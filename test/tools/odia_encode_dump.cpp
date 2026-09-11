@@ -1,4 +1,4 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the ODIA authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Dumps ODIA's PeptDeep encoding as JSON so it can be diffed against

@@ -36,13 +36,29 @@ if(TARGET DIALibraryGenerator)
   add_test(NAME DIALibraryGenerator_write_ini
            COMMAND DIALibraryGenerator -write_ini "${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGenerator.ini")
 
+  # Everything that is right for a tool shipped INSIDE OpenMS and wrong for one
+  # that merely links it: own version, update check off, bare-environment start,
+  # input validation. See test/standalone_test.sh.
+  add_test(NAME standalone_tool_contract
+           COMMAND ${CMAKE_COMMAND} -E env bash
+                   "${CMAKE_CURRENT_SOURCE_DIR}/standalone_test.sh"
+                   $<TARGET_FILE:DIALibraryGenerator> "${PROJECT_VERSION}"
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta")
+
+  # -write_ctd and friends, which stock OpenMS refuses to a tool outside its own
+  # tree. Skips (77) without python3.
+  add_test(NAME write_ctd
+           COMMAND ${CMAKE_COMMAND} -E env bash
+                   "${CMAKE_CURRENT_SOURCE_DIR}/write_ctd_test.sh"
+                   $<TARGET_FILE:DIALibraryGenerator>)
+  set_tests_properties(write_ctd PROPERTIES SKIP_RETURN_CODE 77)
+
   # -write_config must emit the EFFECTIVE config: every default materialised, so
   # the embedded recipe is complete and a reader never has to know our defaults.
-  # -in and -out are registered required, so they are supplied even though
-  # -write_config returns before either is read.
+  # It takes no -in and no -out: seeing the defaults is useful on its own, and
+  # requiring an input file nobody reads to get them was a needless refusal.
   add_test(NAME config_write_effective
-           COMMAND DIALibraryGenerator -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
-                   -out "${CMAKE_CURRENT_BINARY_DIR}/unused.tsv"
+           COMMAND DIALibraryGenerator
                    -write_config "${CMAKE_CURRENT_BINARY_DIR}/effective.json")
   set_tests_properties(config_write_effective PROPERTIES
     PASS_REGULAR_EXPRESSION "effective config")

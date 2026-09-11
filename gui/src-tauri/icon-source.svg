@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="DIALibraryGenerator">
+  <title>DIALibraryGenerator</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#20232b"/>
+      <stop offset="1" stop-color="#111219"/>
+    </linearGradient>
+    <linearGradient id="peak" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#4f8cff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Dark rounded square; macOS masks it to a squircle, Windows leaves it. -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- The predicted fragment spectrum: the thing this tool makes. Peaks are
+       drawn from a fixed list rather than generated, so the icon renders
+       identically everywhere and nothing depends on a script at build time. -->
+  <g fill="#7d8694">
+    <rect x="196" y="600" width="14" height="176" rx="7"/>
+    <rect x="252" y="520" width="14" height="256" rx="7"/>
+    <rect x="308" y="656" width="14" height="120" rx="7"/>
+    <rect x="700" y="576" width="14" height="200" rx="7"/>
+    <rect x="756" y="672" width="14" height="104" rx="7"/>
+    <rect x="812" y="624" width="14" height="152" rx="7"/>
+  </g>
+  <!-- The fragments that made the cut, inside the isolation window. -->
+  <g fill="url(#peak)">
+    <rect x="392" y="392" width="18" height="384" rx="9"/>
+    <rect x="456" y="288" width="18" height="488" rx="9"/>
+    <rect x="520" y="472" width="18" height="304" rx="9"/>
+    <rect x="584" y="344" width="18" height="432" rx="9"/>
+  </g>
+
+  <!-- The DIA isolation window: wide, fixed, and covering a band of the -->
+  <!-- spectrum rather than one precursor. -->
+  <rect x="360" y="232" width="274" height="596" rx="28"
+        fill="#4f8cff" fill-opacity="0.10"
+        stroke="#4f8cff" stroke-opacity="0.55" stroke-width="10"/>
+
+  <!-- Baseline. -->
+  <rect x="176" y="788" width="672" height="12" rx="6" fill="#39404c"/>
+</svg>

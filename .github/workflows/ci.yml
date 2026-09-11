@@ -1,0 +1,197 @@
+name: build
+
+# Linux x64/arm64 and macOS x64/arm64, tests included.
+#
+# OpenMS comes from bioconda, installed in seconds. Windows is a separate
+# workflow (windows.yml) for the unrelated reason that bioconda has no win-64
+# package and OpenMS has to be built from source there.
+#
+# The gates that matter are at the END, against the INSTALLED tree rather than
+# the build tree: a tool that links OpenMS but is not part of it gets OpenMS's
+# defaults for its version, its update check and its data lookup, and all three
+# are wrong for it. Every one of those has shipped past a green pipeline in a
+# sibling project, found only by installing the artefact and typing a command.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `extra` carries per-platform conda packages on top of the shared
+          # set. macOS asks for llvm-openmp explicitly because Apple's clang
+          # ships no OpenMP runtime; on Linux OpenMP comes from the gcc
+          # toolchain and adding llvm-openmp risks clashing with libgomp.
+          - { name: linux-x64,   runner: ubuntu-24.04,     extra: "" }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm, extra: "" }
+          - { name: macos-arm64, runner: macos-14,         extra: "llvm-openmp" }
+          - { name: macos-x64,   runner: macos-15-intel,   extra: "llvm-openmp" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # libboost-devel and qt6-main are dependencies OpenMSConfig.cmake needs
+      # but the openms package does not pull in:
+      #   libboost-devel  OpenMS/config.h is public and #includes
+      #                   <boost/current_function.hpp>, so every downstream
+      #                   translation unit needs Boost headers
+      #   qt6-main        OpenMSConfig.cmake does find_dependency(Qt6)
+      #
+      # libarrow is deliberately NOT pinned: openms pins it itself, and this
+      # project is built against whatever that resolves to. That is the point of
+      # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
+      - name: Install OpenMS, ONNX Runtime and the toolchain
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: dialibgen
+          create-args: >-
+            openms=3.5.0
+            onnxruntime-cpp
+            libparquet
+            libarrow-dataset
+            libarrow-acero
+            nlohmann_json
+            xerces-c
+            libsvm
+            eigen
+            zlib
+            bzip2
+            libzip
+            hdf5
+            libcurl
+            libboost-devel
+            glpk
+            coin-or-cbc
+            coin-or-utils
+            qt6-main
+            cmake
+            ninja
+            cxx-compiler
+            ${{ matrix.extra }}
+          condarc: |
+            channels:
+              - conda-forge
+              - bioconda
+          init-shell: bash
+          cache-environment: true
+
+      - name: Configure
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+
+      - name: Build
+        shell: bash -el {0}
+        run: cmake --build build -j
+
+      - name: Test
+        shell: bash -el {0}
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install
+        shell: bash -el {0}
+        run: cmake --install build
+
+      # ---------------------------------------------------------------------
+      # The standalone-tool gates, against the INSTALLED tree.
+      #
+      # `env -i` is the load-bearing part: a runner that still has the build
+      # tree on PATH, or OPENMS_DATA_PATH set, will happily pass a binary that
+      # cannot stand on its own. OPENMS_DATA_PATH and the conda lib path are
+      # passed back explicitly -- naming them is the difference between "the
+      # binary needs these" and "the binary happened to inherit these".
+      # ---------------------------------------------------------------------
+      - name: The installed binary stands on its own
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          BIN="$PWD/stage/bin/DIALibraryGenerator"
+          test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
+
+          # The data tables must be INSIDE the install, at the path the tool
+          # searches. Before this they resolved to an absolute path in the
+          # source tree, so an installed or relocated binary found nothing.
+          test -s "$PWD/stage/share/DIALibraryGenerator/irt_standards.tsv" \
+            || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
+
+          export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          bash test/standalone_test.sh "$BIN" \
+            "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
+            example/proteins.fasta
+          bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
+
+      - name: Package the CLI
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: cli-${{ matrix.name }}
+          path: DIALibraryGenerator-${{ matrix.name }}.tar.gz
+
+  # The desktop GUI's own checks. They need no OpenMS and no models, so they run
+  # on all three OSes in a couple of minutes and catch the frontend regressions
+  # the C++ matrix never would.
+  gui:
+    name: gui-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - run: npm ci
+        working-directory: gui
+      - run: npm run typecheck
+        working-directory: gui
+      - run: npm test
+        working-directory: gui
+      - run: npm run build
+        working-directory: gui
+
+      # The Rust side: its unit tests cover the trust boundary (which config
+      # keys may reach the CLI, and how a dash-leading path is defanged), and
+      # clippy is denied warnings so a lint does not accumulate until a release.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Tauri needs the system webview and its build dependencies on Linux.
+      - name: Install Tauri's Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev
+      - run: cargo test
+        working-directory: gui/src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: gui/src-tauri

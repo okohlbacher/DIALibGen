@@ -9,10 +9,13 @@ C++, no Python runtime. A TOPP-compatible tool built on
 [OpenMS](https://github.com/OpenMS/OpenMS), which is consumed as an installed,
 read-only dependency and never modified.
 
-> **Status: pre-release (0.1.0).** Extracted from
+> **Status: pre-release (0.2.0).** Extracted from
 > [OpenDIAlyzer](https://github.com/okohlbacher/ODIA), where it was developed.
 > The output formats and the config schema are **not yet frozen** — see
 > [Known limitations](#known-limitations) before depending on them.
+
+There is a [command-line tool](#usage) and a [desktop app](#desktop-app) for
+macOS, Windows and Linux. Both run the same binary and take the same config.
 
 ## Why this exists
 
@@ -60,15 +63,29 @@ table as a statement of where this tool sits, not as a benchmark.
 
 ## Building
 
-Requires an installed OpenMS, Apache Arrow/Parquet ≥ 23, ONNX Runtime and
+Requires an installed OpenMS, Apache Arrow/Parquet ≥ 19, ONNX Runtime and
 nlohmann/json. All four are OpenMS dependencies already, except that ONNX
 Runtime is behind OpenMS's `WITH_ONNX` option.
 
+The quickest complete environment is the one CI uses:
+
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+micromamba create -n dialibgen -c conda-forge -c bioconda \
+  openms=3.5.0 onnxruntime-cpp libparquet libarrow-dataset nlohmann_json \
+  libboost-devel qt6-main cmake ninja cxx-compiler
+micromamba activate dialibgen
+```
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/your/prefix
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+cmake --install build
 ```
+
+The install is **relocatable**: the binary finds its data tables relative to its
+own path (`<prefix>/share/DIALibraryGenerator`), so it works from a package, a
+copied tree or a macOS `.app` and not only from the tree it was built in.
 
 The sources compile at C++20, but OpenMS's imported CMake target declares
 `INTERFACE_COMPILE_FEATURES cxx_std_23`, so consumers are raised to C++23
@@ -86,7 +103,13 @@ OpenMS downloads them from `archive.openms.de` against pinned SHA256s, but only
 when built from `develop` with `WITH_ONNX=ON`, which defaults off. On a released
 OpenMS the files are simply absent and you must supply them yourself.
 
-Point the tool at them from the config:
+Put all three in one directory and point `DIALIBGEN_MODEL_DIR` at it:
+
+```bash
+export DIALIBGEN_MODEL_DIR=/path/to/models
+```
+
+…or name them individually in the config:
 
 ```json
 { "rt_model":  "/path/to/peptdeep_rt_dynamic.onnx",
@@ -95,7 +118,10 @@ Point the tool at them from the config:
 ```
 
 Relative model paths are resolved relative to the **config file**, so a config
-plus a model directory is portable.
+plus a model directory is portable. Failing both, the tool looks beside its own
+executable and in `share/OpenMS/models`. When it finds nothing it says which
+file is missing and lists every directory it searched — it no longer dies inside
+the ONNX session constructor with an empty path.
 
 > The licence under which the published AlphaPeptDeep *weights* may be
 > redistributed has not been established by this project. Nothing here
@@ -107,6 +133,19 @@ plus a model directory is portable.
 DIALibraryGenerator -write_config effective.json   # see every default, materialised
 DIALibraryGenerator -in proteins.fasta -config my.json -out library.parquet
 ```
+
+It is a TOPP tool, so it also speaks the workflow dialect:
+
+```bash
+DIALibraryGenerator -write_ini  DIALibraryGenerator.ini   # OpenMS INI
+DIALibraryGenerator -write_ctd  ./ctd/                    # KNIME/Galaxy descriptor
+```
+
+`-threads` defaults to **0 = all available cores**. `--help` prints OpenMS's own
+line for it, which says `1`; the tool prints a correction underneath. That is
+not cosmetic laziness — TOPPBase registers `-threads` itself, after a tool's own
+registration and with no hook to change the default, so the only place to apply
+one is the command line, which is what the tool does.
 
 `example/proteins.fasta` and `example/default.json` are a runnable starting
 point. `-out` chooses the format by extension: `.parquet` carries the embedded
@@ -130,29 +169,58 @@ The keys that most often need changing:
 | `irt_rescale` | `false` | Off means the RT column is the model's raw 0..1 output, **not** iRT, and is not interchangeable with another tool's iRT library. Set true to export. |
 | `derive_ion_mobility` | `true` | Emits 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension. |
 
+## Desktop app
+
+`gui/` is a Tauri 2 + React front-end that runs the same binary: pick a FASTA,
+pick an output, point it at the models, press go. See
+[gui/README.md](gui/README.md).
+
+The one design decision worth stating here: **the form is generated from the
+tool's own `-write_config` output**, so the GUI cannot offer a parameter the CLI
+does not have, cannot default one differently, and shows a newly added parameter
+without a code change. The config reaches the CLI as a file, which is what lets
+the Parquet writer embed the recipe verbatim.
+
 ## Known limitations
 
-Carried over from extraction and **not** fixed here. Read these before treating
-output as authoritative:
+Read these before treating output as authoritative:
 
-- **The fingerprint under-determines the library.** `min_relative_intensity` is
-  formatted at 3 decimal places, so `1e-4` and `0.0` both render `0.000`; and no
-  RT-domain token is recorded, so a raw-RT and an iRT library of the same content
-  fingerprint identically.
-- **An unknown `decoys` value is accepted** and silently treated as `mutate`,
-  then written into the provenance as though it were real.
-- **`-out` accepts any extension**, writing TSV for anything that is not
-  `.parquet`.
+- **The fingerprint under-determines the library, less than it did.**
+  `min_relative_intensity` is now recorded at full precision and the RT domain
+  (raw vs iRT) carries its own token, so the two collisions that were reachable
+  by changing a setting are closed. The key is `v3`; every `v2` cache misses
+  once, which is the safe direction.
 - **`Fragment.Loss.Type` is written as a hardcoded `"noloss"`** by the Parquet
   writer. The generator itself never emits neutral losses, so this is reachable
   only by a consumer that writes a loss-bearing library back out.
-- **No model is configured by default** and there is no environment fallback, so
-  an out-of-the-box run fails inside the ONNX session constructor.
-- **The data directory is a compile-time absolute path.** `-irt_standards`
-  overrides it, and the default path (`irt_rescale=false`) reads no data file.
-- **`schema_version` is accepted at any value and never read.**
-- **CTD/CWL emission does not work out-of-tree.** `-write_ctd` and friends abort:
-  OpenMS's `ToolHandler` consults a hard-coded tool list.
+- **No model is shipped**, and on a released OpenMS none is present. The tool now
+  searches `DIALIBGEN_MODEL_DIR`, its own `share/` and `share/OpenMS/models`, and
+  reports what it could not find — but it cannot conjure the weights.
+- **`-write_cwl` / `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
+  The tool refuses in its own words rather than letting OpenMS truncate the
+  target file and then throw. `-write_ctd` works everywhere.
+- **Windows is not covered by CI yet.** The code is portable — `std::filesystem`
+  throughout, `_putenv_s` where it matters — and the GUI is built and tested on
+  Windows, but bioconda has no win-64 OpenMS, so the CLI leg needs an OpenMS
+  source build that is not wired up here yet.
+
+### Closed since 0.1.0
+
+Each of these was a real defect, and each is now covered by a test:
+
+| Was | Now |
+|---|---|
+| Reported the version of the OpenMS it was built against | Reports its own, with OpenMS's alongside in `--helphelp` |
+| OpenMS's update check printed Qt network errors on stderr | Off unless the user turns it back on |
+| `-threads` registered twice; TOPPBase's default of 1 silently won | Applied to argv; 0 = all cores |
+| `-write_ctd` aborted with "Requested tool does not exist!" | Registers with `ToolHandler` for the duration of a descriptor run |
+| Data directory was a compile-time absolute path into the source tree | Resolved relative to the executable; installed to `share/DIALibraryGenerator` |
+| An unknown `decoys` value became `mutate` and was recorded under the typed name | Refused, with the known methods listed |
+| `-out` accepted any extension and wrote TSV for anything but `.parquet` | Refused unless `.parquet` or `.tsv` |
+| `schema_version` accepted at any value and never read | Refused unless it is one this build knows |
+| `1e-4` and `0.0` fingerprinted identically; raw and iRT libraries did too | Full precision, plus an RT-domain token |
+| A missing model died inside the ONNX session constructor | Named, with every searched directory listed |
+| `-write_config` required an `-in` and an `-out` nothing read | Works on its own |
 
 ## Provenance
 

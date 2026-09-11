@@ -1,0 +1,203 @@
+/* Light by default, dark when the OS asks for it. `color-scheme` also flips the
+   native scrollbars, form controls and caret, which a token swap alone does
+   not. Every colour below is a token: a hardcoded hex is invisible in one theme
+   and wrong in the other. */
+:root {
+  --bg: #ffffff;
+  --panel: #f3f4f7;
+  --border: #d6d9e0;
+  --fg: #1a1d23;
+  --muted: #666d7a;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --ok: #15803d;
+  --err: #d92d20;
+  --code-bg: #f7f8fa;
+  --code-fg: #333a44;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1a1c20;
+    --panel: #24272e;
+    --border: #363a42;
+    --fg: #e6e8ec;
+    --muted: #9aa0ab;
+    --accent: #4f8cff;
+    --accent-fg: #ffffff;
+    --ok: #46c977;
+    --err: #e5484d;
+    --code-bg: #15171a;
+    --code-fg: #c8cdd6;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.bad { color: var(--err); border-color: var(--err); }
+
+main { flex: 1; display: grid; grid-template-columns: 360px 1fr; min-height: 0; }
+
+.controls { padding: 16px; border-right: 1px solid var(--border); overflow: auto; }
+/* min-width:0 lets the 1fr column shrink below its content: without it a single
+   unbreakable log line forces the whole column wide. */
+.right { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.params { flex: 1 1 auto; overflow: auto; padding: 16px; min-height: 0; }
+.logpane { flex: 0 0 38%; display: flex; flex-direction: column; border-top: 1px solid var(--border); min-height: 0; }
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 10px;
+}
+.logpane .section-head { padding: 8px 16px; }
+.section-head h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; font-weight: 600; }
+.section-head .actions { flex: 0 0 auto; margin-left: auto; }
+
+.field { margin-bottom: 14px; }
+.field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field input,
+.field select,
+.field textarea {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+}
+.field textarea { resize: vertical; font-family: 'SF Mono', ui-monospace, Menlo, monospace; font-size: 11.5px; }
+.field.check { display: grid; grid-template-columns: auto 1fr; gap: 0 8px; align-items: center; }
+.field.check input { width: auto; justify-self: start; }
+.field.check label { margin: 0; }
+.field.check .help { grid-column: 2; }
+.field.off { opacity: .55; }
+
+.help { font-size: 11px; color: var(--muted); margin: 4px 0 0; }
+.help.bad { color: var(--err); }
+.help.inert { font-style: italic; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.row > * { flex: 1; }
+.row.tight { gap: 6px; }
+.row .between { flex: 0 0 auto; color: var(--muted); font-size: 11px; }
+
+button {
+  padding: 7px 14px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: var(--accent-fg);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--fg); }
+button.slim { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+.formats { margin-top: 6px; }
+.chip {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  font-size: 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 10px;
+  font-weight: 500;
+}
+.chip.on { border-color: var(--accent); color: var(--accent); }
+
+.disclose {
+  background: none;
+  border: none;
+  color: var(--muted);
+  padding: 8px 0;
+  font-size: 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.outcome {
+  margin-top: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.outcome.ok { border-color: var(--ok); color: var(--ok); }
+.outcome.bad { border-color: var(--err); color: var(--err); }
+.outcome span { flex: 1; }
+
+.progress {
+  flex: 0 0 auto;
+  position: relative;
+  width: 220px;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+.progress .bar { position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: .25; }
+.progress .pct {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.log {
+  flex: 1;
+  margin: 0;
+  padding: 10px 16px;
+  overflow: auto;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: 'SF Mono', ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.presets { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
+.presets .row + .row { margin-top: 6px; }

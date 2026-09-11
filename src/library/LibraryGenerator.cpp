@@ -1,4 +1,4 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the ODIA authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
@@ -13,6 +13,9 @@
 
 #include <iostream>
 #include <algorithm>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <thread>
 #include <fstream>
 #include <string_view>
@@ -1123,11 +1126,19 @@ namespace ODIA
                                                   const std::string& ms2_model,
                                                   const std::string& ccs_model,
                                                   double nce,
-                                                  const std::string& instrument)
+                                                  const std::string& instrument,
+                                                  bool irt_rescale)
   {
     std::ostringstream ps;
     ps.imbue(std::locale::classic());          // a cache key must not follow the locale
     ps.setf(std::ios::fixed); ps.precision(3);
+    // Round-trip exact, so no two distinct doubles ever share a token.
+    auto exact = [](double v) {
+      std::ostringstream o;
+      o.imbue(std::locale::classic());
+      o << std::setprecision(17) << v;
+      return o.str();
+    };
     auto join = [](const std::vector<std::string>& v) {
       std::string j;
       for (const auto& m : v) { j += m; j += "."; }
@@ -1137,7 +1148,7 @@ namespace ODIA
     // carried only their maximum count), so two libraries digested differently
     // shared a key. Bumping misses every v1 cache once, which is the safe
     // direction.
-    ps << "v2"
+    ps << "v3"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages
@@ -1159,13 +1170,21 @@ namespace ODIA
        // built with it is not the same library.
        << ";fcys=" << (p.free_cysteine_rt_correction ? 1 : 0)
        << ";im=" << (p.derive_ion_mobility ? 1 : 0)
-       << ";minint=" << p.min_relative_intensity
+       // NOT the stream's fixed(3): min_relative_intensity is routinely 1e-4,
+       // which rendered as "0.000" -- the same token as 0.0, so a library that
+       // kept every fragment and one that dropped the weak ones shared a key.
+       << ";minint=" << exact(p.min_relative_intensity)
        << ";rdc=" << p.reserved_doubly_charged
        << ";rt=" << rt_model
        << ";frgmodel=" << ms2_model
        << ";ccsmodel=" << ccs_model
        << ";nce=" << nce
-       << ";inst=" << instrument;
+       << ";inst=" << instrument
+       // The RT column's DOMAIN, not just its values: raw 0..1 model output and
+       // iRT are different scales of the same numbers, and without this token a
+       // raw library and an iRT library of identical content fingerprinted the
+       // same. A consumer that reads the wrong one extracts from nowhere.
+       << ";rtdomain=" << (irt_rescale ? "irt" : "raw");
     return ps.str();
   }
 }

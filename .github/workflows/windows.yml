@@ -39,11 +39,22 @@ env:
   # OpenMS release/3.5.0, the same version ci.yml gets from bioconda. Pinned by
   # SHA rather than by tag so a retag cannot silently change what was built.
   OPENMS_SHA: c49149d47d6fcc76d1271d87d3a7fad15d2219de
-  # The contrib commit that OpenMS SHA pins as a submodule, read out of it
-  # rather than guessed: `git ls-tree <sha> -- contrib`. A stale contrib is the
-  # classic way this build breaks -- wrong Arrow, or Boost headers that no
-  # longer compile under the current MSVC -- and neither failure names contrib.
-  CONTRIB_REV: e6fde7cfed8cde73c6625cd493ce3f82e21263cc
+  # NOT the contrib that OpenMS 3.5.0 pins as a submodule (e6fde7cf). That one
+  # cannot be built any more, by anybody: it names zlib-1.2.11 and boost_1_78_0
+  # and downloads from the contrib-sources release 2024-04-29-000000, and that
+  # release has been DELETED upstream. Neither archive exists in any surviving
+  # release, so there is no base-URL substitution that rescues it -- the pin is
+  # dead, not merely stale. (contrib does not check the HTTP status, only that
+  # an archive extracts, so this presents as "Found empty archive" with no
+  # mention of a download anywhere in the failure.)
+  #
+  # 186aacfb is the oldest contrib whose sources all still exist (it downloads
+  # from the 3.6.0 release, which every contrib since early 2026 does) AND
+  # whose Boost is new enough to compile under the MSVC on windows-2022:
+  # contrib's own Boost 1.81 headers fail there with C3878/C7510 in
+  # boost/process/detail/windows/pipe_in.hpp. It still carries kissfft, which
+  # a later contrib drops and OpenMS 3.5.0 still wants.
+  CONTRIB_REV: 186aacfbc1157719735b497cd6de1b3e83289eea
 
 jobs:
   # ------------------------------------------------------------ OpenMS itself
@@ -84,28 +95,11 @@ jobs:
           git fetch -q --depth 1 origin "$CONTRIB_REV"
           git checkout -q FETCH_HEAD
 
-          # The tag this contrib downloads its sources from NO LONGER EXISTS.
-          # macros.cmake hardcodes
-          #   .../contrib-sources/releases/download/2024-04-29-000000/
-          # and that release has been removed upstream, so every archive comes
-          # back as a 9-byte 404 body. contrib does not check the HTTP status,
-          # only that the archive extracts, so the first sign of it is
-          # "Found empty archive" on LIBSVM and a failure with no mention of a
-          # download at all.
-          #
-          # 3.5.0_pre_2 is the surviving release that carries EXACTLY the
-          # archive names this commit expects -- libsvm-3.12, boost-1.81.0,
-          # Xerces-C_3_2_0, eigen-3.4.0, glpk-4.46, hdf5-1_14_3, zlib-1.3.1,
-          # bzip2-1.0.5, CoinMP-1.8.3-vs22, openmp-12.0.1 -- so only the base
-          # URL moves; the SHA1s contrib checks are unchanged and still verify.
-          # (contrib's own tip has moved to the 3.6.0 release, but it has also
-          # dropped kissfft and changed Boost, which this OpenMS still wants.)
-          OLD="releases/download/2024-04-29-000000/"
-          NEW="releases/download/3.5.0_pre_2/"
-          grep -q "$OLD" macros.cmake \
-            || { echo "::error::contrib no longer uses $OLD -- re-check this patch"; exit 1; }
-          sed -i "s|$OLD|$NEW|" macros.cmake
-          grep -n "_BASE_URL" macros.cmake
+          # Guard, not a patch: if this contrib ever stops resolving to a live
+          # contrib-sources release, fail here with the reason rather than
+          # 40 minutes later with "Found empty archive".
+          grep -q "releases/download/3.6.0/" macros.cmake \
+            || { echo "::error::contrib $CONTRIB_REV no longer downloads from the 3.6.0 sources"; exit 1; }
 
       - name: Cache contrib build
         id: cache-contrib

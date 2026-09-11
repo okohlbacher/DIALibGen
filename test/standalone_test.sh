@@ -68,6 +68,17 @@ env -i "${KEEP[@]}" "$BIN" -write_config "$TMP/eff.json" >"$TMP/cfg.log" 2>&1 \
 [ -s "$TMP/eff.json" ] || fail "-write_config wrote nothing"
 grep -q '"schema_version"' "$TMP/eff.json" || fail "effective config has no schema_version"
 
+# The tool must accept its OWN output. Every default has to sit inside the
+# ranges the config validator enforces, and a default that does not would make
+# the documented "-write_config is the authoritative reference" a lie: copy it,
+# pass it back, get a refusal.
+env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/eff.json" \
+    -out "$TMP/roundtrip.tsv" >"$TMP/rt.log" 2>&1
+if grep -qE "^config:" "$TMP/rt.log"; then
+  echo "--- output ---" >&2; cat "$TMP/rt.log" >&2
+  fail "the tool rejected its own -write_config output"
+fi
+
 # ------------------------------------------------- 5. bad input is refused here
 # Both of these used to be accepted: an unknown decoy method became "mutate"
 # and was then recorded in the provenance under the name that was typed, and
@@ -96,6 +107,36 @@ if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -out "$TMP/library.parqet" \
 fi
 grep -q "must end in .parquet or .tsv" "$TMP/e.log" \
   || fail "a bad -out extension failed for the wrong reason"
+
+# Out-of-range numbers. A negative integer is the sharp one: nlohmann converts
+# it to std::size_t without complaint, so "missed_cleavages": -1 used to become
+# 18446744073709551615 and the digest ran on it -- a wrong library, produced
+# without a word. Each case pairs a config with the phrase the refusal must
+# contain, so a value rejected for some unrelated reason still fails the test.
+while IFS='|' read -r json want; do
+  [ -n "$json" ] || continue
+  printf '%s\n' "$json" > "$TMP/bad.json"
+  if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/bad.json" \
+         -out "$TMP/x.tsv" >"$TMP/r.log" 2>&1; then
+    fail "accepted an out-of-range config: $json"
+  fi
+  grep -q "$want" "$TMP/r.log" \
+    || fail "$json was refused for the wrong reason: $(head -2 "$TMP/r.log" | tr '\n' ' ')"
+done <<'CASES'
+{"missed_cleavages": -1}|missed_cleavages must be a whole number
+{"missed_cleavages": 1.5}|missed_cleavages must be a whole number
+{"max_variable_modifications": -2}|max_variable_modifications must be a whole number
+{"reserved_doubly_charged": -1}|reserved_doubly_charged must be a whole number
+{"precursor_charges": [0, 2]}|precursor_charges must each be between 1 and 10
+{"precursor_charges": [-3]}|precursor_charges must each be between 1 and 10
+{"max_fragment_charge": 0}|max_fragment_charge must be between 1 and 10
+{"min_relative_intensity": -0.5}|min_relative_intensity must be between 0 and 1
+{"min_relative_intensity": 2}|min_relative_intensity must be between 0 and 1
+{"peptide_length": [-1, 30]}|peptide_length values must be between
+{"precursor_mz": [-100.0, 1200.0]}|precursor_mz values must be between
+{"peptide_length": [30, 7]}|peptide_length needs min < max
+{"precursor_charges": []}|precursor_charges must not be empty
+CASES
 
 # ------------------------------------------- 6. a missing model says which one
 # Without this the run died inside the ONNX session constructor with

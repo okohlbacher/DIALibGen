@@ -100,18 +100,21 @@ Requires an installed OpenMS, Apache Arrow/Parquet ≥ 19, ONNX Runtime and
 nlohmann/json. All four are OpenMS dependencies already, except that ONNX
 Runtime is behind OpenMS's `WITH_ONNX` option.
 
-A complete environment in one command:
+The environment CI builds and tests in, which is the combination known to work
+on Linux x64/arm64 and macOS x64/arm64:
 
 ```bash
 micromamba create -n dialibgen -c conda-forge -c bioconda \
-  openms=3.5.0 onnxruntime-cpp libparquet libarrow-dataset nlohmann_json \
-  libboost-devel qt6-main cmake ninja cxx-compiler \
-  python numpy pyarrow onnxruntime
+  bzip2 cmake coin-or-cbc coin-or-utils cxx-compiler eigen glpk hdf5 \
+  libarrow-acero libarrow-dataset libboost-devel libcurl libparquet \
+  libsvm libzip ninja nlohmann_json numpy onnxruntime onnxruntime-cpp \
+  openms=3.5.0 pyarrow python qt6-main xerces-c zlib
 micromamba activate dialibgen
 ```
 
-`python`, `numpy`, `pyarrow` and `onnxruntime` are for the test suite, not the
-tool itself.
+On macOS add `llvm-openmp` — Apple's clang ships no OpenMP runtime, and without
+it the pragmas become no-ops and the build is slower, not broken. `python`,
+`numpy`, `pyarrow` and `onnxruntime` are for the test suite, not the tool.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/your/prefix

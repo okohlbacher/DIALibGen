@@ -25,6 +25,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -274,37 +275,81 @@ protected:
                                  std::to_string(kSchemaVersion) + ")");
       }
     }
-    auto pair = [&](const char* k, auto& lo, auto& hi) {
+    // nlohmann converts a negative JSON number to std::size_t WITHOUT
+    // complaining -- "missed_cleavages": -1 becomes 18446744073709551615 -- and
+    // the digest then runs on it. That is the same shape as the defects already
+    // closed here: a wrong library produced without a word. Every count is
+    // therefore range-checked before it is stored, and is_number_unsigned()
+    // rejects a negative and a float in one go.
+    auto count = [&](const char* k, std::size_t& out, std::size_t max) {
+      if (!j.contains(k)) { return; }
+      if (!j[k].is_number_unsigned() || j[k].get<std::uint64_t>() > max)
+      {
+        throw std::runtime_error(std::string(k) + " must be a whole number in 0.." +
+                                 std::to_string(max));
+      }
+      out = j[k].get<std::size_t>();
+    };
+    auto range = [&](const char* k, auto& lo, auto& hi, double max) {
       if (!j.contains(k)) { return; }
       if (!j[k].is_array() || j[k].size() != 2)
       { throw std::runtime_error(std::string(k) + " must be [min, max]"); }
+      for (const auto& v : j[k])
+      {
+        if (!v.is_number() || v.get<double>() < 0.0 || v.get<double>() > max)
+        {
+          throw std::runtime_error(std::string(k) + " values must be between 0 and " +
+                                   std::to_string(static_cast<long long>(max)));
+        }
+      }
       lo = j[k][0]; hi = j[k][1];
       if (!(lo < hi)) { throw std::runtime_error(std::string(k) + " needs min < max"); }
     };
     if (j.contains("enzyme")) { p.enzyme = j["enzyme"]; }
-    if (j.contains("missed_cleavages")) { p.missed_cleavages = j["missed_cleavages"]; }
-    pair("peptide_length", p.min_length, p.max_length);
-    pair("precursor_mz", p.precursor_mz_min, p.precursor_mz_max);
-    pair("fragment_mz", p.fragment_mz_min, p.fragment_mz_max);
-    pair("fragments", p.min_fragments, p.max_fragments);
-    if (j.contains("precursor_charges")) { p.charges = j["precursor_charges"].get<std::vector<int>>(); }
-    if (j.contains("max_fragment_charge")) { p.max_fragment_charge = j["max_fragment_charge"]; }
+    count("missed_cleavages", p.missed_cleavages, 10);
+    range("peptide_length", p.min_length, p.max_length, 200);
+    range("precursor_mz", p.precursor_mz_min, p.precursor_mz_max, 100000);
+    range("fragment_mz", p.fragment_mz_min, p.fragment_mz_max, 100000);
+    range("fragments", p.min_fragments, p.max_fragments, 1000);
+    if (j.contains("precursor_charges"))
+    {
+      p.charges = j["precursor_charges"].get<std::vector<int>>();
+      // A charge of 0 divides by zero when the m/z is formed, and a negative
+      // one is not a precursor this tool can express.
+      for (const int z : p.charges)
+      {
+        if (z < 1 || z > 10)
+        { throw std::runtime_error("precursor_charges must each be between 1 and 10"); }
+      }
+    }
+    if (j.contains("max_fragment_charge"))
+    {
+      if (!j["max_fragment_charge"].is_number_integer() ||
+          j["max_fragment_charge"] < 1 || j["max_fragment_charge"] > 10)
+      { throw std::runtime_error("max_fragment_charge must be between 1 and 10"); }
+      p.max_fragment_charge = j["max_fragment_charge"];
+    }
     if (j.contains("fixed_modifications"))
     { p.fixed_modifications = j["fixed_modifications"].get<std::vector<std::string>>(); }
     if (j.contains("variable_modifications"))
     { p.variable_modifications = j["variable_modifications"].get<std::vector<std::string>>(); }
-    if (j.contains("max_variable_modifications"))
-    { p.max_variable_modifications = j["max_variable_modifications"]; }
+    count("max_variable_modifications", p.max_variable_modifications, 10);
     if (j.contains("n_terminal_methionine_excision"))
     { p.n_terminal_methionine_excision = j["n_terminal_methionine_excision"]; }
     if (j.contains("min_relative_intensity"))
-    { p.min_relative_intensity = j["min_relative_intensity"]; }
+    {
+      // A fraction of the base peak: outside 0..1 it either keeps everything or
+      // nothing, and both are silent.
+      if (!j["min_relative_intensity"].is_number() ||
+          j["min_relative_intensity"] < 0.0 || j["min_relative_intensity"] > 1.0)
+      { throw std::runtime_error("min_relative_intensity must be between 0 and 1"); }
+      p.min_relative_intensity = j["min_relative_intensity"];
+    }
     if (j.contains("derive_ion_mobility"))
     { p.derive_ion_mobility = j["derive_ion_mobility"]; }
     if (j.contains("free_cysteine_rt_correction"))
     { p.free_cysteine_rt_correction = j["free_cysteine_rt_correction"]; }
-    if (j.contains("reserved_doubly_charged"))
-    { p.reserved_doubly_charged = j["reserved_doubly_charged"]; }
+    count("reserved_doubly_charged", p.reserved_doubly_charged, 100);
     if (j.contains("decoys")) { decoys = j["decoys"]; }
     if (j.contains("rt_model")) { rt_model = j["rt_model"]; }
     if (j.contains("ms2_model")) { ms2_model = j["ms2_model"]; }

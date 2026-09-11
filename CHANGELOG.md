@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.2] — 2026-09-11
 
 ### Fixed
 - **The embedded recipe did not name models supplied via `DIALIBGEN_MODEL_DIR`.**
@@ -11,12 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/).
   recorded `"rt_model": ""` and could not state what produced it. The cache
   fingerprint was unaffected — it hashes model contents — so nothing but reading
   the recipe back would have shown it.
+- **Out-of-range config numbers were accepted.** nlohmann converts a negative
+  JSON number to `std::size_t` without complaint, so `"missed_cleavages": -1`
+  became 18446744073709551615 and the digest ran on it. A precursor charge of 0
+  divided by zero when the m/z was formed, and a `min_relative_intensity`
+  outside 0..1 kept everything or nothing. Every numeric key is now
+  range-checked, and the tool is tested against its own `-write_config` output
+  so a default can never fall outside the ranges it enforces.
 
 ### Added
 - `test/e2e_test.py`: runs the tool the way a user does and reads the result
   back — RT domain, CCS and 1/K0 ranges, fragment normalisation, decoy methods
   being genuinely different, the embedded recipe, the DIA-NN TSV. Registered
   with ctest and skipped without the models.
+
+### Changed
+- The README's build recipe is now exactly the package set CI installs, rather
+  than a second list maintained by hand.
 
 ## [0.2.1] — 2026-09-11
 

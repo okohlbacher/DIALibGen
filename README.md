@@ -77,7 +77,7 @@ tar xzf DIALibraryGenerator-macos-arm64.tar.gz
 ```
 
 There is also a [Homebrew tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
-with a cask for the app, a cask for the CLI and a formula:
+with a cask for the app and a cask for the CLI:
 
 ```bash
 brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator       # desktop app

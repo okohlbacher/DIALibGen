@@ -76,7 +76,9 @@ never have, and that this one had only because it links OpenMS from outside.
 
 - **Homebrew tap** for macOS:
   [okohlbacher/homebrew-dialibrarygenerator](https://github.com/okohlbacher/homebrew-dialibrarygenerator),
-  with a cask for the desktop app and one for the CLI. The CLI cask uses
+  with a cask for the desktop app and one for the CLI. Neither is signed, so a
+  Mac with Gatekeeper enforcing refuses them on first run; the tap's README
+  covers that and the release archive, which is unaffected. The CLI cask uses
   `command_wrapper` rather than a `binary` stanza: a symlink into
   `$(brew --prefix)/bin` would make the tool resolve its own `share/` relative
   to `/opt/homebrew/bin`, where it is not.

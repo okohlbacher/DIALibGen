@@ -294,6 +294,9 @@ jobs:
       # is what turns it into something a user can unpack.
       - name: Make the install tree portable
         if: steps.pkg.outputs.package == 'true'
+        # Bounded on purpose: everything here is seconds of real work, so a
+        # step that runs for twenty minutes is hung, not slow.
+        timeout-minutes: 20
         shell: bash -el {0}
         run: |
           set -euo pipefail
@@ -306,9 +309,15 @@ jobs:
 
           if [ "$RUNNER_OS" = "macOS" ]; then
             brew install dylibbundler >/dev/null
-            dylibbundler -od -b -ns \
+            # </dev/null and -of/-od/-cd together: dylibbundler PROMPTS when it
+            # is unsure about a library or an existing destination, and a
+            # prompt on a runner is not an error -- it is a job that sits there
+            # until the six-hour timeout with no output at all. That is what it
+            # did. Closing stdin turns any remaining question into an immediate
+            # failure, which is the outcome that can be read.
+            dylibbundler -of -od -cd -b -ns \
               -x stage/bin/DIALibraryGenerator \
-              -d stage/lib -p '@executable_path/../lib/'
+              -d stage/lib -p '@executable_path/../lib/' </dev/null
           else
             # patchelf plus a manual closure: ldd names everything the loader
             # would open, minus the system libraries a distro certainly has.

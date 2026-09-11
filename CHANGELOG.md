@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] — 2026-09-11
+
+### Fixed
+- **The desktop app declared macOS 11.0 as its minimum and meant 14.0.** That
+  number is enforced by macOS, so the app launched on a system where the CLI
+  bundled inside it — built for 13.3, since libc++ shipped the floating-point
+  `std::to_chars` there — could not run at all. Tauri's default of 11.0 was
+  never true for this app. `brew audit` is what noticed, by comparing the
+  plist against the cask's `depends_on macos:`.
+
 ## [0.2.0] — 2026-09-11
 
 The release that makes this a standalone tool rather than a tool that happens to

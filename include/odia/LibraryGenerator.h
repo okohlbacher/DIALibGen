@@ -1,4 +1,4 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the ODIA authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
 #pragma once
@@ -208,7 +208,8 @@ namespace ODIA
                                          const std::string& rt_model,
                                          const std::string& ms2_model,
                                          const std::string& ccs_model,
-                                         double nce, const std::string& instrument);
+                                         double nce, const std::string& instrument,
+                                         bool irt_rescale);
 
     static std::size_t predictRetentionTimes(Library& library,
                                              const std::string& rt_model_path,

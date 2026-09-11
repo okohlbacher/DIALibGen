@@ -1,0 +1,9 @@
+/target
+/gen
+# The bundled CLI and its share/ are staged by the release workflow (or
+# symlinked by hand for dev); only the directory skeleton is tracked, because
+# tauri-build refuses to configure when a declared resource path is missing.
+/resources/dialibgen/bin/*
+/resources/dialibgen/share/*
+!/resources/dialibgen/bin/.gitkeep
+!/resources/dialibgen/share/.gitkeep

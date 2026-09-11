@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 project(DIALibraryGenerator
-  VERSION 0.1.0
+  VERSION 0.2.0
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibraryGenerator"
   LANGUAGES CXX)
@@ -32,6 +32,11 @@ option(DIALIBGEN_INSTALL     "Generate install rules" ${DIALIBGEN_IS_TOP_LEVEL})
 
 include(GNUInstallDirs)
 
+# Every file carrying this project's version must agree with project(VERSION).
+# Runs at configure time, so the first cmake after a bump fails when one was
+# missed -- which is how a release ends up announcing the wrong number.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/version-guard.cmake)
+
 # ---------------------------------------------------------------------------
 # Dependencies.
 #
@@ -41,13 +46,33 @@ include(GNUInstallDirs)
 # released OpenMS the three .onnx files must be supplied separately -- see
 # README, "Models".
 # ---------------------------------------------------------------------------
+# OpenMSConfig.cmake does find_dependency(Eigen3 3.4.0...<6), and Eigen 3.4's
+# own config-version file rejects any range whose maximum crosses 4 -- so the
+# find_package below fails on a perfectly good Eigen 3.4.0, on every platform,
+# before OpenMS's fallback can run. Probed rather than assumed: the shim is
+# selected only when a range-respecting lookup has actually failed, so an Eigen
+# that behaves (or one the user pointed at themselves) is left alone.
+if(NOT DEFINED Eigen3_DIR)
+  find_package(Eigen3 3.4.0...<6 QUIET CONFIG)
+  if(NOT Eigen3_FOUND)
+    set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim"
+        CACHE PATH "Eigen3 package directory" FORCE)
+    message(STATUS "Eigen3: using cmake/eigen3-range-shim "
+                   "(the installed Eigen rejects OpenMS's version range)")
+  endif()
+endif()
+
 find_package(OpenMS REQUIRED)
 message(STATUS "OpenMS: ${OpenMS_DIR}")
 
 find_package(Arrow CONFIG REQUIRED)
 find_package(Parquet CONFIG REQUIRED)
-if(Arrow_VERSION VERSION_LESS 23)
-  message(FATAL_ERROR "Apache Arrow >= 23 required (found ${Arrow_VERSION}).")
+# 19 is the real floor, not the 23 this once declared: the newest API used is
+# parquet::arrow::OpenFile's Result-returning overload, added in Arrow 19.0.0.
+# The old number excluded bioconda's libarrow 21 -- which is what OpenMS itself
+# pins, so a consumer linking both could not satisfy it.
+if(Arrow_VERSION VERSION_LESS 19)
+  message(FATAL_ERROR "Apache Arrow >= 19 required (found ${Arrow_VERSION}).")
 endif()
 message(STATUS "Arrow: ${Arrow_VERSION}")
 
@@ -66,8 +91,12 @@ endif()
 # here: it rejects modified peptides -- PeptDeepInputBuilder's only entry points
 # are buildUnmodified*Batch() and it zero-fills the mod_x tensor -- and its
 # headers are not installed.
+# The header lands in a different place in each distribution: bare include/ in
+# Microsoft's release tarballs, include/onnxruntime/ in conda-forge's
+# onnxruntime-cpp, include/onnxruntime/core/session/ in a source build.
 find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
-          PATH_SUFFIXES include onnxruntime/core/session)
+          PATH_SUFFIXES include onnxruntime include/onnxruntime
+                        onnxruntime/core/session include/onnxruntime/core/session)
 find_library(ONNXRuntime_LIBRARY NAMES onnxruntime PATH_SUFFIXES lib)
 if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
   message(FATAL_ERROR "ONNX Runtime not found. Set ONNXRuntime_INCLUDE_DIR and "
@@ -133,12 +162,11 @@ if(OpenMP_CXX_FOUND)
 endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Where the shipped data tables live. Kept identical in name and meaning to the
-# definition this code was extracted with, so no source change was needed.
-# KNOWN LIMITATION: this is an absolute path into the source tree, so an
-# installed binary still resolves its iRT standards relative to the build.
-# -irt_standards overrides it, and the default path (irt_rescale=false) reads no
-# data file at all. See README, "Known limitations".
+# The shipped data tables (irt_standards.tsv). The tool looks for them relative
+# to its own executable first -- $DIALIBGEN_DATA_DIR, then ../share/DIALibraryGenerator,
+# then ../data -- so an installed, packaged or relocated binary finds them. This
+# absolute source path is the LAST candidate and exists only so an uninstalled
+# build tree works; it is deliberately not the only answer any more.
 set(DIALIBGEN_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data")
 
 # ---------------------------------------------------------------------------
@@ -148,8 +176,18 @@ if(DIALIBGEN_BUILD_TOOL)
   add_executable(DIALibraryGenerator src/DIALibraryGenerator.cpp)
   target_link_libraries(DIALibraryGenerator PRIVATE
     odia_library nlohmann_json::nlohmann_json)
+  # PRIVATE, and therefore per-target: a second tool in this repo would need
+  # its own copy of both defines, and grep -L would find the one that missed.
   target_compile_definitions(DIALibraryGenerator PRIVATE
-    ODIA_DATA_DIR="${DIALIBGEN_DATA_DIR}")
+    ODIA_DATA_DIR="${DIALIBGEN_DATA_DIR}"
+    # Without this the tool announces the version of whatever OpenMS tree it was
+    # built against -- a version the user cannot file a bug against.
+    DIALIBGEN_VERSION="${PROJECT_VERSION}")
+  # An installed layout the tool can actually resolve from argv[0]:
+  #   <prefix>/bin/DIALibraryGenerator
+  #   <prefix>/share/DIALibraryGenerator/irt_standards.tsv
+  set_target_properties(DIALibraryGenerator PROPERTIES
+    INSTALL_RPATH_USE_LINK_PATH ON)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -164,7 +202,9 @@ if(DIALIBGEN_INSTALL)
     install(TARGETS DIALibraryGenerator RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
   endif()
   install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-  install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/dialibrarygenerator)
+  # share/DIALibraryGenerator, matching what the tool searches for. The old
+  # lower-case directory name was reachable by nothing.
+  install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibraryGenerator)
 
   install(EXPORT DIALibraryGeneratorTargets
           FILE DIALibraryGeneratorTargets.cmake

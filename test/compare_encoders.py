@@ -55,7 +55,7 @@ def compare_batch(dump, sequences):
     proc = subprocess.run([dump, *sequences], capture_output=True, text=True)
     if proc.returncode != 0:
         return [f"batch of {len(sequences)}: C++ failed: {proc.stderr.strip()}"]
-    batch = json.loads(proc.stdout)
+    batch = ref.load_json(proc, "encoder batch")
     if batch["rows"] != len(sequences):
         return [f"batch reported {batch['rows']} rows, expected {len(sequences)}"]
     out = []
@@ -74,7 +74,7 @@ def main(dump, sequences):
             print(f"  FAIL {seq}: C++ encoder failed: {proc.stderr.strip()}")
             failures += 1
             continue
-        cpp = json.loads(proc.stdout)["peptides"][0]
+        cpp = ref.load_json(proc, "encoder")["peptides"][0]
 
         aa, mod_x = ref.encode(seq)
         if cpp["aa_indices"] != aa.tolist():

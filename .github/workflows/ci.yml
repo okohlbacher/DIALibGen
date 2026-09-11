@@ -1,0 +1,474 @@
+name: build
+
+# Linux x64/arm64 and macOS x64/arm64, tests included.
+#
+# OpenMS comes from bioconda, installed in seconds. Windows is a separate
+# workflow (windows.yml) for the unrelated reason that bioconda has no win-64
+# package and OpenMS has to be built from source there.
+#
+# The gates that matter are at the END, against the INSTALLED tree rather than
+# the build tree: a tool that links OpenMS but is not part of it gets OpenMS's
+# defaults for its version, its update check and its data lookup, and all three
+# are wrong for it. Every one of those has shipped past a green pipeline in a
+# sibling project, found only by installing the artefact and typing a command.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  # gui_dry_run exists because every desktop-app step below runs ONLY on a v*
+  # tag, so its first execution would otherwise be a real release -- the one run
+  # where a mistake is expensive, and one that cannot be repaired by fixing main
+  # (a tag build reruns against the tag's tree). Dispatch with the switch on to
+  # build the app without cutting a tag; nothing is uploaded to a release in
+  # that mode, the bundle comes back as a workflow artifact instead.
+  workflow_dispatch:
+    inputs:
+      gui_dry_run:
+        description: 'Build the desktop app without cutting a tag'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    # write, not the default: needed only by the tag-triggered release upload.
+    # Safe on pull_request runs, including from forks -- GitHub issues a
+    # read-only token for those regardless of what is declared here.
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `extra` carries per-platform conda packages on top of the shared
+          # set. macOS asks for llvm-openmp explicitly because Apple's clang
+          # ships no OpenMP runtime; on Linux OpenMP comes from the gcc
+          # toolchain and adding llvm-openmp risks clashing with libgomp.
+          - { name: linux-x64,   runner: ubuntu-24.04,     extra: "" }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm, extra: "" }
+          - { name: macos-arm64, runner: macos-14,         extra: "llvm-openmp" }
+          - { name: macos-x64,   runner: macos-15-intel,   extra: "llvm-openmp" }
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # libboost-devel and qt6-main are dependencies OpenMSConfig.cmake needs
+      # but the openms package does not pull in:
+      #   libboost-devel  OpenMS/config.h is public and #includes
+      #                   <boost/current_function.hpp>, so every downstream
+      #                   translation unit needs Boost headers
+      #   qt6-main        OpenMSConfig.cmake does find_dependency(Qt6)
+      #
+      # python/numpy/pyarrow/onnxruntime are for the TESTS, not the tool: the
+      # C++ encoder is checked against an independent Python reference written
+      # from the same spec but from different inputs, so agreement is evidence
+      # the spec was implemented rather than that one copied the other. Without
+      # them those tests do not fail -- they are simply never added, which is
+      # the quiet way a test suite shrinks.
+      #
+      # libarrow is deliberately NOT pinned: openms pins it itself, and this
+      # project is built against whatever that resolves to. That is the point of
+      # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
+      #
+      # create-args is a FOLDED scalar: every line is joined into one command
+      # line, so a `#` comment inside it becomes a literal argument. All prose
+      # belongs up here.
+      - name: Install OpenMS, ONNX Runtime and the toolchain
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: dialibgen
+          create-args: >-
+            openms=3.5.0
+            onnxruntime-cpp
+            libparquet
+            libarrow-dataset
+            libarrow-acero
+            nlohmann_json
+            xerces-c
+            libsvm
+            eigen
+            zlib
+            bzip2
+            libzip
+            hdf5
+            libcurl
+            libboost-devel
+            glpk
+            coin-or-cbc
+            coin-or-utils
+            qt6-main
+            cmake
+            ninja
+            cxx-compiler
+            python
+            numpy
+            pyarrow
+            onnxruntime
+            ${{ matrix.extra }}
+          condarc: |
+            channels:
+              - conda-forge
+              - bioconda
+          init-shell: bash
+          cache-environment: true
+
+      # The three AlphaPeptDeep exports. They are NOT shipped with this project
+      # and NOT in any tagged OpenMS release, so without this step every
+      # prediction test and the end-to-end run below are silently skipped -- CI
+      # would prove the tool compiles and nothing about whether it predicts.
+      #
+      # Same URL and same SHA256s OpenMS itself pins (src/openms/CMakeLists.txt).
+      # The hash is the point: an unverified download turns a CDN into a
+      # dependency that can change the numbers this suite asserts.
+      - name: Restore the PeptDeep models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: peptdeep-models-ccs41816f32-ms24141ea23-rt3f3b847e
+
+      - name: Fetch the PeptDeep models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          fetch() {
+            curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
+            echo "$2  models/$1" | shasum -a 256 -c -
+          }
+          # OpenMS lists the files as ccs, ms2, rt and the hashes in that same
+          # order; pairing them by eye got rt and ccs swapped, and the check
+          # below is the only reason that was noticed rather than shipped.
+          fetch peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
+          fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
+          fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
+
+      - name: Configure
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          # QT_HOST_PATH: conda-forge's Qt6 for aarch64 and osx-arm64 is marked
+          # as a cross-compiled Qt, so Qt6Config.cmake refuses to load without a
+          # host Qt. This build is native, so the same prefix IS the host Qt.
+          # x64 is unaffected, which is why it only shows up on the ARM legs.
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DQT_HOST_PATH="$CONDA_PREFIX" \
+            -DODIA_MODEL_DIR="$PWD/models" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+
+      - name: Build
+        shell: bash -el {0}
+        run: cmake --build build -j
+
+      - name: Test
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --output-on-failure
+          # A test that is never ADDED does not fail -- it disappears. The
+          # prediction tier is gated on the models being present, which is
+          # exactly the condition that used to be false everywhere, so assert
+          # the gate opened rather than trusting a green run.
+          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
+            || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
+
+      - name: Install
+        shell: bash -el {0}
+        run: cmake --install build
+
+      # ---------------------------------------------------------------------
+      # The standalone-tool gates, against the INSTALLED tree.
+      #
+      # `env -i` is the load-bearing part: a runner that still has the build
+      # tree on PATH, or OPENMS_DATA_PATH set, will happily pass a binary that
+      # cannot stand on its own. OPENMS_DATA_PATH and the conda lib path are
+      # passed back explicitly -- naming them is the difference between "the
+      # binary needs these" and "the binary happened to inherit these".
+      # ---------------------------------------------------------------------
+      - name: The installed binary stands on its own
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          BIN="$PWD/stage/bin/DIALibraryGenerator"
+          test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
+
+          # The data tables must be INSIDE the install, at the path the tool
+          # searches. Before this they resolved to an absolute path in the
+          # source tree, so an installed or relocated binary found nothing.
+          test -s "$PWD/stage/share/DIALibraryGenerator/irt_standards.tsv" \
+            || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
+
+          export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          bash test/standalone_test.sh "$BIN" \
+            "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
+            example/proteins.fasta
+          bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
+
+      # End to end, against the INSTALLED binary and the real models: a FASTA in,
+      # a library out, in both formats. Everything above proves the tool starts
+      # and refuses bad input; this is the only step that proves it predicts.
+      - name: Build a real library
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
+          export DIALIBGEN_MODEL_DIR="$PWD/models"
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          BIN="$PWD/stage/bin/DIALibraryGenerator"
+
+          "$BIN" -in example/proteins.fasta -out out.parquet
+          "$BIN" -in example/proteins.fasta -out out.tsv
+
+          test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
+          test -s out.tsv     || { echo "::error::no TSV library"; exit 1; }
+
+          # A library with no rows is not a library, and a Parquet that does not
+          # carry the recipe is the whole reason to prefer it over the TSV.
+          python - <<'PY'
+          import pyarrow.parquet as pq, json, sys
+          f = pq.ParquetFile("out.parquet")
+          n = f.metadata.num_rows
+          if n == 0:
+              sys.exit("::error::the Parquet library has no rows")
+          md = f.schema_arrow.metadata or {}
+          raw = md.get(b"odia.config_json")
+          if not raw:
+              sys.exit("::error::the Parquet library does not carry odia.config_json")
+          cfg = json.loads(raw)
+          for k in ("enzyme", "fixed_modifications", "schema_version"):
+              if k not in cfg:
+                  sys.exit(f"::error::the embedded recipe is missing {k!r}")
+          # One row per PRECURSOR: the compact schema carries the fragments as
+          # list columns, so this is not a transition count.
+          print(f"library: {n} precursors, recipe embedded ({len(cfg)} keys)")
+          PY
+
+          # The TSV is the DIA-NN dialect: a header and at least one row.
+          rows=$(wc -l < out.tsv)
+          [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
+          # The dotted spellings, which is what makes this the DIA-NN dialect
+          # rather than merely a table -- see DIANNLibraryFile::Columns.
+          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
+                     Relative.Intensity Fragment.Type Protein.Group; do
+            head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
+              || { echo "::error::the TSV header has no $col column"; exit 1; }
+          done
+          echo "tsv: $((rows - 1)) rows"
+
+      # ---------------------------------------------------------------------
+      # Release. Everything below runs on a v* tag, or on a dispatch with
+      # gui_dry_run -- which is the only way any of it gets exercised before a
+      # tag depends on it.
+      # ---------------------------------------------------------------------
+      - name: Decide whether to package
+        id: pkg
+        shell: bash
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The installed tree links libOpenMS, Arrow and onnxruntime out of the
+      # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
+      # else. Collecting the closure and rewriting the load paths to be relative
+      # is what turns it into something a user can unpack.
+      - name: Make the install tree portable
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          mkdir -p stage/lib
+          # The tool resolves share/OpenMS through OPENMS_DATA_PATH or the
+          # install prefix, and neither is where CMake thought it would be once
+          # the tree moves -- so carry OpenMS's own data inside the bundle.
+          mkdir -p stage/share/OpenMS
+          cp -R "$CONDA_PREFIX/share/OpenMS/." stage/share/OpenMS/
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install dylibbundler >/dev/null
+            dylibbundler -od -b -ns \
+              -x stage/bin/DIALibraryGenerator \
+              -d stage/lib -p '@executable_path/../lib/'
+          else
+            # patchelf + a manual closure: ldd names everything the loader would
+            # open, minus the system libraries a distro certainly has.
+            copy_closure() {
+              ldd "$1" | awk '/=> \//{print $3}' | while read -r so; do
+                case "$so" in
+                  /lib/*|/lib64/*|/usr/lib/x86_64-linux-gnu/lib[cmd]*|*/ld-linux*) continue ;;
+                esac
+                cp -n "$so" stage/lib/ 2>/dev/null || true
+              done
+            }
+            copy_closure stage/bin/DIALibraryGenerator
+            for i in 1 2 3; do
+              for so in stage/lib/*.so*; do copy_closure "$so"; done
+            done
+            patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibraryGenerator
+            for so in stage/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" || true; done
+          fi
+
+          # The load-bearing check, and the reason this step is not decorative:
+          # NOTHING from the build environment on the path. A bundle verified
+          # with the conda prefix still visible proves only that conda is there.
+          env -i HOME="$HOME" "$PWD/stage/bin/DIALibraryGenerator" --help > portable.txt 2>&1 \
+            || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
+          want=$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          grep -q "^Version: $want" portable.txt \
+            || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
+          test -s stage/share/DIALibraryGenerator/irt_standards.tsv
+          test -d stage/share/OpenMS
+          echo "portable bundle ok: $(find stage/lib -name '*.so*' -o -name '*.dylib' | wc -l) libraries"
+
+      - name: Package the CLI
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
+
+      # The desktop app, with that same portable tree as its bundled resources.
+      # Staged BEFORE the Tauri build, because tauri copies resources/ during
+      # the build: doing it afterwards produces an app whose resources are the
+      # empty skeleton, and every check that looks at the source tree passes.
+      - name: Build the desktop app
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+              librsvg2-dev patchelf libgtk-3-dev
+          fi
+          rm -rf gui/src-tauri/resources/dialibgen
+          mkdir -p gui/src-tauri/resources/dialibgen
+          cp -R stage/. gui/src-tauri/resources/dialibgen/
+          test -x gui/src-tauri/resources/dialibgen/bin/DIALibraryGenerator \
+            || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
+          cd gui
+          npm ci
+          npm run tauri build
+
+      - name: Collect the desktop bundles
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bundles
+          find gui/src-tauri/target/release/bundle \
+            \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+            -exec cp {} dist-bundles/ \;
+          ls -la dist-bundles
+          # A bundle step that produces nothing must fail here, not go unnoticed
+          # until a README link 404s.
+          [ -n "$(ls -A dist-bundles)" ] \
+            || { echo "::error::the desktop build produced no installer"; exit 1; }
+
+      - uses: actions/upload-artifact@v5
+        if: steps.pkg.outputs.package == 'true'
+        with:
+          name: bundles-${{ matrix.name }}
+          path: |
+            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            dist-bundles/*
+
+      - name: Attach to the release
+        if: steps.pkg.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            dist-bundles/*
+          fail_on_unmatched_files: true
+
+  # A release whose README links 404 is worse than a missing release: the links
+  # are written for the asset names that were MEANT to be published, not the
+  # ones that were. This asserts the four this workflow is responsible for are
+  # actually on the tag. (windows-x64 comes from windows.yml and asserts its
+  # own, because a cross-workflow wait would be a race either way.)
+  release-complete:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Assert this workflow's assets are on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          have=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                   --json assets -q '.assets[].name')
+          echo "$have"
+          missing=0
+          for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            printf '%s' "$have" | grep -qx "DIALibraryGenerator-$n.tar.gz" \
+              || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
+          done
+          printf '%s' "$have" | grep -q '\.dmg$' \
+            || { echo "::error::no macOS .dmg on $tag"; missing=1; }
+          printf '%s' "$have" | grep -q '\.AppImage$\|\.deb$' \
+            || { echo "::error::no Linux desktop bundle on $tag"; missing=1; }
+          exit $missing
+
+  # The desktop GUI's own checks. They need no OpenMS and no models, so they run
+  # on all three OSes in a couple of minutes and catch the frontend regressions
+  # the C++ matrix never would.
+  gui:
+    name: gui-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - run: npm ci
+        working-directory: gui
+      - run: npm run typecheck
+        working-directory: gui
+      - run: npm test
+        working-directory: gui
+      - run: npm run build
+        working-directory: gui
+
+      # The Rust side: its unit tests cover the trust boundary (which config
+      # keys may reach the CLI, and how a dash-leading path is defanged), and
+      # clippy is denied warnings so a lint does not accumulate until a release.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Tauri needs the system webview and its build dependencies on Linux.
+      - name: Install Tauri's Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libgtk-3-dev
+      - run: cargo test
+        working-directory: gui/src-tauri
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: gui/src-tauri

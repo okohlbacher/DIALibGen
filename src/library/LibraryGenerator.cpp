@@ -1,9 +1,10 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the ODIA authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepPredictor.h>
 
+#include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/EmpiricalFormula.h>
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
@@ -13,6 +14,9 @@
 
 #include <iostream>
 #include <algorithm>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <thread>
 #include <fstream>
 #include <string_view>
@@ -243,14 +247,18 @@ namespace ODIA
     }
     stats.peptides = peptide_to_proteins.size();
 
+    // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
+    // the two are distinct types and no implicit conversion exists between the
+    // vectors even though String converts to and from std::string element-wise.
+    // Built explicitly so this compiles against a stock OpenMS release and not
+    // only against a tree where the alias happens to be spelled differently.
+    auto toStringList = [](const std::vector<std::string>& v) {
+      return StringList(v.begin(), v.end());
+    };
     ModifiedPeptideGenerator::MapToResidueType fixed_map =
-      ModifiedPeptideGenerator::getModifications(
-        std::vector<std::string>(params.fixed_modifications.begin(),
-                                 params.fixed_modifications.end()));
+      ModifiedPeptideGenerator::getModifications(toStringList(params.fixed_modifications));
     ModifiedPeptideGenerator::MapToResidueType variable_map =
-      ModifiedPeptideGenerator::getModifications(
-        std::vector<std::string>(params.variable_modifications.begin(),
-                                 params.variable_modifications.end()));
+      ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
 
     library.reserve(peptide_to_proteins.size() * params.charges.size(),
                     peptide_to_proteins.size() * params.charges.size() * params.max_fragments);
@@ -1123,11 +1131,19 @@ namespace ODIA
                                                   const std::string& ms2_model,
                                                   const std::string& ccs_model,
                                                   double nce,
-                                                  const std::string& instrument)
+                                                  const std::string& instrument,
+                                                  bool irt_rescale)
   {
     std::ostringstream ps;
     ps.imbue(std::locale::classic());          // a cache key must not follow the locale
     ps.setf(std::ios::fixed); ps.precision(3);
+    // Round-trip exact, so no two distinct doubles ever share a token.
+    auto exact = [](double v) {
+      std::ostringstream o;
+      o.imbue(std::locale::classic());
+      o << std::setprecision(17) << v;
+      return o.str();
+    };
     auto join = [](const std::vector<std::string>& v) {
       std::string j;
       for (const auto& m : v) { j += m; j += "."; }
@@ -1137,7 +1153,7 @@ namespace ODIA
     // carried only their maximum count), so two libraries digested differently
     // shared a key. Bumping misses every v1 cache once, which is the safe
     // direction.
-    ps << "v2"
+    ps << "v3"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages
@@ -1159,13 +1175,21 @@ namespace ODIA
        // built with it is not the same library.
        << ";fcys=" << (p.free_cysteine_rt_correction ? 1 : 0)
        << ";im=" << (p.derive_ion_mobility ? 1 : 0)
-       << ";minint=" << p.min_relative_intensity
+       // NOT the stream's fixed(3): min_relative_intensity is routinely 1e-4,
+       // which rendered as "0.000" -- the same token as 0.0, so a library that
+       // kept every fragment and one that dropped the weak ones shared a key.
+       << ";minint=" << exact(p.min_relative_intensity)
        << ";rdc=" << p.reserved_doubly_charged
        << ";rt=" << rt_model
        << ";frgmodel=" << ms2_model
        << ";ccsmodel=" << ccs_model
        << ";nce=" << nce
-       << ";inst=" << instrument;
+       << ";inst=" << instrument
+       // The RT column's DOMAIN, not just its values: raw 0..1 model output and
+       // iRT are different scales of the same numbers, and without this token a
+       // raw library and an iRT library of identical content fingerprinted the
+       // same. A consumer that reads the wrong one extracts from nowhere.
+       << ";rtdomain=" << (irt_rescale ? "irt" : "raw");
     return ps.str();
   }
 }

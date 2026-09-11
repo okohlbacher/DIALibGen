@@ -63,7 +63,20 @@ table as a statement of where this tool sits, not as a benchmark.
 
 ## Installing
 
-On macOS, via [the tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator):
+Release builds for macOS, Windows and Linux — a CLI archive and a desktop
+installer per platform — are attached to each
+[release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
+archives are **self-contained**: unpack and run `bin/DIALibraryGenerator`; the
+147 libraries it needs and OpenMS's own `share/` travel with it.
+
+```bash
+curl -fsSLO https://github.com/okohlbacher/DIALibraryGenerator/releases/latest/download/DIALibraryGenerator-macos-arm64.tar.gz
+tar xzf DIALibraryGenerator-macos-arm64.tar.gz
+./bin/DIALibraryGenerator --help
+```
+
+There is also a [Homebrew tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
+with a cask for the app, a cask for the CLI and a formula:
 
 ```bash
 brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator       # desktop app
@@ -71,18 +84,14 @@ brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator-cli   # 
 ```
 
 Two casks because the app already carries its own copy of the CLI, so one cask
-installing both would put the same tree on disk twice. Both require macOS 14;
+installing both would put the same tree on disk twice. Both require macOS 14:
 the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
-Homebrew can only name whole releases, so the cask rounds up rather than
-promise a machine it cannot load on. On 13.3–13.7, unpack the tarball below.
+Homebrew can only name whole releases, so the cask rounds up rather than promise
+a machine it cannot load on.
 
-Otherwise: release builds for macOS, Windows and Linux — a CLI archive and a
-desktop installer per platform — are attached to each
-[release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
-archives are self-contained: unpack and run `bin/DIALibraryGenerator`; the
-libraries it needs travel with it.
-
-Nothing is signed yet (see [Known limitations](#known-limitations)).
+**Nothing is signed.** On current macOS that means a Homebrew-installed copy is
+killed by Gatekeeper on first run, silently — the tap's README has the details
+and the workarounds. The tarball above is unaffected.
 
 ## Building
 
@@ -231,10 +240,13 @@ Read these before treating output as authoritative:
 - **`-write_cwl` / `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
   The tool refuses in its own words rather than letting OpenMS truncate the
   target file and then throw. `-write_ctd` works everywhere.
-- **Nothing is code-signed.** The macOS `.dmg` is neither signed nor notarized
-  and the Windows installer is unsigned, so both need the OS's "open anyway"
-  path (`brew install --cask --no-quarantine` for the casks). Building from
-  source avoids it entirely.
+- **Nothing is code-signed**, deliberately for now. The macOS `.dmg` and the
+  Windows installer both need the OS's "open anyway" path. On macOS the sharper
+  consequence is that a **Homebrew-installed** copy is killed by Gatekeeper on
+  first run with no message at all (`team: (null)` in `syspolicyd`'s denial),
+  and neither stripping `com.apple.quarantine` nor `--no-quarantine` — which
+  Homebrew 6 removed — avoids it. Extracting the release tarball yourself is
+  unaffected, and so is building from source.
 
 ### Closed since 0.1.0
 

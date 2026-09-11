@@ -5,6 +5,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.2.1] — 2026-09-11
 
+### Added
+- **Homebrew tap**:
+  [okohlbacher/homebrew-dialibrarygenerator](https://github.com/okohlbacher/homebrew-dialibrarygenerator),
+  with a cask for the desktop app, a cask for the CLI and a formula. The CLI
+  cask uses `command_wrapper` rather than a `binary` stanza: OpenMS resolves its
+  data directory with `_NSGetExecutablePath`, which does not follow symlinks, so
+  a symlink into `$(brew --prefix)/bin` would send the data lookup **and** the
+  `@executable_path/../lib` dylib closure to `/opt/homebrew`, where neither is.
+  The releases are unsigned, which on current macOS means a Homebrew-installed
+  copy is killed by Gatekeeper on first run; the tap's README documents that and
+  the tarball route that is unaffected.
+
 ### Fixed
 - **The desktop app declared macOS 11.0 as its minimum and meant 14.0.** That
   number is enforced by macOS, so the app launched on a system where the CLI

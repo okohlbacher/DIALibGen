@@ -18,11 +18,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # have, and it MOVES when a CI runner image is retired. dyld refuses to load a
 # Mach-O on an older macOS than its minos, so the failure lands on the user as
 # an app that installs, launches and then cannot run -- and a Homebrew cask
-# cannot state a floor it does not know. 13.0 is chosen to be older than any
-# supported runner image and new enough for the libc++ this code uses; a
-# feature that needs more fails loudly at build time, which is the point.
+# cannot state a floor it does not know.
+#
+# 13.3 is MEASURED, not chosen: at 13.0 the build fails with
+#   TextWriter.h:105: 'to_chars' is unavailable: introduced in macOS 13.3
+# because libc++ shipped the floating-point std::to_chars in 13.3. That is the
+# whole value of setting a target at all -- without one this was not an error,
+# it was a binary that linked fine on the runner and refused to start for a
+# user on 13.2.
 if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.3" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)

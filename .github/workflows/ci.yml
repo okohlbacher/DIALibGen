@@ -376,11 +376,21 @@ jobs:
       # Staged BEFORE the Tauri build, because tauri copies resources/ during
       # the build: doing it afterwards produces an app whose resources are the
       # empty skeleton, and every check that looks at the source tree passes.
+      # `bash`, NOT `bash -el`: the micromamba environment must not be active
+      # here, and its bin directory is scrubbed from PATH below for the same
+      # reason. cargo resolves its linker by PATH name, so with the conda
+      # toolchain in front it links with aarch64-conda-linux-gnu-ld -- which
+      # cannot resolve the SYSTEM webkit2gtk this app links against, and
+      # produces several hundred lines of undefined references to epoxy, gst
+      # and icu. Nothing in this step wants conda: it copies an already-built
+      # tree and runs node and cargo.
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
-        shell: bash -el {0}
+        shell: bash
         run: |
           set -euo pipefail
+          PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
+          export PATH
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
             sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \

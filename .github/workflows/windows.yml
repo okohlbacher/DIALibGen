@@ -386,6 +386,25 @@ jobs:
           # CMakeLists detects that and substitutes cmake/eigen3-range-shim --
           # but only when nothing has already pinned Eigen3_DIR past it.
           OPENMS_DIR=$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")
+
+          # OpenMS installs its config and its targets file to two different
+          # places on Windows: the config goes to <prefix>/CMake (the non-UNIX
+          # branch of DEF_INSTALL_CMAKE_DIR) while install_export_targets()
+          # sends OpenMSTargets.cmake to <prefix>/lib/cmake/OpenMS. The config
+          # then does include(${CMAKE_CURRENT_LIST_DIR}/OpenMSTargets.cmake) and
+          # cannot find it. Put a copy where the config looks.
+          if [ ! -f "$OPENMS_DIR/OpenMSTargets.cmake" ]; then
+            TGT=$(find openms-install -name 'OpenMSTargets*.cmake' | head -1)
+            [ -n "$TGT" ] \
+              || { echo "::error::OpenMS installed no OpenMSTargets.cmake at all"; exit 1; }
+            cp "$(dirname "$TGT")"/OpenMSTargets*.cmake "$OPENMS_DIR/"
+            echo "copied $(dirname "$TGT")/OpenMSTargets*.cmake -> $OPENMS_DIR"
+          fi
+
+          # What conda actually laid down for ONNX Runtime, so a find failure
+          # below is one log line away from its cause rather than another run.
+          find "$CONDA_LIB_PREFIX" -iname 'onnxruntime*' -maxdepth 4 | head -20 || true
+
           echo "OPENMS_DIR=$OPENMS_DIR" >> "$GITHUB_ENV"
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \

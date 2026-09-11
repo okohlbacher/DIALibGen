@@ -118,8 +118,20 @@ find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
                         onnxruntime/core/session include/onnxruntime/core/session)
 find_library(ONNXRuntime_LIBRARY NAMES onnxruntime PATH_SUFFIXES lib)
 if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
-  message(FATAL_ERROR "ONNX Runtime not found. Set ONNXRuntime_INCLUDE_DIR and "
-                      "ONNXRuntime_LIBRARY, or install onnxruntime-cpp.")
+  # Name the half that failed: the header and the library are packaged in
+  # different places by different distributions, and "not found" for both is a
+  # different problem from "not found" for one.
+  set(_ort_missing "")
+  if(NOT ONNXRuntime_INCLUDE_DIR)
+    string(APPEND _ort_missing "\n  onnxruntime_cxx_api.h (set ONNXRuntime_INCLUDE_DIR)")
+  endif()
+  if(NOT ONNXRuntime_LIBRARY)
+    string(APPEND _ort_missing "\n  the onnxruntime library (set ONNXRuntime_LIBRARY)")
+  endif()
+  message(FATAL_ERROR
+    "ONNX Runtime not found. Missing:${_ort_missing}\n"
+    "Searched CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}\n"
+    "Install onnxruntime-cpp, or set the variables above.")
 endif()
 message(STATUS "ONNX Runtime: ${ONNXRuntime_LIBRARY}")
 

@@ -339,7 +339,18 @@ jobs:
           # find_program(python3) picks whatever is first on PATH, which on a
           # Windows runner is a bare system Python -- the reference tests were
           # then registered and failed on `import numpy` rather than skipping.
-          echo "CONDA_PYTHON=$(python -c "import sys;print(sys.executable.replace('\\','/'))")" >> "$GITHUB_ENV"
+          #
+          # Assigned in its own step, not inlined into the echo: the nested
+          # quoting needed for that produced an EMPTY value, and an empty
+          # -DODIA_PYTHON does not fail the configure -- it unregisters the
+          # whole Python tier, which is worse than a failure because the suite
+          # simply gets smaller.
+          CP=$(python -c 'import sys; print(sys.executable)')
+          CP=${CP//\\//}
+          [ -x "$CP" ] || { echo "::error::conda python not found (got '$CP')"; exit 1; }
+          "$CP" -c 'import numpy, pyarrow, onnxruntime' \
+            || { echo "::error::$CP lacks the test dependencies"; exit 1; }
+          echo "CONDA_PYTHON=$CP" >> "$GITHUB_ENV"
 
       - name: Restore the PeptDeep models
         id: cache-models
@@ -504,8 +515,18 @@ jobs:
           # standalone_test.sh runs the binary under `env -i` and needs the DLL
           # directories handed back explicitly on Windows; ctest does not pass
           # this job's PATH through to it in a form the bare environment keeps.
-          export PATH_KEEP="$DLL_PATH_POSIX:/usr/bin:/bin"
+          # System32 carries the Universal CRT (api-ms-win-crt-*.dll). Without
+          # it a bare environment cannot start ANY Windows process, which is not
+          # the property this test is checking.
+          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -u "$SYSTEMROOT")/System32:/usr/bin:/bin"
           ctest --test-dir build --output-on-failure
+          # A tier that fails to register does not fail -- it disappears, and
+          # the run goes green on a smaller suite. Assert the Python-dependent
+          # tests are actually there.
+          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
+            || { echo "::error::the prediction tests were not registered"; exit 1; }
+          ctest --test-dir build -N | grep -q "e2e" \
+            || { echo "::error::the e2e test was not registered"; exit 1; }
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
 
@@ -522,7 +543,7 @@ jobs:
           # this gate is about -- it is about the BUILD TREE not being on it. So
           # the three runtime prefixes are handed back explicitly and nothing
           # else is.
-          export PATH_KEEP="$DLL_PATH_POSIX:/usr/bin:/bin"
+          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -u "$SYSTEMROOT")/System32:/usr/bin:/bin"
           export OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \

@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.2.0] — unreleased
+## [0.2.0] — 2026-09-11
 
 The release that makes this a standalone tool rather than a tool that happens to
 build. Everything in *Fixed* below was a defect an OpenMS-internal tool would

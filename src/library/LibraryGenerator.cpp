@@ -4,6 +4,7 @@
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepPredictor.h>
 
+#include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/EmpiricalFormula.h>
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
@@ -246,14 +247,18 @@ namespace ODIA
     }
     stats.peptides = peptide_to_proteins.size();
 
+    // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
+    // the two are distinct types and no implicit conversion exists between the
+    // vectors even though String converts to and from std::string element-wise.
+    // Built explicitly so this compiles against a stock OpenMS release and not
+    // only against a tree where the alias happens to be spelled differently.
+    auto toStringList = [](const std::vector<std::string>& v) {
+      return StringList(v.begin(), v.end());
+    };
     ModifiedPeptideGenerator::MapToResidueType fixed_map =
-      ModifiedPeptideGenerator::getModifications(
-        std::vector<std::string>(params.fixed_modifications.begin(),
-                                 params.fixed_modifications.end()));
+      ModifiedPeptideGenerator::getModifications(toStringList(params.fixed_modifications));
     ModifiedPeptideGenerator::MapToResidueType variable_map =
-      ModifiedPeptideGenerator::getModifications(
-        std::vector<std::string>(params.variable_modifications.begin(),
-                                 params.variable_modifications.end()));
+      ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
 
     library.reserve(peptide_to_proteins.size() * params.charges.size(),
                     peptide_to_proteins.size() * params.charges.size() * params.max_fragments);

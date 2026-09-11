@@ -103,6 +103,27 @@ jobs:
           test "$(git rev-parse HEAD)" = "$OPENMS_SHA" \
             || { echo "::error::release/3.5.0 is no longer $OPENMS_SHA"; exit 1; }
 
+          # A missing include in OpenMS 3.5.0, visible only on MSVC.
+          # DIAPrescoring.cpp uses std::divides but includes <algorithm> and
+          # <utility> and not <functional>; libstdc++ and libc++ pull it in
+          # transitively, MSVC's STL does not. With the template undeclared,
+          # MSVC parses `std::divides<double>()` as a chain of comparisons and
+          # reports "syntax error: '>' was unexpected here" -- which reads like
+          # a conformance problem and is not one.
+          #
+          # Guarded on both sides: if the include is ever added upstream, or the
+          # line it is anchored to moves, this fails loudly instead of patching
+          # nothing and letting the build fail 60 minutes later.
+          F=src/openms/source/ANALYSIS/OPENSWATH/DIAPrescoring.cpp
+          if grep -q "std::divides" "$F" && ! grep -q "^#include <functional>" "$F"; then
+            grep -q "^#include <utility>" "$F" \
+              || { echo "::error::$F no longer includes <utility>; re-anchor this patch"; exit 1; }
+            sed -i 's|^#include <utility>|#include <utility>\n#include <functional>|' "$F"
+            grep -q "^#include <functional>" "$F" \
+              || { echo "::error::failed to add <functional> to $F"; exit 1; }
+            echo "patched $F with <functional>"
+          fi
+
       - name: Check out contrib at the pinned commit
         shell: bash
         run: |

@@ -116,7 +116,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models
-          key: peptdeep-models-41816f32-4141ea23-3f3b847e
+          key: peptdeep-models-ccs41816f32-ms24141ea23-rt3f3b847e
 
       - name: Fetch the PeptDeep models
         if: steps.cache-models.outputs.cache-hit != 'true'
@@ -128,9 +128,12 @@ jobs:
             curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
             echo "$2  models/$1" | shasum -a 256 -c -
           }
-          fetch peptdeep_rt_dynamic.onnx  41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
+          # OpenMS lists the files as ccs, ms2, rt and the hashes in that same
+          # order; pairing them by eye got rt and ccs swapped, and the check
+          # below is the only reason that was noticed rather than shipped.
+          fetch peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
           fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
-          fetch peptdeep_ccs_dynamic.onnx 3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
+          fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
 
       - name: Configure
         shell: bash -el {0}

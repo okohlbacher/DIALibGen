@@ -53,6 +53,15 @@ jobs:
       # libarrow is deliberately NOT pinned: openms pins it itself, and this
       # project is built against whatever that resolves to. That is the point of
       # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
+      #
+      # cmake<4, and not by preference: OpenMSConfig.cmake asks for Eigen3 with
+      # the version RANGE "3.4.0...<6", and conda-forge's eigen 3.4.0 ships a
+      # config-version file that CMake 4 rejects against it -- reporting the low
+      # end of the range as incompatible with itself. Nothing here needs CMake 4.
+      #
+      # create-args is a FOLDED scalar: every line is joined into one command
+      # line, so a `#` comment inside it becomes a literal argument. All prose
+      # belongs up here.
       - name: Install OpenMS, ONNX Runtime and the toolchain
         uses: mamba-org/setup-micromamba@v2
         with:
@@ -77,13 +86,7 @@ jobs:
             coin-or-cbc
             coin-or-utils
             qt6-main
-            # cmake<4, and not by preference: OpenMSConfig.cmake asks for
-            # Eigen3 with the version RANGE "3.4.0...<6", and conda-forge's
-            # eigen 3.4.0 ships a config-version file that CMake 4 rejects
-            # outright -- "The version found is not compatible with the version
-            # requested" against a version that is literally the low end of the
-            # range. Nothing in this project needs CMake 4.
-            "cmake<4"
+            cmake<4
             ninja
             cxx-compiler
             ${{ matrix.extra }}

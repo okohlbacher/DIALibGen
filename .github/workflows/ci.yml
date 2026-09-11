@@ -308,16 +308,62 @@ jobs:
           cp -R "$CONDA_PREFIX/share/OpenMS/." stage/share/OpenMS/
 
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install dylibbundler >/dev/null
-            # </dev/null and -of/-od/-cd together: dylibbundler PROMPTS when it
-            # is unsure about a library or an existing destination, and a
-            # prompt on a runner is not an error -- it is a job that sits there
-            # until the six-hour timeout with no output at all. That is what it
-            # did. Closing stdin turns any remaining question into an immediate
-            # failure, which is the outcome that can be read.
-            dylibbundler -of -od -cd -b -ns \
-              -x stage/bin/DIALibraryGenerator \
-              -d stage/lib -p '@executable_path/../lib/' </dev/null
+            # An explicit otool/install_name_tool walk, NOT dylibbundler.
+            # dylibbundler failed twice here in two different ways: it hung for
+            # forty minutes on an interactive prompt, and with stdin closed it
+            # spun forever printing "libOpenMS.dylib does not exist. Try again"
+            # -- it cannot resolve the @rpath install names a conda build uses
+            # and asks a human where they are. Fifteen lines that resolve
+            # @rpath against a known prefix are easier to reason about than a
+            # tool whose failure mode is a question.
+            copy_closure() {
+              otool -L "$1" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+                case "$dep" in
+                  /usr/lib/*|/System/*) continue ;;
+                esac
+                base=$(basename "$dep")
+                # @rpath/@loader_path/@executable_path all resolve to the conda
+                # prefix here, which is where the build actually linked from.
+                src="$dep"
+                case "$dep" in
+                  @*) src="$CONDA_PREFIX/lib/$base" ;;
+                esac
+                [ -f "$src" ] || continue
+                [ -f "stage/lib/$base" ] || cp "$src" "stage/lib/$base"
+              done
+            }
+            copy_closure stage/bin/DIALibraryGenerator
+            prev=0
+            for _ in 1 2 3 4 5 6 7 8; do
+              n=$(ls stage/lib | wc -l)
+              [ "$n" -eq "$prev" ] && break
+              prev=$n
+              for dy in stage/lib/*.dylib; do copy_closure "$dy"; done
+            done
+
+            # Rewrite every load command to the bundle-relative path, and give
+            # each library an id to match.
+            retarget() {
+              otool -L "$1" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+                case "$dep" in
+                  /usr/lib/*|/System/*) continue ;;
+                esac
+                base=$(basename "$dep")
+                [ -f "stage/lib/$base" ] || continue
+                install_name_tool -change "$dep" "@executable_path/../lib/$base" "$1"
+              done
+            }
+            retarget stage/bin/DIALibraryGenerator
+            for dy in stage/lib/*.dylib; do
+              install_name_tool -id "@executable_path/../lib/$(basename "$dy")" "$dy"
+              retarget "$dy"
+            done
+            # Editing a Mach-O invalidates its signature, and arm64 macOS
+            # REFUSES to load an invalidly-signed one -- so an ad-hoc
+            # re-signature is not optional cleanup, it is what makes the
+            # bundle runnable at all.
+            codesign --force --sign - stage/bin/DIALibraryGenerator
+            for dy in stage/lib/*.dylib; do codesign --force --sign - "$dy"; done
           else
             # patchelf plus a manual closure: ldd names everything the loader
             # would open, minus the system libraries a distro certainly has.

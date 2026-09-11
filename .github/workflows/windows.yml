@@ -352,13 +352,16 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
+          # No -DEigen3_DIR here, unlike the OpenMS build above. OpenMSConfig
+          # asks for the version range Eigen 3.4 refuses, and this project's
+          # CMakeLists detects that and substitutes cmake/eigen3-range-shim --
+          # but only when nothing has already pinned Eigen3_DIR past it.
           OPENMS_DIR=$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")
           echo "OPENMS_DIR=$OPENMS_DIR" >> "$GITHUB_ENV"
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DOpenMS_DIR="$OPENMS_DIR" \
             -DCMAKE_PREFIX_PATH="$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
-            -DEigen3_DIR="C:/ProgramData/chocolatey/lib/eigen/share/cmake" \
             -DODIA_MODEL_DIR="$PWD/models" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 

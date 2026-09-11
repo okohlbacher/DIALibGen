@@ -68,14 +68,17 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/version-guard.cmake)
 # before OpenMS's fallback can run. Probed rather than assumed: the shim is
 # selected only when a range-respecting lookup has actually failed, so an Eigen
 # that behaves (or one the user pointed at themselves) is left alone.
-if(NOT DEFINED Eigen3_DIR)
-  find_package(Eigen3 3.4.0...<6 QUIET CONFIG)
-  if(NOT Eigen3_FOUND)
-    set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim"
-        CACHE PATH "Eigen3 package directory" FORCE)
-    message(STATUS "Eigen3: using cmake/eigen3-range-shim "
-                   "(the installed Eigen rejects OpenMS's version range)")
-  endif()
+# The probe runs unconditionally, and is NOT skipped when the caller set
+# Eigen3_DIR: a caller who points at a perfectly good Eigen 3.4.0 hits the same
+# rejection, and skipping the probe for them means the shim exists but never
+# engages. find_package honours their Eigen3_DIR here, so an Eigen that
+# satisfies the range is left exactly as they chose it.
+find_package(Eigen3 3.4.0...<6 QUIET CONFIG)
+if(NOT Eigen3_FOUND)
+  set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim"
+      CACHE PATH "Eigen3 package directory" FORCE)
+  message(STATUS "Eigen3: using cmake/eigen3-range-shim "
+                 "(the installed Eigen rejects OpenMS's version range)")
 endif()
 
 find_package(OpenMS REQUIRED)

@@ -26,6 +26,20 @@ never have, and that this one had only because it links OpenMS from outside.
 - `cmake/version-guard.cmake`: every file carrying the version is checked
   against `project(VERSION)` at configure time.
 
+- **Homebrew tap** for macOS:
+  [okohlbacher/homebrew-dialibrarygenerator](https://github.com/okohlbacher/homebrew-dialibrarygenerator),
+  with a cask for the desktop app and one for the CLI. The CLI cask uses
+  `command_wrapper` rather than a `binary` stanza: a symlink into
+  `$(brew --prefix)/bin` would make the tool resolve its own `share/` relative
+  to `/opt/homebrew/bin`, where it is not.
+- `CMAKE_OSX_DEPLOYMENT_TARGET` (13.0). Without it the macOS floor was whatever
+  SDK the build machine happened to have, and it moved when a CI runner image
+  was retired — which reaches a user as an app that installs, launches and then
+  cannot run.
+- Release assets have FIXED names (`DIALibraryGenerator-gui-macos-arm64.dmg`,
+  …). Tauri spells them with its own version and architecture, which would make
+  every README link and every cask URL depend on Tauri's naming.
+
 ### Fixed
 - **The tool reported OpenMS's version.** `version_` and `verboseVersion_` are
   now set from `project(VERSION)`; `--helphelp` carries both numbers, which is

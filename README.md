@@ -63,13 +63,23 @@ table as a statement of where this tool sits, not as a benchmark.
 
 ## Installing
 
-Release builds for macOS, Windows and Linux — a CLI archive and a desktop
-installer per platform — are attached to each
+On macOS, via [the tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator):
+
+```bash
+brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator       # desktop app
+brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator-cli   # CLI on PATH
+```
+
+Two casks because the app already carries its own copy of the CLI, so one cask
+installing both would put the same tree on disk twice.
+
+Otherwise: release builds for macOS, Windows and Linux — a CLI archive and a
+desktop installer per platform — are attached to each
 [release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
 archives are self-contained: unpack and run `bin/DIALibraryGenerator`; the
 libraries it needs travel with it.
 
-Neither is signed yet (see [Known limitations](#known-limitations)).
+Nothing is signed yet (see [Known limitations](#known-limitations)).
 
 ## Building
 
@@ -211,7 +221,8 @@ Read these before treating output as authoritative:
   target file and then throw. `-write_ctd` works everywhere.
 - **Nothing is code-signed.** The macOS `.dmg` is neither signed nor notarized
   and the Windows installer is unsigned, so both need the OS's "open anyway"
-  path. Building from source avoids it entirely.
+  path (`brew install --cask --no-quarantine` for the casks). Building from
+  source avoids it entirely.
 
 ### Closed since 0.1.0
 

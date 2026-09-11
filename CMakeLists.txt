@@ -14,6 +14,17 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Without this the macOS floor is whatever SDK the build machine happens to
+# have, and it MOVES when a CI runner image is retired. dyld refuses to load a
+# Mach-O on an older macOS than its minos, so the failure lands on the user as
+# an app that installs, launches and then cannot run -- and a Homebrew cask
+# cannot state a floor it does not know. 13.0 is chosen to be older than any
+# supported runner image and new enough for the libc++ this code uses; a
+# feature that needs more fails loudly at build time, which is the point.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version" FORCE)
+endif()
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()

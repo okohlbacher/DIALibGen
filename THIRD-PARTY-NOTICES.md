@@ -58,3 +58,21 @@ Linked against, not vendored:
 
 OpenMS itself pulls in further dependencies with their own terms, including
 Coin-OR components under EPL-2.0. Consult your OpenMS distribution.
+
+A **release bundle** carries the runtime libraries of that list alongside the
+binary (that is what makes it runnable on a machine without a conda prefix), so
+their terms travel with it. A source build links them and vendors nothing.
+
+## Desktop app (`gui/`)
+
+The desktop front-end is a separate dependency tree, none of it vendored here;
+`gui/package-lock.json` and `gui/src-tauri/Cargo.lock` pin the exact versions.
+
+| Component | Licence |
+|---|---|
+| Tauri 2 (and its plugins) | MIT or Apache-2.0 |
+| React / React DOM | MIT |
+| Vite, Vitest, TypeScript | MIT / Apache-2.0 |
+
+A built app also embeds the OS's own webview (WebKit on macOS and Linux,
+WebView2 on Windows), which is the platform's, not ours.

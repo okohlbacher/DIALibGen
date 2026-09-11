@@ -2,11 +2,16 @@
 // the EFFECTIVE config -- every default materialised -- which is the
 // authoritative reference. Comments are permitted here; the parser ignores them.
 {
-  // Required: this tool ships no weights. Relative paths resolve against THIS
-  // file, so a config plus a model directory is portable.
-  "rt_model":  "models/peptdeep_rt_dynamic.onnx",
-  "ms2_model": "models/peptdeep_ms2_dynamic.onnx",
-  "ccs_model": "models/peptdeep_ccs_dynamic.onnx",
+  // This tool ships no weights. Naming them here is ONE of the ways to supply
+  // them -- relative paths resolve against THIS file, so a config plus a model
+  // directory is portable -- and setting DIALIBGEN_MODEL_DIR to a directory
+  // holding all three is the other. Left commented out so this config works
+  // out of the box once the models are anywhere the tool looks; uncomment to
+  // pin them to a specific copy.
+  //
+  // "rt_model":  "models/peptdeep_rt_dynamic.onnx",
+  // "ms2_model": "models/peptdeep_ms2_dynamic.onnx",
+  // "ccs_model": "models/peptdeep_ccs_dynamic.onnx",
 
   // The setting most likely to be wrong. [] for a non-alkylated preparation.
   "fixed_modifications": ["Carbamidomethyl (C)"],

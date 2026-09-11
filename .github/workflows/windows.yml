@@ -32,7 +32,10 @@ on:
         default: false
 
 concurrency:
-  group: windows-${{ github.ref }}
+  # A dispatch gets its OWN group. Sharing one with the branch means the next
+  # push to main cancels a dry run someone is watching -- and, on a leg that
+  # builds OpenMS, poisons the build cache mid-write.
+  group: windows-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -465,11 +468,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Fixed names: Tauri spells them with its own version and
+          # architecture, and every URL pointing at them -- the README's -- would
+          # then depend on Tauri's naming rather than on ours.
           mkdir -p dist-bundles
-          find gui/src-tauri/target/release/bundle \
-            \( -name '*.msi' -o -name '*-setup.exe' \) -exec cp {} dist-bundles/ \;
+          n=0
+          while IFS= read -r f; do
+            case "$f" in
+              *.msi) cp "$f" "dist-bundles/DIALibraryGenerator-gui-windows-x64.msi" ;;
+              *-setup.exe) cp "$f" "dist-bundles/DIALibraryGenerator-gui-windows-x64-setup.exe" ;;
+            esac
+            n=$((n + 1))
+          done < <(find gui/src-tauri/target/release/bundle \
+                     \( -name '*.msi' -o -name '*-setup.exe' \) -type f)
           ls -la dist-bundles
-          [ -n "$(ls -A dist-bundles)" ] \
+          [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
 
       - uses: actions/upload-artifact@v5

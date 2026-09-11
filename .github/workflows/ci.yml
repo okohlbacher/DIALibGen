@@ -31,7 +31,10 @@ on:
         default: false
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A dispatch gets its OWN group. Sharing one with the branch means the next
+  # push to main cancels a dry run someone is watching -- and, on a leg that
+  # builds OpenMS, poisons the build cache mid-write.
+  group: ci-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -307,18 +310,36 @@ jobs:
               -x stage/bin/DIALibraryGenerator \
               -d stage/lib -p '@executable_path/../lib/'
           else
-            # patchelf + a manual closure: ldd names everything the loader would
-            # open, minus the system libraries a distro certainly has.
+            # patchelf plus a manual closure: ldd names everything the loader
+            # would open, minus the system libraries a distro certainly has.
+            #
+            # LD_LIBRARY_PATH is the load-bearing line. A conda library carries
+            # an RPATH like $ORIGIN/../lib, which resolves inside the conda
+            # prefix and NOT from stage/lib -- so ldd on a COPY reports its
+            # dependencies as "not found", the `=> /` filter drops them
+            # silently, and the closure stops one level in. That shipped a
+            # bundle missing libblas.so.3, and the only symptom was the
+            # portability check below.
+            export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
             copy_closure() {
+              local missing
+              missing=$(ldd "$1" | awk '/not found/{print $1}')
+              [ -z "$missing" ] || { echo "::error::unresolved in $1: $missing"; exit 1; }
               ldd "$1" | awk '/=> \//{print $3}' | while read -r so; do
                 case "$so" in
-                  /lib/*|/lib64/*|/usr/lib/x86_64-linux-gnu/lib[cmd]*|*/ld-linux*) continue ;;
+                  /lib/*|/lib64/*|/usr/lib/*|*/ld-linux*) continue ;;
                 esac
                 cp -n "$so" stage/lib/ 2>/dev/null || true
               done
             }
             copy_closure stage/bin/DIALibraryGenerator
-            for i in 1 2 3; do
+            # Iterate to a fixed point rather than a guessed depth: each round
+            # can pull in libraries whose own dependencies are not yet present.
+            prev=0
+            for _ in 1 2 3 4 5 6 7 8; do
+              n=$(ls stage/lib | wc -l)
+              [ "$n" -eq "$prev" ] && break
+              prev=$n
               for so in stage/lib/*.so*; do copy_closure "$so"; done
             done
             patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibraryGenerator
@@ -365,19 +386,28 @@ jobs:
           npm ci
           npm run tauri build
 
+      # Renamed to FIXED names. Tauri spells them with its own version and
+      # architecture (DIALibraryGenerator_0.2.0_aarch64.dmg), which makes every
+      # URL that points at them -- the README's, and the Homebrew cask's --
+      # depend on Tauri's naming rather than on ours. A cask pins a digest to a
+      # URL, so a name that moves is a cask that 404s.
       - name: Collect the desktop bundles
         if: steps.pkg.outputs.package == 'true'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist-bundles
-          find gui/src-tauri/target/release/bundle \
-            \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
-            -exec cp {} dist-bundles/ \;
+          n=0
+          while IFS= read -r f; do
+            ext="${f##*.}"
+            cp "$f" "dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.$ext"
+            n=$((n + 1))
+          done < <(find gui/src-tauri/target/release/bundle \
+                     \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -type f)
           ls -la dist-bundles
           # A bundle step that produces nothing must fail here, not go unnoticed
           # until a README link 404s.
-          [ -n "$(ls -A dist-bundles)" ] \
+          [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
 
       - uses: actions/upload-artifact@v5
@@ -423,9 +453,14 @@ jobs:
             printf '%s' "$have" | grep -qx "DIALibraryGenerator-$n.tar.gz" \
               || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
           done
-          printf '%s' "$have" | grep -q '\.dmg$' \
-            || { echo "::error::no macOS .dmg on $tag"; missing=1; }
-          printf '%s' "$have" | grep -q '\.AppImage$\|\.deb$' \
+          # Named exactly, not by extension: the Homebrew cask and the README
+          # both point at these spellings, so "some dmg exists" is not the
+          # property that matters.
+          for n in macos-x64 macos-arm64; do
+            printf '%s' "$have" | grep -qx "DIALibraryGenerator-gui-$n.dmg" \
+              || { echo "::error::no desktop .dmg for $n on $tag"; missing=1; }
+          done
+          printf '%s' "$have" | grep -q '^DIALibraryGenerator-gui-linux-.*\.\(AppImage\|deb\)$' \
             || { echo "::error::no Linux desktop bundle on $tag"; missing=1; }
           exit $missing
 

@@ -453,15 +453,33 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          DLLS="$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin"
           OPENMS_BIN=$(dirname "$(find openms-install -name 'OpenMS.dll' | head -1)")
-          echo "RUNTIME_DLL_PATH=$DLLS;$OPENMS_BIN" >> "$GITHUB_ENV"
+          [ -n "$OPENMS_BIN" ] || { echo "::error::no OpenMS.dll in the install"; exit 1; }
+
+          # Two spellings, because both are needed and they are not
+          # interchangeable. RUNTIME_DLL_PATH is Windows-style (C:/...;D:/...)
+          # for anything handed to Windows; DLL_PATH_POSIX is what Git Bash's
+          # PATH needs. Translating the first into the second by turning ';'
+          # into ':' does NOT work -- it leaves the drive letters, so "C:/x:D:/y"
+          # splits at the colon after C and every entry is garbage. That is what
+          # made every test die with 0xc0000135, STATUS_DLL_NOT_FOUND.
+          RUNTIME_DLL_PATH="$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin;$OPENMS_BIN"
+          POSIX=""
+          IFS=';' read -ra _dirs <<< "$RUNTIME_DLL_PATH"
+          for d in "${_dirs[@]}"; do
+            [ -n "$d" ] || continue
+            POSIX="$POSIX:$(cygpath -u "$d")"
+          done
+          POSIX="${POSIX#:}"
+          echo "RUNTIME_DLL_PATH=$RUNTIME_DLL_PATH" >> "$GITHUB_ENV"
+          echo "DLL_PATH_POSIX=$POSIX" >> "$GITHUB_ENV"
+          echo "posix dll path: $POSIX"
 
       - name: Test
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          export PATH="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):$PATH"
+          export PATH="$DLL_PATH_POSIX:$PATH"
           ctest --test-dir build --output-on-failure
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
@@ -479,7 +497,7 @@ jobs:
           # this gate is about -- it is about the BUILD TREE not being on it. So
           # the three runtime prefixes are handed back explicitly and nothing
           # else is.
-          export PATH_KEEP="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):/usr/bin:/bin"
+          export PATH_KEEP="$DLL_PATH_POSIX:/usr/bin:/bin"
           export OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
@@ -490,7 +508,7 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          export PATH="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):$PATH"
+          export PATH="$DLL_PATH_POSIX:$PATH"
           export DIALIBGEN_MODEL_DIR="$PWD/models"
           BIN="$PWD/stage/bin/DIALibraryGenerator.exe"
           "$BIN" -in example/proteins.fasta -out out.parquet

@@ -54,11 +54,6 @@ jobs:
       # project is built against whatever that resolves to. That is the point of
       # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
       #
-      # cmake<4, and not by preference: OpenMSConfig.cmake asks for Eigen3 with
-      # the version RANGE "3.4.0...<6", and conda-forge's eigen 3.4.0 ships a
-      # config-version file that CMake 4 rejects against it -- reporting the low
-      # end of the range as incompatible with itself. Nothing here needs CMake 4.
-      #
       # create-args is a FOLDED scalar: every line is joined into one command
       # line, so a `#` comment inside it becomes a literal argument. All prose
       # belongs up here.
@@ -86,7 +81,7 @@ jobs:
             coin-or-cbc
             coin-or-utils
             qt6-main
-            cmake<4
+            cmake
             ninja
             cxx-compiler
             ${{ matrix.extra }}
@@ -101,9 +96,14 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
+          # QT_HOST_PATH: conda-forge's Qt6 for aarch64 and osx-arm64 is marked
+          # as a cross-compiled Qt, so Qt6Config.cmake refuses to load without a
+          # host Qt. This build is native, so the same prefix IS the host Qt.
+          # x64 is unaffected, which is why it only shows up on the ARM legs.
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DQT_HOST_PATH="$CONDA_PREFIX" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 
       - name: Build

@@ -46,6 +46,22 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/version-guard.cmake)
 # released OpenMS the three .onnx files must be supplied separately -- see
 # README, "Models".
 # ---------------------------------------------------------------------------
+# OpenMSConfig.cmake does find_dependency(Eigen3 3.4.0...<6), and Eigen 3.4's
+# own config-version file rejects any range whose maximum crosses 4 -- so the
+# find_package below fails on a perfectly good Eigen 3.4.0, on every platform,
+# before OpenMS's fallback can run. Probed rather than assumed: the shim is
+# selected only when a range-respecting lookup has actually failed, so an Eigen
+# that behaves (or one the user pointed at themselves) is left alone.
+if(NOT DEFINED Eigen3_DIR)
+  find_package(Eigen3 3.4.0...<6 QUIET CONFIG)
+  if(NOT Eigen3_FOUND)
+    set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim"
+        CACHE PATH "Eigen3 package directory" FORCE)
+    message(STATUS "Eigen3: using cmake/eigen3-range-shim "
+                   "(the installed Eigen rejects OpenMS's version range)")
+  endif()
+endif()
+
 find_package(OpenMS REQUIRED)
 message(STATUS "OpenMS: ${OpenMS_DIR}")
 

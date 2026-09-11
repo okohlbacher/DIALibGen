@@ -1,0 +1,473 @@
+name: windows
+
+# Windows x64, in two jobs.
+#
+# bioconda has no win-64 `openms`, so OpenMS has to be built from source here --
+# the one reason this is a separate workflow from ci.yml rather than another
+# matrix leg. contrib (~40 min) and OpenMS itself (~60 min) are each cached on
+# their pinned commit, so only the first run pays for them.
+#
+# They are SEPARATE JOBS on purpose: a failure in this project's own build must
+# not suppress the cache-save step for a perfectly good OpenMS, which is what a
+# single-job version would do and which turns every subsequent iteration into
+# another two hours.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/windows.yml'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+  workflow_dispatch:
+    inputs:
+      gui_dry_run:
+        description: 'Build the desktop app without cutting a tag'
+        type: boolean
+        default: false
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # OpenMS release/3.5.0, the same version ci.yml gets from bioconda. Pinned by
+  # SHA rather than by tag so a retag cannot silently change what was built.
+  OPENMS_SHA: c49149d47d6fcc76d1271d87d3a7fad15d2219de
+  # The contrib commit that OpenMS SHA pins as a submodule, read out of it
+  # rather than guessed: `git ls-tree <sha> -- contrib`. A stale contrib is the
+  # classic way this build breaks -- wrong Arrow, or Boost headers that no
+  # longer compile under the current MSVC -- and neither failure names contrib.
+  CONTRIB_REV: e6fde7cfed8cde73c6625cd493ce3f82e21263cc
+
+jobs:
+  # ------------------------------------------------------------ OpenMS itself
+  openms:
+    name: windows-x64-openms
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      # OpenMS contrib's CMakeLists shells out to cl.exe to decide the target
+      # word size and fails with "Could not determine if cl.exe builds x86 or
+      # x64 apps" without this. Writes GITHUB_PATH/GITHUB_ENV, so it persists to
+      # every later step whatever shell they use.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Check out OpenMS at the pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q openms-src
+          cd openms-src
+          git remote add origin https://github.com/OpenMS/OpenMS.git
+          # A bare `git fetch origin <sha>` is refused -- GitHub serves only
+          # advertised refs -- so fetch the tag this commit is, then verify.
+          git fetch -q --depth 1 origin refs/tags/release/3.5.0
+          git checkout -q FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$OPENMS_SHA" \
+            || { echo "::error::release/3.5.0 is no longer $OPENMS_SHA"; exit 1; }
+
+      - name: Check out contrib at the pinned commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q contrib-src
+          cd contrib-src
+          git remote add origin https://github.com/OpenMS/contrib.git
+          git fetch -q --depth 1 origin "$CONTRIB_REV"
+          git checkout -q FETCH_HEAD
+
+      - name: Cache contrib build
+        id: cache-contrib
+        uses: actions/cache@v4
+        with:
+          path: contrib-build
+          key: windows-x64-contrib-${{ env.CONTRIB_REV }}-v1
+
+      - name: Build contrib
+        if: steps.cache-contrib.outputs.cache-hit != 'true'
+        run: |
+          cmake -S contrib-src -B contrib-build -G "Visual Studio 17 2022" -A x64 -DBUILD_TYPE=ALL
+          cmake --build contrib-build --config Release
+
+      # Eigen and Ninja via choco, matching OpenMS's own Windows recipe -- their
+      # CI points Eigen3_DIR at choco's copy rather than contrib's.
+      - name: Install Eigen and Ninja
+        run: choco install -y --no-progress eigen ninja
+
+      # qtbase/qtsvg/qtimageformats: OpenMSConfig.cmake does find_dependency(Qt6)
+      # even with WITH_GUI=OFF -- Qt is a core-library dependency here, not only
+      # a GUI one, exactly as it is on the conda platforms.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: 'win64_msvc2022_64'
+          cache: 'false'
+          archives: 'qtbase qtsvg qtimageformats'
+
+      # Arrow/Parquet/libzip via conda, which is what OpenMS's own Windows CI
+      # does. NO libarrow-dataset/acero, unlike ci.yml: OpenMS makes LibXml2
+      # REQUIRED the moment ArrowDataset is found, and CMake's FindLibXml2 does
+      # not accept the layout conda-forge's MSVC build presents. Nothing here
+      # uses Arrow Dataset, so dropping it removes the requirement at its source
+      # rather than fighting the find module.
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: dialibgen-deps
+          python-version: '3.11'
+
+      - name: Install the conda dependencies
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          conda install -y -c conda-forge libarrow libparquet libzip nlohmann_json
+          PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
+          echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
+
+      # Built separately rather than via contrib, mirroring OpenMS's own recipe,
+      # and installed into contrib-build so it shares a prefix with everything
+      # else contrib produces. CURL_USE_SCHANNEL uses Windows' own TLS rather
+      # than pulling in another dependency for that alone.
+      - name: Build libcurl from source
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o curl-src.tar.gz https://curl.se/download/curl-8.12.1.tar.gz
+          tar xzf curl-src.tar.gz
+          cd curl-8.12.1
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/contrib-build" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCURL_USE_SCHANNEL=ON \
+            -DBUILD_CURL_EXE=OFF \
+            -DBUILD_TESTING=OFF \
+            -DCURL_DISABLE_LDAP=ON \
+            -DCURL_USE_LIBPSL=OFF
+          cmake --build build
+          cmake --install build
+
+      - name: Cache OpenMS install
+        id: cache-openms
+        uses: actions/cache@v4
+        with:
+          path: openms-install
+          key: windows-x64-openms-${{ env.OPENMS_SHA }}-${{ env.CONTRIB_REV }}-v1
+
+      - name: Configure OpenMS
+        if: steps.cache-openms.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GUI, tests, docs and packaging all OFF: this project needs the
+          # library, the headers and an installed OpenMSConfig.cmake, nothing
+          # else. That is the one place this deliberately diverges from OpenMS's
+          # own recipe, which builds and tests all of OpenMS.
+          cmake -S openms-src -B openms-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOPENMS_CONTRIB_LIBS="$GITHUB_WORKSPACE/contrib-build" \
+            -DWITH_GUI=OFF \
+            -DENABLE_TOPP_TESTING=OFF \
+            -DENABLE_CLASS_TESTING=OFF \
+            -DENABLE_DOCS=OFF \
+            -DENABLE_STYLE_TESTING=OFF \
+            -DENABLE_CWL=OFF \
+            -DMT_ENABLE_OPENMP=ON \
+            -DUSE_EXTERNAL_JSON=OFF \
+            -DEigen3_DIR="C:/ProgramData/chocolatey/lib/eigen/share/cmake" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR;$CONDA_LIB_PREFIX" \
+            -DARROW_USE_STATIC=OFF \
+            -DArrow_DIR="$CONDA_LIB_PREFIX/lib/cmake/Arrow" \
+            -DParquet_DIR="$CONDA_LIB_PREFIX/lib/cmake/Parquet" \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/openms-install"
+
+      - name: Build and install OpenMS
+        if: steps.cache-openms.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build openms-build --parallel
+          cmake --build openms-build --target install
+
+      - name: Verify OpenMS installed its development files
+        shell: bash
+        run: |
+          set -euo pipefail
+          CFG=$(find openms-install -name 'OpenMSConfig.cmake' | head -1)
+          [ -n "$CFG" ] || { echo "::error::no OpenMSConfig.cmake after install"; exit 1; }
+          HDR=$(find openms-install -name 'TOPPBase.h' | head -1)
+          [ -n "$HDR" ] || { echo "::error::installed OpenMS has no TOPPBase.h"; exit 1; }
+          echo "found: $CFG"
+          echo "found: $HDR"
+
+  # -------------------------------------------------------------- this project
+  #
+  # Everything expensive above is a cache restore by the time this runs; choco,
+  # Qt and conda still have to be redone on a fresh runner, but those are
+  # seconds rather than two hours.
+  tool:
+    name: windows-x64
+    runs-on: windows-2022
+    needs: openms
+    timeout-minutes: 60
+    # write, not the default: needed only by the tag-triggered release upload.
+    # Safe on pull_request runs, including from forks -- GitHub issues a
+    # read-only token for those regardless of what is declared here.
+    permissions:
+      contents: write
+    steps:
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - uses: actions/checkout@v5
+
+      - name: Restore contrib build
+        uses: actions/cache@v4
+        with:
+          path: contrib-build
+          key: windows-x64-contrib-${{ env.CONTRIB_REV }}-v1
+
+      - name: Restore OpenMS install
+        uses: actions/cache@v4
+        with:
+          path: openms-install
+          key: windows-x64-openms-${{ env.OPENMS_SHA }}-${{ env.CONTRIB_REV }}-v1
+
+      - name: Install Eigen and Ninja
+        run: choco install -y --no-progress eigen ninja
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: 'win64_msvc2022_64'
+          cache: 'false'
+          archives: 'qtbase qtsvg qtimageformats'
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: dialibgen-deps
+          python-version: '3.11'
+
+      - name: Install the conda dependencies
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          # onnxruntime-cpp is this project's own dependency, not OpenMS's:
+          # OpenMS's ONNX binding rejects modified peptides, which is the whole
+          # reason this code binds ONNX Runtime directly.
+          conda install -y -c conda-forge libarrow libparquet libzip nlohmann_json \
+            onnxruntime-cpp numpy pyarrow onnxruntime
+          PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
+          echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
+
+      - name: Restore the PeptDeep models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: peptdeep-models-ccs41816f32-ms24141ea23-rt3f3b847e
+
+      - name: Fetch the PeptDeep models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          fetch() {
+            curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
+            echo "$2 *models/$1" | sha256sum -c -
+          }
+          fetch peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
+          fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
+          fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
+
+      - name: Configure
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          OPENMS_DIR=$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")
+          echo "OPENMS_DIR=$OPENMS_DIR" >> "$GITHUB_ENV"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOpenMS_DIR="$OPENMS_DIR" \
+            -DCMAKE_PREFIX_PATH="$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
+            -DEigen3_DIR="C:/ProgramData/chocolatey/lib/eigen/share/cmake" \
+            -DODIA_MODEL_DIR="$PWD/models" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+
+      - name: Build and install
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel
+          cmake --install build
+
+      # Everything the binary links lives in three prefixes. Collected once,
+      # here, and reused by every step below -- and by the staged bundle, which
+      # has to carry them.
+      - name: Collect the runtime DLL directories
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          DLLS="$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin"
+          OPENMS_BIN=$(dirname "$(find openms-install -name 'OpenMS.dll' | head -1)")
+          echo "RUNTIME_DLL_PATH=$DLLS;$OPENMS_BIN" >> "$GITHUB_ENV"
+
+      - name: Test
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          export PATH="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):$PATH"
+          ctest --test-dir build --output-on-failure
+          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
+            || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
+
+      - name: The installed binary stands on its own
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          BIN="$PWD/stage/bin/DIALibraryGenerator.exe"
+          test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
+          test -s "$PWD/stage/share/DIALibraryGenerator/irt_standards.tsv" \
+            || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
+
+          # env -i on Windows also strips the DLL search path, which is not what
+          # this gate is about -- it is about the BUILD TREE not being on it. So
+          # the three runtime prefixes are handed back explicitly and nothing
+          # else is.
+          export PATH_KEEP="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):/usr/bin:/bin"
+          export OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
+          bash test/standalone_test.sh "$BIN" \
+            "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
+            example/proteins.fasta
+          bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
+
+      - name: Build a real library
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          export PATH="$(echo "$RUNTIME_DLL_PATH" | tr ';' ':'):$PATH"
+          export DIALIBGEN_MODEL_DIR="$PWD/models"
+          BIN="$PWD/stage/bin/DIALibraryGenerator.exe"
+          "$BIN" -in example/proteins.fasta -out out.parquet
+          "$BIN" -in example/proteins.fasta -out out.tsv
+          test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
+          [ "$(wc -l < out.tsv)" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
+          python - <<'PY'
+          import pyarrow.parquet as pq, json, sys
+          f = pq.ParquetFile("out.parquet")
+          if f.metadata.num_rows == 0:
+              sys.exit("::error::the Parquet library has no rows")
+          if not (f.schema_arrow.metadata or {}).get(b"odia.config_json"):
+              sys.exit("::error::the Parquet library does not carry odia.config_json")
+          print(f"library: {f.metadata.num_rows} precursors")
+          PY
+
+      # A portable tree: the binary, its data, and every DLL it needs. Without
+      # this the artefact runs only on a machine that already has a conda env,
+      # a Qt and an OpenMS build in the same places -- which is to say, on this
+      # runner and nowhere else.
+      - name: Decide whether to package
+        id: pkg
+        shell: bash
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stage a portable bundle
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          for d in $(echo "$RUNTIME_DLL_PATH" | tr ';' '\n'); do
+            [ -d "$d" ] || continue
+            find "$d" -maxdepth 1 -name '*.dll' -exec cp -n {} stage/bin/ \; 2>/dev/null || true
+          done
+          # Qt's platform plugin is loaded by path, not by name, so it does not
+          # appear in any dependency walk and is missed by a *.dll sweep.
+          mkdir -p stage/bin/platforms
+          cp "$QT_ROOT_DIR/plugins/platforms/qwindows.dll" stage/bin/platforms/ 2>/dev/null || true
+
+          # The load-bearing check: it must run with NOTHING but the bundle on
+          # PATH. A bundle verified with the build prefixes still on PATH proves
+          # nothing at all.
+          env -i SystemRoot="$SYSTEMROOT" \
+              PATH="$(cygpath -u "$PWD")/stage/bin:/c/Windows/System32" \
+              "$PWD/stage/bin/DIALibraryGenerator.exe" --help > portable.txt 2>&1 \
+            || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
+          grep -q "^Version: $(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" portable.txt \
+            || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
+
+      - name: Package the CLI
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: 7z a -tzip "DIALibraryGenerator-windows-x64.zip" ./stage/*
+
+      # Staged BEFORE the Tauri build, because tauri copies resources/ during
+      # the build: doing it afterwards yields an app whose resources are the
+      # empty skeleton, and every check that reads the source tree still passes.
+      - uses: actions/setup-node@v5
+        if: steps.pkg.outputs.package == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Build the desktop app
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf gui/src-tauri/resources/dialibgen
+          mkdir -p gui/src-tauri/resources/dialibgen
+          cp -R stage/. gui/src-tauri/resources/dialibgen/
+          test -f gui/src-tauri/resources/dialibgen/bin/DIALibraryGenerator.exe \
+            || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
+          cd gui
+          npm ci
+          npm run tauri build
+
+      - name: Collect the installer
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bundles
+          find gui/src-tauri/target/release/bundle \
+            \( -name '*.msi' -o -name '*-setup.exe' \) -exec cp {} dist-bundles/ \;
+          ls -la dist-bundles
+          [ -n "$(ls -A dist-bundles)" ] \
+            || { echo "::error::the desktop build produced no installer"; exit 1; }
+
+      - uses: actions/upload-artifact@v5
+        if: steps.pkg.outputs.package == 'true'
+        with:
+          name: bundles-windows-x64
+          path: |
+            DIALibraryGenerator-windows-x64.zip
+            dist-bundles/*
+
+      - name: Attach to the release
+        if: steps.pkg.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DIALibraryGenerator-windows-x64.zip
+            dist-bundles/*
+          fail_on_unmatched_files: true

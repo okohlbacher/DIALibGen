@@ -61,6 +61,16 @@ both the competitor and the measuring instrument — the "ground truth" library 
 DIA-NN's own output, censored by its predictions and by its detection. Treat the
 table as a statement of where this tool sits, not as a benchmark.
 
+## Installing
+
+Release builds for macOS, Windows and Linux — a CLI archive and a desktop
+installer per platform — are attached to each
+[release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
+archives are self-contained: unpack and run `bin/DIALibraryGenerator`; the
+libraries it needs travel with it.
+
+Neither is signed yet (see [Known limitations](#known-limitations)).
+
 ## Building
 
 Requires an installed OpenMS, Apache Arrow/Parquet ≥ 19, ONNX Runtime and
@@ -199,10 +209,9 @@ Read these before treating output as authoritative:
 - **`-write_cwl` / `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
   The tool refuses in its own words rather than letting OpenMS truncate the
   target file and then throw. `-write_ctd` works everywhere.
-- **Windows is not covered by CI yet.** The code is portable — `std::filesystem`
-  throughout, `_putenv_s` where it matters — and the GUI is built and tested on
-  Windows, but bioconda has no win-64 OpenMS, so the CLI leg needs an OpenMS
-  source build that is not wired up here yet.
+- **Nothing is code-signed.** The macOS `.dmg` is neither signed nor notarized
+  and the Windows installer is unsigned, so both need the OS's "open anyway"
+  path. Building from source avoids it entirely.
 
 ### Closed since 0.1.0
 

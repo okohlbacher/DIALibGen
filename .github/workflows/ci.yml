@@ -17,7 +17,18 @@ on:
     branches: [main]
     tags: ['v*']
   pull_request:
+  # gui_dry_run exists because every desktop-app step below runs ONLY on a v*
+  # tag, so its first execution would otherwise be a real release -- the one run
+  # where a mistake is expensive, and one that cannot be repaired by fixing main
+  # (a tag build reruns against the tag's tree). Dispatch with the switch on to
+  # build the app without cutting a tag; nothing is uploaded to a release in
+  # that mode, the bundle comes back as a workflow artifact instead.
   workflow_dispatch:
+    inputs:
+      gui_dry_run:
+        description: 'Build the desktop app without cutting a tag'
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -27,6 +38,11 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
+    # write, not the default: needed only by the tag-triggered release upload.
+    # Safe on pull_request runs, including from forks -- GitHub issues a
+    # read-only token for those regardless of what is declared here.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -252,18 +268,166 @@ jobs:
           done
           echo "tsv: $((rows - 1)) rows"
 
-      - name: Package the CLI
-        if: startsWith(github.ref, 'refs/tags/v')
+      # ---------------------------------------------------------------------
+      # Release. Everything below runs on a v* tag, or on a dispatch with
+      # gui_dry_run -- which is the only way any of it gets exercised before a
+      # tag depends on it.
+      # ---------------------------------------------------------------------
+      - name: Decide whether to package
+        id: pkg
+        shell: bash
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The installed tree links libOpenMS, Arrow and onnxruntime out of the
+      # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
+      # else. Collecting the closure and rewriting the load paths to be relative
+      # is what turns it into something a user can unpack.
+      - name: Make the install tree portable
+        if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
+          mkdir -p stage/lib
+          # The tool resolves share/OpenMS through OPENMS_DATA_PATH or the
+          # install prefix, and neither is where CMake thought it would be once
+          # the tree moves -- so carry OpenMS's own data inside the bundle.
+          mkdir -p stage/share/OpenMS
+          cp -R "$CONDA_PREFIX/share/OpenMS/." stage/share/OpenMS/
+
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install dylibbundler >/dev/null
+            dylibbundler -od -b -ns \
+              -x stage/bin/DIALibraryGenerator \
+              -d stage/lib -p '@executable_path/../lib/'
+          else
+            # patchelf + a manual closure: ldd names everything the loader would
+            # open, minus the system libraries a distro certainly has.
+            copy_closure() {
+              ldd "$1" | awk '/=> \//{print $3}' | while read -r so; do
+                case "$so" in
+                  /lib/*|/lib64/*|/usr/lib/x86_64-linux-gnu/lib[cmd]*|*/ld-linux*) continue ;;
+                esac
+                cp -n "$so" stage/lib/ 2>/dev/null || true
+              done
+            }
+            copy_closure stage/bin/DIALibraryGenerator
+            for i in 1 2 3; do
+              for so in stage/lib/*.so*; do copy_closure "$so"; done
+            done
+            patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibraryGenerator
+            for so in stage/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" || true; done
+          fi
+
+          # The load-bearing check, and the reason this step is not decorative:
+          # NOTHING from the build environment on the path. A bundle verified
+          # with the conda prefix still visible proves only that conda is there.
+          env -i HOME="$HOME" "$PWD/stage/bin/DIALibraryGenerator" --help > portable.txt 2>&1 \
+            || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
+          want=$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          grep -q "^Version: $want" portable.txt \
+            || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
+          test -s stage/share/DIALibraryGenerator/irt_standards.tsv
+          test -d stage/share/OpenMS
+          echo "portable bundle ok: $(find stage/lib -name '*.so*' -o -name '*.dylib' | wc -l) libraries"
+
+      - name: Package the CLI
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
+
+      # The desktop app, with that same portable tree as its bundled resources.
+      # Staged BEFORE the Tauri build, because tauri copies resources/ during
+      # the build: doing it afterwards produces an app whose resources are the
+      # empty skeleton, and every check that looks at the source tree passes.
+      - name: Build the desktop app
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+              librsvg2-dev patchelf libgtk-3-dev
+          fi
+          rm -rf gui/src-tauri/resources/dialibgen
+          mkdir -p gui/src-tauri/resources/dialibgen
+          cp -R stage/. gui/src-tauri/resources/dialibgen/
+          test -x gui/src-tauri/resources/dialibgen/bin/DIALibraryGenerator \
+            || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
+          cd gui
+          npm ci
+          npm run tauri build
+
+      - name: Collect the desktop bundles
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bundles
+          find gui/src-tauri/target/release/bundle \
+            \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+            -exec cp {} dist-bundles/ \;
+          ls -la dist-bundles
+          # A bundle step that produces nothing must fail here, not go unnoticed
+          # until a README link 404s.
+          [ -n "$(ls -A dist-bundles)" ] \
+            || { echo "::error::the desktop build produced no installer"; exit 1; }
 
       - uses: actions/upload-artifact@v5
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.pkg.outputs.package == 'true'
         with:
-          name: cli-${{ matrix.name }}
-          path: DIALibraryGenerator-${{ matrix.name }}.tar.gz
+          name: bundles-${{ matrix.name }}
+          path: |
+            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            dist-bundles/*
+
+      - name: Attach to the release
+        if: steps.pkg.outputs.release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            dist-bundles/*
+          fail_on_unmatched_files: true
+
+  # A release whose README links 404 is worse than a missing release: the links
+  # are written for the asset names that were MEANT to be published, not the
+  # ones that were. This asserts the four this workflow is responsible for are
+  # actually on the tag. (windows-x64 comes from windows.yml and asserts its
+  # own, because a cross-workflow wait would be a race either way.)
+  release-complete:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Assert this workflow's assets are on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          have=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+                   --json assets -q '.assets[].name')
+          echo "$have"
+          missing=0
+          for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            printf '%s' "$have" | grep -qx "DIALibraryGenerator-$n.tar.gz" \
+              || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
+          done
+          printf '%s' "$have" | grep -q '\.dmg$' \
+            || { echo "::error::no macOS .dmg on $tag"; missing=1; }
+          printf '%s' "$have" | grep -q '\.AppImage$\|\.deb$' \
+            || { echo "::error::no Linux desktop bundle on $tag"; missing=1; }
+          exit $missing
 
   # The desktop GUI's own checks. They need no OpenMS and no models, so they run
   # on all three OSes in a couple of minutes and catch the frontend regressions

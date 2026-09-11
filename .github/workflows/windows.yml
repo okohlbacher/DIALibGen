@@ -407,13 +407,21 @@ jobs:
               || { echo "::error::OpenMS installed no OpenMSTargets.cmake at all"; exit 1; }
             ABS=$(cd "$(dirname "$TGT")" && pwd)/OpenMSTargets.cmake
             python - "$OPENMS_DIR/OpenMSConfig.cmake" "$ABS" <<'PYEOF'
-          import sys
+          import re, sys
           cfg, target = sys.argv[1], sys.argv[2].replace("\\", "/")
           s = open(cfg).read()
-          old = 'include(${CMAKE_CURRENT_LIST_DIR}/OpenMSTargets.cmake)'
-          assert old in s, f"{cfg}: no OpenMSTargets include to redirect"
-          open(cfg, "w").write(s.replace(old, f'include("{target}")'))
-          print(f"redirected OpenMSConfig's targets include -> {target}")
+          # Matched by intent, not by exact spelling: the line is
+          #   include("${OPENMS_CMAKE_DIR}/OpenMSTargets.cmake")
+          # and an earlier version of this patch guessed
+          # ${CMAKE_CURRENT_LIST_DIR} instead, which matched nothing.
+          pat = re.compile(r'^\s*include\([^)\n]*OpenMSTargets\.cmake[^)\n]*\)\s*$', re.M)
+          hits = pat.findall(s)
+          if not hits:
+              sys.exit(f"{cfg}: no OpenMSTargets include to redirect")
+          if len(hits) != 1:
+              sys.exit(f"{cfg}: {len(hits)} OpenMSTargets includes, expected 1: {hits}")
+          open(cfg, "w").write(pat.sub(f'include("{target}")', s))
+          print(f"redirected {hits[0].strip()} -> {target}")
           PYEOF
           fi
 

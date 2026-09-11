@@ -41,7 +41,7 @@ jobs:
           - { name: macos-x64,   runner: macos-15-intel,   extra: "llvm-openmp" }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # libboost-devel and qt6-main are dependencies OpenMSConfig.cmake needs
       # but the openms package does not pull in:
@@ -77,7 +77,13 @@ jobs:
             coin-or-cbc
             coin-or-utils
             qt6-main
-            cmake
+            # cmake<4, and not by preference: OpenMSConfig.cmake asks for
+            # Eigen3 with the version RANGE "3.4.0...<6", and conda-forge's
+            # eigen 3.4.0 ships a config-version file that CMake 4 rejects
+            # outright -- "The version found is not compatible with the version
+            # requested" against a version that is literally the low end of the
+            # range. Nothing in this project needs CMake 4.
+            "cmake<4"
             ninja
             cxx-compiler
             ${{ matrix.extra }}
@@ -146,7 +152,7 @@ jobs:
           set -euo pipefail
           tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: cli-${{ matrix.name }}
@@ -163,8 +169,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm

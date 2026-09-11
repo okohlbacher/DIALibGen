@@ -71,7 +71,10 @@ brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator-cli   # 
 ```
 
 Two casks because the app already carries its own copy of the CLI, so one cask
-installing both would put the same tree on disk twice.
+installing both would put the same tree on disk twice. Both require macOS 14;
+the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
+Homebrew can only name whole releases, so the cask rounds up rather than
+promise a machine it cannot load on. On 13.3–13.7, unpack the tarball below.
 
 Otherwise: release builds for macOS, Windows and Linux — a CLI archive and a
 desktop installer per platform — are attached to each
@@ -92,9 +95,13 @@ The quickest complete environment is the one CI uses:
 ```bash
 micromamba create -n dialibgen -c conda-forge -c bioconda \
   openms=3.5.0 onnxruntime-cpp libparquet libarrow-dataset nlohmann_json \
-  libboost-devel qt6-main cmake ninja cxx-compiler
+  libboost-devel qt6-main cmake ninja cxx-compiler \
+  python numpy pyarrow onnxruntime
 micromamba activate dialibgen
 ```
+
+The last four are for the tests, not the tool: the C++ encoder is checked
+against an independent Python reference.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/your/prefix
@@ -102,6 +109,11 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 cmake --install build
 ```
+
+The prediction tests are **gated on the models being present**, so without them
+they are not failed — they are never registered, and `ctest` reports a smaller
+suite that passes. Point `-DODIA_MODEL_DIR=` at a directory holding all three
+`.onnx` files to run them.
 
 The install is **relocatable**: the binary finds its data tables relative to its
 own path (`<prefix>/share/DIALibraryGenerator`), so it works from a package, a

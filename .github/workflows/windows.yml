@@ -264,6 +264,15 @@ jobs:
           [ -n "$HDR" ] || { echo "::error::installed OpenMS has no TOPPBase.h"; exit 1; }
           echo "found: $CFG"
           echo "found: $HDR"
+          # OpenMSConfig.cmake prepends <its dir>/Modules/ to CMAKE_MODULE_PATH
+          # and then does find_dependency(LIBSVM), but 3.5.0 does not install
+          # that Modules directory -- so every consumer falls through to CONFIG
+          # mode and fails with "no LIBSVMConfig.cmake". Reported, not fixed
+          # here: the tool job supplies the modules itself, so this stays a
+          # statement about the install rather than a patch to a cached one.
+          if [ ! -f "$(dirname "$CFG")/Modules/FindLIBSVM.cmake" ]; then
+            echo "::warning::installed OpenMS has no CMake/Modules -- consumers must supply them"
+          fi
 
   # -------------------------------------------------------------- this project
   #
@@ -348,6 +357,26 @@ jobs:
           fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
           fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
 
+      # OpenMSConfig.cmake expects its own Find modules next to it and 3.5.0
+      # does not install them, so find_dependency(LIBSVM) falls through to
+      # CONFIG mode and fails. Fetched from the exact commit the install was
+      # built from -- a sparse checkout of one directory, not another clone of
+      # OpenMS -- and handed to CMake as a module path.
+      - name: Fetch OpenMS's CMake find modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q openms-modules-src
+          cd openms-modules-src
+          git remote add origin https://github.com/OpenMS/OpenMS.git
+          git config core.sparseCheckout true
+          git sparse-checkout set --no-cone cmake/Modules
+          git fetch -q --depth 1 origin refs/tags/release/3.5.0
+          git checkout -q FETCH_HEAD
+          test -f cmake/Modules/FindLIBSVM.cmake \
+            || { echo "::error::no FindLIBSVM.cmake in the sparse checkout"; exit 1; }
+          echo "OPENMS_MODULES=$PWD/cmake/Modules" >> "$GITHUB_ENV"
+
       - name: Configure
         shell: bash -el {0}
         run: |
@@ -362,6 +391,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DOpenMS_DIR="$OPENMS_DIR" \
             -DCMAKE_PREFIX_PATH="$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
+            -DCMAKE_MODULE_PATH="$OPENMS_MODULES" \
             -DODIA_MODEL_DIR="$PWD/models" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 

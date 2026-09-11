@@ -116,7 +116,12 @@ endif()
 find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
           PATH_SUFFIXES include onnxruntime include/onnxruntime
                         onnxruntime/core/session include/onnxruntime/core/session)
-find_library(ONNXRuntime_LIBRARY NAMES onnxruntime PATH_SUFFIXES lib)
+# onnxruntime_conda is conda-forge's name for it on Windows (the import library
+# is onnxruntime_conda.lib, the DLL onnxruntime_conda.dll); every other
+# distribution calls it onnxruntime. Searching for the plain name alone made a
+# perfectly good conda install look absent.
+find_library(ONNXRuntime_LIBRARY NAMES onnxruntime onnxruntime_conda
+             PATH_SUFFIXES lib)
 if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
   # Name the half that failed: the header and the library are packaged in
   # different places by different distributions, and "not found" for both is a

@@ -404,6 +404,7 @@ jobs:
           # What conda actually laid down for ONNX Runtime, so a find failure
           # below is one log line away from its cause rather than another run.
           find "$CONDA_LIB_PREFIX" -iname 'onnxruntime*' -maxdepth 4 | head -20 || true
+          find "$CONDA_LIB_PREFIX" -name 'onnxruntime_cxx_api.h' | head -3 || true
 
           echo "OPENMS_DIR=$OPENMS_DIR" >> "$GITHUB_ENV"
           cmake -S . -B build -G Ninja \

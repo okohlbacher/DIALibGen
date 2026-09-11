@@ -393,8 +393,14 @@ jobs:
           export PATH
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
+            # xdg-utils and file are for the BUNDLER, not the build: Tauri's
+            # AppImage step shells out to xdg-open and dies with
+            # "xdg-open binary not found". The x64 runner image happens to
+            # carry them and the arm64 one does not, which is the only reason
+            # this was an arm64-only failure.
             sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-              librsvg2-dev patchelf libgtk-3-dev
+              librsvg2-dev patchelf libgtk-3-dev xdg-utils file \
+              desktop-file-utils
           fi
           rm -rf gui/src-tauri/resources/dialibgen
           mkdir -p gui/src-tauri/resources/dialibgen

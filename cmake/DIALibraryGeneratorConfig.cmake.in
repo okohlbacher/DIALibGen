@@ -9,9 +9,13 @@ find_dependency(Parquet)
 # ONNX Runtime ships no CMake config in most distributions, so it is located the
 # same way the build located it.
 if(NOT TARGET onnxruntime)
+  # Kept in step with the top-level CMakeLists, including conda-forge's
+  # onnxruntime_conda spelling on Windows.
   find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
-            PATH_SUFFIXES include onnxruntime/core/session)
-  find_library(ONNXRuntime_LIBRARY NAMES onnxruntime PATH_SUFFIXES lib)
+            PATH_SUFFIXES include onnxruntime include/onnxruntime
+                          onnxruntime/core/session include/onnxruntime/core/session)
+  find_library(ONNXRuntime_LIBRARY NAMES onnxruntime onnxruntime_conda
+               PATH_SUFFIXES lib)
   if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
     set(DIALibraryGenerator_FOUND FALSE)
     set(DIALibraryGenerator_NOT_FOUND_MESSAGE "ONNX Runtime not found")
@@ -20,5 +24,13 @@ if(NOT TARGET onnxruntime)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/DIALibraryGeneratorTargets.cmake")
+
+# The exported target carries no ONNX Runtime include path of its own (see the
+# BUILD_INTERFACE note in the top-level CMakeLists), so supply the one found
+# above to whoever links it.
+if(TARGET DIALibraryGenerator::odia_library AND ONNXRuntime_INCLUDE_DIR)
+  set_property(TARGET DIALibraryGenerator::odia_library APPEND PROPERTY
+               INTERFACE_INCLUDE_DIRECTORIES "${ONNXRuntime_INCLUDE_DIR}")
+endif()
 
 check_required_components(DIALibraryGenerator)

@@ -184,9 +184,18 @@ add_library(DIALibraryGenerator::odia_library ALIAS odia_library)
 target_include_directories(odia_library PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_include_directories(odia_library SYSTEM PUBLIC ${ONNXRuntime_INCLUDE_DIR})
+# BUILD_INTERFACE, not a bare PUBLIC path. These are where THIS machine happens
+# to keep ONNX Runtime and Boost; baking them into the exported target would
+# hand a consumer an absolute path from the build machine. CMake refuses it
+# outright when the path lies inside the source tree -- which is how this
+# surfaced, on a Windows runner where contrib is built under the checkout --
+# but exporting it was wrong everywhere, just silently. The installed config
+# re-finds both for the consumer.
+target_include_directories(odia_library SYSTEM PUBLIC
+  $<BUILD_INTERFACE:${ONNXRuntime_INCLUDE_DIR}>)
 if(BOOST_INCLUDE_DIR)
-  target_include_directories(odia_library SYSTEM PUBLIC ${BOOST_INCLUDE_DIR})
+  target_include_directories(odia_library SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${BOOST_INCLUDE_DIR}>)
 endif()
 
 target_link_libraries(odia_library PUBLIC

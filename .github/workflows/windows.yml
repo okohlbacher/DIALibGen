@@ -84,6 +84,29 @@ jobs:
           git fetch -q --depth 1 origin "$CONTRIB_REV"
           git checkout -q FETCH_HEAD
 
+          # The tag this contrib downloads its sources from NO LONGER EXISTS.
+          # macros.cmake hardcodes
+          #   .../contrib-sources/releases/download/2024-04-29-000000/
+          # and that release has been removed upstream, so every archive comes
+          # back as a 9-byte 404 body. contrib does not check the HTTP status,
+          # only that the archive extracts, so the first sign of it is
+          # "Found empty archive" on LIBSVM and a failure with no mention of a
+          # download at all.
+          #
+          # 3.5.0_pre_2 is the surviving release that carries EXACTLY the
+          # archive names this commit expects -- libsvm-3.12, boost-1.81.0,
+          # Xerces-C_3_2_0, eigen-3.4.0, glpk-4.46, hdf5-1_14_3, zlib-1.3.1,
+          # bzip2-1.0.5, CoinMP-1.8.3-vs22, openmp-12.0.1 -- so only the base
+          # URL moves; the SHA1s contrib checks are unchanged and still verify.
+          # (contrib's own tip has moved to the 3.6.0 release, but it has also
+          # dropped kissfft and changed Boost, which this OpenMS still wants.)
+          OLD="releases/download/2024-04-29-000000/"
+          NEW="releases/download/3.5.0_pre_2/"
+          grep -q "$OLD" macros.cmake \
+            || { echo "::error::contrib no longer uses $OLD -- re-check this patch"; exit 1; }
+          sed -i "s|$OLD|$NEW|" macros.cmake
+          grep -n "_BASE_URL" macros.cmake
+
       - name: Cache contrib build
         id: cache-contrib
         uses: actions/cache@v4

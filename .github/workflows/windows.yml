@@ -335,6 +335,11 @@ jobs:
             onnxruntime-cpp numpy pyarrow onnxruntime
           PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
           echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
+          # The interpreter that HAS numpy/pyarrow/onnxruntime. CMake's
+          # find_program(python3) picks whatever is first on PATH, which on a
+          # Windows runner is a bare system Python -- the reference tests were
+          # then registered and failed on `import numpy` rather than skipping.
+          echo "CONDA_PYTHON=$(python -c "import sys;print(sys.executable.replace('\\','/'))")" >> "$GITHUB_ENV"
 
       - name: Restore the PeptDeep models
         id: cache-models
@@ -436,6 +441,7 @@ jobs:
             -DOpenMS_DIR="$OPENMS_DIR" \
             -DCMAKE_PREFIX_PATH="$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
             -DCMAKE_MODULE_PATH="$OPENMS_MODULES" \
+            -DODIA_PYTHON="$CONDA_PYTHON" \
             -DODIA_MODEL_DIR="$PWD/models" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 
@@ -495,6 +501,10 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$DLL_PATH_POSIX:$PATH"
+          # standalone_test.sh runs the binary under `env -i` and needs the DLL
+          # directories handed back explicitly on Windows; ctest does not pass
+          # this job's PATH through to it in a form the bare environment keeps.
+          export PATH_KEEP="$DLL_PATH_POSIX:/usr/bin:/bin"
           ctest --test-dir build --output-on-failure
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }

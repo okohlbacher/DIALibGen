@@ -32,8 +32,14 @@ trap 'rm -rf "$TMP"' EXIT
 # in the output that it was needed.
 KEEP=(HOME="${HOME:-$TMP}")
 [ -n "${OPENMS_DATA_PATH:-}" ] && KEEP+=(OPENMS_DATA_PATH="$OPENMS_DATA_PATH")
-# Windows/MSYS: a bare environment loses the DLL search path.
+# Windows has no RPATH: a binary finds its DLLs through PATH, so a bare
+# environment there is not "no build tree on PATH", it is "no libraries at all"
+# and nothing starts. The caller passes the runtime directories in PATH_KEEP --
+# which is still the point of the test, since the BUILD tree is not among them.
+# SystemRoot is required by the Windows loader itself.
 [ -n "${PATH_KEEP:-}" ] && KEEP+=(PATH="$PATH_KEEP")
+[ -n "${SYSTEMROOT:-}" ] && KEEP+=(SYSTEMROOT="$SYSTEMROOT")
+[ -n "${SystemRoot:-}" ] && KEEP+=(SystemRoot="$SystemRoot")
 
 # ---------------------------------------------------------------- 1. it runs
 if ! env -i "${KEEP[@]}" "$BIN" --help >"$TMP/help.txt" 2>&1; then

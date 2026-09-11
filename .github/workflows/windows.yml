@@ -16,6 +16,16 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Same filter as the pull_request trigger below: a docs-only push has no
+    # business starting a two-hour OpenMS build.
+    paths:
+      - '.github/workflows/windows.yml'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - 'src/**'
+      - 'include/**'
+      - 'test/**'
+      - 'gui/**'
   pull_request:
     paths:
       - '.github/workflows/windows.yml'
@@ -36,7 +46,12 @@ concurrency:
   # push to main cancels a dry run someone is watching -- and, on a leg that
   # builds OpenMS, poisons the build cache mid-write.
   group: windows-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: true
+  # NOT cancel-in-progress, unlike ci.yml. The OpenMS job here runs for about
+  # two hours and its whole value is the cache it saves at the end; cancelling
+  # it on the next push means it never finishes, never saves, and the next run
+  # starts from nothing. Three pushes in a row did exactly that. Queuing costs
+  # wall-clock once; cancelling costs it every time.
+  cancel-in-progress: false
 
 env:
   # OpenMS release/3.5.0, the same version ci.yml gets from bioconda. Pinned by

@@ -235,7 +235,9 @@ jobs:
           for k in ("enzyme", "fixed_modifications", "schema_version"):
               if k not in cfg:
                   sys.exit(f"::error::the embedded recipe is missing {k!r}")
-          print(f"library: {n} transitions, recipe embedded ({len(cfg)} keys)")
+          # One row per PRECURSOR: the compact schema carries the fragments as
+          # list columns, so this is not a transition count.
+          print(f"library: {n} precursors, recipe embedded ({len(cfg)} keys)")
           PY
 
           # The TSV is the DIA-NN dialect: a header and at least one row.

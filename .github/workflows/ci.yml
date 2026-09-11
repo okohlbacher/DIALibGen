@@ -241,8 +241,13 @@ jobs:
           # The TSV is the DIA-NN dialect: a header and at least one row.
           rows=$(wc -l < out.tsv)
           [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
-          head -1 out.tsv | grep -q "PrecursorMz" \
-            || { echo "::error::the TSV is not the DIA-NN dialect"; exit 1; }
+          # The dotted spellings, which is what makes this the DIA-NN dialect
+          # rather than merely a table -- see DIANNLibraryFile::Columns.
+          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
+                     Relative.Intensity Fragment.Type Protein.Group; do
+            head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
+              || { echo "::error::the TSV header has no $col column"; exit 1; }
+          done
           echo "tsv: $((rows - 1)) rows"
 
       - name: Package the CLI

@@ -236,6 +236,31 @@ def predict_ccs(model_path, sequences, charges):
     return out
 
 
+def load_json(proc, what):
+    """Parse a helper's JSON out of its stdout.
+
+    NOT json.loads(proc.stdout): OpenMS writes warnings to stdout -- an unknown
+    mass-shift modification produces one -- so a helper that emits perfectly
+    good JSON still hands back a stream that does not start with '{'. That
+    presented as a JSONDecodeError at "line 1 column 1" pointing at the test,
+    and cost a CI run to diagnose.
+
+    Every helper prints its JSON as ONE line, so the last line that opens a
+    JSON value is the payload. A parse failure reports what was actually there.
+    """
+    for line in reversed(proc.stdout.splitlines()):
+        s = line.strip()
+        if s[:1] in ("{", "["):
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                break
+    raise SystemExit(
+        "FAIL %s: no JSON on stdout (exit %s)\n"
+        "  stdout: %r\n  stderr: %s" % (what, proc.returncode, proc.stdout[:400],
+                                         proc.stderr.strip()[:400]))
+
+
 if __name__ == "__main__":
     if sys.argv[1] == "encode":
         aa, mod_x = encode(sys.argv[2])

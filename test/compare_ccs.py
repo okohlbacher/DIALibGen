@@ -67,7 +67,7 @@ def main(tool, model):
             print(f"  FAIL batch of {len(pairs)}: {proc.stderr.strip()}")
             failures += 1
             continue
-        got = json.loads(proc.stdout)
+        got = ref.load_json(proc, "ccs")
         want = ref.predict_ccs(model, [s for s, _ in pairs], [z for _, z in pairs])
         if len(got) != len(want):
             print(f"  FAIL batch of {len(pairs)}: {len(got)} values, expected {len(want)}")
@@ -109,7 +109,7 @@ def main(tool, model):
         failures += 1
     else:
         bad_pins = 0
-        for (seq, charge, want), got in zip(PINNED, json.loads(pinned.stdout)):
+        for (seq, charge, want), got in zip(PINNED, ref.load_json(pinned, "pinned ccs")):
             if not math.isfinite(got) or abs(got - want) > PINNED_TOLERANCE:
                 print(f"  FAIL {seq} z={charge}: CCS {got} A^2, pinned at {want}")
                 bad_pins += 1
@@ -137,7 +137,7 @@ def main(tool, model):
         [tool, model, "ELVISLIVESK:2", "ELVISLIVESK:3"],
         capture_output=True, text=True, env=dict(os.environ, ODIA_ORT_THREADS="1"))
     if charge_only.returncode == 0:
-        a, b = json.loads(charge_only.stdout)
+        a, b = ref.load_json(charge_only, "charge-only ccs")
         if abs(a - b) < 1.0:
             print(f"  FAIL the same peptide at charge 2 and 3 gave {a:.3f} and "
                   f"{b:.3f}; charge is not reaching the model")

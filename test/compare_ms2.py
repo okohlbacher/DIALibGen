@@ -145,7 +145,7 @@ def check_error_paths(tool, model):
         print(f"  FAIL tolerated batch died: {proc.stderr.strip()}")
         bad += 1
     else:
-        out = json.loads(proc.stdout)
+        out = ref.load_json(proc, "tolerated batch")
         if out["failed"] != [1]:
             print(f"  FAIL one bad peptide reported as {out['failed']}, expected [1]")
             bad += 1
@@ -170,7 +170,7 @@ def main(tool, model):
             failures += 1
             continue
         want = ref.predict_ms2(model, [seq], [charge], nce, instrument)[0]
-        bad = compare(seq, json.loads(proc.stdout)["spectra"][0], want, reached)
+        bad = compare(seq, ref.load_json(proc, seq)["spectra"][0], want, reached)
         if bad:
             print(f"  FAIL {seq} z={charge} nce={nce} {instrument}: {bad}")
             failures += 1
@@ -183,7 +183,7 @@ def main(tool, model):
             print(f"  FAIL batch of {len(pairs)}: {proc.stderr.strip()}")
             failures += 1
             continue
-        got = json.loads(proc.stdout)["spectra"]
+        got = ref.load_json(proc, "batch")["spectra"]
         seqs = [s for s, _ in pairs]
         charges = [z for _, z in pairs]
         want = ref.predict_ms2(model, seqs, charges, nce, instrument)

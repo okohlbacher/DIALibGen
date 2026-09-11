@@ -81,7 +81,7 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
 
     run: async (params) => {
       runs.push(params)
-      return { started: true, runId: runs.length }
+      return { started: true }
     },
     cancel: async () => ({ cancelled: true }),
 

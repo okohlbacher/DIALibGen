@@ -3,7 +3,6 @@
 
 export interface BinaryInfo {
   bin: string
-  dataPath?: string
   source: 'env' | 'bundled' | 'path'
   ok: boolean
   version?: string
@@ -19,7 +18,6 @@ export interface ModelStatus {
 
 export interface RunStarted {
   started: boolean
-  runId?: number
   reason?: string
 }
 
@@ -29,9 +27,6 @@ export interface RunResult {
   /// Size of the library that was written, when one was. Absent on failure,
   /// and the difference between "exited 0" and "produced something".
   bytes?: number | null
-  /// Correlates the terminal event to the run the renderer is awaiting.
-  /// Absent on synthetic failures the renderer builds itself.
-  runId?: number
 }
 
 export interface Progress {

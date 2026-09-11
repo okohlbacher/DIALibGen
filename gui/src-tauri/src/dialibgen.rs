@@ -57,7 +57,6 @@ pub struct CurrentRun {
 #[serde(rename_all = "camelCase")]
 pub struct BinaryInfo {
     bin: String,
-    data_path: Option<String>,
     source: String,
     ok: bool,
     version: Option<String>,
@@ -77,7 +76,6 @@ pub struct ModelStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunStarted {
     started: bool,
-    run_id: Option<u64>,
     reason: Option<String>,
 }
 
@@ -168,7 +166,6 @@ fn parse_version(text: &str) -> Option<String> {
 pub fn probe(app: AppHandle) -> BinaryInfo {
     let r = resolve_binary(&app);
     let bin_s = r.bin.display().to_string();
-    let data_s = r.data.as_ref().map(|d| d.display().to_string());
     let mut cmd = Command::new(&r.bin);
     cmd.arg("--help");
     apply_env(&mut cmd, &r);
@@ -184,11 +181,10 @@ pub fn probe(app: AppHandle) -> BinaryInfo {
                 Some(v) => format!("DIALibraryGenerator {v} ({})", r.source),
                 None => format!("runs, version unknown ({})", r.source),
             };
-            BinaryInfo { bin: bin_s, data_path: data_s, source: r.source.into(), ok: true, version, detail }
+            BinaryInfo { bin: bin_s, source: r.source.into(), ok: true, version, detail }
         }
         Err(e) => BinaryInfo {
             bin: bin_s,
-            data_path: data_s,
             source: r.source.into(),
             ok: false,
             version: None,
@@ -324,7 +320,7 @@ fn read_stream<R: Read>(stream: R, app: &AppHandle, parse_progress: bool) {
 
 #[tauri::command]
 pub fn run(app: AppHandle, state: State<'_, RunManager>, params: RunParams) -> RunStarted {
-    let refuse = |reason: String| RunStarted { started: false, run_id: None, reason: Some(reason) };
+    let refuse = |reason: String| RunStarted { started: false, reason: Some(reason) };
     {
         if state.current.lock().unwrap().is_some() {
             return refuse("a run is already in progress".into());
@@ -443,11 +439,11 @@ pub fn run(app: AppHandle, state: State<'_, RunManager>, params: RunParams) -> R
         let bytes = std::fs::metadata(Path::new(&out_path)).map(|m| m.len()).ok();
         let _ = a_done.emit(
             "dialibgen:done",
-            serde_json::json!({ "runId": run_id, "ok": ok, "code": code, "bytes": bytes }),
+            serde_json::json!({ "ok": ok, "code": code, "bytes": bytes }),
         );
     });
 
-    RunStarted { started: true, run_id: Some(run_id), reason: None }
+    RunStarted { started: true, reason: None }
 }
 
 /// Read a JSON library config the user picked.

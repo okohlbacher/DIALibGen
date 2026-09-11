@@ -3,6 +3,21 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **The embedded recipe did not name models supplied via `DIALIBGEN_MODEL_DIR`.**
+  It was built before the model search ran, so a library produced that way
+  recorded `"rt_model": ""` and could not state what produced it. The cache
+  fingerprint was unaffected — it hashes model contents — so nothing but reading
+  the recipe back would have shown it.
+
+### Added
+- `test/e2e_test.py`: runs the tool the way a user does and reads the result
+  back — RT domain, CCS and 1/K0 ranges, fragment normalisation, decoy methods
+  being genuinely different, the embedded recipe, the DIA-NN TSV. Registered
+  with ctest and skipped without the models.
+
 ## [0.2.1] — 2026-09-11
 
 ### Added

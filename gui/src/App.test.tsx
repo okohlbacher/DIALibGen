@@ -97,7 +97,7 @@ describe('App', () => {
 
     act(() => bridge.emitLog('digest: 3 proteins, 120 peptides'))
     await waitFor(() => expect(screen.getByText(/digest: 3 proteins/)).toBeTruthy())
-    act(() => bridge.emitDone({ ok: true, code: 0, bytes: 2_500_000, runId: 1 }))
+    act(() => bridge.emitDone({ ok: true, code: 0, bytes: 2_500_000 }))
     await waitFor(() => expect(screen.getByText(/Wrote 2\.5 MB/)).toBeTruthy())
   })
 
@@ -109,7 +109,7 @@ describe('App', () => {
     await userEvent.type(screen.getByLabelText('output library'), '/d/lib.parquet')
     await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
     await waitFor(() => expect(bridge.runs.length).toBe(1))
-    act(() => bridge.emitDone({ ok: true, code: 0, bytes: null, runId: 1 }))
+    act(() => bridge.emitDone({ ok: true, code: 0, bytes: null }))
     await waitFor(() => expect(screen.getByText(/no library is on disk/)).toBeTruthy())
   })
 

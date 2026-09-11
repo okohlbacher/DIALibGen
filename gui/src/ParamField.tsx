@@ -1,12 +1,10 @@
 import type { JSX } from 'react'
 import type { ParamSpec } from './paramLayout'
 
-export type ParamValue = unknown
-
 interface Props {
   spec: ParamSpec
-  value: ParamValue
-  onChange: (v: ParamValue) => void
+  value: unknown
+  onChange: (v: unknown) => void
   /// Why this parameter currently does nothing, from inertBecause(). The field
   /// is still shown -- hiding it would make the option undiscoverable -- but it
   /// is disabled and says why.

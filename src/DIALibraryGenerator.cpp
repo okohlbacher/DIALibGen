@@ -80,10 +80,8 @@ namespace
       out.emplace_back(env);
     }
     const fs::path exe = executableDir();
-    out.push_back(exe / ".." / "share" / "DIALibraryGenerator");  // installed
-    out.push_back(exe / "share" / "DIALibraryGenerator");         // bundled flat
-    out.push_back(exe / ".." / "data");                           // build tree
-    out.push_back(fs::path("data"));                              // run from source
+    out.push_back(exe / ".." / "share" / "DIALibraryGenerator");  // installed, and the bundles
+    out.push_back(exe / ".." / "data");                           // an uninstalled build tree
 #ifdef ODIA_DATA_DIR
     out.emplace_back(ODIA_DATA_DIR);
 #endif
@@ -118,7 +116,6 @@ namespace
     }
     const fs::path exe = executableDir();
     out.push_back(exe / ".." / "share" / "DIALibraryGenerator" / "models");
-    out.push_back(exe / "share" / "DIALibraryGenerator" / "models");
     // Where OpenMS puts them when built WITH_ONNX=ON.
     try
     {
@@ -375,12 +372,11 @@ protected:
       }
     }
 
-    const json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
-                                     nce, instrument, irt_rescale,
-                                     recompute_decoy_mz);
-
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
+      const json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
+                                       nce, instrument, irt_rescale,
+                                       recompute_decoy_mz);
       std::ofstream os(wc);
       if (!os) { writeLogError_("cannot write config to " + wc); return CANNOT_WRITE_OUTPUT_FILE; }
       os << eff.dump(2) << '\n';
@@ -412,6 +408,15 @@ protected:
     {
       if (m.path->empty()) { *m.path = findModel(m.file); }
     }
+    // The recipe is built HERE, after resolution, and not before: a model
+    // supplied through DIALIBGEN_MODEL_DIR would otherwise be embedded as
+    // "rt_model": "", so a library produced that way would not state what
+    // produced it -- which is the one thing the embedded recipe is for. The
+    // cache fingerprint was unaffected (it hashes model CONTENT), so this was
+    // invisible to every check except reading the recipe back.
+    const json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
+                                     nce, instrument, irt_rescale,
+                                     recompute_decoy_mz);
     std::error_code ec;
     for (const auto& m : models)
     {

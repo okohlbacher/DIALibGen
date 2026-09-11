@@ -66,8 +66,9 @@ table as a statement of where this tool sits, not as a benchmark.
 Release builds for macOS, Windows and Linux — a CLI archive and a desktop
 installer per platform — are attached to each
 [release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
-archives are **self-contained**: unpack and run `bin/DIALibraryGenerator`; the
-147 libraries it needs and OpenMS's own `share/` travel with it.
+archives are **self-contained**: unpack and run `bin/DIALibraryGenerator`. The
+libraries it needs and OpenMS's own data travel with it, so there is nothing to
+install and no OpenMS to set up.
 
 ```bash
 curl -fsSLO https://github.com/okohlbacher/DIALibraryGenerator/releases/latest/download/DIALibraryGenerator-macos-arm64.tar.gz
@@ -89,9 +90,9 @@ the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
 Homebrew can only name whole releases, so the cask rounds up rather than promise
 a machine it cannot load on.
 
-**Nothing is signed.** On current macOS that means a Homebrew-installed copy is
-killed by Gatekeeper on first run, silently — the tap's README has the details
-and the workarounds. The tarball above is unaffected.
+**Nothing is signed.** On current macOS a Homebrew-installed copy is refused by
+Gatekeeper on first run, with no message — see the tap's README for the detail
+and the ways around it. The tarball above is unaffected.
 
 ## Building
 
@@ -99,7 +100,7 @@ Requires an installed OpenMS, Apache Arrow/Parquet ≥ 19, ONNX Runtime and
 nlohmann/json. All four are OpenMS dependencies already, except that ONNX
 Runtime is behind OpenMS's `WITH_ONNX` option.
 
-The quickest complete environment is the one CI uses:
+A complete environment in one command:
 
 ```bash
 micromamba create -n dialibgen -c conda-forge -c bioconda \
@@ -109,8 +110,8 @@ micromamba create -n dialibgen -c conda-forge -c bioconda \
 micromamba activate dialibgen
 ```
 
-The last four are for the tests, not the tool: the C++ encoder is checked
-against an independent Python reference.
+`python`, `numpy`, `pyarrow` and `onnxruntime` are for the test suite, not the
+tool itself.
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/your/prefix
@@ -119,10 +120,9 @@ ctest --test-dir build --output-on-failure
 cmake --install build
 ```
 
-The prediction tests are **gated on the models being present**, so without them
-they are not failed — they are never registered, and `ctest` reports a smaller
-suite that passes. Point `-DODIA_MODEL_DIR=` at a directory holding all three
-`.onnx` files to run them.
+The prediction and end-to-end tests need the three `.onnx` models. Without them
+those tests are not registered at all, so `ctest` reports a smaller suite that
+passes — point `-DODIA_MODEL_DIR=` at a directory holding all three to run them.
 
 The install is **relocatable**: the binary finds its data tables relative to its
 own path (`<prefix>/share/DIALibraryGenerator`), so it works from a package, a
@@ -182,11 +182,9 @@ DIALibraryGenerator -write_ini  DIALibraryGenerator.ini   # OpenMS INI
 DIALibraryGenerator -write_ctd  ./ctd/                    # KNIME/Galaxy descriptor
 ```
 
-`-threads` defaults to **0 = all available cores**. `--help` prints OpenMS's own
-line for it, which says `1`; the tool prints a correction underneath. That is
-not cosmetic laziness — TOPPBase registers `-threads` itself, after a tool's own
-registration and with no hook to change the default, so the only place to apply
-one is the command line, which is what the tool does.
+`-threads` defaults to **0 = all available cores**. `--help` shows OpenMS's own
+line for it, which says `1`, with a correction printed underneath; the tool's
+default is the one that applies.
 
 `example/proteins.fasta` and `example/default.json` are a runnable starting
 point. `-out` chooses the format by extension: `.parquet` carries the embedded
@@ -216,55 +214,34 @@ The keys that most often need changing:
 pick an output, point it at the models, press go. See
 [gui/README.md](gui/README.md).
 
-The one design decision worth stating here: **the form is generated from the
-tool's own `-write_config` output**, so the GUI cannot offer a parameter the CLI
-does not have, cannot default one differently, and shows a newly added parameter
-without a code change. The config reaches the CLI as a file, which is what lets
-the Parquet writer embed the recipe verbatim.
+The form is generated from the tool's own `-write_config` output, so the GUI
+offers exactly the parameters the CLI has, with exactly its defaults. Settings
+reach the CLI as a config file, so a library built from the GUI carries the same
+embedded recipe as one built from the command line.
 
 ## Known limitations
 
 Read these before treating output as authoritative:
 
-- **The fingerprint under-determines the library, less than it did.**
-  `min_relative_intensity` is now recorded at full precision and the RT domain
-  (raw vs iRT) carries its own token, so the two collisions that were reachable
-  by changing a setting are closed. The key is `v3`; every `v2` cache misses
-  once, which is the safe direction.
-- **`Fragment.Loss.Type` is written as a hardcoded `"noloss"`** by the Parquet
-  writer. The generator itself never emits neutral losses, so this is reachable
-  only by a consumer that writes a loss-bearing library back out.
-- **No model is shipped**, and on a released OpenMS none is present. The tool now
-  searches `DIALIBGEN_MODEL_DIR`, its own `share/` and `share/OpenMS/models`, and
-  reports what it could not find — but it cannot conjure the weights.
-- **`-write_cwl` / `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
-  The tool refuses in its own words rather than letting OpenMS truncate the
-  target file and then throw. `-write_ctd` works everywhere.
+- **The cache fingerprint does not capture everything.** It covers the digest
+  parameters, the model contents, the decoy method and the RT domain, but not
+  every field of the config. Two libraries that agree on all of those are
+  treated as interchangeable.
+- **`Fragment.Loss.Type` is always `"noloss"`.** The generator emits no neutral
+  losses, so the column is only meaningful to a consumer that writes a
+  loss-bearing library back out through this writer.
+- **No model weights are shipped**, and no tagged OpenMS release contains them.
+  The tool searches `DIALIBGEN_MODEL_DIR`, its own `share/` and
+  `share/OpenMS/models`, and names what it could not find — but you have to
+  supply the files.
+- **`-write_cwl` and `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
+  Without it the tool refuses them and says so; `-write_ctd` works everywhere.
 - **Nothing is code-signed**, deliberately for now. The macOS `.dmg` and the
-  Windows installer both need the OS's "open anyway" path. On macOS the sharper
-  consequence is that a **Homebrew-installed** copy is killed by Gatekeeper on
-  first run with no message at all (`team: (null)` in `syspolicyd`'s denial),
-  and neither stripping `com.apple.quarantine` nor `--no-quarantine` — which
-  Homebrew 6 removed — avoids it. Extracting the release tarball yourself is
-  unaffected, and so is building from source.
-
-### Closed since 0.1.0
-
-Each of these was a real defect, and each is now covered by a test:
-
-| Was | Now |
-|---|---|
-| Reported the version of the OpenMS it was built against | Reports its own, with OpenMS's alongside in `--helphelp` |
-| OpenMS's update check printed Qt network errors on stderr | Off unless the user turns it back on |
-| `-threads` registered twice; TOPPBase's default of 1 silently won | Applied to argv; 0 = all cores |
-| `-write_ctd` aborted with "Requested tool does not exist!" | Registers with `ToolHandler` for the duration of a descriptor run |
-| Data directory was a compile-time absolute path into the source tree | Resolved relative to the executable; installed to `share/DIALibraryGenerator` |
-| An unknown `decoys` value became `mutate` and was recorded under the typed name | Refused, with the known methods listed |
-| `-out` accepted any extension and wrote TSV for anything but `.parquet` | Refused unless `.parquet` or `.tsv` |
-| `schema_version` accepted at any value and never read | Refused unless it is one this build knows |
-| `1e-4` and `0.0` fingerprinted identically; raw and iRT libraries did too | Full precision, plus an RT-domain token |
-| A missing model died inside the ONNX session constructor | Named, with every searched directory listed |
-| `-write_config` required an `-in` and an `-out` nothing read | Works on its own |
+  Windows installer both need the OS's "open anyway" path, and on macOS a
+  **Homebrew-installed** copy is refused outright rather than with a prompt.
+  Extracting the release tarball yourself is unaffected, and so is building from
+  source. See the [tap's README](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
+  for the mechanics.
 
 ## Provenance
 

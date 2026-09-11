@@ -218,6 +218,20 @@ if(EXISTS "${ODIA_MS2_MODEL_PATH}" AND ODIA_FIXTURE_DIR
                    "${ODIA_FIXTURE_DIR}/diann_library_small.tsv" 400)
 endif()
 
+# The whole pipeline, run the way a user runs it, with the result read back.
+# Everything else checks a piece; this catches a library that is written
+# successfully and is wrong. Skips (77) without the models or without pyarrow.
+if(TARGET DIALibraryGenerator AND ODIA_PYTHON)
+  add_test(NAME e2e
+           COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/e2e_test.py"
+                   $<TARGET_FILE:DIALibraryGenerator>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   "${ODIA_MODEL_DIR}"
+                   "${CMAKE_CURRENT_BINARY_DIR}/e2e")
+  set_tests_properties(e2e PROPERTIES SKIP_RETURN_CODE 77)
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/e2e")
+endif()
+
 # The free-cysteine RT correction is a table of measured constants, and a table
 # of constants is exactly the kind of thing that drifts unnoticed. This also
 # guards the self-gating property that lets it default to on: an alkylated

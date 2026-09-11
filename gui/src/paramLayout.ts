@@ -20,7 +20,6 @@ export type ParamKind =
   | 'double-range'
   | 'int-list'
   | 'string-list'
-  | 'path'
   | 'unsupported'
 
 export interface ParamSpec {

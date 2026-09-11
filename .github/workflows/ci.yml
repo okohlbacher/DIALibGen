@@ -50,6 +50,13 @@ jobs:
       #                   translation unit needs Boost headers
       #   qt6-main        OpenMSConfig.cmake does find_dependency(Qt6)
       #
+      # python/numpy/pyarrow/onnxruntime are for the TESTS, not the tool: the
+      # C++ encoder is checked against an independent Python reference written
+      # from the same spec but from different inputs, so agreement is evidence
+      # the spec was implemented rather than that one copied the other. Without
+      # them those tests do not fail -- they are simply never added, which is
+      # the quiet way a test suite shrinks.
+      #
       # libarrow is deliberately NOT pinned: openms pins it itself, and this
       # project is built against whatever that resolves to. That is the point of
       # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
@@ -84,6 +91,10 @@ jobs:
             cmake
             ninja
             cxx-compiler
+            python
+            numpy
+            pyarrow
+            onnxruntime
             ${{ matrix.extra }}
           condarc: |
             channels:
@@ -91,6 +102,35 @@ jobs:
               - bioconda
           init-shell: bash
           cache-environment: true
+
+      # The three AlphaPeptDeep exports. They are NOT shipped with this project
+      # and NOT in any tagged OpenMS release, so without this step every
+      # prediction test and the end-to-end run below are silently skipped -- CI
+      # would prove the tool compiles and nothing about whether it predicts.
+      #
+      # Same URL and same SHA256s OpenMS itself pins (src/openms/CMakeLists.txt).
+      # The hash is the point: an unverified download turns a CDN into a
+      # dependency that can change the numbers this suite asserts.
+      - name: Restore the PeptDeep models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: peptdeep-models-41816f32-4141ea23-3f3b847e
+
+      - name: Fetch the PeptDeep models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          fetch() {
+            curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
+            echo "$2  models/$1" | shasum -a 256 -c -
+          }
+          fetch peptdeep_rt_dynamic.onnx  41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
+          fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
+          fetch peptdeep_ccs_dynamic.onnx 3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
 
       - name: Configure
         shell: bash -el {0}
@@ -104,6 +144,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
             -DQT_HOST_PATH="$CONDA_PREFIX" \
+            -DODIA_MODEL_DIR="$PWD/models" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 
       - name: Build
@@ -112,7 +153,15 @@ jobs:
 
       - name: Test
         shell: bash -el {0}
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          set -euo pipefail
+          ctest --test-dir build --output-on-failure
+          # A test that is never ADDED does not fail -- it disappears. The
+          # prediction tier is gated on the models being present, which is
+          # exactly the condition that used to be false everywhere, so assert
+          # the gate opened rather than trusting a green run.
+          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
+            || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
 
       - name: Install
         shell: bash -el {0}
@@ -147,6 +196,51 @@ jobs:
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
             example/proteins.fasta
           bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
+
+      # End to end, against the INSTALLED binary and the real models: a FASTA in,
+      # a library out, in both formats. Everything above proves the tool starts
+      # and refuses bad input; this is the only step that proves it predicts.
+      - name: Build a real library
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
+          export DIALIBGEN_MODEL_DIR="$PWD/models"
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          BIN="$PWD/stage/bin/DIALibraryGenerator"
+
+          "$BIN" -in example/proteins.fasta -out out.parquet
+          "$BIN" -in example/proteins.fasta -out out.tsv
+
+          test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
+          test -s out.tsv     || { echo "::error::no TSV library"; exit 1; }
+
+          # A library with no rows is not a library, and a Parquet that does not
+          # carry the recipe is the whole reason to prefer it over the TSV.
+          python - <<'PY'
+          import pyarrow.parquet as pq, json, sys
+          f = pq.ParquetFile("out.parquet")
+          n = f.metadata.num_rows
+          if n == 0:
+              sys.exit("::error::the Parquet library has no rows")
+          md = f.schema_arrow.metadata or {}
+          raw = md.get(b"odia.config_json")
+          if not raw:
+              sys.exit("::error::the Parquet library does not carry odia.config_json")
+          cfg = json.loads(raw)
+          for k in ("enzyme", "fixed_modifications", "schema_version"):
+              if k not in cfg:
+                  sys.exit(f"::error::the embedded recipe is missing {k!r}")
+          print(f"library: {n} transitions, recipe embedded ({len(cfg)} keys)")
+          PY
+
+          # The TSV is the DIA-NN dialect: a header and at least one row.
+          rows=$(wc -l < out.tsv)
+          [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
+          head -1 out.tsv | grep -q "PrecursorMz" \
+            || { echo "::error::the TSV is not the DIA-NN dialect"; exit 1; }
+          echo "tsv: $((rows - 1)) rows"
 
       - name: Package the CLI
         if: startsWith(github.ref, 'refs/tags/v')

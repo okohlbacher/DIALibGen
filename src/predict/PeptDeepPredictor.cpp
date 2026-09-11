@@ -12,10 +12,29 @@
 #include <algorithm>
 #include <atomic>
 #include <exception>
+#include <filesystem>
 #include <mutex>
 #include <thread>
 #include <limits>
 #include <stdexcept>
+
+namespace
+{
+  /// The model path in the character type ONNX Runtime's API actually takes.
+  ///
+  /// Ort::Session takes ORTCHAR_T*, which is wchar_t* on Windows and char*
+  /// everywhere else, so passing std::string::c_str() compiles on POSIX and
+  /// fails on MSVC with "no overloaded function could convert all the argument
+  /// types". std::filesystem::path::c_str() is ORTCHAR_T* on both, and it also
+  /// carries a non-ASCII path across correctly, which a naive widening would
+  /// not.
+  ///
+  /// The returned path is a temporary at every call site; its c_str() stays
+  /// valid for the whole full-expression, which is exactly as long as the
+  /// Ort::Session constructor needs it. Do not "fix" it into a dangling
+  /// pointer by hoisting the c_str() out.
+  std::filesystem::path ortPath(const std::string& p) { return std::filesystem::path(p); }
+}
 
 namespace ODIA
 {
@@ -79,7 +98,7 @@ namespace ODIA
             OrtCUDAProviderOptions cuda{};
             cuda.device_id = dev;
             probe.AppendExecutionProvider_CUDA(cuda);
-            Ort::Session test(impl_->env, model_path.c_str(), probe);   // the real check
+            Ort::Session test(impl_->env, ortPath(model_path).c_str(), probe);   // the real check
             OrtCUDAProviderOptions keep{};
             keep.device_id = dev;
             impl_->options.AppendExecutionProvider_CUDA(keep);
@@ -94,7 +113,7 @@ namespace ODIA
 
     try
     {
-      impl_->session = std::make_unique<Ort::Session>(impl_->env, model_path.c_str(),
+      impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(),
                                                       impl_->options);
     }
     catch (const Ort::Exception& e)
@@ -107,7 +126,7 @@ namespace ODIA
         impl_->options = Ort::SessionOptions{};
         impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
-        impl_->session = std::make_unique<Ort::Session>(impl_->env, model_path.c_str(),
+        impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(),
                                                         impl_->options);
       }
       else
@@ -167,7 +186,7 @@ namespace ODIA
       for (int i = 1; i < sessions; ++i)
       {
         impl_->replicas.push_back(std::make_unique<Ort::Session>(
-          impl_->env, model_path.c_str(), impl_->options));
+          impl_->env, ortPath(model_path).c_str(), impl_->options));
       }
     }
   }

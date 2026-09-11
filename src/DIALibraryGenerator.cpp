@@ -120,7 +120,7 @@ namespace
     // Where OpenMS puts them when built WITH_ONNX=ON.
     try
     {
-      out.push_back(fs::path(OpenMS::File::getOpenMSDataPath()) / "models");
+      out.push_back(fs::path(std::string(OpenMS::File::getOpenMSDataPath())) / "models");
     }
     catch (...)
     {

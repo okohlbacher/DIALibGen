@@ -453,8 +453,13 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          OPENMS_BIN=$(dirname "$(find openms-install -name 'OpenMS.dll' | head -1)")
-          [ -n "$OPENMS_BIN" ] || { echo "::error::no OpenMS.dll in the install"; exit 1; }
+          # ABSOLUTE. find returns a relative path here and cygpath keeps it
+          # relative, so the last PATH entry was "openms-install/bin" -- which
+          # resolves only from the workspace root, and ctest runs tests from the
+          # build directory. Every test died with 0xc0000135 for want of a `cd`.
+          _dll=$(find openms-install -name 'OpenMS.dll' | head -1)
+          [ -n "$_dll" ] || { echo "::error::no OpenMS.dll in the install"; exit 1; }
+          OPENMS_BIN=$(cd "$(dirname "$_dll")" && pwd)
 
           # Two spellings, because both are needed and they are not
           # interchangeable. RUNTIME_DLL_PATH is Windows-style (C:/...;D:/...)
@@ -471,6 +476,16 @@ jobs:
             POSIX="$POSIX:$(cygpath -u "$d")"
           done
           POSIX="${POSIX#:}"
+          # A relative entry is a silent no-op from any other directory, which
+          # is exactly how the above was missed. Refuse one.
+          IFS=':' read -ra _check <<< "$POSIX"
+          for d in "${_check[@]}"; do
+            case "$d" in
+              /*) ;;
+              *) echo "::error::DLL path entry is not absolute: $d"; exit 1 ;;
+            esac
+            [ -d "$d" ] || echo "::warning::DLL path entry does not exist: $d"
+          done
           echo "RUNTIME_DLL_PATH=$RUNTIME_DLL_PATH" >> "$GITHUB_ENV"
           echo "DLL_PATH_POSIX=$POSIX" >> "$GITHUB_ENV"
           echo "posix dll path: $POSIX"

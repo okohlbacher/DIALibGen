@@ -1,0 +1,27 @@
+// A minimal configuration. `DIALibraryGenerator -write_config out.json` emits
+// the EFFECTIVE config -- every default materialised -- which is the
+// authoritative reference. Comments are permitted here; the parser ignores them.
+{
+  // Required: this tool ships no weights. Relative paths resolve against THIS
+  // file, so a config plus a model directory is portable.
+  "rt_model":  "models/peptdeep_rt_dynamic.onnx",
+  "ms2_model": "models/peptdeep_ms2_dynamic.onnx",
+  "ccs_model": "models/peptdeep_ccs_dynamic.onnx",
+
+  // The setting most likely to be wrong. [] for a non-alkylated preparation.
+  "fixed_modifications": ["Carbamidomethyl (C)"],
+
+  "enzyme": "Trypsin/P",
+  "missed_cleavages": 1,
+  "peptide_length": [7, 30],
+  "precursor_charges": [1, 2, 3, 4],
+  "precursor_mz": [350.0, 1200.0],
+
+  // "none" is deliberate: a library is an interchange artefact and the consumer
+  // decides its own null. DIA-NN searches shipped decoys IN ADDITION to its own.
+  "decoys": "none",
+
+  // false means the RT column is the model's raw 0..1 output, NOT iRT. Set true
+  // only to write a library another tool must read as iRT.
+  "irt_rescale": false
+}

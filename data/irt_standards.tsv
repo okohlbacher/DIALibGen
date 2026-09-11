@@ -1,0 +1,33 @@
+# The Biognosys iRT standard peptides, with the indexed retention times that
+# define the scale.
+#
+# AlphaPeptDeep's RT model is trained on rt_norm = (irt - min) / (max - min),
+# so its raw output is a position on the training gradient in 0..1, not an iRT.
+# add_irt_column_to_precursor_df regresses the model's prediction for these 11
+# peptides against the values below and applies that line to everything else.
+#
+# Source: OpenMS test fixture
+# src/tests/class_tests/openms/data/peptdeep_irt_peptides_predicted.csv, whose
+# `sequence` and `irt` columns these are. That fixture also carries the expected
+# ONNX predictions and calibrated outputs, which is what test/check_irt.py
+# checks ODIA against -- so this table and the numbers it is verified with come
+# from the same authority rather than from memory.
+#
+# The FIT IS NOT PINNED HERE, deliberately. The slope and intercept depend on
+# the model checkpoint, so ODIA recomputes them at run time from these peptides.
+# Hardcoding a line measured against one checkpoint would rot silently on a
+# model swap -- the predictions would still look like iRT and would simply be
+# wrong.
+#
+# sequence	irt
+LGGNEQVTR	-24.92
+GAGSSEPVTGLDAK	0.0
+VEATFGVDESNAK	12.39
+YILAGVENSK	19.79
+TPVISGGPYEYR	28.71
+TPVITGAPYEYR	33.38
+DGLDAASYYAPVR	42.26
+ADVTPADFSEWSK	54.62
+GTFIIDPGGVIR	70.52
+GTFIIDPAAVIR	87.23
+LFLQFGAQGSPFLK	100.0

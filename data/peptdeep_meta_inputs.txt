@@ -1,0 +1,30 @@
+# The three inputs the MS2 model has and the RT model does not, pinned here so
+# that a mistake shared between ODIA and its test oracle cannot pass.
+#
+# This file exists because the comparison in test/compare_ms2.py cannot see a
+# shared error: swapping CHARGE_SCALE with NCE_SCALE in both the C++ and the
+# Python at once passes every case. That is not hypothetical for the instrument
+# map -- OpenMS's own PeptDeepMS2Inference.h documents "0=Lumos, 1=QE,
+# 2=timsTOF, 3=Sciex", which is wrong, and shipped.
+#
+# Sources, neither of them an implementation ODIA was written from:
+#   scales:      alphapeptdeep peptdeep/model/ms2.py (charge_factor = 0.1,
+#                nce_factor = 0.01), corroborated by OpenMS
+#                source/ML/PEPTDEEP/PeptDeepInput.cpp CHARGE_SCALE/NCE_SCALE.
+#   instruments: alphapeptdeep peptdeep/constants/model_const.yaml, key
+#                `instruments`, whose comment reads "We MUST keep the order of
+#                these instruments for models". The index is the position in
+#                that list; an unrecognised name maps to
+#                max_instrument_num - 1, which is 8 - 1 = 7, NOT to QE.
+#
+# Format: key<TAB>value. Instruments are matched case-insensitively, as
+# featurize.py upper-cases both sides before the lookup.
+charge_scale	0.1
+nce_scale	0.01
+max_instrument_num	8
+unknown_instrument	7
+instrument	QE	0
+instrument	Lumos	1
+instrument	timsTOF	2
+instrument	SciexTOF	3
+instrument	ThermoTOF	4

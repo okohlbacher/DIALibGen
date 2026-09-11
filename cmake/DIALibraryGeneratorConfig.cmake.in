@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(OpenMS)
+find_dependency(Arrow)
+find_dependency(Parquet)
+
+# ONNX Runtime ships no CMake config in most distributions, so it is located the
+# same way the build located it.
+if(NOT TARGET onnxruntime)
+  find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
+            PATH_SUFFIXES include onnxruntime/core/session)
+  find_library(ONNXRuntime_LIBRARY NAMES onnxruntime PATH_SUFFIXES lib)
+  if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
+    set(DIALibraryGenerator_FOUND FALSE)
+    set(DIALibraryGenerator_NOT_FOUND_MESSAGE "ONNX Runtime not found")
+    return()
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/DIALibraryGeneratorTargets.cmake")
+
+check_required_components(DIALibraryGenerator)

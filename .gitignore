@@ -1,0 +1,11 @@
+build/
+build-*/
+__pycache__/
+*.pyc
+*.o
+*.a
+*.so
+*.parquet
+*.tsv.gz
+.cache/
+compile_commands.json

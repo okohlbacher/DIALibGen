@@ -44,6 +44,26 @@ KEEP=(HOME="${HOME:-$TMP}")
 # ---------------------------------------------------------------- 1. it runs
 if ! env -i "${KEEP[@]}" "$BIN" --help >"$TMP/help.txt" 2>&1; then
   echo "--- output ---" >&2; cat "$TMP/help.txt" >&2
+  # What the bare environment actually was, and where the first unresolved
+  # library really lives. "cannot open shared object file" names the library
+  # and nothing about the search path, so without this every diagnosis is a
+  # guess -- which is how this test has now been fixed twice without being
+  # fixed.
+  echo "--- environment handed to the binary ---" >&2
+  printf '  %s\n' "${KEEP[@]}" >&2
+  miss=$(sed -n 's/.*error while loading shared libraries: \([^:]*\).*/\1/p' "$TMP/help.txt" | head -1)
+  if [ -n "$miss" ] && [ "$miss" != "?" ]; then
+    echo "--- looking for $miss ---" >&2
+    IFS=':' read -ra _p <<< "${PATH_KEEP:-$PATH}"
+    for d in "${_p[@]}"; do
+      [ -e "$d/$miss" ] && echo "  present in $d" >&2
+    done
+    command -v cygpath >/dev/null 2>&1 && {
+      found=$(find "$(cygpath -S 2>/dev/null || echo /nonexistent)" -maxdepth 1 -iname "$miss" 2>/dev/null | head -1)
+      [ -n "$found" ] && echo "  system directory has: $found" >&2
+    }
+    echo "  (not found in any PATH_KEEP entry above)" >&2
+  fi
   fail "the binary does not run in a bare environment"
 fi
 

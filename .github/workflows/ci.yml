@@ -645,7 +645,23 @@ jobs:
             || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
           cd gui
           npm ci
-          npm run tauri build
+          # bundle_dmg.sh's own stderr is SWALLOWED by tauri unless --verbose is
+          # on, so its failure arrives as "error running bundle_dmg.sh" and
+          # nothing else -- which is how macos-x64 failed with no diagnosable
+          # cause while macos-arm64 built the same commit fine.
+          #
+          # One retry, verbose, after detaching any half-attached image: if this
+          # is the transient hdiutil/Finder failure the macOS runners are known
+          # for, the release survives it; if it is real, the reason is in the log
+          # instead of being lost a second time.
+          npm run tauri build || {
+            echo "::warning::tauri build failed -- retrying once, verbosely"
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              hdiutil info | awk '/\/Volumes\/DIALibraryGenerator/{print $1}' \
+                | xargs -r -n1 hdiutil detach -force 2>/dev/null || true
+            fi
+            npm run tauri build -- --verbose
+          }
 
       # Renamed to FIXED names. Tauri spells them with its own version and
       # architecture (DIALibraryGenerator_0.2.0_aarch64.dmg), which makes every

@@ -282,10 +282,20 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+          # event_name FIRST, and a dispatch never releases whatever ref it was
+          # selected against. Testing the ref first meant that dispatching this
+          # workflow with a TAG selected in the Actions UI took the release
+          # branch -- so the run whose entire purpose is to touch no release
+          # would have uploaded to the real one.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+              echo "package=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "package=false" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
             echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.gui_dry_run }}" = "true" ]; then
-            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
           fi
@@ -317,6 +327,8 @@ jobs:
         env:
           CERT: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
           NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          NOTARY_ID: ${{ secrets.MACOS_APPLE_ID }}
+          NOTARY_TEAM: ${{ secrets.MACOS_TEAM_ID }}
         run: |
           set -euo pipefail
           if [ -z "$CERT" ]; then
@@ -326,9 +338,14 @@ jobs:
             exit 0
           fi
           echo "sign=true" >> "$GITHUB_OUTPUT"
-          if [ -n "$NOTARY" ]; then
+          # ALL THREE, not the password alone. Deciding on one of them exported
+          # the other two as set-but-empty to Tauri -- which is the exact trap
+          # documented twenty lines below, reintroduced here.
+          if [ -n "$NOTARY" ] && [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_TEAM" ]; then
             echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
+            [ -z "$NOTARY" ] || echo "::warning::MACOS_NOTARY_PASSWORD is set but MACOS_APPLE_ID/MACOS_TEAM_ID are not"
+
             # Worth saying out loud: Gatekeeper refuses a signed-but-unnotarized
             # build exactly as it refuses an unsigned one, so this half-state
             # buys nothing.
@@ -726,6 +743,27 @@ jobs:
           xcrun stapler validate "$DMG"
           codesign --verify --strict --verbose=2 stage/bin/DIALibraryGenerator
 
+          # The .app's OWN ticket, which is a separate claim from the image's:
+          # a user drags the app OUT of the image, and the image's ticket does
+          # not travel with it. Tauri runs `stapler staple` on the bundle and
+          # DISCARDS the exit status, so a ticket that failed to attach -- most
+          # often error 65, the ticket not yet propagated moments after an
+          # Accept -- leaves the build green and the app refused offline.
+          #
+          # Checked against bundle/macos, which is the bundle the .dmg was built
+          # FROM, after Tauri stapled it. Nothing can repair it here: the image
+          # already contains whatever was stapled, so this fails the run and a
+          # re-run picks up the propagated ticket.
+          shopt -s nullglob
+          apps=(gui/src-tauri/target/release/bundle/macos/*.app)
+          [ "${#apps[@]}" -gt 0 ] \
+            || { echo "::error::no .app bundle to validate"; exit 1; }
+          xcrun stapler validate "${apps[0]}" || {
+            echo "::error::the .app carries no notarization ticket -- Tauri's staple failed silently"
+            echo "::error::re-run this job; the ticket is usually just not propagated yet"
+            exit 1
+          }
+
       - uses: actions/upload-artifact@v5
         if: steps.pkg.outputs.package == 'true'
         with:
@@ -757,7 +795,11 @@ jobs:
   # own, because a cross-workflow wait would be a race either way.)
   release-complete:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # always(), because `needs: build` alone makes this SKIPPED exactly when a
+    # build leg fails -- which is the one case it exists for. fail-fast is off,
+    # so the surviving legs still publish their assets and the release goes
+    # public missing whatever the failed leg owed it.
+    if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

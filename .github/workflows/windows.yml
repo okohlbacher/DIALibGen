@@ -594,10 +594,20 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          if [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+          # event_name FIRST, and a dispatch never releases whatever ref it was
+          # selected against. Testing the ref first meant that dispatching this
+          # workflow with a TAG selected in the Actions UI took the release
+          # branch -- so the run whose entire purpose is to touch no release
+          # would have uploaded to the real one.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+              echo "package=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "package=false" >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
             echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
-          elif [ "${{ inputs.gui_dry_run }}" = "true" ]; then
-            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
           else
             echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
           fi

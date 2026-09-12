@@ -515,17 +515,27 @@ jobs:
           # standalone_test.sh runs the binary under `env -i` and needs the DLL
           # directories handed back explicitly on Windows; ctest does not pass
           # this job's PATH through to it in a form the bare environment keeps.
-          # System32 carries the Universal CRT (api-ms-win-crt-*.dll). Without
-          # it a bare environment cannot start ANY Windows process, which is not
-          # the property this test is checking.
+          # PATH_KEEP is this PATH with the BUILD TREE removed -- which is the
+          # claim standalone_test.sh makes, spelled directly.
           #
-          # `cygpath -S`, not "$SYSTEMROOT/System32": Git Bash on the runner does
-          # not export SYSTEMROOT, so that expanded to the non-existent
-          # "/System32" and the CRT stayed unreachable. cygpath asks Windows.
-          SYSDIR=$(cygpath -S)
-          [ -f "$SYSDIR/kernel32.dll" ] \
-            || { echo "::error::cygpath -S gave '$SYSDIR', which is not the system directory"; exit 1; }
-          export PATH_KEEP="$DLL_PATH_POSIX:$SYSDIR:/usr/bin:/bin"
+          # It is not a hand-built list of directories. Two attempts at that
+          # failed the same way: the Universal CRT (api-ms-win-crt-*.dll) lives
+          # in the toolchain's redistributable directory, which msvc-dev-cmd put
+          # on PATH, and any list assembled from conda/Qt/contrib/OpenMS plus
+          # System32 omits it. A developer has that directory too; what a
+          # developer does NOT have is this build tree, so that is the only
+          # thing taken away.
+          BUILD_ABS=$(cd build && pwd)
+          FILTERED=""
+          IFS=':' read -ra _entries <<< "$PATH"
+          for d in "${_entries[@]}"; do
+            case "$d" in "$BUILD_ABS"|"$BUILD_ABS"/*) continue ;; esac
+            FILTERED="$FILTERED:$d"
+          done
+          export PATH_KEEP="$DLL_PATH_POSIX${FILTERED}"
+          case "$PATH_KEEP" in
+            *"$BUILD_ABS"*) echo "::error::the build tree survived the PATH filter"; exit 1 ;;
+          esac
           ctest --test-dir build --output-on-failure
           # A tier that fails to register does not fail -- it disappears, and
           # the run goes green on a smaller suite. Assert the Python-dependent

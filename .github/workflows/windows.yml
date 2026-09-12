@@ -544,8 +544,6 @@ jobs:
             || { echo "::error::the prediction tests were not registered"; exit 1; }
           ctest --test-dir build -N | grep -q "e2e" \
             || { echo "::error::the e2e test was not registered"; exit 1; }
-          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
-            || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
 
       - name: The installed binary stands on its own
         shell: bash -el {0}
@@ -609,24 +607,119 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          for d in $(echo "$RUNTIME_DLL_PATH" | tr ';' '\n'); do
-            [ -d "$d" ] || continue
-            find "$d" -maxdepth 1 -name '*.dll' -exec cp -n {} stage/bin/ \; 2>/dev/null || true
-          done
-          # Qt's platform plugin is loaded by path, not by name, so it does not
-          # appear in any dependency walk and is missed by a *.dll sweep.
-          mkdir -p stage/bin/platforms
-          cp "$QT_ROOT_DIR/plugins/platforms/qwindows.dll" stage/bin/platforms/ 2>/dev/null || true
 
-          # The load-bearing check: it must run with NOTHING but the bundle on
-          # PATH. A bundle verified with the build prefixes still on PATH proves
-          # nothing at all.
-          env -i SystemRoot="$SYSTEMROOT" \
-              PATH="$(cygpath -u "$PWD")/stage/bin:/c/Windows/System32" \
-              "$PWD/stage/bin/DIALibraryGenerator.exe" --help > portable.txt 2>&1 \
+          # OpenMS's own data tables. The tool reaches them through
+          # OPENMS_DATA_PATH or a path compiled into OpenMS, and on a user's
+          # machine that compiled path is this runner's openms-install -- so the
+          # bundle has to carry them, exactly as the conda legs in ci.yml do.
+          # Without this the bundle prints --help and then fails on the first
+          # mass calculation, which is how v0.2.3 shipped.
+          SHARE=$(find openms-install -type d -path '*/share/OpenMS' | head -1)
+          if [ -z "$SHARE" ]; then
+            # By content rather than by layout, in case a Windows install ever
+            # spells the directory differently.
+            E=$(find openms-install -name 'Elements.xml' -path '*CHEMISTRY*' | head -1)
+            [ -n "$E" ] && SHARE=$(cd "$(dirname "$E")/.." && pwd)
+          fi
+          [ -n "$SHARE" ] || { echo "::error::no share/OpenMS in the OpenMS install"; exit 1; }
+          mkdir -p stage/share/OpenMS
+          cp -R "$SHARE/." stage/share/OpenMS/
+          test -s stage/share/OpenMS/CHEMISTRY/Elements.xml \
+            || { echo "::error::the staged OpenMS data has no Elements.xml"; exit 1; }
+
+          # The dependency CLOSURE, not every DLL in the build prefixes. The
+          # sweep this replaces shipped 271 DLLs and 267 MB -- all of MKL, gRPC,
+          # ICU's data blob and a debug Qt -- because it copied what conda
+          # happened to have installed rather than what the binary loads.
+          command -v dumpbin >/dev/null \
+            || { echo "::error::no dumpbin on PATH; cannot compute the DLL closure"; exit 1; }
+          IFS=';' read -ra PREFIXES <<< "$RUNTIME_DLL_PATH"
+
+          # A name is resolved the way the loader would resolve it, against the
+          # same prefixes. A name that resolves NOWHERE is a system DLL: every
+          # Windows has it in System32, and carrying a copy would be wrong.
+          # `cp -n` is deliberately not used: BSD cp returns 1 when it declines
+          # to overwrite, and under set -e that ends the step mid-bundle.
+          copy_once() { [ -f "stage/bin/$(basename "$1")" ] || cp "$1" stage/bin/; }
+
+          resolve() {
+            local d hit
+            for d in "${PREFIXES[@]}"; do
+              [ -d "$d" ] || continue
+              hit=$(find "$d" -maxdepth 1 -iname "$1" | head -1)
+              if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
+            done
+            return 1
+          }
+
+          declare -A seen=()
+          todo=(stage/bin/DIALibraryGenerator.exe)
+          while [ ${#todo[@]} -gt 0 ]; do
+            f="${todo[0]}"; todo=("${todo[@]:1}")
+            # `-dependents`, not `/dependents`: MSYS rewrites a leading slash
+            # into a Windows path and dumpbin then rejects the option. Relative
+            # paths for the same reason. Both the import table and the
+            # delay-load table are printed, and both are dependencies.
+            while IFS= read -r dep; do
+              key=$(printf '%s' "$dep" | tr 'A-Z' 'a-z')
+              if [ -n "${seen[$key]:-}" ]; then continue; fi
+              seen[$key]=1
+              src=$(resolve "$dep") || continue
+              copy_once "$src"
+              todo+=("stage/bin/$(basename "$src")")
+            done < <(dumpbin -nologo -dependents "$f" \
+                       | grep -oiE '^[[:space:]]+[A-Za-z0-9_.+-]+\.dll$' \
+                       | awk '{print $1}')
+          done
+
+          # Loaded by name at runtime rather than imported, so no dependency
+          # walk can find them. Each set is carried only when the module that
+          # loads it is itself in the closure -- so a bundle that does not use
+          # MKL does not ship 150 MB of it.
+          carry() {
+            local d m n=0
+            for d in "${PREFIXES[@]}"; do
+              [ -d "$d" ] || continue
+              while IFS= read -r m; do copy_once "$m"; n=$((n + 1)); done \
+                < <(find "$d" -maxdepth 1 -iname "$1")
+            done
+            echo "carried $n file(s) for $1"
+          }
+          if ls stage/bin/ | grep -qi '^onnxruntime'; then
+            carry 'onnxruntime_providers_*.dll'
+          fi
+          # mkl_rt is a dispatcher: it LoadLibrary's the kernel matching the CPU
+          # it finds. If anything in the closure links it, the kernels have to
+          # come too.
+          if ls stage/bin/ | grep -qi '^mkl_rt'; then
+            carry 'mkl_*.dll'
+          fi
+
+          # The load-bearing check, and what makes the closure above safe to
+          # trust: NOTHING but the bundle and Windows itself on PATH, and a real
+          # library rather than --help. --help loads neither ONNX Runtime nor
+          # Arrow and reads none of OpenMS's data, which is exactly how a bundle
+          # with no share/OpenMS passed this step for three releases.
+          #
+          # cygpath, not $SYSTEMROOT and not a hardcoded C:/Windows/System32:
+          # the same reason the gate above stopped trusting that variable.
+          BARE_PATH="$(cygpath -u "$PWD")/stage/bin:$(cygpath -S)"
+          run_bare() {
+            env -i SystemRoot="$(cygpath -w "$(cygpath -W)")" \
+                TEMP="${TEMP:-C:/Windows/Temp}" TMP="${TMP:-C:/Windows/Temp}" \
+                DIALIBGEN_MODEL_DIR="$(cygpath -w "$PWD/models")" \
+                PATH="$BARE_PATH" \
+                "$PWD/stage/bin/DIALibraryGenerator.exe" "$@"
+          }
+          run_bare --help > portable.txt 2>&1 \
             || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
           grep -q "^Version: $(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" portable.txt \
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
+          run_bare -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
+            || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }
+          [ "$(wc -l < portable.tsv)" -gt 1 ] \
+            || { echo "::error::the staged bundle produced an empty library"; exit 1; }
+          echo "portable bundle: $(ls stage/bin/*.dll | wc -l) DLLs, $(du -sm stage | cut -f1) MB"
 
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
@@ -716,3 +809,25 @@ jobs:
             DIALibraryGenerator-windows-x64.zip
             dist-bundles/*
           fail_on_unmatched_files: true
+
+      # The completeness gate ci.yml runs for its own assets, for this
+      # workflow's. Named exactly, not by extension: the README points at these
+      # spellings, so "some installer exists" is not the property that matters.
+      - name: Assert this workflow's assets are on the release
+        if: steps.pkg.outputs.release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          have=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                   --json assets -q '.assets[].name')
+          echo "$have"
+          missing=0
+          for n in DIALibraryGenerator-windows-x64.zip \
+                   DIALibraryGenerator-gui-windows-x64.msi \
+                   DIALibraryGenerator-gui-windows-x64-setup.exe; do
+            printf '%s' "$have" | grep -qx "$n" \
+              || { echo "::error::$n is not on $GITHUB_REF_NAME"; missing=1; }
+          done
+          exit $missing

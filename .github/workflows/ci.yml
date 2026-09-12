@@ -184,6 +184,8 @@ jobs:
           # the gate opened rather than trusting a green run.
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
+          ctest --test-dir build -N | grep -q "e2e" \
+            || { echo "::error::the e2e test was not registered"; exit 1; }
 
       - name: Install
         shell: bash -el {0}
@@ -411,6 +413,17 @@ jobs:
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
           test -s stage/share/DIALibraryGenerator/irt_standards.tsv
           test -d stage/share/OpenMS
+
+          # --help loads neither ONNX Runtime nor Arrow and reads none of
+          # OpenMS's data tables, so it separates a startable bundle from an
+          # unstartable one and nothing more. Generate a real library from the
+          # bare tree: that is the claim the archive actually makes.
+          env -i HOME="$HOME" DIALIBGEN_MODEL_DIR="$PWD/models" \
+              "$PWD/stage/bin/DIALibraryGenerator" \
+              -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
+            || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }
+          [ "$(wc -l < portable.tsv)" -gt 1 ] \
+            || { echo "::error::the staged bundle produced an empty library"; exit 1; }
           echo "portable bundle ok: $(find stage/lib -name '*.so*' -o -name '*.dylib' | wc -l) libraries"
 
       - name: Package the CLI

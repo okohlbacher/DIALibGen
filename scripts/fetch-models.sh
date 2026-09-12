@@ -53,6 +53,32 @@ fi
 # Where the tool itself looks, in its own order: $DIALIBGEN_MODEL_DIR first, then
 # <the binary>/../share/DIALibraryGenerator/models. Installing into the second
 # means nothing has to be set in the environment afterwards.
+# The tool resolves share/DIALibraryGenerator RELATIVE TO ITS REAL EXECUTABLE, so
+# the prefix has to come from the real path, not from the name that was invoked.
+# A Homebrew cask makes this bite: $(brew --prefix)/bin/DIALibraryGenerator is a
+# symlink to a wrapper inside the Caskroom, and taking dirname without resolving
+# it gives /opt/homebrew/share -- which is writable, so nothing would fail. The
+# models would land there, the tool would look in the Caskroom, and this script
+# would report success.
+#
+# readlink -f is not portable to older macOS, so the links are walked by hand.
+resolve_link() {
+  local p=$1 n=0
+  while [ -L "$p" ]; do
+    n=$((n + 1))
+    [ "$n" -gt 32 ] && { echo "$p"; return; }   # a loop is not worth dying over
+    local t
+    t=$(readlink "$p")
+    case "$t" in
+      /*) p=$t ;;
+      *)  p=$(dirname "$p")/$t ;;
+    esac
+  done
+  echo "$p"
+}
+
+prefix_of() { cd -P "$(dirname "$(resolve_link "$1")")/.." && pwd; }
+
 # BIN is the binary this install is FOR -- the one under --prefix when that was
 # given, not whatever happens to be on PATH. Getting that wrong made the script
 # tell you to set DIALIBGEN_MODEL_DIR for an installation that needs nothing set.
@@ -62,8 +88,7 @@ if [ -z "$DIR" ]; then
     DIR="$PREFIX/share/DIALibraryGenerator/models"
     BIN="$PREFIX/bin/DIALibraryGenerator"
   elif BIN=$(command -v DIALibraryGenerator 2> /dev/null); then
-    # -P so a symlinked bin (Homebrew's, for one) resolves to the real tree.
-    DIR="$(cd -P "$(dirname "$BIN")/.." && pwd)/share/DIALibraryGenerator/models"
+    DIR="$(prefix_of "$BIN")/share/DIALibraryGenerator/models"
   else
     echo "no DIALibraryGenerator on PATH -- pass --dir or --prefix" >&2
     exit 2
@@ -144,7 +169,7 @@ echo
 # to be one the binary searches.
 found=0
 if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-  want="$(cd -P "$(dirname "$BIN")/.." && pwd)/share/DIALibraryGenerator/models"
+  want="$(prefix_of "$BIN")/share/DIALibraryGenerator/models"
   [ "$DIR" = "$want" ] && found=1
 fi
 if [ "$found" = 1 ]; then

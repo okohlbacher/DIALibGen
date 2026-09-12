@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 project(DIALibraryGenerator
-  VERSION 0.2.2
+  VERSION 0.2.3
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibraryGenerator"
   LANGUAGES CXX)

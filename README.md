@@ -239,6 +239,9 @@ Read these before treating output as authoritative:
   supply the files.
 - **`-write_cwl` and `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
   Without it the tool refuses them and says so; `-write_ctd` works everywhere.
+- **Windows is x64 only.** There is no arm64 Windows build; bioconda has no
+  win-64 OpenMS either, so that leg builds OpenMS from source and is slower
+  than the others on a cold cache.
 - **Nothing is code-signed**, deliberately for now. The macOS `.dmg` and the
   Windows installer both need the OS's "open anyway" path, and on macOS a
   **Homebrew-installed** copy is refused outright rather than with a prompt.

@@ -3,6 +3,28 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] — 2026-09-12
+
+### Added
+- **Windows x64 builds.** The CLI archive and the `.msi` installer now ship
+  alongside Linux and macOS, and the full suite — 23 tests including the
+  end-to-end library build against the real models — passes there.
+
+### Fixed
+- **The exported CMake target carried build-machine include paths.**
+  `odia_library` attached ONNX Runtime's and Boost's include directories as
+  bare `PUBLIC` paths, so `find_package(DIALibraryGenerator)` handed a consumer
+  absolute paths from whatever machine built it. CMake only *errors* when such
+  a path lies inside the source tree, which is why this surfaced on Windows and
+  was silent everywhere else.
+- **Model paths reached ONNX Runtime in the wrong character type.**
+  `Ort::Session` takes `ORTCHAR_T*` — `wchar_t*` on Windows — so
+  `std::string::c_str()` could not compile there. Now `std::filesystem::path`,
+  which is the right type on every platform and carries a non-ASCII path
+  correctly.
+- The installed `DIALibraryGeneratorConfig.cmake` also looks for conda-forge's
+  `onnxruntime_conda` spelling, without which `find_package` fails on Windows.
+
 ## [0.2.2] — 2026-09-11
 
 ### Fixed

@@ -50,6 +50,20 @@ case "${OSTYPE:-}" in
       echo "SKIP: set PATH_KEEP to the runtime library directories on Windows" >&2
       exit 77
     fi
+    # MSYS converts any variable whose name ends in PATH from POSIX to Windows
+    # form when it spawns a native process -- so a PATH_KEEP exported as
+    # "/c/x:/d/y" arrives here as "C:\x;D:\y". Assigning that straight back
+    # into PATH inside MSYS bash then hands the child a list it cannot parse,
+    # and every entry is lost: the whole runner PATH was present and the CRT
+    # still "could not be found". cygpath -p converts a path LIST, which is the
+    # one thing that makes this survive the round trip.
+    case "$PATH_KEEP" in
+      *\;*)
+        command -v cygpath >/dev/null 2>&1 \
+          || { echo "SKIP: PATH_KEEP is Windows-form and cygpath is unavailable" >&2; exit 77; }
+        PATH_KEEP=$(cygpath -p -u "$PATH_KEEP")
+        ;;
+    esac
     run_bare() {
       local args=()
       for v in "${UNSET[@]}"; do args+=(-u "$v"); done

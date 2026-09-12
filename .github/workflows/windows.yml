@@ -518,7 +518,14 @@ jobs:
           # System32 carries the Universal CRT (api-ms-win-crt-*.dll). Without
           # it a bare environment cannot start ANY Windows process, which is not
           # the property this test is checking.
-          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -u "$SYSTEMROOT")/System32:/usr/bin:/bin"
+          #
+          # `cygpath -S`, not "$SYSTEMROOT/System32": Git Bash on the runner does
+          # not export SYSTEMROOT, so that expanded to the non-existent
+          # "/System32" and the CRT stayed unreachable. cygpath asks Windows.
+          SYSDIR=$(cygpath -S)
+          [ -f "$SYSDIR/kernel32.dll" ] \
+            || { echo "::error::cygpath -S gave '$SYSDIR', which is not the system directory"; exit 1; }
+          export PATH_KEEP="$DLL_PATH_POSIX:$SYSDIR:/usr/bin:/bin"
           ctest --test-dir build --output-on-failure
           # A tier that fails to register does not fail -- it disappears, and
           # the run goes green on a smaller suite. Assert the Python-dependent
@@ -543,7 +550,7 @@ jobs:
           # this gate is about -- it is about the BUILD TREE not being on it. So
           # the three runtime prefixes are handed back explicitly and nothing
           # else is.
-          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -u "$SYSTEMROOT")/System32:/usr/bin:/bin"
+          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
           export OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \

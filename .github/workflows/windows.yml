@@ -612,20 +612,25 @@ jobs:
           # OPENMS_DATA_PATH or a path compiled into OpenMS, and on a user's
           # machine that compiled path is this runner's openms-install -- so the
           # bundle has to carry them, exactly as the conda legs in ci.yml do.
-          # Without this the bundle prints --help and then fails on the first
-          # mass calculation, which is how v0.2.3 shipped.
-          SHARE=$(find openms-install -type d -path '*/share/OpenMS' | head -1)
-          if [ -z "$SHARE" ]; then
-            # By content rather than by layout, in case a Windows install ever
-            # spells the directory differently.
-            E=$(find openms-install -name 'Elements.xml' -path '*CHEMISTRY*' | head -1)
-            [ -n "$E" ] && SHARE=$(cd "$(dirname "$E")/.." && pwd)
-          fi
-          [ -n "$SHARE" ] || { echo "::error::no share/OpenMS in the OpenMS install"; exit 1; }
+          # Without this the bundle prints --help and then dies on the first mass
+          # calculation with "Cannot find shared data! OpenMS cannot function
+          # without it!", which is how v0.2.3 shipped.
+          #
+          # Found AND asserted by CHEMISTRY/unimod.xml, because that one file is
+          # the whole of File::isOpenMSDataPath_ -- so "found" here means exactly
+          # what the tool will mean by it at runtime, whatever the install layout
+          # turns out to be. NOT Elements.xml: OpenMS 3.5 compiles the element
+          # table in and ships no such file, so a check for it fails against a
+          # perfectly good data directory.
+          UNIMOD=$(find openms-install -path '*CHEMISTRY/unimod.xml' | head -1)
+          [ -n "$UNIMOD" ] \
+            || { echo "::error::no CHEMISTRY/unimod.xml in the OpenMS install"; exit 1; }
+          SHARE=$(cd "$(dirname "$UNIMOD")/.." && pwd)
           mkdir -p stage/share/OpenMS
           cp -R "$SHARE/." stage/share/OpenMS/
-          test -s stage/share/OpenMS/CHEMISTRY/Elements.xml \
-            || { echo "::error::the staged OpenMS data has no Elements.xml"; exit 1; }
+          test -s stage/share/OpenMS/CHEMISTRY/unimod.xml \
+            || { echo "::error::the staged tree is not a valid OpenMS data path"; exit 1; }
+          echo "staged OpenMS data from $SHARE"
 
           # The dependency CLOSURE, not every DLL in the build prefixes. The
           # sweep this replaces shipped 271 DLLs and 267 MB -- all of MKL, gRPC,

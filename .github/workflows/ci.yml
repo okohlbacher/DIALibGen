@@ -607,11 +607,10 @@ jobs:
         run: |
           set -euo pipefail
           ditto -c -k --keepParent stage "$RUNNER_TEMP/cli.zip"
-          # --wait exits non-zero on anything but Accepted, so a rejected
-          # submission fails here rather than shipping.
-          xcrun notarytool submit "$RUNNER_TEMP/cli.zip" \
-            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
-            --password "$MACOS_NOTARY_PASSWORD" --wait
+          # Through .github/notarize.sh, which fetches `notarytool log` when
+          # Apple says Invalid -- otherwise a rejection is a submission id and
+          # nothing else, and the reason costs another submission to find.
+          bash .github/notarize.sh "$RUNNER_TEMP/cli.zip"
 
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
@@ -632,6 +631,10 @@ jobs:
       # tree and runs node and cargo.
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
+        # Tauri notarizes the .app inside this step, so it inherits Apple's queue
+        # and was the only long step here with no bound at all -- a stuck
+        # submission would have held a runner for the job's six-hour default.
+        timeout-minutes: 90
         shell: bash
         # No `env:` block here on purpose -- the APPLE_* variables Tauri reads
         # are exported by the certificate-import step above, which runs only
@@ -725,9 +728,7 @@ jobs:
           # and makes the identity on the shipped name certain.
           codesign --force --timestamp --keychain "$MACOS_KEYCHAIN" \
             --sign "$MACOS_SIGN_IDENTITY" "$DMG"
-          xcrun notarytool submit "$DMG" \
-            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
-            --password "$MACOS_NOTARY_PASSWORD" --wait
+          bash .github/notarize.sh "$DMG"
           xcrun stapler staple "$DMG"
 
       # Gatekeeper's own verdict, not codesign's. codesign says the signature is

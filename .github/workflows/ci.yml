@@ -334,10 +334,14 @@ jobs:
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
         run: |
           set -euo pipefail
+          # Generated, not a secret. The keychain exists for one job on a runner
+          # that is destroyed afterwards, so a fresh random password is both
+          # safer than a shared one and one less thing to set up.
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           # A throwaway keychain, not the login one: a runner's login keychain
           # is locked and importing into it waits on a prompt nobody can answer.
           KC="$RUNNER_TEMP/signing.keychain-db"
@@ -367,6 +371,7 @@ jobs:
           }
           echo "MACOS_SIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
           echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           echo "signing as: $IDENT"
 
           # Written once, used by both the CLI notarization below and Tauri's,
@@ -579,7 +584,7 @@ jobs:
           APPLE_CERTIFICATE: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
           APPLE_SIGNING_IDENTITY: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_SIGN_IDENTITY || '' }}
-          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.KEYCHAIN_PASSWORD || '' }}
+          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_KEYCHAIN_PASSWORD || '' }}
           APPLE_API_ISSUER: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_ISSUER || '' }}
           APPLE_API_KEY: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_KEY_ID || '' }}
           APPLE_API_KEY_PATH: ${{ steps.sign.outputs.notarize == 'true' && env.APPLE_API_KEY_PATH || '' }}

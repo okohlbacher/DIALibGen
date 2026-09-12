@@ -65,13 +65,13 @@ table as a statement of where this tool sits, not as a benchmark.
 
 Release builds for macOS, Windows and Linux — a CLI archive and a desktop
 installer per platform — are attached to each
-[release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
+[release](https://github.com/okohlbacher/DIALibGen/releases). The CLI
 archives are **self-contained**: unpack and run `bin/DIALibGen`. The
 libraries it needs and OpenMS's own data travel with it, so there is nothing to
 install and no OpenMS to set up.
 
 ```bash
-curl -fsSLO https://github.com/okohlbacher/DIALibraryGenerator/releases/latest/download/DIALibGen-macos-arm64.tar.gz
+curl -fsSLO https://github.com/okohlbacher/DIALibGen/releases/latest/download/DIALibGen-macos-arm64.tar.gz
 tar xzf DIALibGen-macos-arm64.tar.gz
 ./bin/DIALibGen --help
 ```

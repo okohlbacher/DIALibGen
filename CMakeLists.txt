@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 project(DIALibGen
   VERSION 0.10.0
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
-  HOMEPAGE_URL "https://github.com/okohlbacher/DIALibraryGenerator"
+  HOMEPAGE_URL "https://github.com/okohlbacher/DIALibGen"
   LANGUAGES CXX)
 
 # OpenMS's imported target declares INTERFACE_COMPILE_FEATURES cxx_std_23, so

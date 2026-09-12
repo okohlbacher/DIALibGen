@@ -643,17 +643,38 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
 
+      # pwsh, NOT bash. Git Bash puts /usr/bin on PATH, and coreutils ships a
+      # link.exe there -- the POSIX hard-link command. rustc resolves its
+      # linker by PATH NAME, so every cargo build script dies with
+      # "/usr/bin/link: extra operand" and the error blames the Visual Studio
+      # installation. CMake is immune because it takes the linker from cl.exe's
+      # own directory, which is exactly why every step above passes under bash
+      # and this one cannot.
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          rm -rf gui/src-tauri/resources/dialibgen
-          mkdir -p gui/src-tauri/resources/dialibgen
-          cp -R stage/. gui/src-tauri/resources/dialibgen/
-          test -f gui/src-tauri/resources/dialibgen/bin/DIALibraryGenerator.exe \
-            || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
-          cd gui
+          $ErrorActionPreference = 'Stop'
+          $res = 'gui/src-tauri/resources/dialibgen'
+          if (Test-Path $res) { Remove-Item -Recurse -Force $res }
+          New-Item -ItemType Directory -Force -Path $res | Out-Null
+          Copy-Item -Recurse -Force 'stage/*' $res
+          if (-not (Test-Path "$res/bin/DIALibraryGenerator.exe")) {
+            Write-Output '::error::the CLI was not staged into the app''s resources'
+            exit 1
+          }
+
+          # Assert the linker before paying for the build, because the failure
+          # arrives 200 crates later and names the wrong culprit.
+          $link = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
+          Write-Output "link.exe: $link"
+          if (-not $link) { Write-Output '::error::no link.exe on PATH'; exit 1 }
+          if ($link -match '\\Git\\usr\\bin\\') {
+            Write-Output "::error::link.exe resolves to Git's coreutils ($link), not MSVC's"
+            exit 1
+          }
+
+          Set-Location gui
           npm ci
           npm run tauri build
 

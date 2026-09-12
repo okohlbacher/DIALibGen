@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Download the three AlphaPeptDeep ONNX models and put them where the tool looks.
 #
-#   scripts/fetch-models.sh                 # install beside the DIALibraryGenerator on PATH
-#   scripts/fetch-models.sh --dir DIR       # install into DIR instead
-#   scripts/fetch-models.sh --prefix DIR    # install into DIR/share/DIALibraryGenerator/models
-#   scripts/fetch-models.sh --check         # verify what is already installed, download nothing
+# Installed as `dialibgen-fetch-models`; in a checkout it is scripts/fetch-models.sh.
+#
+#   dialibgen-fetch-models                  # install beside the DIALibraryGenerator on PATH
+#   dialibgen-fetch-models --dir DIR        # install into DIR instead
+#   dialibgen-fetch-models --prefix DIR     # install into DIR/share/DIALibraryGenerator/models
+#   dialibgen-fetch-models --check          # verify what is already installed, download nothing
 #
 # The models are NOT redistributed with this project -- see THIRD-PARTY-NOTICES.md
 # and BACKLOG.md -- so this fetches them from OpenMS's archive, which is where a
@@ -33,7 +35,7 @@ while [ $# -gt 0 ]; do
     --dir)    DIR=${2:?--dir needs a directory}; shift 2 ;;
     --prefix) PREFIX=${2:?--prefix needs a directory}; shift 2 ;;
     --check)  CHECK=1; shift ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

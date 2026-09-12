@@ -3,6 +3,27 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] — 2026-09-12
+
+### Added
+- **`dialibgen-fetch-models` ships with the tool.** It downloads the three
+  AlphaPeptDeep ONNX models from OpenMS's archive, checks each against a pinned
+  SHA256, and installs them where the tool already looks — so nothing has to be
+  set in the environment afterwards. `--check` verifies an existing set, `--dir`
+  and `--prefix` place them elsewhere, and re-running it leaves correct files
+  alone.
+  It is installed next to the binary because the models are not redistributed
+  with this project: a release tarball or a Homebrew cask is the whole of what
+  most people have, and pointing them at a script in the git repository is not an
+  answer. 0.9.0 shipped the script in the repository only.
+
+### Documented
+- **The first run of the macOS CLI takes about five minutes.** Measured at 335 s
+  against the published 0.9.0 tarball, 1 s on every run after. macOS validates
+  each of the 145 bundled libraries with Apple individually, and a `.tar.gz`
+  cannot carry a stapled ticket that would answer for all of them at once. It is
+  not stuck. The `.dmg` is stapled and unaffected. See BACKLOG.md for the fix.
+
 ## [0.9.0] — 2026-09-12
 
 ### Added

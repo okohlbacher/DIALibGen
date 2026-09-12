@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 project(DIALibraryGenerator
-  VERSION 0.9.0
+  VERSION 0.9.1
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibraryGenerator"
   LANGUAGES CXX)
@@ -245,6 +245,14 @@ if(DIALIBGEN_INSTALL)
           ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
   if(DIALIBGEN_BUILD_TOOL)
     install(TARGETS DIALibraryGenerator RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    # The models are not redistributed (see THIRD-PARTY-NOTICES.md), so the thing
+    # that fetches them has to travel WITH the tool -- a Homebrew cask or a
+    # release tarball is the whole of what most people ever have, and telling
+    # them to clone the repo for one script is not an answer. PROGRAMS, not
+    # FILES, so it arrives executable.
+    install(PROGRAMS scripts/fetch-models.sh
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+            RENAME dialibgen-fetch-models)
   endif()
   install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
   # share/DIALibraryGenerator, matching what the tool searches for. The old

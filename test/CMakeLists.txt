@@ -44,6 +44,9 @@ if(TARGET DIALibraryGenerator)
                    "${CMAKE_CURRENT_SOURCE_DIR}/standalone_test.sh"
                    $<TARGET_FILE:DIALibraryGenerator> "${PROJECT_VERSION}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta")
+  # On Windows the test needs PATH_KEEP naming the runtime library directories
+  # (there is no RPATH there); without it it skips rather than failing.
+  set_tests_properties(standalone_tool_contract PROPERTIES SKIP_RETURN_CODE 77)
 
   # -write_ctd and friends, which stock OpenMS refuses to a tool outside its own
   # tree. Skips (77) without python3.

@@ -25,32 +25,59 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/dialibgen-standalone.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 
-# OpenMS needs its own share/ to initialise. Inside a relocatable install it
-# finds it relative to the binary; here, in a build tree against an external
-# OpenMS, it may need OPENMS_DATA_PATH -- which is exactly what must NOT be
-# inherited silently. So pass it explicitly when the caller set it, and record
-# in the output that it was needed.
-KEEP=(HOME="${HOME:-$TMP}")
-[ -n "${OPENMS_DATA_PATH:-}" ] && KEEP+=(OPENMS_DATA_PATH="$OPENMS_DATA_PATH")
-# Windows has no RPATH: a binary finds its DLLs through PATH, so a bare
-# environment there is not "no build tree on PATH", it is "no libraries at all"
-# and nothing starts. The caller passes the runtime directories in PATH_KEEP --
-# which is still the point of the test, since the BUILD tree is not among them.
-# SystemRoot is required by the Windows loader itself.
-[ -n "${PATH_KEEP:-}" ] && KEEP+=(PATH="$PATH_KEEP")
-[ -n "${SYSTEMROOT:-}" ] && KEEP+=(SYSTEMROOT="$SYSTEMROOT")
-[ -n "${SystemRoot:-}" ] && KEEP+=(SystemRoot="$SystemRoot")
+# How to run the binary with nothing of the build tree around it.
+#
+# On Linux and macOS that is `env -i`: an empty environment, because the binary
+# carries an RPATH and needs nothing else. A build tree still on PATH, or an
+# inherited OPENMS_DATA_PATH, is exactly what this test exists to catch.
+#
+# Windows cannot be tested that way, and the difference is not cosmetic. There
+# is no RPATH -- libraries come from PATH -- and the Universal CRT
+# (api-ms-win-crt-*.dll) is not a set of files on a search path at all but API
+# set forwarders the loader resolves from process state that `env -i` discards.
+# An emptied environment there does not mean "no build tree", it means no
+# process starts, which tests nothing about this tool.
+#
+# So on Windows the environment is INHERITED, with the project's own variables
+# removed and PATH replaced by the runtime directories the caller names in
+# PATH_KEEP. The claim under test is unchanged -- the build tree is not on the
+# path and nothing project-specific is inherited -- only the mechanism differs.
+UNSET=(OPENMS_DATA_PATH DIALIBGEN_DATA_DIR DIALIBGEN_MODEL_DIR OPENMS_TTD_INTERNAL_PATH)
+
+case "${OSTYPE:-}" in
+  msys*|cygwin*|win32)
+    if [ -z "${PATH_KEEP:-}" ]; then
+      echo "SKIP: set PATH_KEEP to the runtime library directories on Windows" >&2
+      exit 77
+    fi
+    run_bare() {
+      local args=()
+      for v in "${UNSET[@]}"; do args+=(-u "$v"); done
+      env "${args[@]}" PATH="$PATH_KEEP" "$@"
+    }
+    BARE_DESC="inherited environment, PATH=PATH_KEEP"
+    ;;
+  *)
+    KEEP=(HOME="${HOME:-$TMP}")
+    # OpenMS finds share/OpenMS relative to its own binary in an install; in a
+    # build tree against an external OpenMS it may need this, and needing it is
+    # the point -- it is named, not inherited by accident.
+    [ -n "${OPENMS_DATA_PATH:-}" ] && KEEP+=(OPENMS_DATA_PATH="$OPENMS_DATA_PATH")
+    run_bare() { env -i "${KEEP[@]}" "$@"; }
+    BARE_DESC="empty environment"
+    ;;
+esac
 
 # ---------------------------------------------------------------- 1. it runs
-if ! env -i "${KEEP[@]}" "$BIN" --help >"$TMP/help.txt" 2>&1; then
+if ! run_bare "$BIN" --help >"$TMP/help.txt" 2>&1; then
   echo "--- output ---" >&2; cat "$TMP/help.txt" >&2
   # What the bare environment actually was, and where the first unresolved
   # library really lives. "cannot open shared object file" names the library
   # and nothing about the search path, so without this every diagnosis is a
   # guess -- which is how this test has now been fixed twice without being
   # fixed.
-  echo "--- environment handed to the binary ---" >&2
-  printf '  %s\n' "${KEEP[@]}" >&2
+  echo "--- how it was run: $BARE_DESC ---" >&2
+  printf '  PATH=%s\n' "${PATH_KEEP:-${KEEP[*]:-<empty>}}" >&2
   miss=$(sed -n 's/.*error while loading shared libraries: \([^:]*\).*/\1/p' "$TMP/help.txt" | head -1)
   if [ -n "$miss" ] && [ "$miss" != "?" ]; then
     echo "--- looking for $miss ---" >&2
@@ -76,7 +103,7 @@ got=$(sed -n 's/^Version: \([^ ]*\).*/\1/p' "$TMP/help.txt" | head -1)
 
 # --helphelp carries verboseVersion_, which must name BOTH numbers: a bug report
 # needs this tool's version and the OpenMS it was built against.
-env -i "${KEEP[@]}" "$BIN" --helphelp >"$TMP/helphelp.txt" 2>&1
+run_bare "$BIN" --helphelp >"$TMP/helphelp.txt" 2>&1
 grep -q "$WANT" "$TMP/helphelp.txt" || fail "--helphelp does not carry version $WANT"
 grep -qi "OpenMS " "$TMP/helphelp.txt" || fail "--helphelp does not name the OpenMS version"
 
@@ -89,7 +116,7 @@ done
 # --------------------------------------------------- 4. it parses in isolation
 # -write_config needs no input, no models and no data file, so it proves the
 # tool starts, registers its parameters and materialises its defaults.
-env -i "${KEEP[@]}" "$BIN" -write_config "$TMP/eff.json" >"$TMP/cfg.log" 2>&1 \
+run_bare "$BIN" -write_config "$TMP/eff.json" >"$TMP/cfg.log" 2>&1 \
   || { cat "$TMP/cfg.log" >&2; fail "-write_config failed in a bare environment"; }
 [ -s "$TMP/eff.json" ] || fail "-write_config wrote nothing"
 grep -q '"schema_version"' "$TMP/eff.json" || fail "effective config has no schema_version"
@@ -98,7 +125,7 @@ grep -q '"schema_version"' "$TMP/eff.json" || fail "effective config has no sche
 # ranges the config validator enforces, and a default that does not would make
 # the documented "-write_config is the authoritative reference" a lie: copy it,
 # pass it back, get a refusal.
-env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/eff.json" \
+run_bare "$BIN" -in "$FASTA" -config "$TMP/eff.json" \
     -out "$TMP/roundtrip.tsv" >"$TMP/rt.log" 2>&1
 if grep -qE "^config:" "$TMP/rt.log"; then
   echo "--- output ---" >&2; cat "$TMP/rt.log" >&2
@@ -112,7 +139,7 @@ fi
 # whatever name was asked for. They are refused BEFORE the models are needed,
 # so this runs with no models present.
 printf '{"decoys": "reverese"}\n' > "$TMP/bad_decoy.json"
-if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/bad_decoy.json" \
+if run_bare "$BIN" -in "$FASTA" -config "$TMP/bad_decoy.json" \
        -out "$TMP/x.tsv" >"$TMP/d.log" 2>&1; then
   fail "an unknown decoys method was accepted"
 fi
@@ -120,14 +147,14 @@ grep -q "unknown decoys method" "$TMP/d.log" \
   || fail "an unknown decoys method failed for the wrong reason: $(head -3 "$TMP/d.log" | tr '\n' ' ')"
 
 printf '{"schema_version": 99}\n' > "$TMP/bad_schema.json"
-if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/bad_schema.json" \
+if run_bare "$BIN" -in "$FASTA" -config "$TMP/bad_schema.json" \
        -out "$TMP/x.tsv" >"$TMP/s.log" 2>&1; then
   fail "an unsupported schema_version was accepted"
 fi
 grep -q "schema_version 99" "$TMP/s.log" \
   || fail "an unsupported schema_version failed for the wrong reason"
 
-if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -out "$TMP/library.parqet" \
+if run_bare "$BIN" -in "$FASTA" -out "$TMP/library.parqet" \
        >"$TMP/e.log" 2>&1; then
   fail "-out with an unknown extension was accepted"
 fi
@@ -142,7 +169,7 @@ grep -q "must end in .parquet or .tsv" "$TMP/e.log" \
 while IFS='|' read -r json want; do
   [ -n "$json" ] || continue
   printf '%s\n' "$json" > "$TMP/bad.json"
-  if env -i "${KEEP[@]}" "$BIN" -in "$FASTA" -config "$TMP/bad.json" \
+  if run_bare "$BIN" -in "$FASTA" -config "$TMP/bad.json" \
          -out "$TMP/x.tsv" >"$TMP/r.log" 2>&1; then
     fail "accepted an out-of-range config: $json"
   fi
@@ -168,7 +195,7 @@ CASES
 # Without this the run died inside the ONNX session constructor with
 # "Load model from  failed" -- an empty path and no hint that a model was the
 # thing missing.
-env -i "${KEEP[@]}" DIALIBGEN_MODEL_DIR="$TMP/no-such-models" \
+run_bare DIALIBGEN_MODEL_DIR="$TMP/no-such-models" \
     "$BIN" -in "$FASTA" -out "$TMP/x.tsv" >"$TMP/m.log" 2>&1
 if grep -q "peptdeep_rt_dynamic.onnx" "$TMP/m.log"; then
   : # named the file it could not find, and listed where it looked
@@ -179,4 +206,4 @@ else
   fail "a missing model produced neither a named model nor a library"
 fi
 
-echo "standalone_test: version $got, bare environment, update check off, inputs validated"
+echo "standalone_test: version $got, $BARE_DESC, update check off, inputs validated"

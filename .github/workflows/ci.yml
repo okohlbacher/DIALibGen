@@ -344,6 +344,9 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
           # The secret if it is there; otherwise generated, because it protects
@@ -387,6 +390,33 @@ jobs:
           echo "MACOS_SIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
           echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
           echo "signing as: $IDENT"
+
+          # Tauri's own variable names, exported HERE and only here -- that is
+          # the whole point. Declaring them in the build step's `env:` instead
+          # does not work: GitHub sets an absent secret to the EMPTY STRING,
+          # which is still *set*, and Tauri tests presence rather than
+          # emptiness. An unsigned build then tried to sign and died with
+          # "failed to run command security import: failed to import keychain
+          # certificate". This step runs only when there is a certificate, so
+          # an unsigned build sees no such variables at all.
+          #
+          # The heredoc form because a base64 secret may arrive wrapped; the
+          # delimiter cannot occur in base64, which has no underscore.
+          {
+            echo "APPLE_CERTIFICATE<<__ODIA_EOF__"
+            printf '%s\n' "$MACOS_CERTIFICATE_BASE64"
+            echo "__ODIA_EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$MACOS_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$IDENT"
+            echo "KEYCHAIN_PASSWORD=$KCPW"
+          } >> "$GITHUB_ENV"
+          if [ -n "$MACOS_NOTARY_PASSWORD" ]; then
+            {
+              echo "APPLE_ID=$MACOS_APPLE_ID"
+              echo "APPLE_PASSWORD=$MACOS_NOTARY_PASSWORD"
+              echo "APPLE_TEAM_ID=$MACOS_TEAM_ID"
+            } >> "$GITHUB_ENV"
+          fi
 
       # The installed tree links libOpenMS, Arrow and onnxruntime out of the
       # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
@@ -586,21 +616,13 @@ jobs:
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
         shell: bash
-        # Tauri signs and notarizes with these and ignores them when empty.
-        # Spelled through steps.sign rather than straight from secrets so the
-        # Linux legs of this matrix never receive them.
+        # No `env:` block here on purpose -- the APPLE_* variables Tauri reads
+        # are exported by the certificate-import step above, which runs only
+        # when there is something to sign with. See the note there.
         #
         # Tauri staples the .app, NOT the .dmg -- it only signs the image. The
         # image is notarized and stapled in a later step; `stapler validate` on
         # a Tauri .dmg fails, which reads as a broken build and is not one.
-        env:
-          APPLE_CERTIFICATE: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_CERTIFICATE_BASE64 || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
-          APPLE_SIGNING_IDENTITY: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_SIGN_IDENTITY || '' }}
-          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_KEYCHAIN_PASSWORD || '' }}
-          APPLE_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_NOTARY_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_TEAM_ID || '' }}
         run: |
           set -euo pipefail
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)

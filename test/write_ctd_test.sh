@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Tool description export (-write_ctd / -write_cwl / -write_json) against the
-# real binary. DIALibraryGenerator is not in OpenMS's hard-coded ToolHandler
+# real binary. DIALibGen is not in OpenMS's hard-coded ToolHandler
 # registry, so TOPPBase's descriptor writers die with "Requested tool
-# 'DIALibraryGenerator' does not exist!" and exit 8 while -write_ini works;
-# src/DIALibraryGenerator.cpp registers the tool with ToolHandler for the
+# 'DIALibGen' does not exist!" and exit 8 while -write_ini works;
+# src/DIALibGen.cpp registers the tool with ToolHandler for the
 # duration of a descriptor run.
 #
 # What this has to prove, beyond "a file appeared":
@@ -42,17 +42,17 @@ NOSHIM="$TMP/no-such-ttd-dir"
 mkdir -p "$TMP/out"
 "$BIN" -write_ctd "$TMP/out" >"$TMP/ctd.log" 2>&1 \
   || fail "-write_ctd exited $? ($(head -1 "$TMP/ctd.log"))"
-[ -s "$TMP/out/DIALibraryGenerator.ctd" ] || fail "-write_ctd produced no DIALibraryGenerator.ctd"
+[ -s "$TMP/out/DIALibGen.ctd" ] || fail "-write_ctd produced no DIALibGen.ctd"
 
 # The INI is the reference parameter contract: it is what the GUI manifest is
 # built from and it has always worked, so the CTD must describe the same tool.
 "$BIN" -write_ini "$TMP/ref.ini" >/dev/null 2>&1 || fail "-write_ini failed"
 
-"$PY" - "$TMP/out/DIALibraryGenerator.ctd" "$TMP/ref.ini" <<'PYEOF' || exit 1
+"$PY" - "$TMP/out/DIALibGen.ctd" "$TMP/ref.ini" <<'PYEOF' || exit 1
 import sys, xml.etree.ElementTree as ET
 
 ctd_path, ini_path = sys.argv[1], sys.argv[2]
-TOOL = "DIALibraryGenerator"
+TOOL = "DIALibGen"
 
 def die(msg):
     print("FAIL: " + msg, file=sys.stderr)

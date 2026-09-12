@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Assert the decoy methods are actually different from each other.
 
-This exists because they were not. DIALibraryGenerator hand-rolled its own
+This exists because they were not. DIALibGen hand-rolled its own
 name->method chain instead of calling parseDecoyMethod, and every name it did
 not recognise fell through to Mutate -- so "reverse" and "shuffle" silently
 produced mutation decoys and three libraries came out byte-identical. Nothing

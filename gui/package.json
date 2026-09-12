@@ -1,8 +1,8 @@
 {
-  "name": "dialibrarygenerator-gui",
+  "name": "dialibgen-gui",
   "private": true,
-  "version": "0.9.1",
-  "description": "Cross-platform desktop GUI for DIALibraryGenerator (Tauri)",
+  "version": "0.10.0",
+  "description": "Cross-platform desktop GUI for DIALibGen (Tauri)",
   "author": "Oliver Kohlbacher and contributors",
   "license": "BSD-3-Clause",
   "type": "module",

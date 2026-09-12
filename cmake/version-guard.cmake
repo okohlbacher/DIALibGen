@@ -1,5 +1,5 @@
 # Every file that carries this project's version must agree with
-# project(DIALibraryGenerator VERSION ...) in CMakeLists.txt:
+# project(DIALibGen VERSION ...) in CMakeLists.txt:
 #
 #   gui/package.json               the frontend package
 #   gui/package-lock.json          npm's two copies of package.json's version
@@ -24,7 +24,7 @@
 # To bump: edit CMakeLists.txt, gui/package.json, gui/src-tauri/tauri.conf.json
 # and gui/src-tauri/Cargo.toml, then refresh the locks with
 # `npm install --package-lock-only` in gui/ and
-# `cargo update -p dialibrarygenerator-gui --offline` in gui/src-tauri/.
+# `cargo update -p dialibgen-gui --offline` in gui/src-tauri/.
 
 function(_dlg_check file want values)
   list(LENGTH values n)
@@ -42,7 +42,7 @@ endfunction()
 
 function(dialibgen_version_guard want root)
   if(NOT IS_DIRECTORY "${root}/gui")
-    message(STATUS "DIALibraryGenerator: no gui/ in this source tree -- version guard skipped")
+    message(STATUS "DIALibGen: no gui/ in this source tree -- version guard skipped")
     return()
   endif()
 
@@ -89,15 +89,15 @@ function(dialibgen_version_guard want root)
   foreach(f IN ITEMS gui/src-tauri/Cargo.toml gui/src-tauri/Cargo.lock)
     file(READ "${root}/${f}" text)
     string(REPLACE "\r" "" text "${text}")
-    if(NOT text MATCHES "name[ \t]*=[ \t]*\"dialibrarygenerator-gui\"[ \t]*\n+version[ \t]*=[ \t]*\"([^\"]*)\"")
+    if(NOT text MATCHES "name[ \t]*=[ \t]*\"dialibgen-gui\"[ \t]*\n+version[ \t]*=[ \t]*\"([^\"]*)\"")
       message(FATAL_ERROR
-        "version guard: no `name = \"dialibrarygenerator-gui\"` followed by a version in ${f}")
+        "version guard: no `name = \"dialibgen-gui\"` followed by a version in ${f}")
     endif()
     _dlg_check("${f}" "${want}" "${CMAKE_MATCH_1}")
   endforeach()
 
   list(JOIN files ", " files)
-  message(STATUS "DIALibraryGenerator: version ${want} agrees across CMakeLists.txt, ${files}")
+  message(STATUS "DIALibGen: version ${want} agrees across CMakeLists.txt, ${files}")
 endfunction()
 
 dialibgen_version_guard("${PROJECT_VERSION}" "${CMAKE_CURRENT_SOURCE_DIR}")

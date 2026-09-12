@@ -729,8 +729,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialibrarygenerator-gui"
-version = "0.9.1"
+name = "dialibgen-gui"
+version = "0.10.0"
 dependencies = [
  "serde",
  "serde_json",

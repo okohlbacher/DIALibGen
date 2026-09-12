@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] — 2026-09-12
+
+### Changed
+- **Renamed to DIALibGen**, everywhere: the tool, the CMake project and its
+  exported package, the installed binary, `share/DIALibGen`, the desktop app,
+  the release assets and both Homebrew casks. The code already said `DIALIBGEN`
+  wherever it had to be short — `DIALIBGEN_MODEL_DIR`, `DIALIBGEN_DATA_DIR`,
+  `DIALIBGEN_VERSION` — so the tool now agrees with itself, and the name is
+  9 characters to type rather than 21.
+
+  What this breaks, and what it does not:
+  - **Release assets are named `DIALibGen-*` from this version.** Earlier
+    releases keep their own names for ever; a cask pins a digest to a URL, so
+    nothing that already exists moves.
+  - **Both cask tokens changed**, and carry `old_tokens` so an existing install
+    upgrades rather than being orphaned.
+  - **The bundle identifier `de.openms.dialibrarygenerator` is unchanged**, on
+    purpose. Nobody sees it, and it is what macOS and the MSI use to decide
+    whether an install is an upgrade or a second copy — changing it would strand
+    every installed copy for no gain.
+  - **`find_package(DIALibraryGenerator)` becomes `find_package(DIALibGen)`**,
+    and the exported targets file is renamed with it.
+  - `DIALIBGEN_*` environment variables are untouched; they were already right.
+
 ## [0.9.1] — 2026-09-12
 
 ### Added

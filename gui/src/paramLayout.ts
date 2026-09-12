@@ -200,7 +200,7 @@ export function buildSpecs(defaults: Record<string, unknown>): ParamSpec[] {
       label: o?.label ?? name.replace(/_/g, ' '),
       // An undescribed key is a key this file has not caught up with. Say so
       // rather than render an empty hint: the blank looks like a finished field.
-      description: o?.description ?? 'Not yet described here — see `DIALibraryGenerator -write_config`.',
+      description: o?.description ?? 'Not yet described here — see `DIALibGen -write_config`.',
       group: o?.group ?? 'advanced',
       choices: o?.choices,
       min: o?.min,

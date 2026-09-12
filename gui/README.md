@@ -1,6 +1,6 @@
-# DIALibraryGenerator desktop GUI
+# DIALibGen desktop GUI
 
-A cross-platform desktop front-end for the DIALibraryGenerator CLI, built with
+A cross-platform desktop front-end for the DIALibGen CLI, built with
 [Tauri 2](https://tauri.app) (Rust backend + the OS's own webview) and React.
 The CLI stays the source of truth: the GUI shells out to it, streams its
 progress, and never reimplements a single parameter.
@@ -8,7 +8,7 @@ progress, and never reimplements a single parameter.
 ## The one idea worth knowing
 
 **The form is built from the tool's own `-write_config` output.** On startup the
-backend runs `DIALibraryGenerator -write_config`, which materialises every
+backend runs `DIALibGen -write_config`, which materialises every
 default, and hands the JSON to the frontend. `src/paramLayout.ts` is an
 *overlay* on that — prose, grouping, choice lists — and infers each widget's
 type from the tool's own default value.
@@ -58,14 +58,14 @@ npm run tauri dev
 ```
 
 `resolve_binary` looks for the CLI in this order: `DIALIBGEN_BIN`, the bundled
-`resources/dialibgen/bin/DIALibraryGenerator`, then `DIALibraryGenerator` on
+`resources/dialibgen/bin/DIALibGen`, then `DIALibGen` on
 `PATH`. For dev, point it at a local build:
 
 ```bash
-DIALIBGEN_BIN=/path/to/build/DIALibraryGenerator npm run tauri dev
+DIALIBGEN_BIN=/path/to/build/DIALibGen npm run tauri dev
 ```
 
-…or drop a symlink at `src-tauri/resources/dialibgen/bin/DIALibraryGenerator`.
+…or drop a symlink at `src-tauri/resources/dialibgen/bin/DIALibGen`.
 The directory skeleton is tracked (with `.gitkeep`) because `tauri-build`
 refuses to configure when a declared resource path is missing.
 

@@ -12,7 +12,7 @@ function(build name fixmod flag)
                           -out ${WORKDIR}/fcys_${name}.parquet
                   RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
   if(NOT rc EQUAL 0)
-    message(FATAL_ERROR "DIALibraryGenerator (${name}) failed: ${rc}\n${out}\n${err}")
+    message(FATAL_ERROR "DIALibGen (${name}) failed: ${rc}\n${out}\n${err}")
   endif()
 endfunction()
 

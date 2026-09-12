@@ -160,7 +160,7 @@ export default function App(): JSX.Element {
   return (
     <div className="app">
       <header>
-        <h1>DIALibraryGenerator</h1>
+        <h1>DIALibGen</h1>
         <span className={`badge ${info?.ok ? 'ok' : 'bad'}`}>
           {info ? info.detail : 'probing…'}
         </span>

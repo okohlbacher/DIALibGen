@@ -31,10 +31,10 @@ endforeach()
 
 # The tool must answer --help and round-trip its own INI. This catches
 # parameter-registration mistakes without needing any data.
-if(TARGET DIALibraryGenerator)
-  add_test(NAME DIALibraryGenerator_help COMMAND DIALibraryGenerator --help)
-  add_test(NAME DIALibraryGenerator_write_ini
-           COMMAND DIALibraryGenerator -write_ini "${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGenerator.ini")
+if(TARGET DIALibGen)
+  add_test(NAME DIALibGen_help COMMAND DIALibGen --help)
+  add_test(NAME DIALibGen_write_ini
+           COMMAND DIALibGen -write_ini "${CMAKE_CURRENT_BINARY_DIR}/DIALibGen.ini")
 
   # Everything that is right for a tool shipped INSIDE OpenMS and wrong for one
   # that merely links it: own version, update check off, bare-environment start,
@@ -42,7 +42,7 @@ if(TARGET DIALibraryGenerator)
   add_test(NAME standalone_tool_contract
            COMMAND ${CMAKE_COMMAND} -E env bash
                    "${CMAKE_CURRENT_SOURCE_DIR}/standalone_test.sh"
-                   $<TARGET_FILE:DIALibraryGenerator> "${PROJECT_VERSION}"
+                   $<TARGET_FILE:DIALibGen> "${PROJECT_VERSION}"
                    "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta")
   # On Windows the test needs PATH_KEEP naming the runtime library directories
   # (there is no RPATH there); without it it skips rather than failing.
@@ -53,7 +53,7 @@ if(TARGET DIALibraryGenerator)
   add_test(NAME write_ctd
            COMMAND ${CMAKE_COMMAND} -E env bash
                    "${CMAKE_CURRENT_SOURCE_DIR}/write_ctd_test.sh"
-                   $<TARGET_FILE:DIALibraryGenerator>)
+                   $<TARGET_FILE:DIALibGen>)
   set_tests_properties(write_ctd PROPERTIES SKIP_RETURN_CODE 77)
 
   # -write_config must emit the EFFECTIVE config: every default materialised, so
@@ -61,7 +61,7 @@ if(TARGET DIALibraryGenerator)
   # It takes no -in and no -out: seeing the defaults is useful on its own, and
   # requiring an input file nobody reads to get them was a needless refusal.
   add_test(NAME config_write_effective
-           COMMAND DIALibraryGenerator
+           COMMAND DIALibGen
                    -write_config "${CMAKE_CURRENT_BINARY_DIR}/effective.json")
   set_tests_properties(config_write_effective PROPERTIES
     PASS_REGULAR_EXPRESSION "effective config")
@@ -70,7 +70,7 @@ if(TARGET DIALibraryGenerator)
   # default, and a library built from a typo looks exactly like one built right.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/typo.json" "{\"missed_cleavage\": 2}\n")
   add_test(NAME config_rejects_unknown_key
-           COMMAND DIALibraryGenerator -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+           COMMAND DIALibGen -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
                    -config "${CMAKE_CURRENT_BINARY_DIR}/typo.json"
                    -out "${CMAKE_CURRENT_BINARY_DIR}/typo.tsv")
   set_tests_properties(config_rejects_unknown_key PROPERTIES WILL_FAIL TRUE)
@@ -224,10 +224,10 @@ endif()
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.
-if(TARGET DIALibraryGenerator AND ODIA_PYTHON)
+if(TARGET DIALibGen AND ODIA_PYTHON)
   add_test(NAME e2e
            COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/e2e_test.py"
-                   $<TARGET_FILE:DIALibraryGenerator>
+                   $<TARGET_FILE:DIALibGen>
                    "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
                    "${ODIA_MODEL_DIR}"
                    "${CMAKE_CURRENT_BINARY_DIR}/e2e")
@@ -239,10 +239,10 @@ endif()
 # of constants is exactly the kind of thing that drifts unnoticed. This also
 # guards the self-gating property that lets it default to on: an alkylated
 # library must be bit-identical whether the flag is set or not.
-if(TARGET DIALibraryGenerator AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
+if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
   add_test(NAME free_cysteine_correction
            COMMAND ${CMAKE_COMMAND}
-                   -DTOOL=$<TARGET_FILE:DIALibraryGenerator>
+                   -DTOOL=$<TARGET_FILE:DIALibGen>
                    -DPYTHON=${ODIA_PYTHON}
                    -DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_free_cysteine.py
                    -DFASTA=${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta
@@ -257,7 +257,7 @@ if(TARGET DIALibraryGenerator AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}"
   # Mutate, so three of the four produced identical libraries in silence.
   add_test(NAME decoy_methods_distinct
            COMMAND ${CMAKE_COMMAND}
-                   -DGEN=$<TARGET_FILE:DIALibraryGenerator>
+                   -DGEN=$<TARGET_FILE:DIALibGen>
                    -DPYTHON=${ODIA_PYTHON}
                    -DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_decoy_methods.py
                    -DFASTA=${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta

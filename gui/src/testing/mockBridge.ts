@@ -61,9 +61,9 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
   const api: DialibgenApi = {
     probe: async () =>
       opts.probeFails
-        ? { bin: 'DIALibraryGenerator', source: 'path', ok: false, detail: 'cannot execute: not found' }
-        : { bin: '/opt/bin/DIALibraryGenerator', source: 'bundled', ok: true, version: '0.2.0',
-            detail: 'DIALibraryGenerator 0.2.0 (bundled)' },
+        ? { bin: 'DIALibGen', source: 'path', ok: false, detail: 'cannot execute: not found' }
+        : { bin: '/opt/bin/DIALibGen', source: 'bundled', ok: true, version: '0.2.0',
+            detail: 'DIALibGen 0.2.0 (bundled)' },
     models: async () => opts.models ?? { dir: '/models', missing: [] },
     defaultConfig: async () => {
       if (opts.configError) throw new Error(opts.configError)

@@ -204,13 +204,13 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          BIN="$PWD/stage/bin/DIALibraryGenerator"
+          BIN="$PWD/stage/bin/DIALibGen"
           test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
 
           # The data tables must be INSIDE the install, at the path the tool
           # searches. Before this they resolved to an absolute path in the
           # source tree, so an installed or relocated binary found nothing.
-          test -s "$PWD/stage/share/DIALibraryGenerator/irt_standards.tsv" \
+          test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
           export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
@@ -232,7 +232,7 @@ jobs:
           export DIALIBGEN_MODEL_DIR="$PWD/models"
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
-          BIN="$PWD/stage/bin/DIALibraryGenerator"
+          BIN="$PWD/stage/bin/DIALibGen"
 
           "$BIN" -in example/proteins.fasta -out out.parquet
           "$BIN" -in example/proteins.fasta -out out.tsv
@@ -479,7 +479,7 @@ jobs:
                 [ -f "stage/lib/$base" ] || cp "$src" "stage/lib/$base"
               done
             }
-            copy_closure stage/bin/DIALibraryGenerator
+            copy_closure stage/bin/DIALibGen
             prev=0
             for _ in 1 2 3 4 5 6 7 8; do
               n=$(ls stage/lib | wc -l)
@@ -500,7 +500,7 @@ jobs:
                 install_name_tool -change "$dep" "@executable_path/../lib/$base" "$1"
               done
             }
-            retarget stage/bin/DIALibraryGenerator
+            retarget stage/bin/DIALibGen
             for dy in stage/lib/*.dylib; do
               install_name_tool -id "@executable_path/../lib/$(basename "$dy")" "$dy"
               retarget "$dy"
@@ -521,8 +521,8 @@ jobs:
               sign() { codesign --force --sign - "$@"; }
             fi
             for dy in stage/lib/*.dylib; do sign "$dy"; done
-            sign stage/bin/DIALibraryGenerator
-            codesign --verify --strict --verbose=2 stage/bin/DIALibraryGenerator
+            sign stage/bin/DIALibGen
+            codesign --verify --strict --verbose=2 stage/bin/DIALibGen
           else
             # patchelf plus a manual closure: ldd names everything the loader
             # would open, minus the system libraries a distro certainly has.
@@ -546,7 +546,7 @@ jobs:
                 cp -n "$so" stage/lib/ 2>/dev/null || true
               done
             }
-            copy_closure stage/bin/DIALibraryGenerator
+            copy_closure stage/bin/DIALibGen
             # Iterate to a fixed point rather than a guessed depth: each round
             # can pull in libraries whose own dependencies are not yet present.
             prev=0
@@ -556,19 +556,19 @@ jobs:
               prev=$n
               for so in stage/lib/*.so*; do copy_closure "$so"; done
             done
-            patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibraryGenerator
+            patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibGen
             for so in stage/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" || true; done
           fi
 
           # The load-bearing check, and the reason this step is not decorative:
           # NOTHING from the build environment on the path. A bundle verified
           # with the conda prefix still visible proves only that conda is there.
-          env -i HOME="$HOME" "$PWD/stage/bin/DIALibraryGenerator" --help > portable.txt 2>&1 \
+          env -i HOME="$HOME" "$PWD/stage/bin/DIALibGen" --help > portable.txt 2>&1 \
             || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
           want=$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           grep -q "^Version: $want" portable.txt \
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
-          test -s stage/share/DIALibraryGenerator/irt_standards.tsv
+          test -s stage/share/DIALibGen/irt_standards.tsv
           # unimod.xml, not just the directory: that one file is the whole of
           # File::isOpenMSDataPath_, so this is the runtime test spelled here.
           test -s stage/share/OpenMS/CHEMISTRY/unimod.xml \
@@ -579,7 +579,7 @@ jobs:
           # unstartable one and nothing more. Generate a real library from the
           # bare tree: that is the claim the archive actually makes.
           env -i HOME="$HOME" DIALIBGEN_MODEL_DIR="$PWD/models" \
-              "$PWD/stage/bin/DIALibraryGenerator" \
+              "$PWD/stage/bin/DIALibGen" \
               -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
             || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }
           [ "$(wc -l < portable.tsv)" -gt 1 ] \
@@ -615,7 +615,7 @@ jobs:
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
-        run: tar -C stage -czf "DIALibraryGenerator-${{ matrix.name }}.tar.gz" .
+        run: tar -C stage -czf "DIALibGen-${{ matrix.name }}.tar.gz" .
 
       # The desktop app, with that same portable tree as its bundled resources.
       # Staged BEFORE the Tauri build, because tauri copies resources/ during
@@ -661,7 +661,7 @@ jobs:
           rm -rf gui/src-tauri/resources/dialibgen
           mkdir -p gui/src-tauri/resources/dialibgen
           cp -R stage/. gui/src-tauri/resources/dialibgen/
-          test -x gui/src-tauri/resources/dialibgen/bin/DIALibraryGenerator \
+          test -x gui/src-tauri/resources/dialibgen/bin/DIALibGen \
             || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
           cd gui
           npm ci
@@ -677,14 +677,14 @@ jobs:
           npm run tauri build || {
             echo "::warning::tauri build failed -- retrying once, verbosely"
             if [ "$RUNNER_OS" = "macOS" ]; then
-              hdiutil info | awk '/\/Volumes\/DIALibraryGenerator/{print $1}' \
+              hdiutil info | awk '/\/Volumes\/DIALibGen/{print $1}' \
                 | xargs -r -n1 hdiutil detach -force 2>/dev/null || true
             fi
             npm run tauri build -- --verbose
           }
 
       # Renamed to FIXED names. Tauri spells them with its own version and
-      # architecture (DIALibraryGenerator_0.2.0_aarch64.dmg), which makes every
+      # architecture (DIALibGen_0.2.0_aarch64.dmg), which makes every
       # URL that points at them -- the README's, and the Homebrew cask's --
       # depend on Tauri's naming rather than on ours. A cask pins a digest to a
       # URL, so a name that moves is a cask that 404s.
@@ -697,7 +697,7 @@ jobs:
           n=0
           while IFS= read -r f; do
             ext="${f##*.}"
-            cp "$f" "dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.$ext"
+            cp "$f" "dist-bundles/DIALibGen-gui-${{ matrix.name }}.$ext"
             n=$((n + 1))
           done < <(find gui/src-tauri/target/release/bundle \
                      \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -type f)
@@ -721,7 +721,7 @@ jobs:
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
-          DMG="dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.dmg"
+          DMG="dist-bundles/DIALibGen-gui-${{ matrix.name }}.dmg"
           test -f "$DMG" || { echo "::error::no $DMG to notarize"; exit 1; }
           # --force because Tauri already signed it: the rename this repo does
           # afterwards does not invalidate that, but re-signing costs nothing
@@ -739,10 +739,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DMG="dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.dmg"
+          DMG="dist-bundles/DIALibGen-gui-${{ matrix.name }}.dmg"
           spctl --assess --type open --context context:primary-signature -vv "$DMG"
           xcrun stapler validate "$DMG"
-          codesign --verify --strict --verbose=2 stage/bin/DIALibraryGenerator
+          codesign --verify --strict --verbose=2 stage/bin/DIALibGen
 
           # The .app's OWN ticket, which is a separate claim from the image's:
           # a user drags the app OUT of the image, and the image's ticket does
@@ -770,7 +770,7 @@ jobs:
         with:
           name: bundles-${{ matrix.name }}
           path: |
-            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            DIALibGen-${{ matrix.name }}.tar.gz
             dist-bundles/*
 
       - name: Attach to the release
@@ -778,7 +778,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            DIALibraryGenerator-${{ matrix.name }}.tar.gz
+            DIALibGen-${{ matrix.name }}.tar.gz
             dist-bundles/*
           fail_on_unmatched_files: true
 
@@ -816,17 +816,17 @@ jobs:
           echo "$have"
           missing=0
           for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
-            printf '%s' "$have" | grep -qx "DIALibraryGenerator-$n.tar.gz" \
+            printf '%s' "$have" | grep -qx "DIALibGen-$n.tar.gz" \
               || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
           done
           # Named exactly, not by extension: the Homebrew cask and the README
           # both point at these spellings, so "some dmg exists" is not the
           # property that matters.
           for n in macos-x64 macos-arm64; do
-            printf '%s' "$have" | grep -qx "DIALibraryGenerator-gui-$n.dmg" \
+            printf '%s' "$have" | grep -qx "DIALibGen-gui-$n.dmg" \
               || { echo "::error::no desktop .dmg for $n on $tag"; missing=1; }
           done
-          printf '%s' "$have" | grep -q '^DIALibraryGenerator-gui-linux-.*\.\(AppImage\|deb\)$' \
+          printf '%s' "$have" | grep -q '^DIALibGen-gui-linux-.*\.\(AppImage\|deb\)$' \
             || { echo "::error::no Linux desktop bundle on $tag"; missing=1; }
           exit $missing
 

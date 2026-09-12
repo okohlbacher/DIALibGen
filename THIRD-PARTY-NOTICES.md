@@ -1,6 +1,6 @@
 # Third-party notices
 
-DIALibraryGenerator is BSD-3-Clause (see `LICENSE`). It builds against, and in
+DIALibGen is BSD-3-Clause (see `LICENSE`). It builds against, and in
 two places derives content from, the following third-party work.
 
 ## Derived content in this repository

@@ -14,7 +14,7 @@ async function renderApp(opts: Parameters<typeof installMockBridge>[0] = {}): Pr
   await act(async () => {
     render(<App />)
   })
-  await waitFor(() => expect(screen.getByText(/DIALibraryGenerator 0\.2\.0|cannot execute/)).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(/DIALibGen 0\.2\.0|cannot execute/)).toBeTruthy())
 }
 
 describe('withExtension', () => {

@@ -1,4 +1,4 @@
-// A minimal configuration. `DIALibraryGenerator -write_config out.json` emits
+// A minimal configuration. `DIALibGen -write_config out.json` emits
 // the EFFECTIVE config -- every default materialised -- which is the
 // authoritative reference. Comments are permitted here; the parser ignores them.
 {

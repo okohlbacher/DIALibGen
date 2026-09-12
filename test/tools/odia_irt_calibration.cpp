@@ -1,4 +1,4 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Dumps the raw-to-iRT line ODIA fits, and each standard's calibrated value,

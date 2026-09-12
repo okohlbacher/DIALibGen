@@ -17,20 +17,20 @@ if(NOT TARGET onnxruntime)
   find_library(ONNXRuntime_LIBRARY NAMES onnxruntime onnxruntime_conda
                PATH_SUFFIXES lib)
   if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
-    set(DIALibraryGenerator_FOUND FALSE)
-    set(DIALibraryGenerator_NOT_FOUND_MESSAGE "ONNX Runtime not found")
+    set(DIALibGen_FOUND FALSE)
+    set(DIALibGen_NOT_FOUND_MESSAGE "ONNX Runtime not found")
     return()
   endif()
 endif()
 
-include("${CMAKE_CURRENT_LIST_DIR}/DIALibraryGeneratorTargets.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/DIALibGenTargets.cmake")
 
 # The exported target carries no ONNX Runtime include path of its own (see the
 # BUILD_INTERFACE note in the top-level CMakeLists), so supply the one found
 # above to whoever links it.
-if(TARGET DIALibraryGenerator::odia_library AND ONNXRuntime_INCLUDE_DIR)
-  set_property(TARGET DIALibraryGenerator::odia_library APPEND PROPERTY
+if(TARGET DIALibGen::odia_library AND ONNXRuntime_INCLUDE_DIR)
+  set_property(TARGET DIALibGen::odia_library APPEND PROPERTY
                INTERFACE_INCLUDE_DIRECTORIES "${ONNXRuntime_INCLUDE_DIR}")
 endif()
 
-check_required_components(DIALibraryGenerator)
+check_required_components(DIALibGen)

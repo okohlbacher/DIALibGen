@@ -1,4 +1,4 @@
-// DIALibraryGenerator CLI integration: locate the binary, ask it for its own
+// DIALibGen CLI integration: locate the binary, ask it for its own
 // effective config, run it, stream its stderr as events, and cancel by killing
 // the child.
 //
@@ -23,9 +23,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 fn exe_name() -> &'static str {
     if cfg!(windows) {
-        "DIALibraryGenerator.exe"
+        "DIALibGen.exe"
     } else {
-        "DIALibraryGenerator"
+        "DIALibGen"
     }
 }
 
@@ -101,7 +101,7 @@ pub struct RunParams {
 pub struct Resolved {
     pub bin: PathBuf,
     pub data: Option<PathBuf>,
-    /// The bundled share/DIALibraryGenerator, if present.
+    /// The bundled share/DIALibGen, if present.
     pub share: Option<PathBuf>,
     pub source: &'static str,
 }
@@ -127,7 +127,7 @@ pub fn resolve_binary(app: &AppHandle) -> Resolved {
         if bin.exists() {
             let data = root.join("share").join("OpenMS");
             let data = if data.exists() { Some(data) } else { None };
-            let share = root.join("share").join("DIALibraryGenerator");
+            let share = root.join("share").join("DIALibGen");
             let share = if share.exists() { Some(share) } else { None };
             return Resolved { bin, data, share, source: "bundled" };
         }
@@ -178,7 +178,7 @@ pub fn probe(app: AppHandle) -> BinaryInfo {
             );
             let version = parse_version(&text);
             let detail = match &version {
-                Some(v) => format!("DIALibraryGenerator {v} ({})", r.source),
+                Some(v) => format!("DIALibGen {v} ({})", r.source),
                 None => format!("runs, version unknown ({})", r.source),
             };
             BinaryInfo { bin: bin_s, source: r.source.into(), ok: true, version, detail }
@@ -211,7 +211,7 @@ pub fn models(app: AppHandle, dir: Option<String>) -> ModelStatus {
             candidates.push(s.join("models"));
         }
         if let Some(parent) = r.bin.parent() {
-            candidates.push(parent.join("..").join("share").join("DIALibraryGenerator").join("models"));
+            candidates.push(parent.join("..").join("share").join("DIALibGen").join("models"));
         }
         if let Some(d) = &r.data {
             candidates.push(d.join("models"));
@@ -549,7 +549,7 @@ mod tests {
     #[test]
     fn version_parses_from_help_banner() {
         assert_eq!(
-            parse_version("DIALibraryGenerator -- blah\nVersion: 0.2.0 Sep 11 2026"),
+            parse_version("DIALibGen -- blah\nVersion: 0.2.0 Sep 11 2026"),
             Some("0.2.0".to_string())
         );
         assert_eq!(parse_version("no banner here"), None);

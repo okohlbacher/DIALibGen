@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DIALibraryGenerator",
-  "version": "0.9.1",
+  "productName": "DIALibGen",
+  "version": "0.10.0",
   "identifier": "de.openms.dialibrarygenerator",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "DIALibraryGenerator",
+        "title": "DIALibGen",
         "width": 1180,
         "height": 820
       }

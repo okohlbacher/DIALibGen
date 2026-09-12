@@ -1,4 +1,4 @@
-# DIALibraryGenerator
+# DIALibGen
 
 Build an in-silico DIA spectral library from a FASTA: enzymatic digest →
 precursor enumeration → AlphaPeptDeep predictions of retention time, MS2
@@ -66,22 +66,22 @@ table as a statement of where this tool sits, not as a benchmark.
 Release builds for macOS, Windows and Linux — a CLI archive and a desktop
 installer per platform — are attached to each
 [release](https://github.com/okohlbacher/DIALibraryGenerator/releases). The CLI
-archives are **self-contained**: unpack and run `bin/DIALibraryGenerator`. The
+archives are **self-contained**: unpack and run `bin/DIALibGen`. The
 libraries it needs and OpenMS's own data travel with it, so there is nothing to
 install and no OpenMS to set up.
 
 ```bash
-curl -fsSLO https://github.com/okohlbacher/DIALibraryGenerator/releases/latest/download/DIALibraryGenerator-macos-arm64.tar.gz
-tar xzf DIALibraryGenerator-macos-arm64.tar.gz
-./bin/DIALibraryGenerator --help
+curl -fsSLO https://github.com/okohlbacher/DIALibraryGenerator/releases/latest/download/DIALibGen-macos-arm64.tar.gz
+tar xzf DIALibGen-macos-arm64.tar.gz
+./bin/DIALibGen --help
 ```
 
 There is also a [Homebrew tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
 with a cask for the app and a cask for the CLI:
 
 ```bash
-brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator       # desktop app
-brew install --cask okohlbacher/dialibrarygenerator/dialibrarygenerator-cli   # CLI on PATH
+brew install --cask okohlbacher/dialibrarygenerator/dialibgen       # desktop app
+brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli   # CLI on PATH
 ```
 
 Two casks because the app already carries its own copy of the CLI, so one cask
@@ -135,7 +135,7 @@ those tests are not registered at all, so `ctest` reports a smaller suite that
 passes — point `-DODIA_MODEL_DIR=` at a directory holding all three to run them.
 
 The install is **relocatable**: the binary finds its data tables relative to its
-own path (`<prefix>/share/DIALibraryGenerator`), so it works from a package, a
+own path (`<prefix>/share/DIALibGen`), so it works from a package, a
 copied tree or a macOS `.app` and not only from the tree it was built in.
 
 The sources compile at C++20, but OpenMS's imported CMake target declares
@@ -194,15 +194,15 @@ the ONNX session constructor with an empty path.
 ## Usage
 
 ```bash
-DIALibraryGenerator -write_config effective.json   # see every default, materialised
-DIALibraryGenerator -in proteins.fasta -config my.json -out library.parquet
+DIALibGen -write_config effective.json   # see every default, materialised
+DIALibGen -in proteins.fasta -config my.json -out library.parquet
 ```
 
 It is a TOPP tool, so it also speaks the workflow dialect:
 
 ```bash
-DIALibraryGenerator -write_ini  DIALibraryGenerator.ini   # OpenMS INI
-DIALibraryGenerator -write_ctd  ./ctd/                    # KNIME/Galaxy descriptor
+DIALibGen -write_ini  DIALibGen.ini   # OpenMS INI
+DIALibGen -write_ctd  ./ctd/                    # KNIME/Galaxy descriptor
 ```
 
 `-threads` defaults to **0 = all available cores**. `--help` shows OpenMS's own

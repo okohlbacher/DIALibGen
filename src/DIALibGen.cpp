@@ -1,7 +1,7 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
-/// DIALibraryGenerator: FASTA + JSON config -> in-silico DIA library.
+/// DIALibGen: FASTA + JSON config -> in-silico DIA library.
 ///
 /// A library is a CROSS-RUN artefact built once and reused; a search is per-run.
 /// They were welded together behind OpenDIAlyzer's -out_lib, which is why the
@@ -81,7 +81,7 @@ namespace
       out.emplace_back(env);
     }
     const fs::path exe = executableDir();
-    out.push_back(exe / ".." / "share" / "DIALibraryGenerator");  // installed, and the bundles
+    out.push_back(exe / ".." / "share" / "DIALibGen");  // installed, and the bundles
     out.push_back(exe / ".." / "data");                           // an uninstalled build tree
 #ifdef ODIA_DATA_DIR
     out.emplace_back(ODIA_DATA_DIR);
@@ -116,7 +116,7 @@ namespace
       out.emplace_back(env);
     }
     const fs::path exe = executableDir();
-    out.push_back(exe / ".." / "share" / "DIALibraryGenerator" / "models");
+    out.push_back(exe / ".." / "share" / "DIALibGen" / "models");
     // Where OpenMS puts them when built WITH_ONNX=ON.
     try
     {
@@ -182,13 +182,13 @@ namespace
   }
 }
 
-class DIALibraryGenerator final : public OpenMS::TOPPBase
+class DIALibGen final : public OpenMS::TOPPBase
 {
 public:
   // official = false: this tool lives outside the OpenMS tree and so is not in
   // ToolHandler's list. Passing true makes the TOPPBase constructor throw.
-  DIALibraryGenerator()
-    : TOPPBase("DIALibraryGenerator",
+  DIALibGen()
+    : TOPPBase("DIALibGen",
                "Build an in-silico DIA spectral library from a FASTA.",
                false,
                {{"Zeng WF, Zhou XX, Willems S, Ammar C, Wahle M, Bludau I, Voytik E, "
@@ -201,7 +201,7 @@ public:
     // shipped inside OpenMS that is right; for this one it means --help
     // announces the version of whatever OpenMS tree it happened to be built
     // against, and a user cannot report a bug against a version that does not
-    // exist. DIALIBGEN_VERSION comes from project(DIALibraryGenerator VERSION).
+    // exist. DIALIBGEN_VERSION comes from project(DIALibGen VERSION).
 #ifdef DIALIBGEN_VERSION
     version_ = DIALIBGEN_VERSION;
     verboseVersion_ = OpenMS::String(DIALIBGEN_VERSION) + " (OpenMS " +
@@ -591,7 +591,7 @@ protected:
 //     StringList type_list = ToolHandler::getTypes(tool_name_);
 // getTypes() looks the name up in ToolHandler's hard-coded registry of official
 // TOPP tools and THROWS on a miss, so any tool built outside the OpenMS tree
-// dies with "Requested tool 'DIALibraryGenerator' does not exist!" and exit 8.
+// dies with "Requested tool 'DIALibGen' does not exist!" and exit 8.
 // `official=false` does not help: inside writeToolDescription_ that flag guards
 // only the CATEGORY lookup, whose getCategory() is the non-throwing sibling.
 // -write_ini is unaffected because its branch never calls getTypes at all,
@@ -664,11 +664,11 @@ namespace
 
       static const char kTtd[] = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n"
                                  "<ttd><tool status=\"internal\">"
-                                 "<name>DIALibraryGenerator</name>"
+                                 "<name>DIALibGen</name>"
                                  "<category/><type/></tool></ttd>\n";
       constexpr std::size_t kTtdLen = sizeof(kTtd) - 1;
-      const fs::path scratch = dir / "DIALibraryGenerator.ttd.part";
-      const fs::path target = dir / "DIALibraryGenerator.ttd";
+      const fs::path scratch = dir / "DIALibGen.ttd.part";
+      const fs::path target = dir / "DIALibGen.ttd";
       {
         std::ofstream os(scratch, std::ios::binary | std::ios::trunc);
         os.write(kTtd, static_cast<std::streamsize>(kTtdLen));
@@ -766,7 +766,7 @@ int main(int argc, const char** argv)
   // one.
   if (want_descriptor && descriptor == DescriptorRequest::CwlOrJson)
   {
-    std::cerr << "DIALibraryGenerator: -write_cwl and -write_json need an OpenMS built with\n"
+    std::cerr << "DIALibGen: -write_cwl and -write_json need an OpenMS built with\n"
                  "                     ENABLE_TDL=ON; the OpenMS this binary links has it off.\n"
                  "                     Use -write_ctd instead." << std::endl;
     return OpenMS::TOPPBase::UNKNOWN_ERROR;
@@ -776,7 +776,7 @@ int main(int argc, const char** argv)
   std::unique_ptr<ToolHandlerRegistration> ttd;
   if (want_descriptor) { ttd = std::make_unique<ToolHandlerRegistration>(); }
 
-  DIALibraryGenerator tool;
+  DIALibGen tool;
   OpenMS::TOPPBase::ExitCodes rc;
   if (ttd)
   {
@@ -787,7 +787,7 @@ int main(int argc, const char** argv)
     try { rc = tool.main(static_cast<int>(args.size()), args.data()); }
     catch (const std::exception& e)
     {
-      std::cerr << "DIALibraryGenerator: tool description export failed: " << e.what() << std::endl;
+      std::cerr << "DIALibGen: tool description export failed: " << e.what() << std::endl;
       rc = OpenMS::TOPPBase::UNKNOWN_ERROR;
     }
   }
@@ -805,7 +805,7 @@ int main(int argc, const char** argv)
   // CI looks for "Version:" only.
   if (help && rc == OpenMS::TOPPBase::EXECUTION_OK)
   {
-    std::cerr << "Note: in DIALibraryGenerator, -threads defaults to 0 = all available cores;\n"
+    std::cerr << "Note: in DIALibGen, -threads defaults to 0 = all available cores;\n"
                  "      the -threads line above is OpenMS's and shows OpenMS's own default.\n"
                  "      With -ini, the file's threads value applies (1 if it has none) unless\n"
                  "      -threads is also given on the command line.\n" << std::endl;

@@ -3,9 +3,9 @@
 #
 # Installed as `dialibgen-fetch-models`; in a checkout it is scripts/fetch-models.sh.
 #
-#   dialibgen-fetch-models                  # install beside the DIALibraryGenerator on PATH
+#   dialibgen-fetch-models                  # install beside the DIALibGen on PATH
 #   dialibgen-fetch-models --dir DIR        # install into DIR instead
-#   dialibgen-fetch-models --prefix DIR     # install into DIR/share/DIALibraryGenerator/models
+#   dialibgen-fetch-models --prefix DIR     # install into DIR/share/DIALibGen/models
 #   dialibgen-fetch-models --check          # verify what is already installed, download nothing
 #
 # The models are NOT redistributed with this project -- see THIRD-PARTY-NOTICES.md
@@ -51,11 +51,11 @@ else
 fi
 
 # Where the tool itself looks, in its own order: $DIALIBGEN_MODEL_DIR first, then
-# <the binary>/../share/DIALibraryGenerator/models. Installing into the second
+# <the binary>/../share/DIALibGen/models. Installing into the second
 # means nothing has to be set in the environment afterwards.
-# The tool resolves share/DIALibraryGenerator RELATIVE TO ITS REAL EXECUTABLE, so
+# The tool resolves share/DIALibGen RELATIVE TO ITS REAL EXECUTABLE, so
 # the prefix has to come from the real path, not from the name that was invoked.
-# A Homebrew cask makes this bite: $(brew --prefix)/bin/DIALibraryGenerator is a
+# A Homebrew cask makes this bite: $(brew --prefix)/bin/DIALibGen is a
 # symlink to a wrapper inside the Caskroom, and taking dirname without resolving
 # it gives /opt/homebrew/share -- which is writable, so nothing would fail. The
 # models would land there, the tool would look in the Caskroom, and this script
@@ -85,16 +85,16 @@ prefix_of() { cd -P "$(dirname "$(resolve_link "$1")")/.." && pwd; }
 BIN=""
 if [ -z "$DIR" ]; then
   if [ -n "$PREFIX" ]; then
-    DIR="$PREFIX/share/DIALibraryGenerator/models"
-    BIN="$PREFIX/bin/DIALibraryGenerator"
-  elif BIN=$(command -v DIALibraryGenerator 2> /dev/null); then
-    DIR="$(prefix_of "$BIN")/share/DIALibraryGenerator/models"
+    DIR="$PREFIX/share/DIALibGen/models"
+    BIN="$PREFIX/bin/DIALibGen"
+  elif BIN=$(command -v DIALibGen 2> /dev/null); then
+    DIR="$(prefix_of "$BIN")/share/DIALibGen/models"
   else
-    echo "no DIALibraryGenerator on PATH -- pass --dir or --prefix" >&2
+    echo "no DIALibGen on PATH -- pass --dir or --prefix" >&2
     exit 2
   fi
 else
-  BIN=$(command -v DIALibraryGenerator 2> /dev/null || true)
+  BIN=$(command -v DIALibGen 2> /dev/null || true)
 fi
 
 # A Homebrew cask stages into the Caskroom, which brew owns and an upgrade
@@ -169,7 +169,7 @@ echo
 # to be one the binary searches.
 found=0
 if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-  want="$(prefix_of "$BIN")/share/DIALibraryGenerator/models"
+  want="$(prefix_of "$BIN")/share/DIALibGen/models"
   [ "$DIR" = "$want" ] && found=1
 fi
 if [ "$found" = 1 ]; then

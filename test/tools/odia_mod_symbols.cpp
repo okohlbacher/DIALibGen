@@ -1,4 +1,4 @@
-// Copyright (c) 2026, Oliver Kohlbacher and the DIALibraryGenerator authors.
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Walks every modification ModificationsDB knows and reports which element

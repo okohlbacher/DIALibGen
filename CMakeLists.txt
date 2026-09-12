@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
-project(DIALibraryGenerator
-  VERSION 0.9.1
+project(DIALibGen
+  VERSION 0.10.0
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibraryGenerator"
   LANGUAGES CXX)
@@ -42,7 +42,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 else()
   set(DIALIBGEN_IS_TOP_LEVEL OFF)
 endif()
-option(DIALIBGEN_BUILD_TOOL  "Build the DIALibraryGenerator executable" ${DIALIBGEN_IS_TOP_LEVEL})
+option(DIALIBGEN_BUILD_TOOL  "Build the DIALibGen executable" ${DIALIBGEN_IS_TOP_LEVEL})
 option(DIALIBGEN_BUILD_TESTS "Build the test suite" ${DIALIBGEN_IS_TOP_LEVEL})
 option(DIALIBGEN_INSTALL     "Generate install rules" ${DIALIBGEN_IS_TOP_LEVEL})
 
@@ -179,7 +179,7 @@ add_library(odia_library STATIC
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
 )
-add_library(DIALibraryGenerator::odia_library ALIAS odia_library)
+add_library(DIALibGen::odia_library ALIAS odia_library)
 
 target_include_directories(odia_library PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -208,7 +208,7 @@ endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # The shipped data tables (irt_standards.tsv). The tool looks for them relative
-# to its own executable first -- $DIALIBGEN_DATA_DIR, then ../share/DIALibraryGenerator,
+# to its own executable first -- $DIALIBGEN_DATA_DIR, then ../share/DIALibGen,
 # then ../data -- so an installed, packaged or relocated binary finds them. This
 # absolute source path is the LAST candidate and exists only so an uninstalled
 # build tree works; it is deliberately not the only answer any more.
@@ -218,33 +218,33 @@ set(DIALIBGEN_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data")
 # The TOPP-compatible tool.
 # ---------------------------------------------------------------------------
 if(DIALIBGEN_BUILD_TOOL)
-  add_executable(DIALibraryGenerator src/DIALibraryGenerator.cpp)
-  target_link_libraries(DIALibraryGenerator PRIVATE
+  add_executable(DIALibGen src/DIALibGen.cpp)
+  target_link_libraries(DIALibGen PRIVATE
     odia_library nlohmann_json::nlohmann_json)
   # PRIVATE, and therefore per-target: a second tool in this repo would need
   # its own copy of both defines, and grep -L would find the one that missed.
-  target_compile_definitions(DIALibraryGenerator PRIVATE
+  target_compile_definitions(DIALibGen PRIVATE
     ODIA_DATA_DIR="${DIALIBGEN_DATA_DIR}"
     # Without this the tool announces the version of whatever OpenMS tree it was
     # built against -- a version the user cannot file a bug against.
     DIALIBGEN_VERSION="${PROJECT_VERSION}")
   # An installed layout the tool can actually resolve from argv[0]:
-  #   <prefix>/bin/DIALibraryGenerator
-  #   <prefix>/share/DIALibraryGenerator/irt_standards.tsv
-  set_target_properties(DIALibraryGenerator PROPERTIES
+  #   <prefix>/bin/DIALibGen
+  #   <prefix>/share/DIALibGen/irt_standards.tsv
+  set_target_properties(DIALibGen PROPERTIES
     INSTALL_RPATH_USE_LINK_PATH ON)
 endif()
 
 # ---------------------------------------------------------------------------
-# Install and export, so a consumer can find_package(DIALibraryGenerator).
+# Install and export, so a consumer can find_package(DIALibGen).
 # ---------------------------------------------------------------------------
 if(DIALIBGEN_INSTALL)
   include(CMakePackageConfigHelpers)
 
-  install(TARGETS odia_library EXPORT DIALibraryGeneratorTargets
+  install(TARGETS odia_library EXPORT DIALibGenTargets
           ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
   if(DIALIBGEN_BUILD_TOOL)
-    install(TARGETS DIALibraryGenerator RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(TARGETS DIALibGen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     # The models are not redistributed (see THIRD-PARTY-NOTICES.md), so the thing
     # that fetches them has to travel WITH the tool -- a Homebrew cask or a
     # release tarball is the whole of what most people ever have, and telling
@@ -255,26 +255,26 @@ if(DIALIBGEN_INSTALL)
             RENAME dialibgen-fetch-models)
   endif()
   install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-  # share/DIALibraryGenerator, matching what the tool searches for. The old
+  # share/DIALibGen, matching what the tool searches for. The old
   # lower-case directory name was reachable by nothing.
-  install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibraryGenerator)
+  install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen)
 
-  install(EXPORT DIALibraryGeneratorTargets
-          FILE DIALibraryGeneratorTargets.cmake
-          NAMESPACE DIALibraryGenerator::
-          DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibraryGenerator)
+  install(EXPORT DIALibGenTargets
+          FILE DIALibGenTargets.cmake
+          NAMESPACE DIALibGen::
+          DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)
 
   configure_package_config_file(
-    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/DIALibraryGeneratorConfig.cmake.in
-    ${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGeneratorConfig.cmake
-    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibraryGenerator)
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/DIALibGenConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/DIALibGenConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)
   write_basic_package_version_file(
-    ${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGeneratorConfigVersion.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/DIALibGenConfigVersion.cmake
     COMPATIBILITY SameMinorVersion)
   install(FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGeneratorConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/DIALibraryGeneratorConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibraryGenerator)
+    ${CMAKE_CURRENT_BINARY_DIR}/DIALibGenConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/DIALibGenConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)
 endif()
 
 if(DIALIBGEN_BUILD_TESTS)

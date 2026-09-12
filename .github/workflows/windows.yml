@@ -415,7 +415,7 @@ jobs:
           # needed to recover the install prefix into the generated file, so a
           # targets file read from a different depth computes a prefix two
           # levels too high and every imported target points at
-          # D:/a/DIALibraryGenerator/bin/OpenSwathAlgo.lib. Point the config at
+          # D:/a/DIALibGen/bin/OpenSwathAlgo.lib. Point the config at
           # the real file instead, so it is read where it was installed.
           if [ ! -f "$OPENMS_DIR/OpenMSTargets.cmake" ]; then
             TGT=$(find openms-install -name 'OpenMSTargets.cmake' | head -1)
@@ -549,9 +549,9 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          BIN="$PWD/stage/bin/DIALibraryGenerator.exe"
+          BIN="$PWD/stage/bin/DIALibGen.exe"
           test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
-          test -s "$PWD/stage/share/DIALibraryGenerator/irt_standards.tsv" \
+          test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
           # env -i on Windows also strips the DLL search path, which is not what
@@ -571,7 +571,7 @@ jobs:
           set -euo pipefail
           export PATH="$DLL_PATH_POSIX:$PATH"
           export DIALIBGEN_MODEL_DIR="$PWD/models"
-          BIN="$PWD/stage/bin/DIALibraryGenerator.exe"
+          BIN="$PWD/stage/bin/DIALibGen.exe"
           "$BIN" -in example/proteins.fasta -out out.parquet
           "$BIN" -in example/proteins.fasta -out out.tsv
           test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
@@ -668,7 +668,7 @@ jobs:
           }
 
           declare -A seen=()
-          todo=(stage/bin/DIALibraryGenerator.exe)
+          todo=(stage/bin/DIALibGen.exe)
           while [ ${#todo[@]} -gt 0 ]; do
             f="${todo[0]}"; todo=("${todo[@]:1}")
             # `-dependents`, not `/dependents`: MSYS rewrites a leading slash
@@ -724,7 +724,7 @@ jobs:
                 TEMP="${TEMP:-C:/Windows/Temp}" TMP="${TMP:-C:/Windows/Temp}" \
                 DIALIBGEN_MODEL_DIR="$(cygpath -w "$PWD/models")" \
                 PATH="$BARE_PATH" \
-                "$PWD/stage/bin/DIALibraryGenerator.exe" "$@"
+                "$PWD/stage/bin/DIALibGen.exe" "$@"
           }
           run_bare --help > portable.txt 2>&1 \
             || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
@@ -739,7 +739,7 @@ jobs:
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
         shell: bash
-        run: 7z a -tzip "DIALibraryGenerator-windows-x64.zip" ./stage/*
+        run: 7z a -tzip "DIALibGen-windows-x64.zip" ./stage/*
 
       # Staged BEFORE the Tauri build, because tauri copies resources/ during
       # the build: doing it afterwards yields an app whose resources are the
@@ -767,7 +767,7 @@ jobs:
           if (Test-Path $res) { Remove-Item -Recurse -Force $res }
           New-Item -ItemType Directory -Force -Path $res | Out-Null
           Copy-Item -Recurse -Force 'stage/*' $res
-          if (-not (Test-Path "$res/bin/DIALibraryGenerator.exe")) {
+          if (-not (Test-Path "$res/bin/DIALibGen.exe")) {
             Write-Output '::error::the CLI was not staged into the app''s resources'
             exit 1
           }
@@ -798,8 +798,8 @@ jobs:
           n=0
           while IFS= read -r f; do
             case "$f" in
-              *.msi) cp "$f" "dist-bundles/DIALibraryGenerator-gui-windows-x64.msi" ;;
-              *-setup.exe) cp "$f" "dist-bundles/DIALibraryGenerator-gui-windows-x64-setup.exe" ;;
+              *.msi) cp "$f" "dist-bundles/DIALibGen-gui-windows-x64.msi" ;;
+              *-setup.exe) cp "$f" "dist-bundles/DIALibGen-gui-windows-x64-setup.exe" ;;
             esac
             n=$((n + 1))
           done < <(find gui/src-tauri/target/release/bundle \
@@ -813,7 +813,7 @@ jobs:
         with:
           name: bundles-windows-x64
           path: |
-            DIALibraryGenerator-windows-x64.zip
+            DIALibGen-windows-x64.zip
             dist-bundles/*
 
       - name: Attach to the release
@@ -821,7 +821,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            DIALibraryGenerator-windows-x64.zip
+            DIALibGen-windows-x64.zip
             dist-bundles/*
           fail_on_unmatched_files: true
 
@@ -839,9 +839,9 @@ jobs:
                    --json assets -q '.assets[].name')
           echo "$have"
           missing=0
-          for n in DIALibraryGenerator-windows-x64.zip \
-                   DIALibraryGenerator-gui-windows-x64.msi \
-                   DIALibraryGenerator-gui-windows-x64-setup.exe; do
+          for n in DIALibGen-windows-x64.zip \
+                   DIALibGen-gui-windows-x64.msi \
+                   DIALibGen-gui-windows-x64-setup.exe; do
             printf '%s' "$have" | grep -qx "$n" \
               || { echo "::error::$n is not on $GITHUB_REF_NAME"; missing=1; }
           done

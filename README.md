@@ -90,9 +90,11 @@ the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
 Homebrew can only name whole releases, so the cask rounds up rather than promise
 a machine it cannot load on.
 
-**Nothing is signed.** On current macOS a Homebrew-installed copy is refused by
-Gatekeeper on first run, with no message — see the tap's README for the detail
-and the ways around it. The tarball above is unaffected.
+**Signed and notarized** since 0.9.0, with a Developer ID, so a Homebrew-installed
+copy runs without a prompt. The `.dmg` and the `.app` inside it each carry a
+stapled ticket and need no network; the CLI tarball cannot carry one — no archive
+format can — so a quarantined copy is checked with Apple once, online, on first
+run.
 
 ## Building
 
@@ -242,12 +244,10 @@ Read these before treating output as authoritative:
 - **Windows is x64 only.** There is no arm64 Windows build; bioconda has no
   win-64 OpenMS either, so that leg builds OpenMS from source and is slower
   than the others on a cold cache.
-- **Nothing is code-signed**, deliberately for now. The macOS `.dmg` and the
-  Windows installer both need the OS's "open anyway" path, and on macOS a
-  **Homebrew-installed** copy is refused outright rather than with a prompt.
-  Extracting the release tarball yourself is unaffected, and so is building from
-  source. See the [tap's README](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
-  for the mechanics.
+- **The Windows builds are not signed.** The `.msi` and the setup `.exe` need
+  SmartScreen's "More info → Run anyway" on first download. That certificate is
+  a separate purchase and is not in place yet; macOS has been signed and
+  notarized since 0.9.0.
 
 ## Provenance
 

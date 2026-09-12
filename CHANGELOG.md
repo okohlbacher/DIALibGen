@@ -3,6 +3,45 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] — 2026-09-12
+
+### Added
+- **The macOS builds are signed and notarized.** With
+  `Developer ID Application: Oliver Kohlbacher (9WF4NVY9MY)`, the hardened
+  runtime and a secure timestamp on all 146 Mach-O files in the bundle. The
+  `.dmg` and the `.app` inside it each carry a stapled ticket and so need no
+  network; the CLI tarball cannot carry one, because no archive format can, and
+  is checked online once on first run. This is what the Homebrew casks needed:
+  an unsigned payload installed by a package manager carries a provenance record
+  Gatekeeper refuses, clearing the quarantine attribute does not remove it, and
+  Homebrew 6 dropped `--no-quarantine`.
+  Signing is optional in CI — without the certificate secret the artefacts are
+  ad-hoc signed exactly as before, so forks and pull requests still build.
+
+### Fixed
+- **The Windows CLI archive and `.msi` could not generate a library.** Neither
+  carried `share/OpenMS`, so the tool exited with "Cannot find shared data!
+  OpenMS cannot function without it!" on the first mass calculation. `--help`
+  worked, which is why the release gate never caught it: it asked only for
+  `--help`, and that reads none of OpenMS's data. Both gates now build a real
+  library from the bare bundle instead, on every platform.
+- **The Windows bundle carried 271 DLLs and 267 MB** — a blind sweep of every
+  `*.dll` in conda's `Library/bin`, Qt's and contrib's, including all of MKL,
+  gRPC, ICU and a Qt built for debugging. Replaced with the dependency closure
+  `dumpbin` walks, plus the sets that are `LoadLibrary`'d rather than imported
+  and so appear in no walk. 66 DLLs; the archive is 108 MB, the `.msi` 114 MB
+  and the setup `.exe` 84 MB, down from 267/275/168.
+- **A failed build leg could publish an incomplete release.** `fail-fast` is off,
+  so the surviving legs uploaded and the release went public missing whatever
+  the failed leg owed it — while `release-complete`, the job that exists to
+  catch exactly that, was SKIPPED by the same failure.
+- **A `workflow_dispatch` selected against a tag uploaded to the real release.**
+  The ref was tested before the event, so the run whose entire purpose is to
+  touch no release took the release branch. Both workflows test the event first.
+- **A rejected notarization named only a submission id.** The reasons live behind
+  `notarytool log`, a second round trip nobody makes on a step that takes tens
+  of minutes to reach again; it is now fetched on failure.
+
 ## [0.2.3] — 2026-09-12
 
 ### Added

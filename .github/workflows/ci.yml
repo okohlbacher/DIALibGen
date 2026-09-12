@@ -290,6 +290,92 @@ jobs:
             echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # ---------------------------------------------------------------------
+      # macOS code signing and notarization. Entirely optional: with no
+      # APPLE_CERTIFICATE secret every step here is skipped and the macOS
+      # artefacts are ad-hoc signed exactly as they were, so forks and pull
+      # requests keep building.
+      #
+      # With the secrets present the CLI, its dylibs and the .app are signed
+      # with a Developer ID and notarized. That is what a Homebrew cask needs:
+      # an unsigned payload installed by a package manager carries a provenance
+      # record Gatekeeper refuses, clearing the quarantine attribute does not
+      # remove it, and Homebrew 6 dropped --no-quarantine.
+      # ---------------------------------------------------------------------
+      - name: Decide whether to sign
+        id: sign
+        if: runner.os == 'macOS' && steps.pkg.outputs.package == 'true'
+        shell: bash
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE }}
+          API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CERT" ]; then
+            echo "::notice::no APPLE_CERTIFICATE -- macOS artefacts stay ad-hoc signed"
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "sign=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$API_KEY" ]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+          else
+            # Worth saying out loud: a signed but un-notarized build is refused
+            # by Gatekeeper just as an unsigned one is. Signing alone buys
+            # nothing on its own.
+            echo "::warning::signing without notarizing -- Gatekeeper still refuses these"
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Import the Developer ID certificate
+        if: steps.sign.outputs.sign == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          # A throwaway keychain, not the login one: a runner's login keychain
+          # is locked and importing into it waits on a prompt nobody can answer.
+          KC="$RUNNER_TEMP/signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Without the partition list codesign blocks on a GUI prompt and the
+          # job sits there until the timeout with no output.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC"
+
+          # Read the identity out of the keychain rather than taking it from a
+          # secret: a secret can disagree with the certificate that was actually
+          # imported, and the failure that produces is unreadable.
+          IDENT=$(security find-identity -v -p codesigning "$KC" \
+                    | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          [ -n "$IDENT" ] || {
+            security find-identity -v -p codesigning "$KC"
+            echo "::error::the imported certificate is not a Developer ID Application certificate"
+            echo "::error::Apple Development and Apple Distribution certificates cannot sign for distribution outside the App Store"
+            exit 1
+          }
+          echo "MACOS_SIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
+          echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          echo "signing as: $IDENT"
+
+          # Written once, used by both the CLI notarization below and Tauri's,
+          # which takes a path rather than the key itself.
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/api.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/api.p8" >> "$GITHUB_ENV"
+          fi
+
       # The installed tree links libOpenMS, Arrow and onnxruntime out of the
       # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
       # else. Collecting the closure and rewriting the load paths to be relative
@@ -364,8 +450,20 @@ jobs:
             # REFUSES to load an invalidly-signed one -- so an ad-hoc
             # re-signature is not optional cleanup, it is what makes the
             # bundle runnable at all.
-            codesign --force --sign - stage/bin/DIALibraryGenerator
-            for dy in stage/lib/*.dylib; do codesign --force --sign - "$dy"; done
+            #
+            # With a Developer ID imported this is also the real signature: the
+            # hardened runtime (--options runtime) and a timestamp are both
+            # required for notarization, and every Mach-O in the payload needs
+            # them, not just the executable.
+            if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
+              sign() { codesign --force --timestamp --options runtime \
+                         --keychain "$MACOS_KEYCHAIN" --sign "$MACOS_SIGN_IDENTITY" "$@"; }
+            else
+              sign() { codesign --force --sign - "$@"; }
+            fi
+            for dy in stage/lib/*.dylib; do sign "$dy"; done
+            sign stage/bin/DIALibraryGenerator
+            codesign --verify --strict --verbose=2 stage/bin/DIALibraryGenerator
           else
             # patchelf plus a manual closure: ldd names everything the loader
             # would open, minus the system libraries a distro certainly has.
@@ -426,6 +524,33 @@ jobs:
             || { echo "::error::the staged bundle produced an empty library"; exit 1; }
           echo "portable bundle ok: $(find stage/lib -name '*.so*' -o -name '*.dylib' | wc -l) libraries"
 
+      # notarytool takes a .zip, a .dmg or a .pkg and not a .tar.gz, so the
+      # staged tree is zipped for SUBMISSION only. That is not a workaround:
+      # notarization registers the code-directory hash of each signed binary
+      # with Apple, and the ticket then applies to those binaries in whatever
+      # container they arrive in.
+      #
+      # What a .tar.gz cannot have is a STAPLED ticket, so the first run of a
+      # quarantined copy needs network for the online check. The .dmg, which
+      # Tauri staples, does not -- which is the one behavioural difference
+      # between the two downloads.
+      - name: Notarize the CLI
+        if: steps.sign.outputs.notarize == 'true'
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent stage "$RUNNER_TEMP/cli.zip"
+          # --wait exits non-zero on anything but Accepted, so a rejected
+          # submission fails here rather than shipping.
+          xcrun notarytool submit "$RUNNER_TEMP/cli.zip" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --timeout 30m
+
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
@@ -446,6 +571,18 @@ jobs:
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
         shell: bash
+        # Tauri signs, notarizes and STAPLES the .dmg itself when these are set,
+        # and ignores them otherwise. Spelled through steps.sign rather than
+        # straight from secrets so the Linux legs of this matrix never receive
+        # them. APPLE_API_KEY is Tauri's name for the key ID, not the key.
+        env:
+          APPLE_CERTIFICATE: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_SIGN_IDENTITY || '' }}
+          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.KEYCHAIN_PASSWORD || '' }}
+          APPLE_API_ISSUER: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_KEY_PATH: ${{ steps.sign.outputs.notarize == 'true' && env.APPLE_API_KEY_PATH || '' }}
         run: |
           set -euo pipefail
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
@@ -493,6 +630,20 @@ jobs:
           # until a README link 404s.
           [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
+
+      # Gatekeeper's own verdict, not codesign's. codesign says the signature
+      # is intact; spctl says the system would actually open it, which is the
+      # question a cask install turns on. stapler proves the ticket travelled
+      # with the .dmg instead of needing a network round trip.
+      - name: The signed artefacts are what they claim to be
+        if: steps.sign.outputs.notarize == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DMG="dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.dmg"
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+          xcrun stapler validate "$DMG"
+          codesign --verify --strict --verbose=2 stage/bin/DIALibraryGenerator
 
       - uses: actions/upload-artifact@v5
         if: steps.pkg.outputs.package == 'true'

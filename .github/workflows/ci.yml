@@ -292,38 +292,46 @@ jobs:
 
       # ---------------------------------------------------------------------
       # macOS code signing and notarization. Entirely optional: with no
-      # APPLE_CERTIFICATE secret every step here is skipped and the macOS
+      # MACOS_CERTIFICATE_BASE64 secret every step here is skipped and the macOS
       # artefacts are ad-hoc signed exactly as they were, so forks and pull
-      # requests keep building.
+      # requests -- which cannot read secrets at all -- keep building.
       #
-      # With the secrets present the CLI, its dylibs and the .app are signed
-      # with a Developer ID and notarized. That is what a Homebrew cask needs:
-      # an unsigned payload installed by a package manager carries a provenance
-      # record Gatekeeper refuses, clearing the quarantine attribute does not
-      # remove it, and Homebrew 6 dropped --no-quarantine.
+      # The secret NAMES and the notarization route are BALL's and FASTag's, not
+      # this repo's invention: one Developer ID Application certificate covers
+      # every app on the team, and ~/Documents/Admin/Software Signing supplies
+      # the same seven values to all three repos through its copy-secret.sh.
+      # Diverging here would mean a second set of names for one identity.
+      #
+      # Why it matters: an unsigned payload installed by a package manager
+      # carries a provenance record Gatekeeper refuses, clearing the quarantine
+      # attribute does not remove it, and Homebrew 6 dropped --no-quarantine --
+      # so the casks cannot work until this is on.
       # ---------------------------------------------------------------------
       - name: Decide whether to sign
         id: sign
         if: runner.os == 'macOS' && steps.pkg.outputs.package == 'true'
         shell: bash
+        # Mapped into env and gated on a step OUTPUT below. `secrets.*` in an
+        # `if:` is not merely ignored -- it makes the whole workflow invalid and
+        # every push returns a 0-job startup_failure.
         env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE }}
-          API_KEY: ${{ secrets.APPLE_API_KEY_P8 }}
+          CERT: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -z "$CERT" ]; then
-            echo "::notice::no APPLE_CERTIFICATE -- macOS artefacts stay ad-hoc signed"
+            echo "::notice::no MACOS_CERTIFICATE_BASE64 -- macOS artefacts stay ad-hoc signed"
             echo "sign=false" >> "$GITHUB_OUTPUT"
             echo "notarize=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "sign=true" >> "$GITHUB_OUTPUT"
-          if [ -n "$API_KEY" ]; then
+          if [ -n "$NOTARY" ]; then
             echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
-            # Worth saying out loud: a signed but un-notarized build is refused
-            # by Gatekeeper just as an unsigned one is. Signing alone buys
-            # nothing on its own.
+            # Worth saying out loud: Gatekeeper refuses a signed-but-unnotarized
+            # build exactly as it refuses an unsigned one, so this half-state
+            # buys nothing.
             echo "::warning::signing without notarizing -- Gatekeeper still refuses these"
             echo "notarize=false" >> "$GITHUB_OUTPUT"
           fi
@@ -332,54 +340,53 @@ jobs:
         if: steps.sign.outputs.sign == 'true'
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          # Generated, not a secret. The keychain exists for one job on a runner
-          # that is destroyed afterwards, so a fresh random password is both
-          # safer than a shared one and one less thing to set up.
-          KEYCHAIN_PASSWORD=$(uuidgen)
-          echo "::add-mask::$KEYCHAIN_PASSWORD"
-          # A throwaway keychain, not the login one: a runner's login keychain
-          # is locked and importing into it waits on a prompt nobody can answer.
-          KC="$RUNNER_TEMP/signing.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
+          # The secret if it is there; otherwise generated, because it protects
+          # only a keychain that lives for one job on a runner that is then
+          # destroyed, and an empty password is worse than a random one.
+          KCPW="${MACOS_KEYCHAIN_PASSWORD:-$(uuidgen)}"
+          echo "::add-mask::$KCPW"
+          # An ephemeral keychain, never the runner's login keychain: that one is
+          # locked, and importing into it waits on a prompt nobody can answer.
+          KC="$RUNNER_TEMP/dialibgen-signing.keychain-db"
+          security create-keychain -p "$KCPW" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KC"
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$APPLE_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security
+          security unlock-keychain -p "$KCPW" "$KC"
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
           rm -f "$RUNNER_TEMP/cert.p12"
           # Without the partition list codesign blocks on a GUI prompt and the
-          # job sits there until the timeout with no output.
-          security set-key-partition-list -S apple-tool:,apple: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KC" > /dev/null
-          security list-keychains -d user -s "$KC"
+          # job sits there producing no output until the timeout.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KCPW" "$KC" > /dev/null
+          security list-keychain -d user -s "$KC" \
+            $(security list-keychains -d user | tr -d '"' | xargs)
+          security default-keychain -d user -s "$KC"
 
-          # Read the identity out of the keychain rather than taking it from a
-          # secret: a secret can disagree with the certificate that was actually
-          # imported, and the failure that produces is unreadable.
-          IDENT=$(security find-identity -v -p codesigning "$KC" \
+          # Read back what was actually imported and hold the secret to it. A
+          # MACOS_SIGNING_IDENTITY that disagrees with the certificate fails
+          # later, inside codesign, with a message that names neither.
+          IDENT=$(security find-identity -p codesigning -v "$KC" \
                     | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
           [ -n "$IDENT" ] || {
-            security find-identity -v -p codesigning "$KC"
-            echo "::error::the imported certificate is not a Developer ID Application certificate"
-            echo "::error::Apple Development and Apple Distribution certificates cannot sign for distribution outside the App Store"
+            security find-identity -p codesigning -v "$KC"
+            echo "::error::no Developer ID Application identity in the imported certificate"
+            echo "::error::Apple Development and Apple Distribution certificates sit next to it in the portal and cannot sign for distribution outside the App Store"
             exit 1
           }
+          if [ -n "$MACOS_SIGNING_IDENTITY" ] && [ "$MACOS_SIGNING_IDENTITY" != "$IDENT" ]; then
+            echo "::error::MACOS_SIGNING_IDENTITY does not match the imported certificate ($IDENT)"
+            exit 1
+          fi
           echo "MACOS_SIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
           echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
-          echo "MACOS_KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           echo "signing as: $IDENT"
-
-          # Written once, used by both the CLI notarization below and Tauri's,
-          # which takes a path rather than the key itself.
-          if [ -n "$APPLE_API_KEY_P8" ]; then
-            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/api.p8"
-            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/api.p8" >> "$GITHUB_ENV"
-          fi
 
       # The installed tree links libOpenMS, Arrow and onnxruntime out of the
       # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
@@ -536,25 +543,25 @@ jobs:
       # container they arrive in.
       #
       # What a .tar.gz cannot have is a STAPLED ticket, so the first run of a
-      # quarantined copy needs network for the online check. The .dmg, which
-      # Tauri staples, does not -- which is the one behavioural difference
-      # between the two downloads.
+      # quarantined copy checks with Apple over the network. The .dmg below is
+      # stapled and does not -- the one behavioural difference between the two
+      # downloads.
       - name: Notarize the CLI
         if: steps.sign.outputs.notarize == 'true'
+        timeout-minutes: 60
         shell: bash
         env:
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
           ditto -c -k --keepParent stage "$RUNNER_TEMP/cli.zip"
           # --wait exits non-zero on anything but Accepted, so a rejected
           # submission fails here rather than shipping.
           xcrun notarytool submit "$RUNNER_TEMP/cli.zip" \
-            --key "$APPLE_API_KEY_PATH" \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_ISSUER" \
-            --wait --timeout 30m
+            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" --wait
 
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
@@ -576,18 +583,21 @@ jobs:
       - name: Build the desktop app
         if: steps.pkg.outputs.package == 'true'
         shell: bash
-        # Tauri signs, notarizes and STAPLES the .dmg itself when these are set,
-        # and ignores them otherwise. Spelled through steps.sign rather than
-        # straight from secrets so the Linux legs of this matrix never receive
-        # them. APPLE_API_KEY is Tauri's name for the key ID, not the key.
+        # Tauri signs and notarizes with these and ignores them when empty.
+        # Spelled through steps.sign rather than straight from secrets so the
+        # Linux legs of this matrix never receive them.
+        #
+        # Tauri staples the .app, NOT the .dmg -- it only signs the image. The
+        # image is notarized and stapled in a later step; `stapler validate` on
+        # a Tauri .dmg fails, which reads as a broken build and is not one.
         env:
-          APPLE_CERTIFICATE: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_CERTIFICATE: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_CERTIFICATE_BASE64 || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
           APPLE_SIGNING_IDENTITY: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_SIGN_IDENTITY || '' }}
-          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && env.MACOS_KEYCHAIN_PASSWORD || '' }}
-          APPLE_API_ISSUER: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_API_KEY: ${{ steps.sign.outputs.notarize == 'true' && secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_KEY_PATH: ${{ steps.sign.outputs.notarize == 'true' && env.APPLE_API_KEY_PATH || '' }}
+          KEYCHAIN_PASSWORD: ${{ steps.sign.outputs.sign == 'true' && secrets.MACOS_KEYCHAIN_PASSWORD || '' }}
+          APPLE_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_NOTARY_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_TEAM_ID || '' }}
         run: |
           set -euo pipefail
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
@@ -636,10 +646,35 @@ jobs:
           [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
 
-      # Gatekeeper's own verdict, not codesign's. codesign says the signature
-      # is intact; spctl says the system would actually open it, which is the
-      # question a cask install turns on. stapler proves the ticket travelled
-      # with the .dmg instead of needing a network round trip.
+      # Tauri notarized and stapled the .app INSIDE the image; the image itself
+      # it only signed. Without this the .dmg carries no ticket of its own, so
+      # Gatekeeper checks it online -- which is the difference between a
+      # download that works on a train and one that does not.
+      - name: Notarize and staple the disk image
+        if: steps.sign.outputs.notarize == 'true'
+        timeout-minutes: 60
+        shell: bash
+        env:
+          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
+          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          DMG="dist-bundles/DIALibraryGenerator-gui-${{ matrix.name }}.dmg"
+          test -f "$DMG" || { echo "::error::no $DMG to notarize"; exit 1; }
+          # --force because Tauri already signed it: the rename this repo does
+          # afterwards does not invalidate that, but re-signing costs nothing
+          # and makes the identity on the shipped name certain.
+          codesign --force --timestamp --keychain "$MACOS_KEYCHAIN" \
+            --sign "$MACOS_SIGN_IDENTITY" "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" \
+            --password "$MACOS_NOTARY_PASSWORD" --wait
+          xcrun stapler staple "$DMG"
+
+      # Gatekeeper's own verdict, not codesign's. codesign says the signature is
+      # intact; spctl says the system would actually open it, and only the
+      # second is the question a cask install turns on.
       - name: The signed artefacts are what they claim to be
         if: steps.sign.outputs.notarize == 'true'
         shell: bash
@@ -666,6 +701,13 @@ jobs:
             DIALibraryGenerator-${{ matrix.name }}.tar.gz
             dist-bundles/*
           fail_on_unmatched_files: true
+
+      # Last, because everything above that needs the identity has run, and
+      # always(), so an earlier failure still takes the keychain with it.
+      - name: Delete the signing keychain
+        if: always() && steps.sign.outputs.sign == 'true'
+        shell: bash
+        run: security delete-keychain "$RUNNER_TEMP/dialibgen-signing.keychain-db" || true
 
   # A release whose README links 404 is worse than a missing release: the links
   # are written for the asset names that were MEANT to be published, not the

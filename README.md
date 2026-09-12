@@ -90,6 +90,11 @@ the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
 Homebrew can only name whole releases, so the cask rounds up rather than promise
 a machine it cannot load on.
 
+> **The first run of the CLI takes about five minutes.** It is not stuck. macOS
+> checks each of the 145 bundled libraries with Apple one at a time, and a
+> `.tar.gz` cannot carry a stapled ticket that would answer for all of them at
+> once. Every later run starts in about a second. See BACKLOG.md.
+
 **Signed and notarized** since 0.9.0, with a Developer ID, so a Homebrew-installed
 copy runs without a prompt. The `.dmg` and the `.app` inside it each carry a
 stapled ticket and need no network; the CLI tarball cannot carry one — no archive
@@ -149,7 +154,20 @@ OpenMS downloads them from `archive.openms.de` against pinned SHA256s, but only
 when built from `develop` with `WITH_ONNX=ON`, which defaults off. On a released
 OpenMS the files are simply absent and you must supply them yourself.
 
-Put all three in one directory and point `DIALIBGEN_MODEL_DIR` at it:
+The easiest way is to let the tool fetch them:
+
+```bash
+scripts/fetch-models.sh
+```
+
+That downloads all three from OpenMS's archive, checks each against a pinned
+SHA256, and installs them beside the installed binary — where the tool looks
+without anything being set in the environment. `--dir DIR` puts them somewhere
+else, `--prefix DIR` targets another installation, and `--check` verifies what is
+already there without downloading. Re-running it is free: files that are already
+correct are left alone.
+
+Or place them yourself and point `DIALIBGEN_MODEL_DIR` at the directory:
 
 ```bash
 export DIALIBGEN_MODEL_DIR=/path/to/models

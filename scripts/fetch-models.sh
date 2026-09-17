@@ -8,9 +8,9 @@
 #   dialibgen-fetch-models --prefix DIR     # install into DIR/share/DIALibGen/models
 #   dialibgen-fetch-models --check          # verify what is already installed, download nothing
 #
-# The models are NOT redistributed with this project -- see THIRD-PARTY-NOTICES.md
-# and BACKLOG.md -- so this fetches them from OpenMS's archive, which is where a
-# source build of OpenMS gets them too.
+# Releases from 0.10.1 BUNDLE the models, so an installed copy already has them
+# and this is for a source build, a refresh, or a --check. It fetches from
+# OpenMS's archive, which is where a source build of OpenMS gets them too.
 #
 # Every file is checked against a pinned SHA256. A mismatch is deleted rather than
 # installed: these drive every prediction the tool makes, and a silently different

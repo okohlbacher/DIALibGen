@@ -10,8 +10,8 @@
 
 find_program(ODIA_PYTHON python3)
 
-set(ODIA_MODEL_DIR "$ENV{ODIA_OPENMS}/share/OpenMS/models"
-    CACHE PATH "Directory holding peptdeep_{rt,ms2,ccs}_dynamic.onnx")
+# ODIA_MODEL_DIR comes from the top-level CMakeLists, which needs it earlier
+# than this file is added -- the install rules bundle whatever it points at.
 set(ODIA_RT_MODEL_PATH  "${ODIA_MODEL_DIR}/peptdeep_rt_dynamic.onnx"  CACHE FILEPATH "PeptDeep RT model")
 set(ODIA_MS2_MODEL_PATH "${ODIA_MODEL_DIR}/peptdeep_ms2_dynamic.onnx" CACHE FILEPATH "PeptDeep MS2 model")
 set(ODIA_CCS_MODEL_PATH "${ODIA_MODEL_DIR}/peptdeep_ccs_dynamic.onnx" CACHE FILEPATH "PeptDeep CCS model")

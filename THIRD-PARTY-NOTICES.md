@@ -31,18 +31,27 @@ Escher *et al.*, "Using iRT, a normalized retention time for more targeted
 measurement of peptides", *Proteomics* **12**, 1111–1121 (2012). Sequence and
 value data; cite the paper.
 
-## Model weights — NOT distributed here
+## Model weights — bundled since 0.10.1
 
-This repository contains **no** model weights. The three ONNX files the tool
-predicts with (`peptdeep_{rt,ms2,ccs}_dynamic.onnx`) are AlphaPeptDeep models,
-obtained separately — see README, "Models".
+Every release carries three ONNX files in `share/DIALibGen/models`:
+`peptdeep_rt_dynamic.onnx`, `peptdeep_ms2_dynamic.onnx` and
+`peptdeep_ccs_dynamic.onnx`. They are the weights of **AlphaPeptDeep**'s
+retention-time, fragment-intensity and collisional-cross-section models,
+exported to ONNX by the OpenMS project and mirrored at
+`archive.openms.de/openms/models`. This project converts nothing and trains
+nothing; it downloads those exact files against pinned SHA256 digests and
+installs them unmodified.
 
-**The licence under which those published weights may be redistributed has not
-been established by this project.** The copies available to us carried no
-LICENSE, README or NOTICE, and the OpenMS install that downloads them records
-only OpenMS's own licence. If you redistribute the weights — in a container
-image, a conda package or otherwise — establish their terms first. Using them
-locally is a different question from shipping them.
+- AlphaPeptDeep: https://github.com/MannLabs/alphapeptdeep, Apache License 2.0.
+- Zeng *et al.*, "AlphaPeptDeep: a modular deep learning framework to predict
+  peptide properties for proteomics", *Nat. Commun.* **13**, 7238 (2022).
+  Cite this paper for any result these models produce.
+- The ONNX exports are OpenMS's, produced by
+  `tools/scripts/export_peptdeep_models_to_onnx.py`.
+
+Redistribution here is with the agreement of the upstream authors. Releases up
+to and including 0.10.0 did not ship the weights and fetched them on first use;
+`dialibgen-fetch-models` still exists for source builds and for refreshing them.
 
 ## Build dependencies
 

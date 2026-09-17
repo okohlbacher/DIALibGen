@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 project(DIALibGen
-  VERSION 0.10.0
+  VERSION 0.10.1
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibGen"
   LANGUAGES CXX)
@@ -43,6 +43,11 @@ else()
   set(DIALIBGEN_IS_TOP_LEVEL OFF)
 endif()
 option(DIALIBGEN_BUILD_TOOL  "Build the DIALibGen executable" ${DIALIBGEN_IS_TOP_LEVEL})
+
+# Defined HERE, not in test/, because the install rules below read it and
+# add_subdirectory(test) runs after them. The tests use the same cache entry.
+set(ODIA_MODEL_DIR "$ENV{ODIA_OPENMS}/share/OpenMS/models"
+    CACHE PATH "Directory holding peptdeep_{rt,ms2,ccs}_dynamic.onnx")
 option(DIALIBGEN_BUILD_TESTS "Build the test suite" ${DIALIBGEN_IS_TOP_LEVEL})
 option(DIALIBGEN_INSTALL     "Generate install rules" ${DIALIBGEN_IS_TOP_LEVEL})
 
@@ -245,11 +250,40 @@ if(DIALIBGEN_INSTALL)
           ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
   if(DIALIBGEN_BUILD_TOOL)
     install(TARGETS DIALibGen RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    # The models are not redistributed (see THIRD-PARTY-NOTICES.md), so the thing
-    # that fetches them has to travel WITH the tool -- a Homebrew cask or a
-    # release tarball is the whole of what most people ever have, and telling
-    # them to clone the repo for one script is not an answer. PROGRAMS, not
-    # FILES, so it arrives executable.
+
+    # The models travel WITH the tool. They are the whole reason it can predict
+    # anything, so an install that must download 22 MB before it does its job is
+    # not a working install -- and the directory they go in,
+    # share/DIALibGen/models, is already the second entry in the tool's own
+    # search order, so nothing has to be set to find them.
+    #
+    # Bundled when the build HAS them (CI fetches them against pinned digests
+    # before configuring) and skipped, with a line saying so, when it does not:
+    # a source build without models is a normal thing to be, and
+    # dialibgen-fetch-models exists for exactly that case.
+    set(_dlg_models "")
+    foreach(_m IN ITEMS peptdeep_rt_dynamic.onnx
+                        peptdeep_ms2_dynamic.onnx
+                        peptdeep_ccs_dynamic.onnx)
+      if(EXISTS "${ODIA_MODEL_DIR}/${_m}")
+        list(APPEND _dlg_models "${ODIA_MODEL_DIR}/${_m}")
+      endif()
+    endforeach()
+    list(LENGTH _dlg_models _dlg_model_count)
+    if(_dlg_model_count EQUAL 3)
+      install(FILES ${_dlg_models}
+              DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen/models)
+      message(STATUS "DIALibGen: bundling the PeptDeep models from ${ODIA_MODEL_DIR}")
+    else()
+      # Two of three is worth naming rather than silently shipping: the tool
+      # would start, predict retention time, and fail on the first fragment.
+      message(STATUS "DIALibGen: ${_dlg_model_count}/3 PeptDeep models in "
+                     "'${ODIA_MODEL_DIR}' -- the install will not carry them, "
+                     "run dialibgen-fetch-models after installing")
+    endif()
+
+    # The fetcher ships too, for a source build, a refresh, or a --check.
+    # PROGRAMS, not FILES, so it arrives executable.
     install(PROGRAMS scripts/fetch-models.sh
             DESTINATION ${CMAKE_INSTALL_BINDIR}
             RENAME dialibgen-fetch-models)

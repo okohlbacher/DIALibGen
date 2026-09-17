@@ -561,6 +561,14 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
+          # The three models must be IN the install tree. They are bundled from
+          # 0.10.1, and an install that silently lacks them is an install that
+          # cannot predict anything.
+          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
+            test -s "$PWD/stage/share/DIALibGen/models/$m" \
+              || { echo "::error::$m is not in the install tree"; exit 1; }
+          done
+
           # env -i on Windows also strips the DLL search path, which is not what
           # this gate is about -- it is about the BUILD TREE not being on it. So
           # the three runtime prefixes are handed back explicitly and nothing
@@ -577,7 +585,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$DLL_PATH_POSIX:$PATH"
-          export DIALIBGEN_MODEL_DIR="$PWD/models"
+          # No DIALIBGEN_MODEL_DIR: the installed tree carries the models now.
           BIN="$PWD/stage/bin/DIALibGen.exe"
           "$BIN" -in example/proteins.fasta -out out.parquet
           "$BIN" -in example/proteins.fasta -out out.tsv
@@ -729,7 +737,6 @@ jobs:
           run_bare() {
             env -i SystemRoot="$(cygpath -w "$(cygpath -W)")" \
                 TEMP="${TEMP:-C:/Windows/Temp}" TMP="${TMP:-C:/Windows/Temp}" \
-                DIALIBGEN_MODEL_DIR="$(cygpath -w "$PWD/models")" \
                 PATH="$BARE_PATH" \
                 "$PWD/stage/bin/DIALibGen.exe" "$@"
           }

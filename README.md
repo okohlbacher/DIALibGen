@@ -149,25 +149,29 @@ The tool predicts with three ONNX exports of AlphaPeptDeep models:
 `peptdeep_rt_dynamic.onnx`, `peptdeep_ms2_dynamic.onnx`,
 `peptdeep_ccs_dynamic.onnx`.
 
-**They are not shipped here, and they are not in any tagged OpenMS release.**
-OpenMS downloads them from `archive.openms.de` against pinned SHA256s, but only
-when built from `develop` with `WITH_ONNX=ON`, which defaults off. On a released
-OpenMS the files are simply absent and you must supply them yourself.
+**Every release from 0.10.1 carries them**, in `share/DIALibGen/models` next to
+the binary — the second entry in the tool's own search order — so an installed
+copy predicts straight away with nothing set. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for their provenance and the
+paper to cite.
 
-The easiest way is to let the tool fetch them:
+A build from source has no models unless you point `-DODIA_MODEL_DIR=` at some,
+and no tagged OpenMS release ships them either: OpenMS downloads them only when
+built from `develop` with `WITH_ONNX=ON`, which defaults off. For those cases,
+and to refresh or verify a set:
 
 ```bash
-scripts/fetch-models.sh
+dialibgen-fetch-models          # download, verify and install all three
+dialibgen-fetch-models --check  # verify what is there, download nothing
 ```
 
-That downloads all three from OpenMS's archive, checks each against a pinned
-SHA256, and installs them beside the installed binary — where the tool looks
-without anything being set in the environment. `--dir DIR` puts them somewhere
-else, `--prefix DIR` targets another installation, and `--check` verifies what is
-already there without downloading. Re-running it is free: files that are already
-correct are left alone.
+It checks every file against a pinned SHA256 and installs where the tool looks.
+`--dir DIR` puts them elsewhere, `--prefix DIR` targets another installation.
+Re-running it is free: files that are already correct are left alone. In a
+source checkout the same script is `scripts/fetch-models.sh`.
 
-Or place them yourself and point `DIALIBGEN_MODEL_DIR` at the directory:
+To use models from somewhere else entirely, name the directory and it wins over
+the bundled ones:
 
 ```bash
 export DIALIBGEN_MODEL_DIR=/path/to/models
@@ -182,14 +186,10 @@ export DIALIBGEN_MODEL_DIR=/path/to/models
 ```
 
 Relative model paths are resolved relative to the **config file**, so a config
-plus a model directory is portable. Failing both, the tool looks beside its own
-executable and in `share/OpenMS/models`. When it finds nothing it says which
-file is missing and lists every directory it searched — it no longer dies inside
-the ONNX session constructor with an empty path.
-
-> The licence under which the published AlphaPeptDeep *weights* may be
-> redistributed has not been established by this project. Nothing here
-> redistributes them. If you package them, check first.
+plus a model directory is portable. The full search order is: the config,
+`DIALIBGEN_MODEL_DIR`, `share/DIALibGen/models` beside the executable (the
+bundled ones), then `share/OpenMS/models`. When it finds nothing it says which
+file is missing and lists every directory it searched.
 
 ## Usage
 

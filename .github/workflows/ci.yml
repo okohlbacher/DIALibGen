@@ -213,6 +213,14 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
+          # The three models must be IN the install tree. They are bundled from
+          # 0.10.1, and an install that silently lacks them is an install that
+          # cannot predict anything.
+          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
+            test -s "$PWD/stage/share/DIALibGen/models/$m" \
+              || { echo "::error::$m is not in the install tree"; exit 1; }
+          done
+
           export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
@@ -229,7 +237,8 @@ jobs:
         run: |
           set -euo pipefail
           export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
-          export DIALIBGEN_MODEL_DIR="$PWD/models"
+          # No DIALIBGEN_MODEL_DIR: the installed tree carries the models now, and
+          # the point of this step is that the tool finds them by itself.
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib"
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
           BIN="$PWD/stage/bin/DIALibGen"
@@ -569,6 +578,8 @@ jobs:
           grep -q "^Version: $want" portable.txt \
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
           test -s stage/share/DIALibGen/irt_standards.tsv
+          test -s stage/share/DIALibGen/models/peptdeep_ms2_dynamic.onnx \
+            || { echo "::error::the staged bundle carries no models"; exit 1; }
           # unimod.xml, not just the directory: that one file is the whole of
           # File::isOpenMSDataPath_, so this is the runtime test spelled here.
           test -s stage/share/OpenMS/CHEMISTRY/unimod.xml \
@@ -578,7 +589,7 @@ jobs:
           # OpenMS's data tables, so it separates a startable bundle from an
           # unstartable one and nothing more. Generate a real library from the
           # bare tree: that is the claim the archive actually makes.
-          env -i HOME="$HOME" DIALIBGEN_MODEL_DIR="$PWD/models" \
+          env -i HOME="$HOME" \
               "$PWD/stage/bin/DIALibGen" \
               -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
             || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }

@@ -3,6 +3,32 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.10.1] — 2026-09-17
+
+### Added
+- **The PeptDeep models ship with the tool.** Every release now carries
+  `peptdeep_{rt,ms2,ccs}_dynamic.onnx` in `share/DIALibGen/models`, which is
+  already the second entry in the tool's own search order — so an installed copy
+  predicts immediately, with nothing set and nothing to download. Their
+  provenance and the paper to cite are in
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+  This also ends a papercut that had no good answer before: a Homebrew upgrade
+  replaces the Caskroom directory, so models installed into it were deleted on
+  every upgrade and had to be fetched again. Bundled models arrive with each
+  version instead.
+
+  `dialibgen-fetch-models` stays, for a build from source, a refresh, or
+  `--check`. `DIALIBGEN_MODEL_DIR` and the config's `rt_model`/`ms2_model`/
+  `ccs_model` still override the bundled copies.
+
+### Changed
+- **The release gates no longer hand the tool its models.** The end-to-end run
+  against the installed tree, and the bare-environment run against the staged
+  bundle, both stopped setting `DIALIBGEN_MODEL_DIR` — so what they prove is
+  that a user's install finds its own models. Both workflows also assert the
+  three files are in the install tree, on every platform.
+
 ## [0.10.0] — 2026-09-12
 
 ### Changed

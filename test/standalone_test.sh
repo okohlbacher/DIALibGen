@@ -209,12 +209,33 @@ CASES
 # Without this the run died inside the ONNX session constructor with
 # "Load model from  failed" -- an empty path and no hint that a model was the
 # thing missing.
+# A model named in the CONFIG and not present is the case that stays testable
+# whatever the install carries: DIALIBGEN_MODEL_DIR only reorders the SEARCH,
+# so since 0.10.1 -- when the models began shipping in share/DIALibGen/models --
+# pointing it at an empty directory just falls through to the bundled ones and
+# a library comes out. A configured path does not fall through.
+printf '{"rt_model": "%s/no-such-model.onnx"}\n' "$TMP" > "$TMP/nomodel.json"
+if run_bare "$BIN" -in "$FASTA" -config "$TMP/nomodel.json" \
+       -out "$TMP/x.tsv" >"$TMP/m.log" 2>&1; then
+  fail "a config naming a model that does not exist was accepted"
+fi
+grep -q "no-such-model.onnx" "$TMP/m.log" \
+  || { echo "--- output ---" >&2; cat "$TMP/m.log" >&2
+       fail "a missing configured model did not name the file"; }
+
+# And the SEARCH failure, which is what used to die inside the ONNX session
+# constructor with "Load model from  failed" -- an empty path and no hint that a
+# model was the thing missing. On a build that bundles them this cannot be
+# provoked by the environment, so a library is the expected outcome; the check
+# is on the artefact, not on the log line, because the tool prints a native
+# path and $TMP here is an MSYS one on Windows.
+rm -f "$TMP/x.tsv"
 run_bare DIALIBGEN_MODEL_DIR="$TMP/no-such-models" \
-    "$BIN" -in "$FASTA" -out "$TMP/x.tsv" >"$TMP/m.log" 2>&1
+    "$BIN" -in "$FASTA" -out "$TMP/x.tsv" >"$TMP/m.log" 2>&1 || true
 if grep -q "peptdeep_rt_dynamic.onnx" "$TMP/m.log"; then
   : # named the file it could not find, and listed where it looked
-elif grep -q "wrote $TMP/x.tsv" "$TMP/m.log"; then
-  : # this build DOES have models installed; nothing to assert
+elif [ -s "$TMP/x.tsv" ]; then
+  : # this build bundles the models, so the search found them; nothing to assert
 else
   echo "--- output ---" >&2; cat "$TMP/m.log" >&2
   fail "a missing model produced neither a named model nor a library"

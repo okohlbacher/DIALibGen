@@ -230,7 +230,7 @@ The keys that most often need changing:
 | `decoys` | `"none"` | Deliberate: a library is an interchange artefact and the consumer decides its own null. DIA-NN searches shipped decoys *in addition* to its own. |
 | `irt_rescale` | `false` | Off means the RT column is the model's raw 0..1 output, **not** iRT, and is not interchangeable with another tool's iRT library. Set true to export. |
 | `derive_ion_mobility` | `true` | Emits 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension. |
-| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data naming `timsTOF` was worth +1,662 precursors — see below. |
+| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data naming `timsTOF` was worth +1,329 precursors — see below. |
 | `nce` | per instrument | Unset it takes the instrument's default (timsTOF 30, QE/SciexTOF/ThermoTOF 30, Lumos and so Astral 25). The recipe records `nce_source`, so a dumped config says whether you chose the number or the tool did. |
 
 #### Instrument and collision energy
@@ -260,12 +260,12 @@ Measured on K562 diaPASEF (DIA-NN 2.0, three replicates, matched digests):
 | Setting | Precursors (1% FDR) | Protein groups |
 |---|---|---|
 | `QE` / 30 (the old default) | 117,572 | 7,878 |
-| `timsTOF` / 30 (the default now) | 119,234 | 7,971 |
+| `timsTOF` / 30 (the default now) | 118,901 | 7,971 |
 | `timsTOF` / 40 | **119,929** | **7,981** |
 | DIA-NN's own predictor | 120,287 | 7,931 |
 
-Most of that is the **label**: `QE`→`timsTOF` at NCE 30 is +1,662 precursors and
-already passes DIA-NN on protein groups; NCE 30→40 adds +695 more.
+Most of that is the **label**: `QE`→`timsTOF` at NCE 30 is +1,329 precursors and
+already passes DIA-NN on protein groups; NCE 30→40 adds +1,028 more.
 
 **If you run timsTOF diaPASEF, consider `nce: 40`.** It scored better on every
 replicate — spectral angle against each run's own observed fragment areas was

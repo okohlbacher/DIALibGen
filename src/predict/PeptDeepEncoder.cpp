@@ -247,7 +247,7 @@ namespace ODIA
     // On K562 diaPASEF, normalised spectral angle against the run's own observed
     // fragment areas was 0.8939 +/- 0.0011 at NCE 30 and 0.9041 +/- 0.0004 at 40
     // over three replicates -- a real difference, ten times the replicate
-    // spread, and worth +695 precursors end to end. It is still not a default:
+    // spread, and worth +1,028 precursors end to end. It is still not a default:
     // the curve falls about four times more steeply above its peak than below
     // it, so defaulting AT the peak puts every method with a cooler ramp on the
     // steep side, while defaulting below costs our own ramp 0.010. One ramp was

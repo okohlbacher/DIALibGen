@@ -61,6 +61,35 @@ namespace ODIA
     /// for the wrong one.
     static std::int64_t instrumentIndex(const std::string& name);
 
+    /// Canonical instrument name for @p name, or an empty string if nothing in
+    /// the table claims it.
+    ///
+    /// The MS2 model one-hot encodes the INDEX of the name, so an unrecognised
+    /// one is not "generic": THIS ENCODER sends it to max_instrument_num - 1, a
+    /// slot no training ever addressed. (Upstream does not do that -- peptdeep's
+    /// ModelManager falls back to Lumos -- so the slot-7 behaviour is ours, and
+    /// the reason a caller should canonicalise before encoding.)
+    ///
+    /// What that costs is small but unknowable from the output: measured on
+    /// timsTOF data, "Astral" through slot 7 scored 0.8582 against Lumos's
+    /// 0.8586, because the shipped checkpoint's Lumos column also sits at its
+    /// initialisation -- only QE and timsTOF carry trained weights, and Lumos is
+    /// in effect the no-correction baseline. So the harm is not a wrong
+    /// spectrum, it is a library whose instrument setting meant nothing while
+    /// reading back as though it had.
+    ///
+    /// The table is upstream's `instrument_group` (all 17 entries) PLUS the
+    /// spellings PSI-MS, SDRF and PRIDE actually carry -- a superset. Matching
+    /// ignores case, '-', '_' and ' ', which upstream does not do; a leading
+    /// "Orbitrap" and a trailing model number are then stripped, so
+    /// "Orbitrap Exploris 480" resolves where upstream would refuse it.
+    static std::string canonicalInstrument(const std::string& name);
+
+    /// The NCE that suits @p canonical_instrument. Never zero: an instrument
+    /// with nothing specific to say still gets upstream's generic 30, so no
+    /// caller can report a fallback as though it were the instrument's own.
+    static float defaultNce(const std::string& canonical_instrument);
+
     /// Encode one peptide. Throws if it is empty or carries a residue outside
     /// A-Z, which would one-hot to an all-off row and so be indistinguishable
     /// from padding.

@@ -22,7 +22,7 @@ set(ODIA_IRT_FIXTURE "$ENV{ODIA_OPENMS_SOURCE}/src/tests/class_tests/openms/data
 
 foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
-               odia_irt_calibration odia_ms2_sessions)
+               odia_irt_calibration odia_ms2_sessions odia_instrument_dump)
   add_executable(${helper} tools/${helper}.cpp)
   target_link_libraries(${helper} PRIVATE odia_library)
 endforeach()
@@ -74,6 +74,43 @@ if(TARGET DIALibGen)
                    -config "${CMAKE_CURRENT_BINARY_DIR}/typo.json"
                    -out "${CMAKE_CURRENT_BINARY_DIR}/typo.tsv")
   set_tests_properties(config_rejects_unknown_key PROPERTIES WILL_FAIL TRUE)
+endif()
+
+# The instrument table. An alias that resolves to the UNTRAINED slot (7, or
+# ThermoTOF's 4 in the shipped checkpoint) predicts spectra for no instrument at
+# all, and nothing downstream can tell: every slot of the checkpoint carries
+# non-zero weight, so the library looks entirely normal. Pinned in full.
+add_test(NAME peptdeep_instrument_table
+         COMMAND odia_instrument_dump QE Lumos timsTOF SciexTOF Astral "timsTOF Pro" Exploris Velos nonsense)
+set_tests_properties(peptdeep_instrument_table PROPERTIES PASS_REGULAR_EXPRESSION
+  "QE -> QE slot 0 nce 30\nLumos -> Lumos slot 1 nce 25\ntimsTOF -> timsTOF slot 2 nce 30\nSciexTOF -> SciexTOF slot 3 nce 30\nAstral -> Lumos slot 1 nce 25\ntimsTOF Pro -> timsTOF slot 2 nce 30\nExploris -> QE slot 0 nce 30\nVelos -> Lumos slot 1 nce 25\nnonsense -> REFUSED")
+
+# The spellings PSI-MS, SDRF and PRIDE carry. Refusing an unknown name made the
+# table a gate, and a gate that rejects the name a user copied out of their own
+# metadata is worse than the fall-through it replaced.
+add_test(NAME peptdeep_instrument_real_spellings
+         COMMAND odia_instrument_dump "Q Exactive HF-X" "Orbitrap Fusion Lumos" "Orbitrap Exploris 480"
+                 "Orbitrap Astral" "TripleTOF 6600" "ZenoTOF 7600" "timsTOF Ultra 2")
+set_tests_properties(peptdeep_instrument_real_spellings PROPERTIES PASS_REGULAR_EXPRESSION
+  "Q Exactive HF-X -> QE slot 0 nce 30\nOrbitrap Fusion Lumos -> Lumos slot 1 nce 25\nOrbitrap Exploris 480 -> QE slot 0 nce 30\nOrbitrap Astral -> Lumos slot 1 nce 25\nTripleTOF 6600 -> SciexTOF slot 3 nce 30\nZenoTOF 7600 -> SciexTOF slot 3 nce 30\ntimsTOF Ultra 2 -> timsTOF slot 2 nce 30")
+
+# Accepting the vendor spellings must not accept a TYPO of one. A prefix match
+# would: "Astrall" starts with "Astral", and the first version of the stripping
+# code accepted it -- the exact mistake the refusal exists to catch.
+add_test(NAME peptdeep_instrument_typos_refused
+         COMMAND odia_instrument_dump Astrall Lumoss timsTOFF QEE Explori nonsense)
+set_tests_properties(peptdeep_instrument_typos_refused PROPERTIES PASS_REGULAR_EXPRESSION
+  "Astrall -> REFUSED\nLumoss -> REFUSED\ntimsTOFF -> REFUSED\nQEE -> REFUSED\nExplori -> REFUSED\nnonsense -> REFUSED")
+
+# An instrument name the model does not know must be refused, not silently
+# indexed onto an untrained slot.
+if(TARGET DIALibGen)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json" "{\"instrument\": \"Astrall\"}\n")
+  add_test(NAME config_rejects_unknown_instrument
+           COMMAND DIALibGen -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   -config "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json"
+                   -out "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.tsv")
+  set_tests_properties(config_rejects_unknown_instrument PROPERTIES WILL_FAIL TRUE)
 endif()
 
 # groupByLength and the homogeneity guard. Collapsing every peptide into one

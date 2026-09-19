@@ -183,26 +183,52 @@ namespace ODIA
     }
 
     /// Upstream's `instrument_group` (peptdeep/constants/default_settings.yaml),
-    /// pinned in data/peptdeep_meta_inputs.txt. An Astral is a Lumos here
-    /// because that is the group the model was TRAINED with, not because the two
-    /// instruments resemble each other.
+    /// all 17 entries, PLUS spellings of our own -- so this is a superset, not a
+    /// copy. Pinned in data/peptdeep_meta_inputs.txt.
+    ///
+    /// An Astral is a Lumos here because that is the group upstream trained it
+    /// with. They tried the other reading: commit 74a9816 mapped Astral onto
+    /// ThermoTOF, and 4b0aaf1 reverted it, "FIX use lumos model for Astral".
     struct InstrumentAlias { const char* folded; const char* canonical; };
     constexpr InstrumentAlias INSTRUMENT_ALIASES[] = {
-      {"QE", "QE"}, {"QE+", "QE"}, {"QEPLUS", "QE"}, {"QEHF", "QE"}, {"QEHFX", "QE"},
+      // the five the model indexes, each mapping to itself
+      {"QE", "QE"}, {"LUMOS", "Lumos"}, {"TIMSTOF", "timsTOF"},
+      {"SCIEXTOF", "SciexTOF"}, {"THERMOTOF", "ThermoTOF"},
+      // upstream instrument_group
+      {"ASTRAL", "Lumos"}, {"FUSION", "Lumos"}, {"ECLIPSE", "Lumos"},
+      {"VELOS", "Lumos"}, {"ELITE", "Lumos"},
+      {"ORBITRAPTRIBRID", "Lumos"}, {"THERMOTRIBRID", "Lumos"},
+      {"QE+", "QE"}, {"QEHF", "QE"}, {"QEHFX", "QE"},
       {"EXPLORIS", "QE"}, {"EXPLORIS480", "QE"},
-      {"LUMOS", "Lumos"}, {"ASTRAL", "Lumos"}, {"ORBITRAPASTRAL", "Lumos"},
-      {"FUSION", "Lumos"}, {"ECLIPSE", "Lumos"}, {"ORBITRAPTRIBRID", "Lumos"},
-      {"TIMSTOF", "timsTOF"}, {"TIMSTOFPRO", "timsTOF"}, {"TIMSTOFPRO2", "timsTOF"},
-      {"TIMSTOFSCP", "timsTOF"}, {"TIMSTOFHT", "timsTOF"}, {"TIMSTOFULTRA", "timsTOF"},
-      {"TIMSTOFULTRA2", "timsTOF"}, {"TIMSTOFFLEX", "timsTOF"},
-      {"SCIEXTOF", "SciexTOF"}, {"TRIPLETOF", "SciexTOF"}, {"ZENOTOF", "SciexTOF"},
-      {"THERMOTOF", "ThermoTOF"},
+      // ours: the spellings PSI-MS, SDRF and PRIDE actually carry
+      {"QEPLUS", "QE"}, {"QEXACTIVE", "QE"}, {"QEXACTIVEPLUS", "QE"},
+      {"QEXACTIVEHF", "QE"}, {"QEXACTIVEHFX", "QE"},
+      {"TIMSTOFPRO", "timsTOF"}, {"TIMSTOFPRO2", "timsTOF"}, {"TIMSTOFSCP", "timsTOF"},
+      {"TIMSTOFHT", "timsTOF"}, {"TIMSTOFULTRA", "timsTOF"}, {"TIMSTOFULTRA2", "timsTOF"},
+      {"TIMSTOFFLEX", "timsTOF"},
+      {"FUSIONLUMOS", "Lumos"}, {"ASTRALZOOM", "Lumos"},
+      {"TRIPLETOF", "SciexTOF"}, {"ZENOTOF", "SciexTOF"},
     };
   }
 
+
   std::string PeptDeepEncoder::canonicalInstrument(const std::string& name)
   {
-    const std::string folded = foldInstrument(name);
+    std::string folded = foldInstrument(name);
+    for (const InstrumentAlias& a : INSTRUMENT_ALIASES)
+    { if (folded == a.folded) { return a.canonical; } }
+
+    // Then the two things a vendor name carries that do not change which of the
+    // five it is: a leading "Orbitrap", and a trailing model number. That turns
+    // "Orbitrap Exploris 480" and "ZenoTOF 7600" -- the names a user copies out
+    // of their own metadata -- into an answer rather than a refusal.
+    //
+    // The result must match the table EXACTLY. A prefix match here would be a
+    // hole big enough to drive the whole feature through: "Astrall" begins with
+    // "Astral", and an earlier version of this function duly accepted it, which
+    // is precisely the typo the refusal exists to catch.
+    if (folded.rfind("ORBITRAP", 0) == 0) { folded.erase(0, 8); }
+    while (!folded.empty() && std::isdigit(static_cast<unsigned char>(folded.back()))) { folded.pop_back(); }
     for (const InstrumentAlias& a : INSTRUMENT_ALIASES)
     { if (folded == a.folded) { return a.canonical; } }
     return {};
@@ -210,24 +236,33 @@ namespace ODIA
 
   float PeptDeepEncoder::defaultNce(const std::string& canonical_instrument)
   {
-    // NCE carries more weight in this model than any single instrument slot
-    // (|w| 5.89 against 1.0-3.9, read out of the shipped checkpoint), so a
-    // default that is wrong for the instrument costs more than the label does.
+    // Read out of the shipped checkpoint: meta_nn is Linear(9,7) over
+    // one_hot(instrument,8) + nce, and only the QE, timsTOF and nce columns
+    // carry weights outside the layer's initialisation bound. Lumos, SciexTOF
+    // and ThermoTOF sit at init -- Lumos is effectively the BASELINE, the
+    // no-correction case that QE and timsTOF are deltas from. So the label is
+    // worth choosing for those two, and the NCE is worth choosing for everyone.
     //
-    // timsTOF 40 is MEASURED, not inherited: on K562 diaPASEF, normalised
-    // spectral angle against the run's own observed fragment areas peaked at
-    // NCE 40 (0.904, against 0.894 at 30 and 0.864 at 45), and end to end that
-    // was 119,929 precursors against 119,234 at NCE 30. It is one dataset with
-    // one collision-energy ramp; a method whose ramp differs should set `nce`
-    // explicitly rather than trust this.
+    // timsTOF 30 is upstream's value, kept deliberately over the 40 we measured.
+    // On K562 diaPASEF, normalised spectral angle against the run's own observed
+    // fragment areas was 0.8939 +/- 0.0011 at NCE 30 and 0.9041 +/- 0.0004 at 40
+    // over three replicates -- a real difference, ten times the replicate
+    // spread, and worth +695 precursors end to end. It is still not a default:
+    // the curve falls about four times more steeply above its peak than below
+    // it, so defaulting AT the peak puts every method with a cooler ramp on the
+    // steep side, while defaulting below costs our own ramp 0.010. One ramp was
+    // measured and the caller's is unknown, so the default sits below the peak.
+    // A timsTOF method like ours should set nce 40 explicitly; the README says so.
     //
-    // The others are upstream's: peptdeep defaults to 30, and AlphaDIA runs
-    // every instrument at 25. We have measured NEITHER on their own data.
-    if (canonical_instrument == "timsTOF") { return 40.0f; }
+    // QE 30 is peptdeep's default and Lumos 25 is AlphaDIA's. NEITHER is
+    // measured here: every row of our sweep was scored on timsTOF spectra, so it
+    // says which LABEL suits timsTOF data, not what NCE a real QE run wants.
+    if (canonical_instrument == "timsTOF") { return 30.0f; }
     if (canonical_instrument == "Lumos") { return 25.0f; }
-    if (canonical_instrument == "QE") { return 30.0f; }
-    if (canonical_instrument == "SciexTOF") { return 30.0f; }
-    return 0.0f;
+    // QE, SciexTOF and ThermoTOF: upstream's generic default. Named explicitly
+    // rather than left to a sentinel, so that no instrument can reach the caller
+    // with "no default" and have the fallback reported as its own.
+    return 30.0f;
   }
 
   std::int64_t PeptDeepEncoder::instrumentIndex(const std::string& name)

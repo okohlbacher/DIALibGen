@@ -230,39 +230,53 @@ The keys that most often need changing:
 | `decoys` | `"none"` | Deliberate: a library is an interchange artefact and the consumer decides its own null. DIA-NN searches shipped decoys *in addition* to its own. |
 | `irt_rescale` | `false` | Off means the RT column is the model's raw 0..1 output, **not** iRT, and is not interchangeable with another tool's iRT library. Set true to export. |
 | `derive_ion_mobility` | `true` | Emits 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension. |
-| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data the `timsTOF` slot beat `QE` by 2.0% precursors end to end — see below. |
-| `nce` | per instrument | Left unset it takes the instrument's default (timsTOF 40, QE 30, Lumos/Astral 25). NCE carries more weight in the model than the instrument label does. |
+| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data naming `timsTOF` was worth +1,662 precursors — see below. |
+| `nce` | per instrument | Unset it takes the instrument's default (timsTOF 30, QE/SciexTOF/ThermoTOF 30, Lumos and so Astral 25). The recipe records `nce_source`, so a dumped config says whether you chose the number or the tool did. |
 
 #### Instrument and collision energy
 
 The MS2 model one-hot encodes the **index** of the instrument name, so the name
-is not cosmetic. It knows five: `QE`, `Lumos`, `timsTOF`, `SciexTOF`,
-`ThermoTOF`, plus the aliases upstream groups onto them — `Astral`, `Fusion`,
-`Eclipse` and `OrbitrapTribrid` are `Lumos`; `QE+`, `QEHF`, `QEHFX` and
-`Exploris` are `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` are `timsTOF`; `TripleTOF`
-and `ZenoTOF` are `SciexTOF`. Matching ignores case, spaces, `-` and `_`.
+is not cosmetic. It knows five — `QE`, `Lumos`, `timsTOF`, `SciexTOF`,
+`ThermoTOF` — plus every alias upstream groups onto them (`Astral`, `Fusion`,
+`Eclipse`, `Velos`, `Elite`, the Tribrids → `Lumos`; `QE+`, `QEHF`, `QEHFX`,
+`Q Exactive`, `Exploris` → `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` → `timsTOF`;
+`TripleTOF`, `ZenoTOF` → `SciexTOF`). Case, spaces, `-` and `_` are ignored, a
+leading `Orbitrap` and a trailing model number are stripped, so
+`"Orbitrap Exploris 480"` and `"ZenoTOF 7600"` resolve. A name that still does
+not match is **refused** — `"Astrall"` is a typo, not an instrument.
 
-A name it does not know is **refused**, because it would otherwise index an
-untrained slot — one still holding the weights it was initialised with. Every
-slot of the shipped checkpoint carries non-zero weight, so a library built that
-way predicts, writes and reads back looking entirely normal. `"Astral"` did
-exactly that until this check existed.
+Only `QE` and `timsTOF` carry trained weights in the shipped checkpoint. Read
+straight out of it, the other three columns sit inside the meta layer's
+initialisation bound, with `Lumos` acting as the **no-correction baseline** that
+QE and timsTOF are deltas from. So naming `Lumos`, `SciexTOF` or `ThermoTOF` is
+not wrong, it simply buys nothing — `SciexTOF` and `ThermoTOF` say so at
+runtime. The reason an unknown name is refused is therefore *not* that the
+spectra would be ruinous (`"Astral"` through the unknown slot scored 0.8582
+against Lumos's 0.8586) but that the library would record an instrument setting
+that meant nothing, with nothing downstream able to tell.
 
-Measured on K562 diaPASEF (DIA-NN 2.0, three replicates, matched digests),
-changing only these two settings:
+Measured on K562 diaPASEF (DIA-NN 2.0, three replicates, matched digests):
 
 | Setting | Precursors (1% FDR) | Protein groups |
 |---|---|---|
 | `QE` / 30 (the old default) | 117,572 | 7,878 |
-| **`timsTOF` / 40** | **119,929** | **7,981** |
+| `timsTOF` / 30 (the default now) | 119,234 | 7,971 |
+| `timsTOF` / 40 | **119,929** | **7,981** |
 | DIA-NN's own predictor | 120,287 | 7,931 |
 
-That closed a 2.0% precursor deficit and put the library ahead on protein
-groups. The `timsTOF` default of NCE 40 comes from that dataset — spectral angle
-against its own observed fragment areas peaked at 40 (0.904, against 0.894 at 30
-and 0.864 at 45). timsTOF ramps collision energy with ion mobility rather than
-using a single NCE, so a method whose ramp differs should set `nce` explicitly.
-The `QE` and `Lumos` defaults are upstream's and are **not** measured here.
+Most of that is the **label**: `QE`→`timsTOF` at NCE 30 is +1,662 precursors and
+already passes DIA-NN on protein groups; NCE 30→40 adds +695 more.
+
+**If you run timsTOF diaPASEF, consider `nce: 40`.** It scored better on every
+replicate — spectral angle against each run's own observed fragment areas was
+0.9041 ± 0.0004 at NCE 40 against 0.8939 ± 0.0011 at 30, ten times the replicate
+spread. It is *not* the default because that curve falls about four times more
+steeply above its peak than below it, so defaulting at the measured maximum puts
+every cooler collision-energy ramp on the steep side; timsTOF ramps energy with
+ion mobility, and we measured one ramp. The `QE` and `Lumos` numbers are
+upstream's (peptdeep and AlphaDIA respectively) and are **not** measured here —
+every row of our sweep was scored on timsTOF spectra, so it says which *label*
+suits timsTOF data, not what NCE a real QE run wants.
 
 ## Desktop app
 

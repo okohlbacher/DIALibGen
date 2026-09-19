@@ -260,6 +260,10 @@ protected:
                                      recompute_decoy_mz);
     for (const auto& [k, v] : j.items())
     {
+      // nce_source and instrument_named are REPORTED, not accepted: a dumped
+      // config carries them so its reader knows who chose the NCE, and feeding
+      // that config straight back in must not then fail on its own output.
+      if (k == "nce_source" || k == "instrument_named") { continue; }
       if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
       (void)v;
     }
@@ -374,21 +378,26 @@ protected:
       throw std::runtime_error("unknown decoys method: '" + decoys + "' (known: " + all + ")");
     }
 
-    // The MS2 model one-hot encodes the INDEX of the instrument name, and a name
-    // it does not know indexes max_instrument_num - 1 -- a slot still holding the
-    // random weights it was initialised with. Every slot of the shipped
-    // checkpoint carries non-zero weight, so such a library predicts, writes and
-    // reads back as though nothing were wrong. "Astral" hit that slot until this
-    // check existed. Refused for the same reason a decoy-method typo is.
+    // The MS2 model one-hot encodes the INDEX of the instrument name, and OUR
+    // encoder sends a name it does not know to max_instrument_num - 1, a slot no
+    // training addressed. (Upstream does not: peptdeep's ModelManager falls back
+    // to Lumos. The slot-7 behaviour is ours.) In output terms the cost is small
+    // -- "Astral" through slot 7 scored 0.8582 on timsTOF data against Lumos's
+    // 0.8586 -- but the library records an instrument that meant nothing, and
+    // nothing downstream can tell. Refused for the same reason a decoy-method
+    // typo is: not because the spectra are ruinous, but because the provenance
+    // would be false.
     const std::string canonical = ODIA::PeptDeepEncoder::canonicalInstrument(instrument);
     if (canonical.empty())
     {
       throw std::runtime_error(
-        "unknown instrument: '" + instrument + "'. The MS2 model knows QE, Lumos, timsTOF, SciexTOF and "
-        "ThermoTOF, and accepts the aliases upstream groups onto them (Astral, Fusion, Eclipse and "
-        "OrbitrapTribrid are Lumos; QE+, QEHF, QEHFX and Exploris are QE; timsTOF Pro/SCP/HT/Ultra/flex "
-        "are timsTOF; TripleTOF and ZenoTOF are SciexTOF). An unrecognised name would silently index an "
-        "untrained slot and predict spectra for no instrument at all.");
+        "unknown instrument: '" + instrument + "'. Known: QE, Lumos, timsTOF, SciexTOF, ThermoTOF, and the "
+        "aliases upstream groups onto them -- Astral, Fusion, Eclipse, Velos, Elite and the Tribrids are "
+        "Lumos; QE+, QEHF, QEHFX, Q Exactive and Exploris are QE; timsTOF Pro/SCP/HT/Ultra/flex are "
+        "timsTOF; TripleTOF and ZenoTOF are SciexTOF. A leading 'Orbitrap' and a trailing model number "
+        "are ignored, so 'Orbitrap Exploris 480' is accepted. An unrecognised name would index a slot no "
+        "training addressed, which is close to Lumos in practice but would be recorded as though you had "
+        "chosen an instrument. Use Lumos to ask for no instrument correction deliberately.");
     }
     if (canonical != instrument) { instrument_alias_of = instrument; }
     instrument = canonical;
@@ -418,6 +427,10 @@ protected:
     // instrument's own default without overriding anyone who set one.
     bool nce_was_set = false;
     std::string instrument_alias_of;   // the name the caller wrote, when it was an alias
+    // Who chose the NCE. The number alone is written down either way; without
+    // this, a dumped config cannot tell its next reader that editing `instrument`
+    // will NOT move an `nce` the tool picked.
+    std::string nce_source = "config";
 
     const std::string cfg = getStringOption_("config");
     if (!cfg.empty())
@@ -456,23 +469,38 @@ protected:
     // an NCE that differs from the one it was built with.
     if (!nce_was_set)
     {
-      if (const float d = ODIA::PeptDeepEncoder::defaultNce(instrument); d > 0.0f) { nce = d; }
+      nce = ODIA::PeptDeepEncoder::defaultNce(instrument);
+      nce_source = "instrument-default:" + instrument;
     }
     if (!instrument_alias_of.empty())
     { writeLogInfo_("instrument '" + instrument_alias_of + "' is '" + instrument + "' to this model (upstream's instrument_group)"); }
     if (!nce_was_set)
-    { writeLogInfo_("nce not set; using " + std::to_string(nce) + ", the default for " + instrument +
-                    (instrument == "timsTOF" ? " (measured on K562 diaPASEF; set it explicitly if your collision-energy ramp differs)" : "")); }
-    if (instrument == "ThermoTOF")
-    { writeLogWarn_("ThermoTOF is in upstream's instrument list but is NOT trained in the shipped MS2 checkpoint, "
-                    "which lists four instruments; its slot holds untrained weights. Prefer Lumos, which is the group "
-                    "upstream puts Astral and the Tribrids in."); }
+    {
+      writeLogInfo_("nce not set; using " + std::to_string(nce) + " for " + instrument +
+                    " (recorded as " + nce_source + ")");
+      if (instrument == "timsTOF")
+      { writeLogInfo_("on our own K562 diaPASEF data nce 40 scored better than this default (spectral angle "
+                      "0.9041 +/- 0.0004 against 0.8939 +/- 0.0011 over three replicates, +695 precursors end to "
+                      "end). The default stays at upstream's 30 because the curve is steeper above its peak than "
+                      "below and your collision-energy ramp is not ours -- set nce 40 if it is."); }
+    }
+    // Only QE and timsTOF carry weights outside the meta layer's initialisation
+    // bound in the shipped checkpoint. The other three are at init, with Lumos
+    // acting as the no-correction baseline -- so naming them is not wrong, it
+    // just buys nothing, and a caller should know that before reading a
+    // difference into it.
+    if (instrument == "SciexTOF" || instrument == "ThermoTOF")
+    { writeLogWarn_(instrument + " is in upstream's instrument list but carries no trained weights in the shipped "
+                    "MS2 checkpoint (whose own constants name four instruments, and whose SciexTOF column sits at "
+                    "its initialisation). Predictions will be close to Lumos, the no-correction baseline; name "
+                    "Lumos if that is what you want."); }
 
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
-      const json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
-                                       nce, instrument, irt_rescale,
-                                       recompute_decoy_mz);
+      json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
+                                 nce, instrument, irt_rescale,
+                                 recompute_decoy_mz);
+      eff["nce_source"] = nce_source;
       std::ofstream os(wc);
       if (!os) { writeLogError_("cannot write config to " + wc); return CANNOT_WRITE_OUTPUT_FILE; }
       os << eff.dump(2) << '\n';
@@ -510,9 +538,16 @@ protected:
     // produced it -- which is the one thing the embedded recipe is for. The
     // cache fingerprint was unaffected (it hashes model CONTENT), so this was
     // invisible to every check except reading the recipe back.
-    const json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
-                                     nce, instrument, irt_rescale,
-                                     recompute_decoy_mz);
+    json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
+                               nce, instrument, irt_rescale,
+                               recompute_decoy_mz);
+    // Derived, so NOT part of effectiveConfig -- that doubles as the config-key
+    // whitelist, and this is something the tool reports rather than accepts.
+    // The number is in the recipe either way; this says who chose it, which is
+    // what a reader of a dumped config needs in order to know that editing
+    // `instrument` will not move an `nce` the tool picked.
+    eff["nce_source"] = nce_source;
+    if (!instrument_alias_of.empty()) { eff["instrument_named"] = instrument_alias_of; }
     std::error_code ec;
     for (const auto& m : models)
     {

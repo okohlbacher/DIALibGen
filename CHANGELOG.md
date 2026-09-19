@@ -24,17 +24,21 @@ This project follows [Semantic Versioning](https://semver.org/).
   is logged and the canonical name is what lands in the provenance.
 - **Per-instrument default `nce`**, applied only when the config names none, and
   resolved before `-write_config` so the dumped config is the one that was used:
-  `timsTOF` 40, `QE` 30, `Lumos` (so also `Astral`) 25.
+  `Lumos` (and so `Astral`) 25, everything else upstream's 30. `nce_source` in
+  the recipe records whether the operator or the tool chose the number.
 
-  The timsTOF value is measured on K562 diaPASEF: spectral angle against that
-  run's own observed fragment areas peaked at NCE 40, and end to end
-  `timsTOF`/40 gave 119,929 precursors and 7,981 protein groups against
-  `QE`/30's 117,572 and 7,878 — closing a 2.0% deficit to DIA-NN's own predictor
-  and passing it on protein groups. One dataset, one collision-energy ramp; a
-  method whose ramp differs should set `nce` explicitly. The `QE` and `Lumos`
-  values are upstream's and are not measured here.
-- `ThermoTOF` warns: it is in upstream's list but is not trained in the shipped
-  checkpoint, whose own constants name four instruments.
+  `timsTOF` stays at upstream's 30 although we measured 40 as better on K562
+  diaPASEF (spectral angle 0.9041 ± 0.0004 against 0.8939 ± 0.0011 over three
+  replicates, +695 precursors end to end): the curve falls about four times more
+  steeply above its peak than below, so a default at the measured maximum puts
+  every cooler collision-energy ramp on the steep side. The README says to set
+  `nce: 40` for a method like ours. Most of the end-to-end win is the label, not
+  the NCE — `QE`/30 → `timsTOF`/30 is +1,662 precursors and already passes
+  DIA-NN on protein groups.
+- `SciexTOF` and `ThermoTOF` warn that they carry no trained weights in the
+  shipped checkpoint. Read out of it, only `QE` and `timsTOF` have weights
+  outside the meta layer's initialisation bound; `Lumos` is the no-correction
+  baseline the other two are deltas from.
 - `test/tools/odia_instrument_dump.cpp` and two tests: the whole
   name → canonical → slot → NCE table is pinned, and an unknown instrument in a
   config must fail. `test/check_meta_inputs.py` now validates the alias table

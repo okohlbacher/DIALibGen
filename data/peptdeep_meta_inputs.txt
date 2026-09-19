@@ -30,7 +30,9 @@ instrument	SciexTOF	3
 instrument	ThermoTOF	4
 
 # Aliases: upstream's `instrument_group` in peptdeep/constants/default_settings.yaml,
-# which is how a name that is not one of the five above reaches a trained slot.
+# all 17 entries. The shipped table is a SUPERSET -- it also accepts the
+# spellings PSI-MS, SDRF and PRIDE carry -- so this pin is a lower bound on it,
+# not a copy of it. Only the entries below are checked.
 # An Astral is a Lumos to this model because that is the group its authors
 # trained it with, not because the instruments are alike. Matched after
 # upper-casing and removing '-', '_' and ' '.
@@ -40,6 +42,9 @@ alias	QEHFX	QE
 alias	Exploris	QE
 alias	Exploris480	QE
 alias	Astral	Lumos
+alias	Velos	Lumos
+alias	Elite	Lumos
+alias	ThermoTribrid	Lumos
 alias	Fusion	Lumos
 alias	Eclipse	Lumos
 alias	OrbitrapTribrid	Lumos

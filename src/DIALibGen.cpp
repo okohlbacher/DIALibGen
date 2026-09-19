@@ -480,7 +480,7 @@ protected:
                     " (recorded as " + nce_source + ")");
       if (instrument == "timsTOF")
       { writeLogInfo_("on our own K562 diaPASEF data nce 40 scored better than this default (spectral angle "
-                      "0.9041 +/- 0.0004 against 0.8939 +/- 0.0011 over three replicates, +695 precursors end to "
+                      "0.9041 +/- 0.0004 against 0.8939 +/- 0.0011 over three replicates, +1,028 precursors end to "
                       "end). The default stays at upstream's 30 because the curve is steeper above its peak than "
                       "below and your collision-energy ramp is not ours -- set nce 40 if it is."); }
     }

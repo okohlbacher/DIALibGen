@@ -29,11 +29,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   `timsTOF` stays at upstream's 30 although we measured 40 as better on K562
   diaPASEF (spectral angle 0.9041 ± 0.0004 against 0.8939 ± 0.0011 over three
-  replicates, +695 precursors end to end): the curve falls about four times more
+  replicates, +1,028 precursors end to end): the curve falls about four times more
   steeply above its peak than below, so a default at the measured maximum puts
   every cooler collision-energy ramp on the steep side. The README says to set
   `nce: 40` for a method like ours. Most of the end-to-end win is the label, not
-  the NCE — `QE`/30 → `timsTOF`/30 is +1,662 precursors and already passes
+  the NCE — `QE`/30 → `timsTOF`/30 is +1,329 precursors and already passes
   DIA-NN on protein groups.
 - `SciexTOF` and `ThermoTOF` warn that they carry no trained weights in the
   shipped checkpoint. Read out of it, only `QE` and `timsTOF` have weights

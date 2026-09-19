@@ -18,6 +18,7 @@
 #include <odia/DIANNLibraryFile.h>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
+#include <odia/PeptDeepEncoder.h>
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/CONCEPT/VersionInfo.h>
@@ -252,7 +253,7 @@ protected:
   void apply_(const json& j, ODIA::DigestParams& p, std::string& decoys,
               std::string& rt_model, std::string& ms2_model, std::string& ccs_model,
               double& nce, std::string& instrument, bool& irt_rescale,
-              bool& recompute_decoy_mz)
+              bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of)
   {
     const json ref = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                      nce, instrument, irt_rescale,
@@ -355,7 +356,7 @@ protected:
     if (j.contains("ms2_model")) { ms2_model = j["ms2_model"]; }
     if (j.contains("ccs_model")) { ccs_model = j["ccs_model"]; }
     if (j.contains("instrument")) { instrument = j["instrument"]; }
-    if (j.contains("nce")) { nce = j["nce"]; }
+    if (j.contains("nce")) { nce = j["nce"]; nce_was_set = true; }
     if (j.contains("irt_rescale")) { irt_rescale = j["irt_rescale"]; }
     if (j.contains("recompute_decoy_mz"))
     { recompute_decoy_mz = j["recompute_decoy_mz"]; }
@@ -372,6 +373,25 @@ protected:
       for (const char* m : kDecoyMethods) { all += (all.empty() ? "" : ", "); all += m; }
       throw std::runtime_error("unknown decoys method: '" + decoys + "' (known: " + all + ")");
     }
+
+    // The MS2 model one-hot encodes the INDEX of the instrument name, and a name
+    // it does not know indexes max_instrument_num - 1 -- a slot still holding the
+    // random weights it was initialised with. Every slot of the shipped
+    // checkpoint carries non-zero weight, so such a library predicts, writes and
+    // reads back as though nothing were wrong. "Astral" hit that slot until this
+    // check existed. Refused for the same reason a decoy-method typo is.
+    const std::string canonical = ODIA::PeptDeepEncoder::canonicalInstrument(instrument);
+    if (canonical.empty())
+    {
+      throw std::runtime_error(
+        "unknown instrument: '" + instrument + "'. The MS2 model knows QE, Lumos, timsTOF, SciexTOF and "
+        "ThermoTOF, and accepts the aliases upstream groups onto them (Astral, Fusion, Eclipse and "
+        "OrbitrapTribrid are Lumos; QE+, QEHF, QEHFX and Exploris are QE; timsTOF Pro/SCP/HT/Ultra/flex "
+        "are timsTOF; TripleTOF and ZenoTOF are SciexTOF). An unrecognised name would silently index an "
+        "untrained slot and predict spectra for no instrument at all.");
+    }
+    if (canonical != instrument) { instrument_alias_of = instrument; }
+    instrument = canonical;
   }
 
   ExitCodes main_(int, const char**) override
@@ -394,6 +414,10 @@ protected:
     // nothing internally, and its 11 spiked standards had a worst-case error of
     // 8.76 iRT. Set true only to write a library another tool must read as iRT.
     bool irt_rescale = false;
+    // Whether "nce" was named in the config, so that leaving it out can take the
+    // instrument's own default without overriding anyone who set one.
+    bool nce_was_set = false;
+    std::string instrument_alias_of;   // the name the caller wrote, when it was an alias
 
     const std::string cfg = getStringOption_("config");
     if (!cfg.empty())
@@ -402,7 +426,7 @@ protected:
       if (!in) { writeLogError_("cannot read config: " + cfg); return INPUT_FILE_NOT_FOUND; }
       try { apply_(json::parse(in, nullptr, true, true), p, decoys, rt_model,
                    ms2_model, ccs_model, nce, instrument, irt_rescale,
-                   recompute_decoy_mz); }
+                   recompute_decoy_mz, nce_was_set, instrument_alias_of); }
       catch (const std::exception& e)
       { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
 
@@ -416,6 +440,33 @@ protected:
         { *m = (base / *m).lexically_normal().string(); }
       }
     }
+
+    // With no config at all the instrument never went through apply_, so
+    // canonicalise here too: -write_config must dump the name that will be used.
+    if (cfg.empty())
+    {
+      const std::string canonical = ODIA::PeptDeepEncoder::canonicalInstrument(instrument);
+      if (canonical.empty()) { writeLogError_("unknown instrument: '" + instrument + "'"); return ILLEGAL_PARAMETERS; }
+      instrument = canonical;
+    }
+
+    // An NCE nobody named takes the instrument's own default. Resolved BEFORE
+    // -write_config so that the dumped config is the one that was used, and
+    // recorded in the provenance for the same reason: a library must not carry
+    // an NCE that differs from the one it was built with.
+    if (!nce_was_set)
+    {
+      if (const float d = ODIA::PeptDeepEncoder::defaultNce(instrument); d > 0.0f) { nce = d; }
+    }
+    if (!instrument_alias_of.empty())
+    { writeLogInfo_("instrument '" + instrument_alias_of + "' is '" + instrument + "' to this model (upstream's instrument_group)"); }
+    if (!nce_was_set)
+    { writeLogInfo_("nce not set; using " + std::to_string(nce) + ", the default for " + instrument +
+                    (instrument == "timsTOF" ? " (measured on K562 diaPASEF; set it explicitly if your collision-energy ramp differs)" : "")); }
+    if (instrument == "ThermoTOF")
+    { writeLogWarn_("ThermoTOF is in upstream's instrument list but is NOT trained in the shipped MS2 checkpoint, "
+                    "which lists four instruments; its slot holds untrained weights. Prefer Lumos, which is the group "
+                    "upstream puts Astral and the Tribrids in."); }
 
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {

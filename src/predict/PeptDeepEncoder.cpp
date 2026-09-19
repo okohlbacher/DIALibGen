@@ -166,6 +166,70 @@ namespace ODIA
     return batch;
   }
 
+  namespace
+  {
+    /// Upper-case, and drop '-', '_' and ' ', so "timsTOF Pro" and "TIMSTOF-PRO"
+    /// are one name. Instrument names are written a dozen ways in the wild and a
+    /// hyphen is not a different mass spectrometer.
+    std::string foldInstrument(const std::string& name)
+    {
+      std::string f;
+      for (const char c : name)
+      {
+        if (c == '-' || c == '_' || c == ' ') { continue; }
+        f.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+      }
+      return f;
+    }
+
+    /// Upstream's `instrument_group` (peptdeep/constants/default_settings.yaml),
+    /// pinned in data/peptdeep_meta_inputs.txt. An Astral is a Lumos here
+    /// because that is the group the model was TRAINED with, not because the two
+    /// instruments resemble each other.
+    struct InstrumentAlias { const char* folded; const char* canonical; };
+    constexpr InstrumentAlias INSTRUMENT_ALIASES[] = {
+      {"QE", "QE"}, {"QE+", "QE"}, {"QEPLUS", "QE"}, {"QEHF", "QE"}, {"QEHFX", "QE"},
+      {"EXPLORIS", "QE"}, {"EXPLORIS480", "QE"},
+      {"LUMOS", "Lumos"}, {"ASTRAL", "Lumos"}, {"ORBITRAPASTRAL", "Lumos"},
+      {"FUSION", "Lumos"}, {"ECLIPSE", "Lumos"}, {"ORBITRAPTRIBRID", "Lumos"},
+      {"TIMSTOF", "timsTOF"}, {"TIMSTOFPRO", "timsTOF"}, {"TIMSTOFPRO2", "timsTOF"},
+      {"TIMSTOFSCP", "timsTOF"}, {"TIMSTOFHT", "timsTOF"}, {"TIMSTOFULTRA", "timsTOF"},
+      {"TIMSTOFULTRA2", "timsTOF"}, {"TIMSTOFFLEX", "timsTOF"},
+      {"SCIEXTOF", "SciexTOF"}, {"TRIPLETOF", "SciexTOF"}, {"ZENOTOF", "SciexTOF"},
+      {"THERMOTOF", "ThermoTOF"},
+    };
+  }
+
+  std::string PeptDeepEncoder::canonicalInstrument(const std::string& name)
+  {
+    const std::string folded = foldInstrument(name);
+    for (const InstrumentAlias& a : INSTRUMENT_ALIASES)
+    { if (folded == a.folded) { return a.canonical; } }
+    return {};
+  }
+
+  float PeptDeepEncoder::defaultNce(const std::string& canonical_instrument)
+  {
+    // NCE carries more weight in this model than any single instrument slot
+    // (|w| 5.89 against 1.0-3.9, read out of the shipped checkpoint), so a
+    // default that is wrong for the instrument costs more than the label does.
+    //
+    // timsTOF 40 is MEASURED, not inherited: on K562 diaPASEF, normalised
+    // spectral angle against the run's own observed fragment areas peaked at
+    // NCE 40 (0.904, against 0.894 at 30 and 0.864 at 45), and end to end that
+    // was 119,929 precursors against 119,234 at NCE 30. It is one dataset with
+    // one collision-energy ramp; a method whose ramp differs should set `nce`
+    // explicitly rather than trust this.
+    //
+    // The others are upstream's: peptdeep defaults to 30, and AlphaDIA runs
+    // every instrument at 25. We have measured NEITHER on their own data.
+    if (canonical_instrument == "timsTOF") { return 40.0f; }
+    if (canonical_instrument == "Lumos") { return 25.0f; }
+    if (canonical_instrument == "QE") { return 30.0f; }
+    if (canonical_instrument == "SciexTOF") { return 30.0f; }
+    return 0.0f;
+  }
+
   std::int64_t PeptDeepEncoder::instrumentIndex(const std::string& name)
   {
     // AlphaPeptDeep's list, in its order, pinned in data/peptdeep_meta_inputs.txt

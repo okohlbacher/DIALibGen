@@ -61,6 +61,30 @@ namespace ODIA
     /// for the wrong one.
     static std::int64_t instrumentIndex(const std::string& name);
 
+    /// Canonical instrument name for @p name, or an empty string if the model
+    /// has no slot for it.
+    ///
+    /// AlphaPeptDeep's MS2 model knows five instruments and one-hot encodes the
+    /// INDEX of the name, so a name it does not know is not "generic": it lands
+    /// on max_instrument_num - 1, a slot whose weights are the random values it
+    /// was initialised with and never trained away from. Measured on the shipped
+    /// checkpoint, every slot carries non-zero weight, so nothing downstream can
+    /// notice. An "Astral" library built that way looks perfectly normal.
+    ///
+    /// The alias table is upstream's own `instrument_group`
+    /// (peptdeep/constants/default_settings.yaml), pinned in
+    /// data/peptdeep_meta_inputs.txt -- an Astral is a Lumos to this model
+    /// because that is what its authors trained it to be, not because the two
+    /// instruments are alike.
+    ///
+    /// Matching is case-insensitive, and '-', '_' and ' ' are ignored, so
+    /// "timsTOF Pro", "timstof-pro" and "TIMSTOFPRO" are one name.
+    static std::string canonicalInstrument(const std::string& name);
+
+    /// The NCE that suits @p canonical_instrument when the caller named none.
+    /// Zero if there is no defensible default for it.
+    static float defaultNce(const std::string& canonical_instrument);
+
     /// Encode one peptide. Throws if it is empty or carries a residue outside
     /// A-Z, which would one-hot to an all-off row and so be indistinguishable
     /// from padding.

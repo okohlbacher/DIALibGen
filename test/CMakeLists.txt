@@ -22,7 +22,7 @@ set(ODIA_IRT_FIXTURE "$ENV{ODIA_OPENMS_SOURCE}/src/tests/class_tests/openms/data
 
 foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
-               odia_irt_calibration odia_ms2_sessions)
+               odia_irt_calibration odia_ms2_sessions odia_instrument_dump)
   add_executable(${helper} tools/${helper}.cpp)
   target_link_libraries(${helper} PRIVATE odia_library)
 endforeach()
@@ -74,6 +74,26 @@ if(TARGET DIALibGen)
                    -config "${CMAKE_CURRENT_BINARY_DIR}/typo.json"
                    -out "${CMAKE_CURRENT_BINARY_DIR}/typo.tsv")
   set_tests_properties(config_rejects_unknown_key PROPERTIES WILL_FAIL TRUE)
+endif()
+
+# The instrument table. An alias that resolves to the UNTRAINED slot (7, or
+# ThermoTOF's 4 in the shipped checkpoint) predicts spectra for no instrument at
+# all, and nothing downstream can tell: every slot of the checkpoint carries
+# non-zero weight, so the library looks entirely normal. Pinned in full.
+add_test(NAME peptdeep_instrument_table
+         COMMAND odia_instrument_dump QE Lumos timsTOF SciexTOF Astral "timsTOF Pro" Exploris nonsense)
+set_tests_properties(peptdeep_instrument_table PROPERTIES PASS_REGULAR_EXPRESSION
+  "QE -> QE slot 0 nce 30\nLumos -> Lumos slot 1 nce 25\ntimsTOF -> timsTOF slot 2 nce 40\nSciexTOF -> SciexTOF slot 3 nce 30\nAstral -> Lumos slot 1 nce 25\ntimsTOF Pro -> timsTOF slot 2 nce 40\nExploris -> QE slot 0 nce 30\nnonsense -> REFUSED")
+
+# An instrument name the model does not know must be refused, not silently
+# indexed onto an untrained slot.
+if(TARGET DIALibGen)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json" "{\"instrument\": \"Astrall\"}\n")
+  add_test(NAME config_rejects_unknown_instrument
+           COMMAND DIALibGen -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   -config "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json"
+                   -out "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.tsv")
+  set_tests_properties(config_rejects_unknown_instrument PROPERTIES WILL_FAIL TRUE)
 endif()
 
 # groupByLength and the homogeneity guard. Collapsing every peptide into one

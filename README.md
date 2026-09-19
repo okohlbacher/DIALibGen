@@ -230,6 +230,39 @@ The keys that most often need changing:
 | `decoys` | `"none"` | Deliberate: a library is an interchange artefact and the consumer decides its own null. DIA-NN searches shipped decoys *in addition* to its own. |
 | `irt_rescale` | `false` | Off means the RT column is the model's raw 0..1 output, **not** iRT, and is not interchangeable with another tool's iRT library. Set true to export. |
 | `derive_ion_mobility` | `true` | Emits 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension. |
+| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data the `timsTOF` slot beat `QE` by 2.0% precursors end to end — see below. |
+| `nce` | per instrument | Left unset it takes the instrument's default (timsTOF 40, QE 30, Lumos/Astral 25). NCE carries more weight in the model than the instrument label does. |
+
+#### Instrument and collision energy
+
+The MS2 model one-hot encodes the **index** of the instrument name, so the name
+is not cosmetic. It knows five: `QE`, `Lumos`, `timsTOF`, `SciexTOF`,
+`ThermoTOF`, plus the aliases upstream groups onto them — `Astral`, `Fusion`,
+`Eclipse` and `OrbitrapTribrid` are `Lumos`; `QE+`, `QEHF`, `QEHFX` and
+`Exploris` are `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` are `timsTOF`; `TripleTOF`
+and `ZenoTOF` are `SciexTOF`. Matching ignores case, spaces, `-` and `_`.
+
+A name it does not know is **refused**, because it would otherwise index an
+untrained slot — one still holding the weights it was initialised with. Every
+slot of the shipped checkpoint carries non-zero weight, so a library built that
+way predicts, writes and reads back looking entirely normal. `"Astral"` did
+exactly that until this check existed.
+
+Measured on K562 diaPASEF (DIA-NN 2.0, three replicates, matched digests),
+changing only these two settings:
+
+| Setting | Precursors (1% FDR) | Protein groups |
+|---|---|---|
+| `QE` / 30 (the old default) | 117,572 | 7,878 |
+| **`timsTOF` / 40** | **119,929** | **7,981** |
+| DIA-NN's own predictor | 120,287 | 7,931 |
+
+That closed a 2.0% precursor deficit and put the library ahead on protein
+groups. The `timsTOF` default of NCE 40 comes from that dataset — spectral angle
+against its own observed fragment areas peaked at 40 (0.904, against 0.894 at 30
+and 0.864 at 45). timsTOF ramps collision energy with ion mobility rather than
+using a single NCE, so a method whose ramp differs should set `nce` explicitly.
+The `QE` and `Lumos` defaults are upstream's and are **not** measured here.
 
 ## Desktop app
 

@@ -28,3 +28,24 @@ instrument	Lumos	1
 instrument	timsTOF	2
 instrument	SciexTOF	3
 instrument	ThermoTOF	4
+
+# Aliases: upstream's `instrument_group` in peptdeep/constants/default_settings.yaml,
+# which is how a name that is not one of the five above reaches a trained slot.
+# An Astral is a Lumos to this model because that is the group its authors
+# trained it with, not because the instruments are alike. Matched after
+# upper-casing and removing '-', '_' and ' '.
+alias	QE+	QE
+alias	QEHF	QE
+alias	QEHFX	QE
+alias	Exploris	QE
+alias	Exploris480	QE
+alias	Astral	Lumos
+alias	Fusion	Lumos
+alias	Eclipse	Lumos
+alias	OrbitrapTribrid	Lumos
+alias	timsTOFPro	timsTOF
+alias	timsTOFSCP	timsTOF
+alias	timsTOFHT	timsTOF
+alias	timsTOFUltra	timsTOF
+alias	TripleTOF	SciexTOF
+alias	ZenoTOF	SciexTOF

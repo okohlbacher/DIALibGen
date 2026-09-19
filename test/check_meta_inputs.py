@@ -20,6 +20,7 @@ import peptdeep_reference as ref
 
 pinned = {}
 instruments = {}
+aliases = {}
 with open(f"{root}/data/peptdeep_meta_inputs.txt") as f:
     for line in f:
         line = line.rstrip("\n")
@@ -28,6 +29,8 @@ with open(f"{root}/data/peptdeep_meta_inputs.txt") as f:
         parts = line.split("\t")
         if parts[0] == "instrument":
             instruments[parts[1]] = int(parts[2])
+        elif parts[0] == "alias":
+            aliases[parts[1]] = parts[2]
         else:
             pinned[parts[0]] = float(parts[1])
 
@@ -67,14 +70,31 @@ check("C++ unknown instrument", float(re.search(r"return it == known.end\(\) \? 
 check("reference unknown instrument", float(ref.UNKNOWN_INSTRUMENT),
       pinned["unknown_instrument"])
 
-# An instrument the pin does not name must not be silently mapped to a real
-# one; that is the failure mode the "unknown" slot exists to prevent.
+# The INDEX map must know only the five names the model was trained with. An
+# alias reaches a trained slot through canonicalInstrument, a layer above this
+# one, and does so loudly -- it is logged and recorded in the provenance. What
+# must never happen is the index map growing a name of its own.
 for stray in ("Astral", "Orbitrap", "", "qe "):
     if ref.INSTRUMENTS.get(stray.upper()) is not None:
         failures.append(f"reference maps unlisted instrument {stray!r}")
 
+# The alias table, pinned against upstream's instrument_group. An alias that
+# stops resolving falls through to the UNTRAINED slot, and no library built
+# from it looks wrong afterwards.
+cpp_aliases = dict(re.findall(r'\{"([A-Za-z0-9+]+)",\s*"([A-Za-z]+)"\}', encoder))
+def fold(name):
+    return "".join(c for c in name.upper() if c not in "-_ ")
+for name, canonical in aliases.items():
+    check(f"C++ alias {name}", cpp_aliases.get(fold(name)), canonical)
+    if canonical not in instruments:
+        failures.append(f"alias {name!r} resolves to {canonical!r}, which is not a pinned instrument")
+# Every canonical name must map to itself, or a config naming it exactly would
+# be refused by the very check meant to protect it.
+for name in instruments:
+    check(f"C++ alias {name} (identity)", cpp_aliases.get(fold(name)), name)
+
 for f in failures:
     print(f"  FAIL {f}")
 print(f"meta inputs: {len(failures)} failures "
-      f"({len(instruments)} instruments, {len(pinned)} scalars)")
+      f"({len(instruments)} instruments, {len(aliases)} aliases, {len(pinned)} scalars)")
 sys.exit(1 if failures else 0)

@@ -3,6 +3,43 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed — breaking
+- **An unknown `instrument` is now refused instead of silently predicting for no
+  instrument at all.** The MS2 model one-hot encodes the *index* of the name, and
+  a name it did not know indexed `max_instrument_num - 1` — a slot still holding
+  its random initialisation. Every slot of the shipped checkpoint carries
+  non-zero weight, so nothing downstream could notice: the library predicted,
+  wrote and read back looking entirely normal. `"Astral"` hit that slot.
+
+  Anyone who was passing a name that "worked" this way was getting predictions
+  from an untrained slot; the error now names every accepted spelling.
+
+### Added
+- **Instrument aliases**, taken from upstream's own `instrument_group`: `Astral`,
+  `Fusion`, `Eclipse`, `OrbitrapTribrid` → `Lumos`; `QE+`, `QEHF`, `QEHFX`,
+  `Exploris` → `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` → `timsTOF`; `TripleTOF`,
+  `ZenoTOF` → `SciexTOF`. Case, spaces, `-` and `_` are ignored. The resolution
+  is logged and the canonical name is what lands in the provenance.
+- **Per-instrument default `nce`**, applied only when the config names none, and
+  resolved before `-write_config` so the dumped config is the one that was used:
+  `timsTOF` 40, `QE` 30, `Lumos` (so also `Astral`) 25.
+
+  The timsTOF value is measured on K562 diaPASEF: spectral angle against that
+  run's own observed fragment areas peaked at NCE 40, and end to end
+  `timsTOF`/40 gave 119,929 precursors and 7,981 protein groups against
+  `QE`/30's 117,572 and 7,878 — closing a 2.0% deficit to DIA-NN's own predictor
+  and passing it on protein groups. One dataset, one collision-energy ramp; a
+  method whose ramp differs should set `nce` explicitly. The `QE` and `Lumos`
+  values are upstream's and are not measured here.
+- `ThermoTOF` warns: it is in upstream's list but is not trained in the shipped
+  checkpoint, whose own constants name four instruments.
+- `test/tools/odia_instrument_dump.cpp` and two tests: the whole
+  name → canonical → slot → NCE table is pinned, and an unknown instrument in a
+  config must fail. `test/check_meta_inputs.py` now validates the alias table
+  against the C++ source the same way it already validated the index map.
+
 ## [0.10.1] — 2026-09-17
 
 ### Added

@@ -46,23 +46,23 @@ assert "tune_out_models" in items, "training options missing from the release"
 for mode in ("generate", "refine", "tune"):
     run(f"config-{mode}", ["-mode", mode, "-write_config", out / f"{mode}.json"])
 run("generate", ["-mode", "generate", "-in", root / "example/proteins.fasta", "-out", out / "generated.tsv", "-threads", "2"])
-assert len((out / "generated.tsv").read_text().splitlines()) > 1
+assert len((out / "generated.tsv").read_text(encoding='utf-8').splitlines()) > 1
 # Python creates the fixture and checks provenance; the executable receives a
 # bare environment and never calls Python.
 subprocess.run([sys.executable, str(root / "test/refinement/synth_report.py"), "-", str(out / "report.parquet"), "--precursors", "1600", "--library", str(out / "library.tsv")], check=True)
 common = ["-in", out / "library.tsv", "-ids", out / "report.parquet"]
 run("refine", ["-mode", "refine", *common, "-q_global", "1", "-q_protein", "1", "-out", out / "refined.tsv", "-write_im"])
-assert len((out / "refined.tsv").read_text().splitlines()) > 1
-assert json.loads((out / "refined.tsv.refine.json").read_text())["tool"] == "DIALibGen"
+assert len((out / "refined.tsv").read_text(encoding='utf-8').splitlines()) > 1
+assert json.loads((out / "refined.tsv.refine.json").read_text(encoding='utf-8'))["tool"] == "DIALibGen"
 for head in ("rt", "ccs"):
     models = out / head
     result = run(f"tune-{head}", ["-mode", "tune", *common, "-out", out / f"tuned-{head}.tsv", "-tune_heads", head, "-tune_out_models", models,
         "-filter:rt_max_minutes", "30", "-train:epochs", "20", "-train:warmup", "2", "-stop:min_epochs", "20", "-machine:threads", "2", "-machine:device", "cpu"])
     model = models / f"peptdeep_{head}_dynamic.onnx"
-    provenance = json.loads(Path(str(model) + ".tune.json").read_text())
+    provenance = json.loads(Path(str(model) + ".tune.json").read_text(encoding='utf-8'))
     course = provenance["course"]
     assert course["updates"] > 0 and course["epochs_run"] == 20, f"{head}: no optimizer work"
     assert provenance["device"] == "cpu"
     assert course["exported"] and model.stat().st_size > 0, f"{head}: no tuned model"
-    assert len((out / f"tuned-{head}.tsv").read_text().splitlines()) > 1
+    assert len((out / f"tuned-{head}.tsv").read_text(encoding='utf-8').splitlines()) > 1
 print("PASS: generate, refine and both CPU training heads work" + (" without the build environment" if a.bare else ""))

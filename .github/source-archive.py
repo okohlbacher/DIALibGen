@@ -76,9 +76,9 @@ def verify_assets(manifest, assets):
 
 if __name__ == '__main__':
     if len(sys.argv) >= 4 and sys.argv[1] == '--verify-assets':
-        assets = json.loads(Path(sys.argv[2]).read_text())['assets']
+        assets = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))['assets']
         for filename in sys.argv[3:]:
-            verify_assets(json.loads(Path(filename).read_text()), assets)
+            verify_assets(json.loads(Path(filename).read_text(encoding='utf-8')), assets)
             print(f'Verified source assets: {filename}')
     elif len(sys.argv) == 2:
         package(sys.argv[1])

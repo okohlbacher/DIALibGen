@@ -97,7 +97,7 @@ def source_records(recipe):
     for filename in ('rendered_recipe.yaml', 'meta.yaml', 'recipe.yaml'):
         path = recipe / filename
         if path.is_file():
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding='utf-8'))
             data = data.get('recipe', data)
             sources = data.get('source', [])
             return [sources] if isinstance(sources, dict) else sources
@@ -109,7 +109,7 @@ def collect_source_notices(archive, target):
     pattern = re.compile(r'^(COPYING|LICENSE|LICENCE|NOTICE|COPYRIGHT|AUTHORS|Third[_-]?Party[_-]?Notices?)([._-].*)?$', re.I)
     archive_sha256 = digest(archive)
     manifest_file = target / 'index.json'
-    manifest = json.loads(manifest_file.read_text()) if manifest_file.is_file() else {}
+    manifest = json.loads(manifest_file.read_text(encoding='utf-8')) if manifest_file.is_file() else {}
     def destination(name):
         path = Path(name)
         if not (pattern.match(path.name) or path.name == 'REUSE.toml' or path.suffix.lower() == '.license'
@@ -208,7 +208,7 @@ def main():
     repository_licenses = Path(__file__).resolve().parent.parent / 'licenses'
     records, owners = {}, {}
     for path in sorted((prefix / 'conda-meta').glob('*.json')):
-        record = json.loads(path.read_text())
+        record = json.loads(path.read_text(encoding='utf-8'))
         key = f"{record['name']}-{record['version']}-{record['build']}"
         records[key] = record
         for filename in record.get('files', []):
@@ -216,7 +216,7 @@ def main():
             owners.setdefault(file.name.lower(), []).append((file, key))
     if not records:
         raise RuntimeError(f'no conda package inventory in {prefix}')
-    providers = json.loads(args.providers.read_text()) if args.providers else []
+    providers = json.loads(args.providers.read_text(encoding='utf-8')) if args.providers else []
     if args.torch_root and args.torch_root.resolve() != prefix:
         torch = args.torch_root.resolve()
         provenance = torch / 'share/licenses/Torch/provenance.json'
@@ -225,7 +225,7 @@ def main():
         license_file = provenance.with_name('LICENSE')
         if not license_file.is_file() or not license_file.stat().st_size:
             raise RuntimeError('Torch SDK lacks a non-empty primary LICENSE; refresh its cache using fetch-libtorch.py')
-        data = json.loads(provenance.read_text())
+        data = json.loads(provenance.read_text(encoding='utf-8'))
         native = data.pop('native_providers', [])
         native_files = set()
         for provider in native:
@@ -242,7 +242,7 @@ def main():
                           if p.is_file() and str(p.resolve()) not in native_files and not separate.match(p.name)],
                           'license_directory': str(torch / 'share/licenses/Torch')})
         providers.extend(native)
-    origins = dict(line.split('\t', 1) for line in args.origins.read_text().splitlines()) if args.origins else {}
+    origins = dict(line.split('\t', 1) for line in args.origins.read_text(encoding='utf-8').splitlines()) if args.origins else {}
     if args.origins:
         shutil.copy2(args.origins, sources / 'runtime-origins.tsv')
     external = {}
@@ -259,7 +259,7 @@ def main():
                 return key
             record = records[key]
             info = conda_info(record, cache)
-            about = json.loads((info / 'about.json').read_text())
+            about = json.loads((info / 'about.json').read_text(encoding='utf-8'))
             license_dir = info / 'licenses'
             target = notices / key
             if target.exists():

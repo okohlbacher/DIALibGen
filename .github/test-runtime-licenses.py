@@ -244,11 +244,12 @@ with tempfile.TemporaryDirectory() as temporary:
     (torch / 'lib/libiomp5md.dll').write_bytes(b'libiomp5md.dll')
     (torch / 'lib/libgfortran.so.5').write_bytes(b'GCC runtime')
     (stage / 'lib/libgfortran.so.5').write_bytes(b'GCC runtime')
+    recorded_origin = f'{torch}/lib/libgfortran.so.5'
     with origins.open('a') as stream:
-        stream.write(f'lib/libgfortran.so.5\t{torch}/lib/libgfortran.so.5\n')
+        stream.write(f'lib/libgfortran.so.5\t{recorded_origin}\n')
     run(False, 'no licensing owner')
     failure = json.loads((output / 'runtime-attribution-failure.json').read_text())
-    assert failure['recorded_origin'] == str(torch / 'lib/libgfortran.so.5')
+    assert failure['recorded_origin'] == recorded_origin
     assert failure['resolved_origin'] == str((torch / 'lib/libgfortran.so.5').resolve())
     (stage / 'lib/libgfortran.so.5').unlink()
 
@@ -257,7 +258,8 @@ with tempfile.TemporaryDirectory() as temporary:
     gui_inventory = gui / 'inventory.json'
     gui_inventory.write_text(json.dumps({'target': 'test', 'packages': [{
         'ecosystem': 'cargo', 'name': 'fixture', 'version': '1', 'license': 'mpl-2.0',
-        'source': source.as_uri(), 'checksum': checksum}]}))
+        'source': source.as_uri(), 'checksum': checksum, 'description': 'Unicode source ā'}]},
+        ensure_ascii=False), encoding='utf-8')
     (gui / 'THIRD_PARTY_NOTICES.txt').write_text('fixture notices')
     subprocess.run([sys.executable, str(script.with_name('collect-gui-sources.py')),
                     '--inventory', str(gui_inventory), '--sources', str(output)], check=True)

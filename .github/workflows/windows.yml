@@ -794,7 +794,16 @@ jobs:
       - name: Package corresponding sources
         if: steps.pkg.outputs.package == 'true'
         shell: bash
-        run: tar -C corresponding-sources -czf DIALibGen-sources-windows-x64.tar.gz .
+        run: |
+          tar -C corresponding-sources -czf DIALibGen-sources-windows-x64.tar.gz .
+          python - <<'PY'
+          from pathlib import Path
+          asset = Path('DIALibGen-sources-windows-x64.tar.gz')
+          size = asset.stat().st_size
+          print(f'{asset.name}: {size:,} bytes')
+          if size >= 2 * 1024**3:
+              raise SystemExit('Corresponding-source asset exceeds the GitHub 2 GiB limit; split it before release.')
+          PY
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: steps.pkg.outputs.package == 'true'

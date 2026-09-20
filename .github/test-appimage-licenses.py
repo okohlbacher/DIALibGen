@@ -3,10 +3,12 @@
 import hashlib
 import importlib.util
 import io
+import json
 import shutil
 from pathlib import Path
 import tempfile
 import tarfile
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -186,6 +188,62 @@ class AttributionTests(unittest.TestCase):
         with patch.object(collector, 'run', return_value=str(image.stat().st_size)):
             with self.assertRaisesRegex(RuntimeError, 'offset differs'):
                 collector.validate_runtime_provider(image, {**provider, 'size': image.stat().st_size})
+
+    def test_required_notices_must_survive_in_final_payload_as_exact_bytes(self):
+        original = self.root / 'upstream'
+        original.mkdir()
+        notices = {}
+        for index, name in enumerate(('packages/sample/copyright', 'providers/helper/0-LICENSE',
+                                      'providers/second-helper/0-LICENSE', 'common-licenses/LGPL-2.1')):
+            source = original / str(index)
+            source.write_text(f'Original copyright and terms for {name}\n')
+            notices[name] = source
+        resources = self.root / 'resources'
+        resources.mkdir()
+        (resources / 'stale-notice').write_text('from an older package')
+        collector.stage_notices(notices, resources)
+        self.assertFalse((resources / 'stale-notice').exists())
+        for name, source in notices.items():
+            self.assertEqual((resources / name).read_bytes(), source.read_bytes())
+        records = [{'path': 'usr/share/resources/' + name, 'sha256': collector.digest(resources / name)}
+                   for name in notices]
+        matches = collector.verify_bundled_notices(notices, records)
+        self.assertEqual(set(matches), set(notices))
+        self.assertTrue(all(len(paths) == 1 for paths in matches.values()))
+        # A notice present only in sources, or changed under the right filename, cannot satisfy the gate.
+        for changed in (records[:-1], [*records[:-1], {**records[-1], 'sha256': '0' * 64}]):
+            with self.assertRaisesRegex(RuntimeError, 'final AppImage lacks required notice bytes.*LGPL-2.1'):
+                collector.verify_bundled_notices(notices, changed)
+
+    def test_prepare_stages_notices_without_collecting_sources_or_claiming_completion(self):
+        gui = self.root / 'gui'
+        (gui / 'src-tauri').mkdir(parents=True)
+        (gui / 'src-tauri/tauri.conf.json').write_text('{"productName":"DIALibGen"}')
+        appdir = self.root / 'AppDir'
+        appdir.mkdir()
+        binary = appdir / 'gui-binary'
+        binary.write_bytes(b'known GUI executable')
+        notice = self.root / 'original-notice'
+        notice.write_text('Original helper copyright and permission\n')
+        providers = self.root / 'providers.json'
+        providers.write_text(json.dumps([{'name': 'runtime', 'license': 'MIT', 'notices': [str(notice)],
+                                          'appimage_runtime': {'size': 1, 'sha256': '0' * 64}}]))
+        argv = ['collector', '--appdir', str(appdir), '--appimage', str(self.root / 'final.AppImage'),
+                '--baseline', str(self.root / 'stage'), '--gui-binary', str(binary), '--gui-root', str(gui),
+                '--deb', str(self.root / 'same-build.deb'), '--sources', str(self.root / 'sources'),
+                '--source-asset', 'sources.tar.gz', '--providers', str(providers), '--prepare-notices']
+        with patch.object(sys, 'argv', argv), patch.object(collector, 'validate_appimage_payload'), \
+             patch.object(collector, 'validate_runtime_provider'), \
+             patch.object(collector, 'installed_packages', return_value=({}, {})), \
+             patch.object(collector, 'deb_descriptor_hashes', return_value={}), \
+             patch.object(collector, 'required_notices', return_value={'providers/runtime/LICENSE': notice}), \
+             patch.object(collector, 'ubuntu_sources') as sources, patch.object(collector, 'fetch') as fetch:
+            collector.main()
+            sources.assert_not_called()
+            fetch.assert_not_called()
+        self.assertEqual((gui / 'src-tauri/resources/third-party-licenses/appimage/providers/runtime/LICENSE').read_bytes(),
+                         notice.read_bytes())
+        self.assertFalse((self.root / 'sources/appimage/inventory.json').exists())
 
 
 if __name__ == '__main__':

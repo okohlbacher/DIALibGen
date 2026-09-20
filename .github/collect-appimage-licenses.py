@@ -259,6 +259,44 @@ def validate_runtime_provider(image, runtime):
         raise RuntimeError('AppImage runtime hash differs from provider evidence')
 
 
+def required_notices(used_packages, providers):
+    notices = {f'packages/{name}/copyright': Path('/usr/share/doc') / name.split(':')[0] / 'copyright'
+               for name in sorted(used_packages)}
+    for provider in providers:
+        if not provider.get('license') or not provider.get('notices'):
+            raise RuntimeError(f'incomplete helper licensing: {provider["name"]}')
+        for index, notice in enumerate(provider['notices']):
+            notices[f'providers/{provider["name"]}/{index}-{Path(notice).name}'] = Path(notice)
+    # Installed copyright files refer to this complete, small set of license texts.
+    notices.update({f'common-licenses/{path.name}': path
+                    for path in sorted(Path('/usr/share/common-licenses').iterdir()) if path.is_file()})
+    for name, path in notices.items():
+        if not path.is_file() or not path.stat().st_size:
+            raise RuntimeError(f'missing or empty AppImage notice: {name}')
+    return notices
+
+
+def stage_notices(notices, directory):
+    if directory.exists():
+        shutil.rmtree(directory)
+    for name, source in notices.items():
+        destination = directory / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def verify_bundled_notices(notices, records):
+    by_hash = defaultdict(list)
+    for record in records:
+        if record.get('sha256'):
+            by_hash[record['sha256']].append(record['path'])
+    bundled = {name: by_hash.get(digest(source), []) for name, source in notices.items()}
+    missing = [name for name, paths in bundled.items() if not paths]
+    if missing:
+        raise RuntimeError('final AppImage lacks required notice bytes: ' + ', '.join(missing))
+    return bundled
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--appdir', type=Path, required=True)
@@ -270,6 +308,8 @@ def main():
     parser.add_argument('--sources', type=Path, required=True)
     parser.add_argument('--source-asset', required=True)
     parser.add_argument('--providers', type=Path)
+    parser.add_argument('--prepare-notices', action='store_true',
+                        help='stage exact payload notices in GUI resources for rebundling; do not collect sources')
     args = parser.parse_args()
     appdir, image = args.appdir.resolve(), args.appimage.resolve()
     validate_appimage_payload(appdir, image)
@@ -324,13 +364,28 @@ def main():
                 else:
                     unknown.append(record)
         records.append(record)
-    inventory = {'appimage': image.name, 'sha256': digest(image), 'source_asset': args.source_asset,
-                 'scope': 'Every regular file and symlink in the AppDir, verified against the extracted final AppImage by path, exact file SHA-256 and link target. Attribution of ELF RPATH changes may match original build IDs; data requires exact SHA-256. AppImage header runtime has separate provider proof.',
-                 'files': records, 'packages': [], 'providers': [], 'unknown': unknown, 'complete': False}
-    report = output / 'inventory.json'
-    report.write_text(json.dumps(inventory, indent=2) + '\n')
     if unknown:
         raise RuntimeError('unattributed AppImage files: ' + ', '.join(item['path'] for item in unknown))
+    providers = [provider for provider in providers
+                 if provider['name'] in used_providers or provider.get('appimage_runtime')]
+    if not any(provider.get('appimage_runtime') for provider in providers):
+        raise RuntimeError('AppImage header runtime requires a corresponding-source helper provider')
+    for provider in providers:
+        if provider.get('appimage_runtime'):
+            validate_runtime_provider(image, provider['appimage_runtime'])
+    notices = required_notices(used_packages, providers)
+    if args.prepare_notices:
+        directory = args.gui_root / 'src-tauri/resources/third-party-licenses/appimage'
+        stage_notices(notices, directory)
+        print(f'Staged {len(notices)} exact AppImage notices in {directory}; rebundle before final verification')
+        return
+    bundled_notices = verify_bundled_notices(notices, records)
+    inventory = {'appimage': image.name, 'sha256': digest(image), 'source_asset': args.source_asset,
+                 'scope': 'Every regular file and symlink in the AppDir, verified against the extracted final AppImage by path, exact file SHA-256 and link target. Attribution of ELF RPATH changes may match original build IDs; data requires exact SHA-256. AppImage header runtime has separate provider proof.',
+                 'files': records, 'packages': [], 'providers': [], 'unknown': unknown, 'complete': False,
+                 'bundled_notice_paths': bundled_notices}
+    report = output / 'inventory.json'
+    report.write_text(json.dumps(inventory, indent=2) + '\n')
     # Ubuntu copyright files may refer to shared full license texts. Keep the
     # exact installed collection once; it is small and avoids fragile parsing.
     shutil.copytree('/usr/share/common-licenses', output / 'common-licenses', dirs_exist_ok=True)
@@ -348,12 +403,9 @@ def main():
             source_cache[key] = ubuntu_sources(package['source'], package['source_version'], output / 'sources' / key)
         inventory['packages'].append({**package, 'copyright': str((target / 'copyright').relative_to(output)),
                                       'copyright_sha256': digest(target / 'copyright'),
-                                      'bundled_copyright_paths': [record['path'] for record in records
-                                                                  if record.get('sha256') == digest(target / 'copyright')],
+                                      'bundled_copyright_paths': bundled_notices[f'packages/{name}/copyright'],
                                       'corresponding_source': source_cache[key]})
     for provider in providers:
-        if provider['name'] not in used_providers and not provider.get('appimage_runtime'):
-            continue
         target = output / 'providers' / provider['name']
         target.mkdir(parents=True, exist_ok=True)
         if not provider.get('license') or not provider.get('notices'):
@@ -362,22 +414,18 @@ def main():
         for index, notice in enumerate(provider['notices']):
             dest = target / f'{index}-{Path(notice).name}'
             shutil.copy2(notice, dest)
-            notices.append({'file': str(dest.relative_to(output)), 'sha256': digest(dest)})
-        runtime = provider.get('appimage_runtime')
-        if runtime:
-            validate_runtime_provider(image, runtime)
+            notices.append({'file': str(dest.relative_to(output)), 'sha256': digest(dest),
+                            'bundled_paths': bundled_notices[f'providers/{provider["name"]}/{index}-{Path(notice).name}']})
         if re.search(r'GPL|MPL|EPL|CDDL', provider['license'], re.I) and not provider.get('sources'):
             raise RuntimeError(f'no corresponding helper source: {provider["name"]}')
         sources = [fetch(source['url'], target / source['filename'], source['sha256'])
                    for source in provider.get('sources', [])]
         inventory['providers'].append({**provider, 'notices': notices, 'sources': sources})
-    if not any(provider.get('appimage_runtime') for provider in providers):
-        raise RuntimeError('AppImage header runtime requires a corresponding-source helper provider')
     (output / 'README.txt').write_text(
         'This directory accompanies the AppImage named and SHA-256 identified in inventory.json.\n'
         'Ubuntu packages retain their original copyright notices and exact source versions.\n'
-        'bundled_copyright_paths identifies byte-identical copyright files inside the AppImage;\n'
-        'an empty list means no exact file match, not a search of aggregate notice contents.\n'
+        'bundled_notice_paths identifies byte-identical package copyrights, helper notices and\n'
+        'common license texts inside the extracted final AppImage; absent notices fail packaging.\n'
         'Source descriptors are trusted through HTTPS to their authoritative Launchpad publication;\n'
         'their OpenPGP signatures are not verified. Source archives match descriptor SHA-256 checksums.\n'
         'sources/ contains the complete upstream archives and Debian/Ubuntu packaging/patches.\n'

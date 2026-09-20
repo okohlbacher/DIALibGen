@@ -106,6 +106,51 @@ def post_close(window, post_message, win_error):
         raise win_error()
 
 
+def wait_for_frontend_ready(hwnd, timeout):
+    # Reset is enabled only after the frontend receives default_config over
+    # native IPC. A visible native shell alone can precede WebView2 setup.
+    if timeout <= 0:
+        raise RuntimeError('installed GUI exhausted its startup budget before frontend readiness')
+    script = f"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$condition = [System.Windows.Automation.AndCondition]::new([System.Windows.Automation.Condition[]]@(
+  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty, 'Reset'),
+  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button),
+  [System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::IsEnabledProperty, $true)
+))
+$clock = [System.Diagnostics.Stopwatch]::StartNew()
+while ($clock.Elapsed.TotalMilliseconds -lt {int(timeout * 1000)}) {{
+  $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{int(hwnd)})
+  if ($null -ne $root) {{
+    $control = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    if ($null -ne $control) {{
+      @{{name=$control.Current.Name; control_type=$control.Current.ControlType.ProgrammaticName;
+         enabled=$control.Current.IsEnabled; process_id=$control.Current.ProcessId}} | ConvertTo-Json -Compress
+      exit 0
+    }}
+  }}
+  Start-Sleep -Milliseconds 200
+}}
+throw 'enabled frontend Reset button did not appear'
+"""
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    try:
+        result = subprocess.run([str(powershell), '-NoProfile', '-Command', script],
+                                capture_output=True, encoding='utf-8', errors='replace',
+                                timeout=timeout, check=True)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f'installed GUI frontend readiness failed: {error.stderr.strip()}') from error
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError('installed GUI frontend did not become ready within its startup budget') from error
+    control = json.loads(result.stdout)
+    if (not isinstance(control, dict) or control.get('name') != 'Reset' or control.get('control_type') != 'ControlType.Button'
+            or control.get('enabled') is not True):
+        raise RuntimeError(f'installed GUI returned invalid frontend readiness evidence: {control}')
+    return control
+
+
 def log_gui_processes(pid, output):
     # Capture only this GUI and its descendants; SDK or unrelated runner
     # processes must never appear in the diagnostic output.
@@ -135,7 +180,7 @@ $all | Where-Object {{ $ids.Contains([uint32]$_.ProcessId) }} |
 
 def exercise_gui(gui, log):
     # Native window ownership excludes another single-instance process and
-    # WebView2 helper processes. This checks startup, not frontend rendering.
+    # WebView2 helper processes. UIA then verifies the rendered frontend and IPC.
     import ctypes
     from ctypes import wintypes
     user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -181,11 +226,18 @@ def exercise_gui(gui, log):
     with log.open('w', encoding='utf-8') as output:
         process = subprocess.Popen([str(gui)], cwd=gui.parent, env=gui_environment(gui),
                                    stdout=output, stderr=subprocess.STDOUT)
+        startup = time.monotonic()
         output.write(f'launched installed GUI: {gui}; pid={process.pid}\n'); output.flush()
         try:
-            window = wait_for_gui_window(process, find_window)
+            window = wait_for_gui_window(process, find_window, timeout=60 - (time.monotonic() - startup))
             output.write(f'visible native main window stayed open for 3 seconds: {json.dumps(window)}\n')
             output.flush()
+            ready = wait_for_frontend_ready(window['hwnd'], 60 - (time.monotonic() - startup))
+            current = find_window(process.pid)
+            if process.poll() is not None or current is None or current['hwnd'] != window['hwnd']:
+                raise RuntimeError('installed GUI exited or replaced its main window during frontend startup')
+            ready['elapsed_seconds'] = time.monotonic() - startup
+            output.write(f'installed frontend ready: {json.dumps(ready)}\n'); output.flush()
         finally:
             if process.poll() is None:
                 # Recheck ownership immediately before closing this process's window.
@@ -222,7 +274,7 @@ def exercise_gui(gui, log):
             output.write(f'GUI exit: {process.returncode}\n')
         if process.returncode != 0:
             raise RuntimeError(f'installed GUI exited abnormally: {process.returncode}; see {log}')
-    return {**window, 'stable_seconds': 3, 'clean_exit': True}
+    return {**window, 'stable_seconds': 3, 'frontend_ready': ready, 'clean_exit': True}
 
 
 def main():

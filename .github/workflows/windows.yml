@@ -865,6 +865,7 @@ jobs:
           name: smoke-windows-x64
           path: |
             build/Testing/Temporary/LastTest.log
+            stage/share/DIALibGen/runtime-dependencies.json
             windows-reader-crash.txt
             smoke-installed/*.log
             smoke-installed/**/*.tune.json

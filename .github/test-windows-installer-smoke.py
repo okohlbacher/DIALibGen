@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline failures for the shared MSI/NSIS payload verifier."""
 import importlib.util
+import json
 import ntpath
 from pathlib import Path
 import tempfile
@@ -84,6 +85,39 @@ assert all(environment[key] == value for key, value in system.items())
 assert 'build-sdk' not in environment['PATH'] and 'OPENMS_DATA_PATH' not in environment
 with patch.dict(installer.os.environ, environment, clear=True):
     assert ntpath.expandvars(r'%SystemDrive%\ProgramData\Microsoft\Windows\Caches') == r'C:\ProgramData\Microsoft\Windows\Caches'
+
+ready = {'name': 'Reset', 'control_type': 'ControlType.Button', 'enabled': True, 'process_id': 47}
+with patch.dict(installer.os.environ, system, clear=True):
+    with patch.object(installer.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(ready))) as probe:
+        assert installer.wait_for_frontend_ready(123, 57) == ready
+        assert probe.call_args.kwargs['timeout'] == 57  # remaining shared startup budget
+        assert 'FromHandle([IntPtr]123)' in probe.call_args.args[0][-1]
+    for invalid in ({**ready, 'enabled': False}, {**ready, 'name': 'DIALibGen'},
+                    {**ready, 'control_type': 'ControlType.Window'}, []):
+        with patch.object(installer.subprocess, 'run', return_value=SimpleNamespace(stdout=json.dumps(invalid))):
+            try:
+                installer.wait_for_frontend_ready(123, 57)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('accepted absent, disabled, or non-button frontend control')
+    for failure in (installer.subprocess.TimeoutExpired('UIA', 57),
+                    installer.subprocess.CalledProcessError(1, 'UIA', stderr='UIA unavailable')):
+        with patch.object(installer.subprocess, 'run', side_effect=failure):
+            try:
+                installer.wait_for_frontend_ready(123, 57)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError('accepted failed or timed out native UIA probe')
+    with patch.object(installer.subprocess, 'run') as probe:
+        try:
+            installer.wait_for_frontend_ready(123, 0)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('extended an exhausted startup budget')
+        probe.assert_not_called()
 
 # No native Windows API is mocked into success: these exercise the timing gate;
 # the actual EnumWindows/installed-process proof runs on the Windows runner.

@@ -160,7 +160,10 @@ Existing library outputs are refused. Writers stage complete files in a private
 directory beside the destination and rename them into place only after a
 successful close. Refinement prepares its library, provenance and optional
 report before publishing the library; a system interruption can leave an orphan
-sidecar, but does not expose a half-written library.
+sidecar. A forced termination (including GUI Cancel) may also leave a hidden
+`.dialibgen-tmp-*` directory beside the destination. After the process exits,
+that abandoned directory can be removed. Atomic replacement prevents readers
+from seeing partial writes; it does not promise durability after a power loss.
 
 The training seed is reproducible within the same build and device setup;
 numeric results can differ across platforms, runtimes and CUDA kernels. The

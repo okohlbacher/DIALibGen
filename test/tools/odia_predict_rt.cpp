@@ -45,7 +45,7 @@ int main(int argc, char** argv)
               << "\n";
     for (std::size_t i = 0; i < rt.size(); ++i)
     {
-      std::cout << argv[i + 2] << "\t" << std::fixed << std::setprecision(6)
+      std::cout << argv[i + 2] << "\t" << std::fixed << std::setprecision(9)
                 << rt[i] << "\n";
     }
   }

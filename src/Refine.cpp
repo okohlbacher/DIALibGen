@@ -10,6 +10,9 @@
 
 #ifdef DIALIBGEN_WITH_FINETUNE
 #include <odia/tune/Trainer.h>
+#include <odia/PeptDeepEncoder.h>
+#include <OpenMS/CHEMISTRY/AASequence.h>
+#include <unordered_set>
 #endif
 
 #include "DIALibGen.h"
@@ -417,6 +420,18 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         const std::string heads = getStringOption_("tune_heads");
         const bool want_rt = heads != "ccs", want_ccs = heads != "rt";
+
+        // A foreign library can carry mass-only modifications that the model
+        // cannot encode. Reject these before training either head.
+        std::unordered_set<std::uint32_t> checked;
+        for (const auto sequence_id : library.precursors().modified_sequence)
+        {
+          if (!checked.insert(sequence_id).second) { continue; }
+          const std::string sequence(library.strings().get(sequence_id));
+          try { (void)ODIA::PeptDeepEncoder::encode(OpenMS::AASequence::fromString(sequence)); }
+          catch (const std::exception& error)
+          { throw std::runtime_error("tuning cannot encode library precursor '" + sequence + "': " + error.what()); }
+        }
 
         const std::string keep = getStringOption_("tune_out_models");
         struct WorkDirectory

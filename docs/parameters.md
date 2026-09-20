@@ -61,15 +61,15 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-generation:free_cysteine_rt_correction` | string | `true` | true,false | free cysteine rt correction |
 | `-generation:instrument` | string | `QE` |  | instrument |
 | `-generation:irt_rescale` | bool | `false` |  | irt rescale |
-| `-generation:max_fragment_charge` | int | `2` | 0: | max fragment charge |
+| `-generation:max_fragment_charge` | int | `2` | 1:2 | max fragment charge |
 | `-generation:max_variable_modifications` | int | `1` | 0: | max variable modifications |
 | `-generation:min_relative_intensity` | double | `1.0e-04` | 0.0: | min relative intensity |
 | `-generation:missed_cleavages` | int | `1` | 0: | missed cleavages |
 | `-generation:ms2_model` | string | (empty) |  | ms2 model |
 | `-generation:n_terminal_methionine_excision` | string | `true` | true,false | n terminal methionine excision |
-| `-generation:nce` | double | `-1.0` | -1.0: | Normalized collision energy (0..100). -1 selects the instrument default. |
+| `-generation:nce` | double | `-1.0` | -1.0:100.0 | Normalized collision energy (>0 and <=100). -1 selects the instrument default. |
 | `-generation:peptide_length` | int list | `7, 30` |  | peptide length |
-| `-generation:precursor_charges` | int list | `1, 2, 3, 4` |  | precursor charges |
+| `-generation:precursor_charges` | int list | `1, 2, 3, 4` | 1:8 | precursor charges |
 | `-generation:precursor_mz` | double list | `350, 1200` |  | precursor mz |
 | `-generation:recompute_decoy_mz` | bool | `false` |  | recompute decoy mz |
 | `-generation:reserved_doubly_charged` | int | `0` | 0: | reserved doubly charged |

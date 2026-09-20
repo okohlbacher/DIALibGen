@@ -26,7 +26,9 @@ CREDS=(--apple-id "$MACOS_APPLE_ID" --team-id "$MACOS_TEAM_ID" --password "$MACO
 out=$(xcrun notarytool submit "$ART" "${CREDS[@]}" --wait 2>&1)
 rc=$?
 printf '%s\n' "$out"
-[ "$rc" -eq 0 ] && exit 0
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -Eq '^ *status: Accepted *$'; then
+  exit 0
+fi
 
 # The id is printed on submission, so it is in `out` even when the wait failed.
 id=$(printf '%s\n' "$out" | awk '/^ *id: /{print $2; exit}')

@@ -24,6 +24,7 @@
 #include <fstream>
 #include <cstdio>
 #include <iostream>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -47,11 +48,23 @@ namespace ODIA
     {
       double v = 0.0;
       if (s.empty()) { return std::nan(""); }
+#ifdef __APPLE__
+      // Apple's deployment SDKs do not yet provide floating-point from_chars.
+      std::string token(s);
+      std::transform(token.begin(), token.end(), token.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (token == "nan" || token == "+nan" || token == "-nan") { return std::nan(""); }
+      std::istringstream input{std::string(s)};
+      input.imbue(std::locale::classic());
+      input >> std::noskipws >> v;
+      if (!input || input.peek() != std::char_traits<char>::eof() || std::isinf(v))
+#else
       const auto* first = s.data();
       const auto* last = first + s.size();
       if (*first == '+') { ++first; }
       const auto parsed = std::from_chars(first, last, v, std::chars_format::general);
       if (parsed.ec != std::errc{} || parsed.ptr != last || std::isinf(v))
+#endif
       { throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s)); }
       return v;
     }
@@ -299,6 +312,7 @@ namespace ODIA
       throw std::runtime_error("not a DIA-NN library (missing Precursor.Id / Precursor.Mz / "
                                "Product.Mz): " + filename);
     }
+    if (c_seq < 0) { throw std::runtime_error("missing Modified.Sequence in library: " + filename); }
 
     Builder builder(library);
     std::string line;
@@ -472,6 +486,7 @@ namespace ODIA
         throw std::runtime_error("not a DIA-NN library (missing Precursor.Id / Precursor.Mz / "
                                  "Product.Mz): " + filename);
       }
+      if (!a_seq) { throw std::runtime_error("missing Modified.Sequence in library: " + filename); }
 
       const int64_t rows = table->num_rows();
       for (int64_t i = 0; i < rows; ++i)

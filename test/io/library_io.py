@@ -60,6 +60,15 @@ for name, line in [('short', tsv.splitlines()[1].rsplit('\t', 1)[0]),
 path = work / 'duplicate-header.tsv'
 path.write_text(tsv.splitlines()[0] + '\tPrecursor.Id\n')
 run('load', path, 'duplicate TSV column')
+rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
+path = work / 'missing-sequence.tsv'
+with path.open('w', newline='') as f:
+    writer = csv.DictWriter(f, [key for key in rows[0] if key != 'Modified.Sequence'],
+                            delimiter='\t', extrasaction='ignore')
+    writer.writeheader(); writer.writerows(rows)
+run('load', path, 'missing Modified.Sequence')
+pq.write_table(flat.drop(['Modified.Sequence']), work / 'missing-sequence.parquet')
+run('load', work / 'missing-sequence.parquet', 'missing Modified.Sequence')
 for token in ('1.5garbage', 'inf', '0x1p2', '9' * 500):
     rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
     rows[0]['RT'] = token
@@ -83,6 +92,10 @@ for name, table in (('flat', flat), ('compact', compact)):
 long = pa.concat_tables([flat.slice(0, 1)] * 65537)
 pq.write_table(long, work / 'batch-boundary.parquet', row_group_size=40000)
 assert run('load', work / 'batch-boundary.parquet') == '1 65537 0 0 0'
+# Compact lists must preserve offsets across both row-group and decoder batches.
+long_compact = pa.concat_tables([compact] * 21846)
+pq.write_table(long_compact, work / 'compact-boundary.parquet', row_group_size=40000)
+assert run('load', work / 'compact-boundary.parquet') == '65538 109230 21846 0 0'
 
 # A historical compact-v1 file may omit its all-noloss annotation.
 legacy = compact.drop(['Fragment.Loss.Type'])

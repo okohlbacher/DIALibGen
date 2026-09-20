@@ -298,7 +298,7 @@ void DIALibGen::registerGenerationOptions_()
     const std::string name = "generation:" + key;
     std::string description = key;
     std::replace(description.begin(), description.end(), '_', ' ');
-    if (key == "nce") { description = "Normalized collision energy (0..100). -1 selects the instrument default."; }
+    if (key == "nce") { description = "Normalized collision energy (>0 and <=100). -1 selects the instrument default."; }
     if (value.is_boolean())
     {
       registerStringOption_(name, "<true/false>", value.get<bool>() ? "true" : "false", description, false);
@@ -325,6 +325,11 @@ void DIALibGen::registerGenerationOptions_()
     }
   }
   setValidStrings_("generation:decoys", {"none", "mutate", "pseudo_reverse", "reverse", "shuffle"});
+  setMinInt_("generation:max_fragment_charge", 1);
+  setMaxInt_("generation:max_fragment_charge", 2);
+  setMinInt_("generation:precursor_charges", 1);
+  setMaxInt_("generation:precursor_charges", 8);
+  setMaxFloat_("generation:nce", 100);
   registerInputFile_("irt_standards", "<file>", "", "iRT calibration standards; defaults to the bundled table.", false);
   setValidFormats_("irt_standards", {"tsv"}, false);
 }

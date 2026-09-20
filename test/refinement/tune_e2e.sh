@@ -23,6 +23,24 @@ for head in rt ccs; do
   [ -s "$MODELS/peptdeep_${head}_dynamic.onnx" ] || fail "no stock model for $head in $MODELS"
 done
 
+# Foreign mass-only modifications must fail before either head trains.
+"$PY" - "$TMP/library.tsv" "$TMP/unencodable.tsv" <<'PY_ENCODING' || exit 1
+import csv, sys
+with open(sys.argv[1]) as source:
+    reader = csv.DictReader(source, delimiter="\t"); fields = reader.fieldnames; rows = list(reader)
+first = rows[0]["Precursor.Id"]
+for row in rows:
+    if row["Precursor.Id"] == first:
+        row["Modified.Sequence"] += "[+123.456789]"
+with open(sys.argv[2], "w", newline="") as target:
+    writer = csv.DictWriter(target, fields, delimiter="\t"); writer.writeheader(); writer.writerows(rows)
+PY_ENCODING
+if "$BIN" -mode tune -in "$TMP/unencodable.tsv" -ids "$TMP/report.parquet" -out "$TMP/not-written.tsv" \
+   -tune_models "$MODELS" -tune_out_models "$TMP/encoding-models" \
+   > "$TMP/encoding.log" 2>&1; then fail "unencodable library was accepted"; fi
+grep -q 'tuning cannot encode library precursor' "$TMP/encoding.log" || { cat "$TMP/encoding.log"; fail "wrong library encoding error"; }
+if find "$TMP/encoding-models" -type f 2>/dev/null | grep -q .; then fail "trained before library encoding validation"; fi
+
 # Missing CCS data and refinement gates must fail before spending any epochs
 # on RT or writing kept model artifacts.
 "$PY" - "$TMP/report.parquet" "$TMP/no-im.parquet" <<'PY_PREFLIGHT' || exit 1

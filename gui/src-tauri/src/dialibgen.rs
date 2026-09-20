@@ -14,7 +14,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,8 @@ pub struct RunManager {
     pub current: Mutex<Option<CurrentRun>>,
     pub launch: Mutex<()>,
     pub seq: AtomicU64,
+    cancel_seq: AtomicU64,
+    shutting_down: AtomicBool,
 }
 
 pub struct CurrentRun {
@@ -586,13 +588,20 @@ fn validate_run_inputs(params: &RunParams) -> Result<(), String> {
 
 #[tauri::command(async)]
 pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, params: RunParams) -> RunStarted {
+    let cancel_seq = state.cancel_seq.load(Ordering::SeqCst);
     let refuse = |reason: String| RunStarted { started: false, reason: Some(reason) };
     let Ok(_launch) = state.launch.try_lock() else {
         return refuse("a run is already starting".into());
     };
     {
-        if state.current.lock().unwrap().is_some() {
+        // Cancellation and the final spawn share this short critical section;
+        // the potentially slow CLI preflight below never holds it.
+        let current = state.current.lock().unwrap();
+        if current.is_some() {
             return refuse("a run is already in progress".into());
+        }
+        if state.shutting_down.load(Ordering::SeqCst) {
+            return refuse("the app is closing".into());
         }
     }
     if let Err(e) = validate_run_inputs(&params) { return refuse(e); }
@@ -674,6 +683,10 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
         cmd.env("DIALIBGEN_MODEL_DIR", directory);
     }
 
+    let mut current = state.current.lock().unwrap();
+    if state.shutting_down.load(Ordering::SeqCst) || state.cancel_seq.load(Ordering::SeqCst) != cancel_seq {
+        return refuse("run cancelled before launch".into());
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         // A spawn failure is known synchronously: report it as a non-start so
@@ -687,8 +700,9 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let child_arc = Arc::new(Mutex::new(child));
-    *state.current.lock().unwrap() =
+    *current =
         Some(CurrentRun { run_id, child: child_arc.clone(), config_dir: Some(dir) });
+    drop(current);
 
     // One reader thread per stream. stdout is drained as log even though the
     // tool writes nothing there, so a full pipe can never block the child.
@@ -768,19 +782,26 @@ pub fn cancel(state: State<'_, RunManager>) -> Value {
 
 fn cancel_current(state: &RunManager) -> Value {
     let cur = state.current.lock().unwrap();
+    state.cancel_seq.fetch_add(1, Ordering::SeqCst);
     if let Some(run) = cur.as_ref() {
         if let Ok(mut child) = run.child.lock() {
             let _ = child.kill(); // the coordinator reaps, cleans up and emits done
         }
         serde_json::json!({ "cancelled": true })
     } else {
-        serde_json::json!({ "cancelled": false })
+        serde_json::json!({ "cancelled": state.launch.try_lock().is_err() })
     }
 }
 
 /// Finish cancellation and release temporary files before the app exits.
 pub fn shutdown(state: &RunManager) {
-    if let Some(run) = state.current.lock().unwrap().take() {
+    let run = {
+        let mut current = state.current.lock().unwrap();
+        state.shutting_down.store(true, Ordering::SeqCst);
+        state.cancel_seq.fetch_add(1, Ordering::SeqCst);
+        current.take()
+    };
+    if let Some(run) = run {
         if let Ok(mut child) = run.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1007,6 +1028,11 @@ if [ "$1" = --help ]; then echo 'DIALibGen Version: 0.11.0'; exit 0; fi
 if [ "$1" = -write_ini ]; then cp "$work/schema.ini" "$2"; exit 0; fi
 if [ "$3" = -write_config ]; then
   if [ -f "$work/fail-config" ]; then echo 'config failed' >&2; exit 12; fi
+  if [ -f "$work/pause-config" ]; then
+    touch "$work/config-entered"
+    i=0
+    while [ -f "$work/pause-config" ] && [ "$i" -lt 1000 ]; do sleep 0.01; i=$((i+1)); done
+  fi
   printf '{"instrument":"QE","nce":30,"precursor_charges":[2,3],"requested_mode":"%s","rt_model":"/stale/rt.onnx","ms2_model":"/stale/ms2.onnx","ccs_model":"/stale/ccs.onnx"}' "$2" > "$4"
   exit 0
 fi
@@ -1210,6 +1236,43 @@ printf 'library' > "$out"
         assert_eq!(invoke("cancel", serde_json::json!({})).unwrap()["cancelled"], true);
         assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap()["ok"], false);
         assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
+        std::fs::remove_file(dir.path().join("wait")).unwrap();
+
+        // Block the real native preflight helper, then cancel/close while no
+        // generation child exists. Neither path may launch after it returns.
+        for closing in [false, true] {
+            let pause = dir.path().join("pause-config");
+            let entered = dir.path().join("config-entered");
+            let _ = std::fs::remove_file(&entered);
+            std::fs::write(&pause, "").unwrap();
+            let before = std::fs::read(dir.path().join("argv.txt")).unwrap();
+            let handle = app.handle().clone();
+            let pending_params = serde_json::from_value(params.clone()).unwrap();
+            let pending = std::thread::spawn(move || run(handle.clone(), handle.state::<RunManager>(), pending_params));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !entered.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let preflight_entered = entered.exists();
+            if closing { shutdown(&app.state::<RunManager>()); }
+            else { assert_eq!(invoke("cancel", serde_json::json!({})).unwrap()["cancelled"], true); }
+            std::fs::remove_file(&pause).unwrap();
+            let result = pending.join().unwrap();
+            assert!(preflight_entered, "the CLI helper must enter preflight before cancellation");
+            assert!(!result.started);
+            assert_eq!(result.reason.as_deref(), Some("run cancelled before launch"));
+            assert_eq!(std::fs::read(dir.path().join("argv.txt")).unwrap(), before);
+            assert!(!Path::new(params["out"].as_str().unwrap()).exists());
+            assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
+            assert!(rx.try_recv().is_err());
+            if !closing {
+                let mut retry = params.clone();
+                retry["out"] = dir.path().join("after-cancel.tsv").display().to_string().into();
+                assert_eq!(invoke("run", serde_json::json!({"params":retry})).unwrap()["started"], true);
+                assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap()["ok"], true);
+            }
+        }
+        assert_eq!(invoke("run", serde_json::json!({"params":params})).unwrap()["reason"], "the app is closing");
     }
 
     // build_config is the trust boundary: the tool REFUSES an unknown config

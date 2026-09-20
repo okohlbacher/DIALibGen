@@ -62,6 +62,9 @@ the selected mode, and older generation presets remain usable.
 The desktop uses the model directory shown in the form for every selected
 head. Imported generation JSON's individual model paths are replaced by that
 directory's models. Use the CLI when models must come from different directories.
+When reusing a tuned RT model in Generate, turn off **free cysteine rt correction**
+under Advanced; generation emits normalized RT. The [CLI example](../docs/usage.md#model-tuning)
+explains the model scale and the stock correction.
 
 Parquet includes provenance. Refinement and tuning also write a `.refine.json`
 sidecar beside the library. Retained tuned models have `.tune.json` and

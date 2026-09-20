@@ -83,14 +83,14 @@ build-machine ONNX Runtime or LibTorch path. This local result does not stand
 in for the required consumer checks on the other release platforms.
 
 The frontend suite, including desktop refinement and fine-tuning, passed
-**88 tests** and measured **100% lines (352/352)**, **100% functions (164/164)**,
-**98.35% statements (478/486)** and **93.66% branches (562/600)**. Tests cover
+**92 tests** and measured **100% lines (365/365)**, **100% functions (164/164)**,
+**98.03% statements (498/508)** and **93.32% branches (573/614)**. Tests cover
 mode-specific inputs and settings, all native tuning controls, selected-head
 model checks, stale asynchronous results, configuration round-trips and errors. Type checking and the frontend build also passed. The native
 GUI passed **23 macOS Rust tests** and Clippy with warnings treated as errors.
-Instrumented native tests measured **82.96% of production-library lines
-(521/628)**, including the new training schema, command validation and model
-directory selection. Bootstrap and several native error paths remain uncovered. Linux also checks isolation of the bundled CLI from the
+Instrumented native tests measured **83.54% of production-library lines
+(538/644)**, including the new training schema, command validation and model
+directory selection, cancellation during startup and shutdown. Bootstrap and several native error paths remain uncovered. Linux also checks isolation of the bundled CLI from the
 AppImage launcher’s library environment.
 
 These are local measurements, not final platform CI results or claims of

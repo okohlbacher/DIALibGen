@@ -248,12 +248,66 @@ describe('App', () => {
     expect(screen.getByText('Predicting MS2')).toBeTruthy()
   })
 
+  it('cancels a pending settings save without dispatching the run and permits a fresh retry', async () => {
+    let saved!: (ok: boolean) => void
+    await renderApp({}, (b) => {
+      b.api.saveLast = vi.fn(() => new Promise<boolean>((resolve) => { saved = resolve }))
+      b.api.cancel = vi.fn().mockResolvedValue({ cancelled: false })
+    })
+    await startRun()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await act(async () => saved(true))
+    expect(bridge.runs).toHaveLength(0)
+    expect(screen.getByText('Cancelled before launch.')).toBeTruthy()
+    bridge.api.saveLast = vi.fn().mockResolvedValue(true)
+    await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
+    expect(bridge.runs).toHaveLength(1)
+  })
+
+  it.each([false, true])('retains cancellation while native launch is pending (started=%s)', async (started) => {
+    let launched!: (result: { started: boolean; reason?: string }) => void
+    await renderApp({}, (b) => {
+      b.api.run = vi.fn(() => new Promise<{ started: boolean; reason?: string }>((resolve) => { launched = resolve }))
+      // The first cancel may arrive before native command dispatch; a launch
+      // acknowledgement then needs another cancel, followed by its done event.
+      b.api.cancel = vi.fn().mockResolvedValueOnce({ cancelled: false }).mockResolvedValue({ cancelled: true })
+    })
+    await startRun()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await act(async () => launched({ started, reason: 'run cancelled before launch' }))
+    if (started) {
+      expect(bridge.api.cancel).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('button', { name: 'Running…' })).toBeTruthy()
+      act(() => bridge.emitDone({ ok: false, code: null, bytes: null }))
+      expect(screen.getByText(/Failed \(exit killed\)/)).toBeTruthy()
+    } else {
+      expect(bridge.api.cancel).toHaveBeenCalledOnce()
+      expect(screen.getByText('run cancelled before launch')).toBeTruthy()
+      expect((screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement).disabled).toBe(false)
+    }
+  })
+
   it('reports a cancellation error without claiming the job stopped', async () => {
     await renderApp({}, (b) => { b.api.cancel = vi.fn().mockRejectedValue('permission denied') })
     await startRun()
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(await screen.findByText(/Could not cancel: permission denied/)).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Running…' })).toBeTruthy()
+  })
+
+  it('ignores a late cancellation error after that run ends and another starts', async () => {
+    let rejectCancel!: (reason: string) => void
+    await renderApp({}, (b) => {
+      b.api.cancel = vi.fn(() => new Promise<{ cancelled: boolean }>((_, reject) => { rejectCancel = reject }))
+    })
+    await startRun()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    act(() => bridge.emitDone({ ok: false, code: null, bytes: null }))
+    await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
+    await act(async () => rejectCancel('old cancellation failed'))
+    expect(screen.queryByText(/old cancellation failed/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Running…' })).toBeTruthy()
+    expect(bridge.runs).toHaveLength(2)
   })
 
   it('reveals the completed job’s output even if the form was edited during the run', async () => {

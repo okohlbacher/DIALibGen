@@ -58,6 +58,7 @@ export default function App(): JSX.Element {
   const [presets, setPresets] = useState<Record<string, Values>>({})
   const logRef = useRef<HTMLPreElement | null>(null)
   const outRef = useRef(out)
+  const launchRef = useRef<{ cancelled: boolean } | null>(null)
   // Invalidates a file dialog/default response when a newer mode/recipe wins.
   const revision = useRef(0)
   const defaults = nativeDefaults[mode] ?? null
@@ -154,6 +155,7 @@ export default function App(): JSX.Element {
   useEffect(() => {
     const offLog = window.dialibgen.onLog((line) => setLog((old) => [...old.slice(-(MAX_LOG_LINES - 1)), line]))
     const offDone = window.dialibgen.onDone((r: RunResult) => {
+      launchRef.current = null
       setRunning(false)
       setOutcome(r.ok && r.bytes ? { ok: true, text: `Wrote ${humanBytes(r.bytes)}`, path: outRef.current }
         : r.ok ? { ok: false, text: 'The tool exited cleanly but no library is on disk.' }
@@ -186,15 +188,30 @@ export default function App(): JSX.Element {
 
   async function start(): Promise<void> {
     if (!canRun) return
+    const launch = { cancelled: false }
+    launchRef.current = launch
     setRunning(true); outRef.current = out; setLog([]); setOutcome(null)
     try {
       if (!await window.dialibgen.saveLast(snapshot())) throw new Error('could not save settings; check that the app config directory is writable')
+      if (launchRef.current !== launch) return
+      if (launch.cancelled) { setRunning(false); setOutcome({ ok: false, text: 'Cancelled before launch.' }); return }
       const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out,
         config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
         ...(mode !== 'generate' ? { ids, ...(outReport ? { outReport } : {}) } : {}),
         ...(usesTuning ? { tuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
+      if (launchRef.current !== launch) return
       if (!result.started) { setRunning(false); setOutcome({ ok: false, text: result.reason ?? 'could not start' }) }
-    } catch (e) { setRunning(false); setOutcome({ ok: false, text: `Could not start: ${String(e)}` }) }
+      else if (launch.cancelled) await cancel()
+    } catch (e) {
+      if (launchRef.current !== launch) return
+      setRunning(false); setOutcome({ ok: false, text: `Could not start: ${String(e)}` })
+    }
+  }
+  async function cancel(): Promise<void> {
+    const launch = launchRef.current
+    if (launch) launch.cancelled = true
+    try { await window.dialibgen.cancel() }
+    catch (e) { if (launchRef.current === launch) setOutcome({ ok: false, text: `Could not cancel: ${String(e)}` }) }
   }
   async function load(): Promise<void> {
     const token = revision.current
@@ -251,7 +268,7 @@ export default function App(): JSX.Element {
       {validation && <p className="help bad" role="alert">{validation}</p>}
       {mode !== 'generate' && outReport && !/\.tsv$/.test(outReport) && <p className="help bad">The residual report name must end in .tsv.</p>}
       <div className="row"><button type="button" disabled={!canRun} onClick={() => void start()}>{running ? 'Running…' : mode === 'generate' ? 'Generate library' : mode === 'refine' ? 'Refine library' : 'Fine-tune library'}</button>
-        <button type="button" className="secondary" disabled={!running} onClick={() => void window.dialibgen.cancel().catch((e: unknown) => setOutcome({ ok: false, text: `Could not cancel: ${String(e)}` }))}>Cancel</button></div>
+        <button type="button" className="secondary" disabled={!running} onClick={() => void cancel()}>Cancel</button></div>
       <Presets presets={presets} values={snapshot()} disabled={running || !defaults} onApply={(payload) => {
         try { applySaved(payload, 'generate') } catch (e) { setOutcome({ ok: false, text: `Could not load preset: ${String(e)}` }) }
       }} onSaved={setPresets} onError={(text) => setOutcome({ ok: false, text })} />

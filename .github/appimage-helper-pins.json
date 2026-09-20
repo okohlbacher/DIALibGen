@@ -1,0 +1,163 @@
+{
+  "tauri_cli": {
+    "version": "2.11.4",
+    "revision": "8909f221d1515955fc843808032bdc5d62209c96"
+  },
+  "apprun": {
+    "revision": "5735cc5bed206497cddfbd2a75e1982c2606c35d",
+    "upstream_release": "https://github.com/AppImage/AppImageKit/releases/tag/continuous"
+  },
+  "runtime": {
+    "revision": "75849dce7cc37e4319b633df1f116ca895c71a12",
+    "build_log": "https://github.com/AppImage/type2-runtime/actions/runs/28063784345",
+    "alpine_image": "alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d",
+    "static_dependencies": {
+      "libfuse": "3.15.0 (runtime mount.c patch)",
+      "squashfuse": "0.5.2",
+      "musl": "1.2.5-r11",
+      "zstd": "1.5.6-r2",
+      "zlib": "1.3.2-r0",
+      "mimalloc2": "2.1.7-r0"
+    }
+  },
+  "sources": [
+    {
+      "name": "appimagekit",
+      "url": "https://codeload.github.com/AppImage/AppImageKit/tar.gz/5735cc5bed206497cddfbd2a75e1982c2606c35d",
+      "sha256": "65ce93060bb5d662fcff878ab5c63b530af16f2a4c86ae1c93f3dc7bf55e4e12",
+      "filename": "appimagekit.tar.gz"
+    },
+    {
+      "name": "type2-runtime",
+      "url": "https://codeload.github.com/AppImage/type2-runtime/tar.gz/75849dce7cc37e4319b633df1f116ca895c71a12",
+      "sha256": "b7af4960da4b90364e935a3281d04fad6560da4813c012414fa2f738291ad443",
+      "filename": "type2-runtime.tar.gz"
+    },
+    {
+      "name": "libfuse",
+      "url": "https://github.com/libfuse/libfuse/releases/download/fuse-3.15.0/fuse-3.15.0.tar.xz",
+      "sha256": "70589cfd5e1cff7ccd6ac91c86c01be340b227285c5e200baa284e401eea2ca0",
+      "filename": "libfuse.tar.xz"
+    },
+    {
+      "name": "squashfuse",
+      "url": "https://codeload.github.com/vasi/squashfuse/tar.gz/0.5.2",
+      "sha256": "db0238c5981dabbd80ee09ae15387f390091668ca060a7bc38047912491443d3",
+      "filename": "squashfuse.tar.gz"
+    },
+    {
+      "name": "musl",
+      "url": "https://musl.libc.org/releases/musl-1.2.5.tar.gz",
+      "sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+      "filename": "musl.tar.gz"
+    },
+    {
+      "name": "zstd",
+      "url": "https://codeload.github.com/facebook/zstd/tar.gz/refs/tags/v1.5.6",
+      "sha256": "30f35f71c1203369dc979ecde0400ffea93c27391bfd2ac5a9715d2173d92ff7",
+      "filename": "zstd.tar.gz"
+    },
+    {
+      "name": "zlib",
+      "url": "https://zlib.net/fossils/zlib-1.3.2.tar.gz",
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "filename": "zlib.tar.gz"
+    },
+    {
+      "name": "mimalloc",
+      "url": "https://codeload.github.com/microsoft/mimalloc/tar.gz/refs/tags/v2.1.7",
+      "sha256": "0eed39319f139afde8515010ff59baf24de9e47ea316a315398e8027d198202d",
+      "filename": "mimalloc.tar.gz"
+    },
+    {
+      "name": "alpine-aports",
+      "url": "https://codeload.github.com/alpinelinux/aports/tar.gz/9ba44d139997adf2fc29046f578ab596d05b7fc5",
+      "sha256": "c69de817b34b14b252482a7f31d50f49bcb3ec4f5c8b725faa186e5501a61e3c",
+      "filename": "alpine-aports.tar.gz"
+    },
+    {
+      "name": "linuxdeploy-gtk",
+      "url": "https://codeload.github.com/tauri-apps/linuxdeploy-plugin-gtk/tar.gz/dda522bce37387f1b853d9095713bfaa924c8423",
+      "sha256": "a4e74dae707023492371e8bb410a7e83cae2cc753e820c91eb386672128601a2",
+      "filename": "linuxdeploy-gtk.tar.gz",
+      "revision": "dda522bce37387f1b853d9095713bfaa924c8423"
+    },
+    {
+      "name": "linuxdeploy-wrapper",
+      "url": "https://codeload.github.com/linuxdeploy/linuxdeploy/tar.gz/659c9db374666be3f29432316a859221eac28e53",
+      "sha256": "a8db0e406c11aeeb186f97550d0a590d98ac0c76b40858667a66a962f86347e5",
+      "filename": "linuxdeploy-wrapper.tar.gz",
+      "revision": "659c9db374666be3f29432316a859221eac28e53"
+    }
+  ],
+  "architectures": {
+    "x86_64": {
+      "elf_machine": 62,
+      "apprun": {
+        "sha256": "f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f",
+        "build_id": "84fe6e2b121f245ed5b8c05ccafe2dc1d45a9f37"
+      },
+      "runtime": {
+        "sha256": "1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf",
+        "size": 944632,
+        "url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64",
+        "mutable_sections": [
+          {
+            "name": ".digest_md5",
+            "offset": 932096,
+            "size": 16
+          },
+          {
+            "name": ".upd_info",
+            "offset": 932112,
+            "size": 1024
+          },
+          {
+            "name": ".sha256_sig",
+            "offset": 933136,
+            "size": 1024
+          },
+          {
+            "name": ".sig_key",
+            "offset": 934160,
+            "size": 8192
+          }
+        ]
+      }
+    },
+    "aarch64": {
+      "elf_machine": 183,
+      "apprun": {
+        "sha256": "072f17c0895a85c490282fe5395c5007e5fc75da727e553b3b8fb680feb11578",
+        "build_id": "8448bfc7822ab77349021a6123a6b26952985c95"
+      },
+      "runtime": {
+        "sha256": "7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372",
+        "size": 936456,
+        "url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64",
+        "mutable_sections": [
+          {
+            "name": ".digest_md5",
+            "offset": 923920,
+            "size": 16
+          },
+          {
+            "name": ".upd_info",
+            "offset": 923936,
+            "size": 1024
+          },
+          {
+            "name": ".sha256_sig",
+            "offset": 924960,
+            "size": 1024
+          },
+          {
+            "name": ".sig_key",
+            "offset": 925984,
+            "size": 8192
+          }
+        ]
+      }
+    }
+  }
+}

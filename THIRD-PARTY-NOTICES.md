@@ -53,36 +53,82 @@ Redistribution here is with the agreement of the upstream authors. Releases up
 to and including 0.10.0 did not ship the weights and fetched them on first use;
 `dialibgen-fetch-models` still exists for source builds and for refreshing them.
 
-## Build dependencies
+## Runtime libraries and corresponding sources
 
-Linked against, not vendored:
+The DIALibGen code is BSD-3-Clause. Bundled dependencies keep their own licenses;
+that BSD license does not replace their terms. The release package contains the
+license texts in `share/DIALibGen/licenses`. Its machine-readable
+`share/DIALibGen/runtime-dependencies.json` records each bundled library's exact
+package/version, original package URL, license location, and SHA256 after
+relocation. It also identifies compiled header dependencies and the matching
+corresponding-source release asset.
 
-| Component | Licence |
+| Component | License |
 |---|---|
 | OpenMS | BSD-3-Clause |
-| Apache Arrow / Parquet | Apache-2.0 |
-| ONNX Runtime | MIT |
-| PyTorch / LibTorch | BSD-3-Clause; additional bundled component notices in `licenses/PyTorch-LICENSE` |
+| Apache Arrow / Parquet | Apache-2.0, with bundled third-party notices |
+| ONNX Runtime | MIT, with bundled third-party notices |
+| PyTorch / LibTorch | BSD-3-Clause, with bundled third-party notices |
+| Qt Core / Network | LGPL-3.0; embedded third parties retain their terms |
+| Coin-OR solver libraries | EPL; the exact version and terms are in the inventory |
+| Eigen | MPL-2.0 |
 | nlohmann/json | MIT |
-| Boost (transitively, via OpenMS headers) | BSL-1.0 |
+| Boost | BSL-1.0 |
+| LLVM OpenMP, where bundled | Apache-2.0 with LLVM exception |
+| GCC runtime libraries, where bundled | GPL-3.0 with GCC Runtime Library Exception 3.1 |
 
-OpenMS itself pulls in further dependencies with their own terms, including
-Coin-OR components under EPL-2.0. Consult your OpenMS distribution.
+Other transitive runtime libraries are listed in the generated inventory, with
+their original package notices. Platform system libraries that are not copied
+into the package are outside that inventory. Presence in the build environment
+does not establish that a library is distributed: the release collector records
+the actual copied dependency closure. The pinned Windows contrib `ALL` build
+uses Coin-OR and excludes GLPK.
 
-A **release bundle** carries the runtime libraries of that list alongside the
-binary (that is what makes it runnable on a machine without a conda prefix), so
-their terms travel with it. A source build links them and vendors nothing.
+Every platform's release includes `DIALibGen-sources-<platform>.tar.gz` alongside
+its CLI and desktop downloads. This archive accompanies the binaries and
+contains the exact source archives for bundled copyleft components, their
+recorded checksums, package build recipes and patches, and our packaging build
+instructions. Shared source archives are stored once. The Windows archive also
+conservatively includes the complete pinned contrib build inputs, including
+static/header dependencies. An upstream URL alone is not the distribution
+mechanism: the corresponding source is uploaded as a release asset under the
+same distributor's control. Packaging fails if required notices, package
+ownership, or corresponding-source evidence is unavailable.
+
+Qt and the other replaceable runtime libraries are dynamically linked. You may
+replace them with interface-compatible modified versions: use `lib/` in the
+Unix CLI package or `bin/` in the Windows package. Locally modified macOS code
+may need to be re-signed with your own or an ad-hoc signature. These packages
+impose no additional restriction on modification, debugging those changes, or
+reverse engineering for that purpose. The LGPL and GPL texts are included;
+see also [Qt's licensing documentation](https://doc.qt.io/qt-6/licensing.html)
+and [LGPL obligations](https://www.qt.io/development/open-source-lgpl-obligations).
+
+The static notices in this repository include the complete PyTorch 2.10 CPU
+wheel LICENSE and NOTICE, not only its primary BSD grant. The generated runtime
+notices additionally preserve the exact release SDK/package texts when a
+platform uses another pinned version. See `licenses/README.md` for origins.
+
+## Test fixture derived from OpenMS
+
+`test/data/peptdeep_irt_peptides_predicted.csv` is the unmodified OpenMS test
+fixture identified in `test/data/README.md`, under OpenMS's BSD-3-Clause license.
+It is distributed with the source tests; it is not part of the CLI runtime data.
 
 ## Desktop app (`gui/`)
 
-The desktop front-end is a separate dependency tree, none of it vendored here;
-`gui/package-lock.json` and `gui/src-tauri/Cargo.lock` pin the exact versions.
+`gui/package-lock.json` and `gui/src-tauri/Cargo.lock` pin the frontend and Rust
+dependencies. The desktop build generates and embeds
+`third-party-licenses/THIRD_PARTY_NOTICES.txt` and `inventory.json`, covering the
+production npm dependencies and the selected platform's non-development Cargo
+closure, including build dependencies. The inventory records exact registry
+source URLs/checksums and the upstream origins of supplemental license texts.
 
-| Component | Licence |
-|---|---|
-| Tauri 2 (and its plugins) | MIT or Apache-2.0 |
-| React / React DOM | MIT |
-| Vite, Vitest, TypeScript | MIT / Apache-2.0 |
-
-A built app also embeds the OS's own webview (WebKit on macOS and Linux,
-WebView2 on Windows), which is the platform's, not ours.
+Tauri, React and their dependencies retain their individual MIT, Apache, MPL or
+other recorded licenses. Vite, Vitest and TypeScript are development tools;
+the generated inventory distinguishes production npm content from that tooling.
+macOS's system WebKit and Windows's system WebView2 are external platform
+components. Linux AppImages can additionally carry GTK/WebKit and other native
+libraries; these require the separate post-bundle runtime inventory and notices
+in the accompanying platform source archive. The npm/Cargo inventory does not
+claim to cover those injected native libraries.

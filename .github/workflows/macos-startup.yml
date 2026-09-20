@@ -39,7 +39,7 @@ jobs:
     steps:
       - name: Download the candidate payload without launching it
         if: inputs.candidate_run_id != ''
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           name: bundles-macos-arm64
           path: payload
@@ -193,7 +193,7 @@ jobs:
             fi
           fi
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: startup-${{ inputs.candidate_run_id != '' && format('candidate-{0}', inputs.candidate_run_id) || 'v0.10.1' }}-${{ matrix.route }}

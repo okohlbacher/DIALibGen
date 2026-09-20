@@ -60,13 +60,13 @@ jobs:
           - { name: macos-x64,   runner: macos-15-intel,   extra: "llvm-openmp libtorch=2.10.0=cpu_generic* libblas=*=*openblas", wheel: false }
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       # Boost headers and Qt are required by OpenMS public interfaces.
       # Python dependencies are only for reference tests, whose registration is checked.
       # Let OpenMS constrain Arrow. Keep comments outside the folded create-args scalar.
       - name: Install OpenMS, ONNX Runtime and the toolchain
-        uses: mamba-org/setup-micromamba@v2
+        uses: mamba-org/setup-micromamba@add3a49764cedee8ee24e82dfde87f5bc2914462 # v2
         with:
           environment-name: dialibgen
           create-args: >-
@@ -93,6 +93,7 @@ jobs:
             ninja
             cxx-compiler
             python
+            pyyaml
             numpy
             pyarrow
             onnxruntime
@@ -109,10 +110,10 @@ jobs:
       - name: Restore the ARM libtorch SDK
         if: matrix.wheel
         id: torch-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: libtorch-sdk
-          key: libtorch-cpu-2.14.0-linux-arm64-08894195-v1
+          key: libtorch-cpu-2.14.0-linux-arm64-08894195-v2
 
       - name: Extract the ARM libtorch SDK
         if: matrix.wheel && steps.torch-cache.outputs.cache-hit != 'true'
@@ -139,7 +140,7 @@ jobs:
       # Pinned stock models are required for prediction and training tests.
       - name: Restore the PeptDeep models
         id: cache-models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: models
           key: peptdeep-models-ccs41816f32-ms24141ea23-rt3f3b847e
@@ -151,7 +152,7 @@ jobs:
           set -euo pipefail
           mkdir -p models
           fetch() {
-            curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
+            curl -fsSL --retry 3 -o "models/$1" "https://archive.openms.de/openms/models/$1"
             echo "$2  models/$1" | shasum -a 256 -c -
           }
           # Keep model filenames and pinned hashes paired in ccs, ms2, rt order.
@@ -190,14 +191,17 @@ jobs:
           python - <<'PYTEST'
           import xml.etree.ElementTree as ET
           tests = {case.get("name"): case for case in ET.parse("build/ctest.xml").iter("testcase")}
-          for name in ("tune_parity", "tune_e2e"):
-              assert name in tests and tests[name].find("skipped") is None, f"{name} must pass, not skip"
+          required = {
+              "tune_parity", "tune_e2e", "tune_parameter_contract", "tune_training_contract", "e2e",
+              "peptdeep_predictions_match_reference", "peptdeep_ccs_matches_reference",
+              "peptdeep_ms2_matches_reference", "irt_calibration_matches_openms",
+              "ms2_sessions_are_deterministic", "free_cysteine_correction", "decoy_methods_distinct",
+              "library_io_contract", "text_writer_contract", "atomic_file_contract", "refinement_report_contract",
+          }
+          assert required <= tests.keys(), f"required tests missing: {required - tests.keys()}"
+          for name, case in tests.items():
+              assert case.find("skipped") is None, f"{name} must pass, not skip"
           PYTEST
-          # Require model-dependent tests to be registered; missing tests cannot pass.
-          ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
-            || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
-          ctest --test-dir build -N | grep -q "e2e" \
-            || { echo "::error::the e2e test was not registered"; exit 1; }
 
       - name: Diagnose an ARM training failure
         if: failure() && !cancelled() && matrix.wheel
@@ -246,7 +250,7 @@ jobs:
           fi
           ARM_DIAG
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: tests-${{ matrix.name }}
@@ -363,6 +367,12 @@ jobs:
             printf '%s\n' package=false release=false gui=false >> "$GITHUB_OUTPUT"
           fi
 
+      # Dependency install scripts run before signing material is imported.
+      - name: Install desktop dependencies
+        if: steps.pkg.outputs.gui == 'true'
+        working-directory: gui
+        run: npm ci
+
       # Developer ID signing and notarization require secrets.
       # Forks and unsigned builds retain ad-hoc signing.
       - name: Decide whether to sign
@@ -384,7 +394,7 @@ jobs:
             exit 0
           fi
           echo "sign=true" >> "$GITHUB_OUTPUT"
-          # Export notarization credentials only when all three values are present.
+          # Enable notarization only when all three credentials are present.
           if [ -n "$NOTARY" ] && [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_TEAM" ]; then
             echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
@@ -396,6 +406,7 @@ jobs:
           fi
 
       - name: Import the Developer ID certificate
+        id: signing
         if: steps.sign.outputs.sign == 'true'
         shell: bash
         env:
@@ -403,9 +414,6 @@ jobs:
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
-          MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
-          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
           # Use a random password when none is provided for this temporary keychain.
@@ -442,27 +450,10 @@ jobs:
             echo "::error::MACOS_SIGNING_IDENTITY does not match the imported certificate ($IDENT)"
             exit 1
           fi
-          echo "MACOS_SIGN_IDENTITY=$IDENT" >> "$GITHUB_ENV"
-          echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          # Only non-secret references cross the step boundary.
+          echo "identity=$IDENT" >> "$GITHUB_OUTPUT"
+          echo "keychain=$KC" >> "$GITHUB_OUTPUT"
           echo "signing as: $IDENT"
-
-          # Export Tauri signing variables only when credentials exist; empty values count as set.
-          # A heredoc preserves wrapped base64 certificate data.
-          {
-            echo "APPLE_CERTIFICATE<<__ODIA_EOF__"
-            printf '%s\n' "$MACOS_CERTIFICATE_BASE64"
-            echo "__ODIA_EOF__"
-            echo "APPLE_CERTIFICATE_PASSWORD=$MACOS_CERTIFICATE_PASSWORD"
-            echo "APPLE_SIGNING_IDENTITY=$IDENT"
-            echo "KEYCHAIN_PASSWORD=$KCPW"
-          } >> "$GITHUB_ENV"
-          if [ -n "$MACOS_NOTARY_PASSWORD" ]; then
-            {
-              echo "APPLE_ID=$MACOS_APPLE_ID"
-              echo "APPLE_PASSWORD=$MACOS_NOTARY_PASSWORD"
-              echo "APPLE_TEAM_ID=$MACOS_TEAM_ID"
-            } >> "$GITHUB_ENV"
-          fi
 
       # Collect dependency libraries and rewrite load paths for a relocatable bundle.
       - name: Make the install tree portable
@@ -470,11 +461,15 @@ jobs:
         # Bound dependency collection to detect hung tools.
         timeout-minutes: 20
         shell: bash -el {0}
+        env:
+          MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          MACOS_KEYCHAIN: ${{ steps.signing.outputs.keychain }}
         run: |
           set -euo pipefail
           # Source installs retain the SDK; portable applications carry only runtime files.
           rm -rf stage/include stage/lib/cmake stage/lib/*.a stage/bin/dialibgen-fetch-models
           mkdir -p stage/lib
+          : > runtime-origins.tsv
           # Bundle OpenMS data so relocated binaries do not require the build prefix.
           mkdir -p stage/share/OpenMS
           cp -R "$CONDA_PREFIX/share/OpenMS/." stage/share/OpenMS/
@@ -496,7 +491,10 @@ jobs:
                     ;;
                 esac
                 [ -f "$src" ] || { echo "::error::unresolved in $1: $dep"; exit 1; }
-                [ -f "stage/lib/$base" ] || cp "$src" "stage/lib/$base"
+                if [ ! -f "stage/lib/$base" ]; then
+                  cp "$src" "stage/lib/$base"
+                  printf 'lib/%s\t%s\n' "$base" "$src" >> runtime-origins.tsv
+                fi
               done
             }
             copy_closure stage/bin/DIALibGen
@@ -547,7 +545,11 @@ jobs:
                 case "$so" in
                   /lib/*|/lib64/*|/usr/lib/*|*/ld-linux*) continue ;;
                 esac
-                cp -n "$so" stage/lib/ 2>/dev/null || true
+                base=$(basename "$so")
+                if [ ! -f "stage/lib/$base" ]; then
+                  cp "$so" "stage/lib/$base"
+                  printf 'lib/%s\t%s\n' "$base" "$so" >> runtime-origins.tsv
+                fi
               done
             }
             copy_closure stage/bin/DIALibGen
@@ -618,6 +620,20 @@ jobs:
           # The helper fetches the rejection log when notarization fails.
           bash .github/notarize.sh "$RUNNER_TEMP/cli.zip"
 
+      - name: Collect runtime notices and corresponding sources
+        if: steps.pkg.outputs.package == 'true'
+        timeout-minutes: 90
+        shell: bash -el {0}
+        run: |
+          python .github/test-runtime-licenses.py
+          python .github/collect-runtime-licenses.py --stage stage \
+            --conda-prefix "$CONDA_PREFIX" --torch-root "$TORCH_ROOT" \
+            --origins runtime-origins.tsv --sources corresponding-sources \
+            --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+          mkdir -p corresponding-sources/build-instructions
+          cp .github/workflows/ci.yml .github/fetch-libtorch.py corresponding-sources/build-instructions/
+          cp LICENSE THIRD-PARTY-NOTICES.md corresponding-sources/
+
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
@@ -630,8 +646,13 @@ jobs:
         # Allow for notarization latency while bounding the desktop build.
         timeout-minutes: 90
         shell: bash
-        # Tauri signing variables come only from the credential step.
-        # Tauri staples the app; the DMG is notarized and stapled separately below.
+        # The certificate is already in the temporary keychain. Tauri needs
+        # only the identity and, for notarization, these step-scoped credentials.
+        env:
+          MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          MACOS_APPLE_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_APPLE_ID || '' }}
+          MACOS_TEAM_ID: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_TEAM_ID || '' }}
+          MACOS_NOTARY_PASSWORD: ${{ steps.sign.outputs.notarize == 'true' && secrets.MACOS_NOTARY_PASSWORD || '' }}
         run: |
           set -euo pipefail
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
@@ -649,7 +670,14 @@ jobs:
           test -x gui/src-tauri/resources/dialibgen/bin/DIALibGen \
             || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
           cd gui
-          npm ci
+          # Empty APPLE_* values count as set to Tauri; export only usable values.
+          if [ -n "$MACOS_SIGN_IDENTITY" ]; then
+            export APPLE_SIGNING_IDENTITY="$MACOS_SIGN_IDENTITY"
+          fi
+          if [ -n "$MACOS_NOTARY_PASSWORD" ]; then
+            export APPLE_ID="$MACOS_APPLE_ID" APPLE_PASSWORD="$MACOS_NOTARY_PASSWORD" \
+              APPLE_TEAM_ID="$MACOS_TEAM_ID"
+          fi
           # Keep verbose bundler diagnostics. Retry once after detaching transient DMG mounts.
           npm run tauri build || {
             echo "::warning::tauri build failed -- retrying once, verbosely"
@@ -659,6 +687,14 @@ jobs:
             fi
             npm run tauri build -- --verbose
           }
+
+      - name: Collect desktop corresponding sources
+        if: steps.pkg.outputs.gui == 'true'
+        shell: bash -el {0}
+        run: |
+          python .github/collect-gui-sources.py \
+            --inventory gui/src-tauri/resources/third-party-licenses/inventory.json \
+            --sources corresponding-sources
 
       # Use stable asset names expected by the README and Homebrew casks.
       - name: Collect the desktop bundles
@@ -679,12 +715,36 @@ jobs:
           [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
 
+      - name: Collect AppImage system-library notices and corresponding sources
+        if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/test-appimage-licenses.py
+          python3 .github/test-appimage-helpers.py
+          APPDIR="$PWD/gui/src-tauri/target/release/bundle/appimage/DIALibGen.AppDir"
+          APPIMAGE="$PWD/dist-bundles/DIALibGen-gui-${{ matrix.name }}.AppImage"
+          test -d "$APPDIR" && test -f "$APPIMAGE"
+          python3 .github/appimage-helper-providers.py \
+            --appdir "$APPDIR" --appimage "$APPIMAGE" --tools "$HOME/.cache/tauri" \
+            --output corresponding-sources/appimage-helper-providers.json
+          python3 .github/collect-appimage-licenses.py \
+            --appdir "$APPDIR" --appimage "$APPIMAGE" --baseline stage \
+            --gui-binary gui/src-tauri/target/release/dialibgen-gui \
+            --deb "dist-bundles/DIALibGen-gui-${{ matrix.name }}.deb" \
+            --providers corresponding-sources/appimage-helper-providers.json \
+            --sources corresponding-sources \
+            --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+
       # Notarize and staple the DMG separately from the app it contains.
       - name: Notarize and staple the disk image
         if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
         timeout-minutes: 60
         shell: bash
         env:
+          MACOS_SIGN_IDENTITY: ${{ steps.signing.outputs.identity }}
+          MACOS_KEYCHAIN: ${{ steps.signing.outputs.keychain }}
           MACOS_APPLE_ID: ${{ secrets.MACOS_APPLE_ID }}
           MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
@@ -721,25 +781,32 @@ jobs:
             exit 1
           }
 
-      - uses: actions/upload-artifact@v5
+      - name: Package corresponding sources
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash
+        run: tar -C corresponding-sources -czf "DIALibGen-sources-${{ matrix.name }}.tar.gz" .
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: steps.pkg.outputs.package == 'true'
         with:
           name: bundles-${{ matrix.name }}
           path: |
             DIALibGen-${{ matrix.name }}.tar.gz
+            DIALibGen-sources-${{ matrix.name }}.tar.gz
             dist-bundles/*
 
       - name: Attach to the release
         if: steps.pkg.outputs.release == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           draft: true
           files: |
             DIALibGen-${{ matrix.name }}.tar.gz
+            DIALibGen-sources-${{ matrix.name }}.tar.gz
             dist-bundles/*
           fail_on_unmatched_files: true
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
         with:
           name: smoke-${{ matrix.name }}
@@ -777,6 +844,8 @@ jobs:
           for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
             printf '%s' "$have" | grep -qx "DIALibGen-$n.tar.gz" \
               || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
+            printf '%s' "$have" | grep -qx "DIALibGen-sources-$n.tar.gz" \
+              || { echo "::error::no corresponding sources for $n on $tag"; missing=1; }
           done
           # Require the exact asset names used by download links.
           for n in macos-x64 macos-arm64; do
@@ -797,8 +866,8 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: '22'
           cache: npm
@@ -807,13 +876,18 @@ jobs:
         working-directory: gui
       - run: npm run typecheck
         working-directory: gui
-      - run: npm test
+      - run: npm run test:coverage
         working-directory: gui
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: frontend-coverage-${{ matrix.os }}
+          path: gui/coverage/
       - run: npm run build
         working-directory: gui
 
       # Test the Rust command boundary and enforce warning-free clippy.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
       # Tauri needs the system webview and its build dependencies on Linux.

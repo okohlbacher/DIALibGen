@@ -15,12 +15,21 @@ Expected values are written as literals -- absolute indices and pinned model
 outputs -- so a permuted element list or a rewritten helper cannot satisfy them
 by construction.
 """
+import argparse
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 import peptdeep_reference as ref
+
+parser = argparse.ArgumentParser(description="Check the reference encoder and optional pinned model outputs.")
+mode = parser.add_mutually_exclusive_group(required=True)
+mode.add_argument("--model", help="Explicit RT model whose pinned predictions must be checked")
+mode.add_argument("--encoding-only", action="store_true", help="Run only the model-independent encoder assertions")
+args = parser.parse_args()
+if args.model and not os.path.isfile(args.model):
+    parser.error(f"required RT model does not exist: {args.model}")
 
 failures = []
 
@@ -112,14 +121,8 @@ for bad in ("", "peptidek"):
         pass
 
 # --- the model itself: pinned outputs, dtypes and length grouping ------------
-# Falls back to the OpenMS install's model directory. $ODIA_OPENMS, then
-# $CONDA_PREFIX, then the model is simply absent and the block below is skipped.
-_prefix = os.environ.get("ODIA_OPENMS") or os.environ.get("CONDA_PREFIX") or ""
-MODEL = os.environ.get(
-    "ODIA_RT_MODEL",
-    os.path.join(_prefix, "share", "OpenMS", "models",
-                 "peptdeep_rt_dynamic.onnx") if _prefix else "")
-if os.path.exists(MODEL):
+MODEL = args.model
+if MODEL:
     # Obtained by running the shipped model directly, and reproduced
     # independently during review.
     got = ref.predict_rt(MODEL, ["ELVISLIVESK", "PEPTIDEK", "PEPTIDER"])
@@ -138,7 +141,7 @@ if os.path.exists(MODEL):
     check(len(dup) == 3 and dup[0] == dup[2] and abs(dup[1] - alone) < 1e-6,
           f"duplicate or ordering handling is wrong: {dup}")
 else:
-    print(f"  note: {MODEL} absent, model assertions skipped")
+    print("  encoding-only mode explicitly requested; no model assertions registered")
 
 for f in failures:
     print(f"  FAIL {f}")

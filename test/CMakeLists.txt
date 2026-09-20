@@ -10,6 +10,12 @@
 
 find_program(ODIA_PYTHON python3)
 
+function(add_failure_test name target expected)
+  add_test(NAME ${name} COMMAND ${CMAKE_COMMAND}
+    "-DTOOL=$<TARGET_FILE:${target}>" "-DEXPECTED=${expected}" "-DARGS=${ARGN}"
+    -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/expect_failure.cmake")
+endfunction()
+
 # ODIA_MODEL_DIR comes from the top-level CMakeLists, which needs it earlier
 # than this file is added -- the install rules bundle whatever it points at.
 set(ODIA_RT_MODEL_PATH  "${ODIA_MODEL_DIR}/peptdeep_rt_dynamic.onnx"  CACHE FILEPATH "PeptDeep RT model")
@@ -67,11 +73,11 @@ if(TARGET DIALibGen)
   # An unknown config key is a typo that would otherwise silently become a
   # default, and a library built from a typo looks exactly like one built right.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/typo.json" "{\"missed_cleavage\": 2}\n")
-  add_test(NAME config_rejects_unknown_key
-           COMMAND DIALibGen -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+  add_failure_test(config_rejects_unknown_key DIALibGen "unknown config key: missed_cleavage"
+                   -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
                    -config "${CMAKE_CURRENT_BINARY_DIR}/typo.json"
                    -out "${CMAKE_CURRENT_BINARY_DIR}/typo.tsv")
-  set_tests_properties(config_rejects_unknown_key PROPERTIES WILL_FAIL TRUE)
+
 endif()
 
 # The instrument table. An alias that resolves to the UNTRAINED slot (7, or
@@ -104,11 +110,11 @@ set_tests_properties(peptdeep_instrument_typos_refused PROPERTIES PASS_REGULAR_E
 # indexed onto an untrained slot.
 if(TARGET DIALibGen)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json" "{\"instrument\": \"Astrall\"}\n")
-  add_test(NAME config_rejects_unknown_instrument
-           COMMAND DIALibGen -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+  add_failure_test(config_rejects_unknown_instrument DIALibGen "unknown instrument: 'Astrall'"
+                   -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
                    -config "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.json"
                    -out "${CMAKE_CURRENT_BINARY_DIR}/badinstrument.tsv")
-  set_tests_properties(config_rejects_unknown_instrument PROPERTIES WILL_FAIL TRUE)
+
 endif()
 
 # groupByLength and the homogeneity guard. Collapsing every peptide into one
@@ -121,9 +127,9 @@ set_tests_properties(peptdeep_length_grouping PROPERTIES
 
 # A modification with no elemental composition encodes to all zeros, which is
 # indistinguishable from no modification. OpenMS accepts bare mass shifts.
-add_test(NAME peptdeep_rejects_massshift_modification
-         COMMAND odia_encode_dump "PEPTIDEC[999]")
-set_tests_properties(peptdeep_rejects_massshift_modification PROPERTIES WILL_FAIL TRUE)
+add_failure_test(peptdeep_rejects_massshift_modification odia_encode_dump
+  "has no elemental composition" "PEPTIDEC[999]")
+
 
 # Every element symbol in every modification OpenMS knows must either map into
 # AlphaPeptDeep's 109-element list or be a deliberate '?' bucket entry. The four
@@ -149,9 +155,14 @@ add_test(NAME digest_methionine_excision
 if(ODIA_PYTHON)
   # The PeptDeep reference encoder is the oracle the C++ encoder is checked
   # against, so it carries its own guard.
+  if(EXISTS "${ODIA_RT_MODEL_PATH}")
+    set(reference_model_args --model "${ODIA_RT_MODEL_PATH}")
+  else()
+    set(reference_model_args --encoding-only)
+  endif()
   add_test(NAME peptdeep_reference_encoding
            COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1 ${ODIA_PYTHON}
-                   ${CMAKE_CURRENT_SOURCE_DIR}/check_peptdeep_encoding.py)
+                   ${CMAKE_CURRENT_SOURCE_DIR}/check_peptdeep_encoding.py ${reference_model_args})
 
   # The C++ header and the Python data file are the same table for two
   # languages, and nothing compiled or tested the header before.
@@ -226,29 +237,27 @@ endif()
 if(EXISTS "${ODIA_RT_MODEL_PATH}")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/degenerate_irt.tsv"
        "# every peptide identical, so every prediction is identical\nPEPTIDEK\t0.0\nPEPTIDEK\t50.0\nPEPTIDEK\t100.0\n")
-  add_test(NAME irt_calibration_rejects_degenerate
-           COMMAND odia_irt_calibration "${ODIA_RT_MODEL_PATH}"
+  add_failure_test(irt_calibration_rejects_degenerate odia_irt_calibration
+                   "iRT standards all predicted the same retention time" "${ODIA_RT_MODEL_PATH}"
                    "${CMAKE_CURRENT_BINARY_DIR}/degenerate_irt.tsv")
-  set_tests_properties(irt_calibration_rejects_degenerate PROPERTIES WILL_FAIL TRUE)
 
   # Two standards is not a calibration, it is a line through two points with no
   # residual to check. Three is the documented floor.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/too_few_irt.tsv"
        "LGGNEQVTR\t-24.92\nLFLQFGAQGSPFLK\t100.0\n")
-  add_test(NAME irt_calibration_rejects_too_few
-           COMMAND odia_irt_calibration "${ODIA_RT_MODEL_PATH}"
+  add_failure_test(irt_calibration_rejects_too_few odia_irt_calibration
+                   "iRT standards file has fewer than 3 usable peptides" "${ODIA_RT_MODEL_PATH}"
                    "${CMAKE_CURRENT_BINARY_DIR}/too_few_irt.tsv")
-  set_tests_properties(irt_calibration_rejects_too_few PROPERTIES WILL_FAIL TRUE)
 
   # Standards that parse but cannot be encoded. One bad standard must cost
   # precision, not the calibration; three bad ones out of four must fail loudly
   # rather than fit a line through the survivor.
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/unencodable_irt.tsv"
        "LGGNEQVTR\t-24.92\nPEPTIDEC[999]K\t20.0\nSAMPLEC[999]R\t60.0\nAAAAC[999]K\t90.0\n")
-  add_test(NAME irt_calibration_rejects_unencodable
-           COMMAND odia_irt_calibration "${ODIA_RT_MODEL_PATH}"
+  add_failure_test(irt_calibration_rejects_unencodable odia_irt_calibration
+                   "only 1 of 4 iRT standards could be predicted; at least 3 are needed" "${ODIA_RT_MODEL_PATH}"
                    "${CMAKE_CURRENT_BINARY_DIR}/unencodable_irt.tsv")
-  set_tests_properties(irt_calibration_rejects_unencodable PROPERTIES WILL_FAIL TRUE)
+
 endif()
 
 # Spreading MS2 batches across sessions must be bit-for-bit identical to running
@@ -283,7 +292,6 @@ if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
                    -DTOOL=$<TARGET_FILE:DIALibGen>
                    -DPYTHON=${ODIA_PYTHON}
                    -DCHECKER=${CMAKE_CURRENT_SOURCE_DIR}/check_free_cysteine.py
-                   -DFASTA=${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta
                    -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                    -DRT_MODEL=${ODIA_RT_MODEL_PATH}
                    -DMS2_MODEL=${ODIA_MS2_MODEL_PATH}

@@ -446,7 +446,14 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           for (int attempt = 0; attempt < 16; ++attempt)
           {
             directory.path = fs::temp_directory_path() / ("dialibgen-tune-" + std::to_string(random()) + "-" + std::to_string(random()));
-            if (fs::create_directory(directory.path)) { directory.temporary = true; break; }
+#ifdef _WIN32
+            const bool created = fs::create_directory(directory.path);
+#else
+            const bool created = ::mkdir(directory.path.c_str(), 0700) == 0;
+            if (!created && errno != EEXIST)
+            { throw std::runtime_error("cannot create private tuning directory: " + std::error_code(errno, std::generic_category()).message()); }
+#endif
+            if (created) { directory.temporary = true; break; }
           }
           if (!directory.temporary) { throw std::runtime_error("cannot create a unique tuning directory"); }
         }

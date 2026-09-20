@@ -19,10 +19,9 @@ if(TARGET DIALibGen)
     COMMAND DIALibGen -mode refine -write_config "${CMAKE_CURRENT_BINARY_DIR}/refine-effective.json")
   set_tests_properties(refinement_config_write_effective PROPERTIES PASS_REGULAR_EXPRESSION "effective config")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/refine-typo.json" "{\"q_precursour\": 0.05}\n")
-  add_test(NAME refinement_config_rejects_unknown_key
-    COMMAND DIALibGen -mode refine -in x.parquet -ids y.parquet -out z.parquet
-      -config "${CMAKE_CURRENT_BINARY_DIR}/refine-typo.json")
-  set_tests_properties(refinement_config_rejects_unknown_key PROPERTIES WILL_FAIL TRUE)
+  add_failure_test(refinement_config_rejects_unknown_key DIALibGen "unknown config key: q_precursour"
+    -mode refine -config "${CMAKE_CURRENT_BINARY_DIR}/refine-typo.json"
+    -write_config "${CMAKE_CURRENT_BINARY_DIR}/refine-invalid.json")
 endif()
 
 if(TARGET odia_tune)

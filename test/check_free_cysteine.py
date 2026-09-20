@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Assert the free-cysteine RT correction (doc/30) is exactly what it claims.
 
-Three libraries from one FASTA:
+Four libraries from one FASTA:
   on   -- CAM-free, correction on
   off  -- CAM-free, correction off
-  cam  -- carbamidomethylated, correction on
+  cam_on / cam_off -- carbamidomethylated, correction on / off
 
 on - off must be the bucketed offset for every peptide and zero for peptides
 without cysteine; cam must be untouched, because the correction counts
@@ -36,7 +36,9 @@ def expected(n):
 
 def main(on, off, cam_on, cam_off):
     a, b = rt_by_sequence(on), rt_by_sequence(off)
-    shared = [s for s in a if s in b]
+    if a.keys() != b.keys():
+        raise SystemExit("correction on/off changed the peptide set")
+    shared = list(a)
     if not shared:
         raise SystemExit("no shared peptides: the two libraries are unrelated")
 
@@ -53,13 +55,15 @@ def main(on, off, cam_on, cam_off):
                 print(f"  FAIL {seq}: {n} Cys, expected {want:+.4f}, got {got:+.6f}")
     if bad:
         raise SystemExit(f"{bad}/{len(shared)} peptides carry the wrong offset")
-    if not {0, 1} <= seen:
+    if seen != {0, 1, 2, 3}:
         raise SystemExit(f"fixture exercises only {sorted(seen)} cysteine counts; "
-                         "it must contain both cysteine-free and cysteine-bearing peptides")
+                         "it must exercise 0, 1, 2 and 3-or-more cysteines")
     print(f"  offsets exact on {len(shared)} peptides, buckets {sorted(seen)}")
 
     c, d = rt_by_sequence(cam_on), rt_by_sequence(cam_off)
-    shared = [s for s in c if s in d]
+    if c.keys() != d.keys():
+        raise SystemExit("alkylated correction on/off changed the peptide set")
+    shared = list(c)
     with_c = sum(1 for s in shared if "C" in s)
     worst = max((abs(c[s] - d[s]) for s in shared), default=0.0)
     if worst > TOL:

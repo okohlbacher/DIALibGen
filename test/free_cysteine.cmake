@@ -1,5 +1,9 @@
 # Builds four small libraries and checks the free-cysteine RT correction.
-# Expects: TOOL PYTHON CHECKER FASTA WORKDIR RT_MODEL MS2_MODEL CCS_MODEL
+# Expects: TOOL PYTHON CHECKER WORKDIR RT_MODEL MS2_MODEL CCS_MODEL
+
+set(FASTA "${WORKDIR}/free_cysteine.fasta")
+file(WRITE "${FASTA}"
+  ">zero\nPEPTIDEK\n>one\nACDEFGHIK\n>two\nACCDEFGHIK\n>three\nACCCDEFGHIK\n>four\nACCCCDEFGHIK\n")
 
 function(build name fixmod flag)
   set(cfg "${WORKDIR}/fcys_${name}.json")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Extract a checksum-pinned CPU wheel's C++ SDK; Python is not a runtime dependency."""
 import hashlib
+import json
 import pathlib
 import sys
 import tempfile
@@ -36,8 +37,10 @@ with tempfile.TemporaryFile() as archive:
                 continue
             if str(path).startswith(("torch/include/", "torch/lib/", "torch/share/")):
                 target = out.joinpath(*path.parts[1:])
-            elif path.name == "LICENSE" and ".dist-info" in str(path):
-                target = out / "share/licenses/Torch/LICENSE"
+            elif ".dist-info" in path.parts[0] and len(path.parts) > 2 and path.parts[1] == "licenses":
+                target = out.joinpath("share/licenses/Torch", *path.parts[2:])
+            elif path.name in {"LICENSE", "NOTICE"} and ".dist-info" in str(path):
+                target = out / "share/licenses/Torch" / path.name
             else:
                 continue
             # The Python bridge is never linked by Torch's C++ imported targets.
@@ -46,4 +49,9 @@ with tempfile.TemporaryFile() as archive:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(files.read(member))
 assert (out / "share/cmake/Torch/TorchConfig.cmake").is_file()
+(out / "share/licenses/Torch/provenance.json").write_text(json.dumps({
+    "name": "PyTorch", "version": version, "license": "BSD-3-Clause AND bundled component licenses",
+    "package_url": url, "package_sha256": expected,
+    "source_url": f"https://github.com/pytorch/pytorch/tree/v{version}",
+}, indent=2) + "\n")
 print(f"CPU libtorch {version}: {out} (SHA256 {expected})")

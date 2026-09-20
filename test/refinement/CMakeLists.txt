@@ -33,9 +33,11 @@ if(TARGET odia_tune)
   set(DIALIBGEN_PEPTDEEP_ONNX_DIR "${ODIA_MODEL_DIR}" CACHE PATH "Stock peptdeep RT/CCS models for refinement tests")
   if(EXISTS "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_rt_dynamic.onnx" AND
      EXISTS "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_ccs_dynamic.onnx")
-    add_test(NAME tune_parity COMMAND dialibgen_tune_parity
-      "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_rt_dynamic.onnx"
-      "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_ccs_dynamic.onnx")
+    if(EXISTS "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_ms2_dynamic.onnx")
+      add_test(NAME tune_parity COMMAND dialibgen_tune_parity
+        "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_rt_dynamic.onnx"
+        "${DIALIBGEN_PEPTDEEP_ONNX_DIR}/peptdeep_ccs_dynamic.onnx")
+    endif()
     if(TARGET DIALibGen)
       find_program(DIALIBGEN_REFINEMENT_PYTHON NAMES python3 python)
       set(DIALIBGEN_EXAMPLE_FASTA "-" CACHE FILEPATH "FASTA for refinement training test; - uses synthetic proteins")

@@ -3,8 +3,8 @@
 // The TOOL is the source of truth for which keys exist and what they default
 // to: the backend runs `-write_config` and hands the JSON over, and every spec
 // below is an OVERLAY on that -- prose, grouping, and the choice lists the JSON
-// cannot express. Types are INFERRED from the tool's own default value, so a
-// spec can never disagree with the CLI about whether something is a number.
+// cannot express. Types are inferred from the defaults, with documented floating
+// point fields kept decimal even when their JSON defaults are whole numbers.
 //
 // A key the tool grows and this file has not heard of still appears, inferred,
 // under Advanced. That is deliberate: a new CLI parameter that the GUI silently
@@ -163,11 +163,15 @@ function isInt(n: number): boolean {
 /// silently become a range.
 export function inferKind(name: string, value: unknown): ParamKind {
   if (typeof value === 'boolean') return 'bool'
-  if (typeof value === 'number') return isInt(value) ? 'int' : 'double'
+  if (typeof value === 'number') {
+    if (name === 'nce' || name === 'min_relative_intensity') return 'double'
+    return isInt(value) ? 'int' : 'double'
+  }
   if (typeof value === 'string') return 'string'
   if (Array.isArray(value)) {
     const nums = value.filter((v) => typeof v === 'number') as number[]
     if (RANGE_KEYS.has(name) && value.length === 2 && nums.length === 2) {
+      if (name === 'precursor_mz' || name === 'fragment_mz') return 'double-range'
       return nums.every(isInt) ? 'int-range' : 'double-range'
     }
     if (value.length > 0 && nums.length === value.length) return 'int-list'

@@ -128,7 +128,8 @@ export default function App(): JSX.Element {
 
   const modelsReady = !!models && models.missing.length === 0
   const outExt = /\.parquet$/.test(out) ? 'parquet' : /\.tsv$/.test(out) ? 'tsv' : null
-  const canRun = !running && !!fasta && !!out && !!outExt && modelsReady && !!defaults && !!info?.ok
+  const threadsValid = Number.isSafeInteger(threads) && threads >= 0
+  const canRun = threadsValid && !running && !!fasta && !!out && !!outExt && modelsReady && !!defaults && !!info?.ok
 
   async function start(): Promise<void> {
     setRunning(true)
@@ -244,9 +245,11 @@ export default function App(): JSX.Element {
 
           <div className="field">
             <label htmlFor="threads">threads</label>
-            <input id="threads" type="number" min={0} value={threads}
-                   onChange={(e) => setThreads(Math.max(0, Number(e.target.value) || 0))} />
-            <p className="help">1 is the default. 0 uses all available cores, with more memory.</p>
+            <input id="threads" type="number" min={0} step={1} value={threads} aria-invalid={!threadsValid}
+                   onChange={(e) => setThreads(Number(e.target.value) || 0)} />
+            <p className={`help${threadsValid ? '' : ' bad'}`}>{threadsValid
+              ? '1 is the default. 0 uses all available cores, with more memory.'
+              : 'Enter a whole number of threads (0 or more).'}</p>
           </div>
 
           <div className="row">

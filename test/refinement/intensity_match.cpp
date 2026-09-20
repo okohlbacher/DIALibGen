@@ -21,6 +21,7 @@
 #include <parquet/arrow/writer.h>
 
 #include <chrono>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iostream>
@@ -126,6 +127,91 @@ namespace
           "no-restrict never changes a transition count, and a run that replaces nothing is refused");
   }
 
+  void decoy_intensities_are_symmetric()
+  {
+    Library lib = makeLibrary(LIB).subsetByIndex({0, 0});
+    lib.precursors().decoy[1] = 1;
+    auto& transitions = lib.transitions();
+    for (std::size_t j = LIB.size(); j < transitions.product_mz.size(); ++j)
+    { transitions.product_mz[j] += toFixed(37.0); }
+    // A decoy has its own m/z and may arrive in a different transition order.
+    auto reverse_decoy = [&](auto& values) { std::reverse(values.begin() + LIB.size(), values.end()); };
+    reverse_decoy(transitions.product_mz); reverse_decoy(transitions.library_intensity);
+    reverse_decoy(transitions.type); reverse_decoy(transitions.ordinal);
+    reverse_decoy(transitions.charge); reverse_decoy(transitions.loss);
+    const auto obs = observe("y5^1/600.30;y4^1/500.25;b3^1/300.15;y6^1/700.35;",
+                             "500;1000;500;0;", "0.9;0.9;0.9;0.9;");
+    RefineParams p; p.write_rt = false; p.write_intensity = true;
+    RefineStats st;
+    LibraryRefiner::refine(lib, obs, p, st);
+    check(st.intensity_replaced_precursors == 1 && st.intensity_replaced_decoys == 1 &&
+          lib.precursors().transition_count == std::vector<std::uint32_t>({3, 3}),
+          "target and shifted decoy both keep the three trusted fragment identities");
+    const auto& t = lib.transitions();
+    check(t.ordinal == std::vector<std::uint8_t>({4, 3, 5, 4, 3, 5}) &&
+          t.library_intensity == std::vector<float>({1.0f, 0.5f, 0.5f, 1.0f, 0.5f, 0.5f}),
+          "target and decoy use identical observed values and identity tie-breaking order");
+    for (std::size_t j = 0; j < 3 && t.product_mz.size() == 6; ++j)
+    {
+      check(t.type[j] == t.type[j + 3] && t.ordinal[j] == t.ordinal[j + 3] &&
+            t.charge[j] == t.charge[j + 3] && t.loss[j] == t.loss[j + 3],
+            "paired transitions retain identical fragment identities");
+      check(t.product_mz[j + 3] - t.product_mz[j] == toFixed(37.0),
+            "decoy transitions retain their own shifted m/z after reordering");
+    }
+
+    const auto all_trusted = observe("y5^1/600.30;y4^1/500.25;b3^1/300.15;y6^1/700.35;",
+                                     "500;1000;500;250;", "0.9;0.9;0.9;0.9;");
+    for (int scenario = 0; scenario < 4; ++scenario)
+    {
+      lib = makeLibrary(LIB).subsetByIndex({0, 0});
+      lib.precursors().decoy[1] = 1;
+      auto& missing = lib.transitions();
+      if (scenario < 2)
+      {
+        --lib.precursors().transition_count[1];
+        missing.product_mz.pop_back(); missing.library_intensity.pop_back();
+        missing.type.pop_back(); missing.ordinal.pop_back(); missing.charge.pop_back(); missing.loss.pop_back();
+      }
+      else { missing.ordinal.back() = 5; } // Duplicate y5 must not hide the absent y6 by preserving the count.
+      const Library before = lib.subsetByIndex({0, 1});
+      p.intensity_restrict = scenario % 2; st = RefineStats{};
+      std::string error;
+      try { LibraryRefiner::refine(lib, all_trusted, p, st); }
+      catch (const std::runtime_error& e) { error = e.what(); }
+      check(error.find("replaced no precursor") != std::string::npos && st.intensity_decoy_asymmetry == 1 &&
+            st.intensity_replaced_precursors == 0 && st.intensity_replaced_decoys == 0,
+            "a decoy missing a kept target fragment reverts both spectra, also under no-restrict");
+      check(lib.precursors().transition_begin == before.precursors().transition_begin &&
+            lib.precursors().transition_count == before.precursors().transition_count &&
+            lib.transitions().product_mz == before.transitions().product_mz &&
+            lib.transitions().library_intensity == before.transitions().library_intensity &&
+            lib.transitions().type == before.transitions().type && lib.transitions().ordinal == before.transitions().ordinal &&
+            lib.transitions().charge == before.transitions().charge && lib.transitions().loss == before.transitions().loss,
+            "refused asymmetric replacement leaves both rows' complete transition arrays unchanged");
+    }
+  }
+
+  void mixed_rt_units_refused()
+  {
+    Library lib = makeLibrary(LIB).subsetByIndex({0, 0});
+    lib.precursors().modified_sequence[1] = lib.strings().intern("UNSEENPEPK");
+    const auto obs = observe("y5^1/600.30;", "500;", "0.9;");
+    RefineParams p; p.filter = false;
+    RefineStats st;
+    std::string error;
+    try { LibraryRefiner::refine(lib, obs, p, st); }
+    catch (const std::runtime_error& e) { error = e.what(); }
+    check(error.find("mix reference-run minutes") != std::string::npos &&
+          lib.precursors().irt == std::vector<float>({0.5f, 0.5f}),
+          "shared refinement API refuses mixed RT units before modifying either precursor");
+    lib.precursors().irt = {15.0f, 20.0f};
+    p.library_rt_in_minutes = true;
+    LibraryRefiner::refine(lib, obs, p, st);
+    check(lib.precursors().irt == std::vector<float>({42.0f, 20.0f}),
+          "known whole-library minutes permit observed RT while retaining unmatched predictions");
+  }
+
   void mz_mismatch_throws()
   {
     Library lib = makeLibrary(LIB);
@@ -144,7 +230,7 @@ namespace
   {
     Library lib = makeLibrary(LIB);
     const auto obs = observe("y5^1/600.30;", "500;", "0.9;");
-    RefineParams p; p.write_intensity = true; p.filter = false;
+    RefineParams p; p.write_rt = false; p.write_intensity = true; p.filter = false;
     RefineStats st;
     bool threw = false;
     try { LibraryRefiner::refine(lib, obs, p, st); } catch (const std::runtime_error&) { threw = true; }
@@ -348,10 +434,12 @@ int main()
   parser();
   std::cerr << "intensity_match: replacement and reranking\n";
   replaces_and_reranks();
+  decoy_intensities_are_symmetric();
   std::cerr << "intensity_match: preservation and refusal guards\n";
   no_restrict_preserves_counts();
   mz_mismatch_throws();
   mixed_provenance_refused();
+  mixed_rt_units_refused();
   duplicate_keys_count_once();
   loss_bearing_rank_and_preservation();
   std::cerr << "intensity_match: report layouts\n";

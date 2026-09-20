@@ -3,6 +3,8 @@
 
 #include <odia/LibraryRefiner.h>
 
+#include <OpenMS/CHEMISTRY/ModificationsDB.h>
+
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/io/file.h>
@@ -151,13 +153,57 @@ namespace ODIA
       return true;
     }
 
-    /// Is this modified sequence's token a name we know or an accession?
-    bool knownModToken(std::string_view body)
+    std::size_t tokenEnd(std::string_view seq, std::size_t start)
     {
-      if (body.size() > 7 && body.substr(0, 7) == "UniMod:") { return true; }
-      for (const auto& a : MOD_ALIASES) { if (body == a.name) { return true; } }
-      return false;
+      const char open = seq[start], close = open == '(' ? ')' : ']';
+      std::size_t depth = 0;
+      for (std::size_t i = start; i < seq.size(); ++i)
+      {
+        if (seq[i] == open) { ++depth; }
+        else if (seq[i] == close && --depth == 0) { return i; }
+      }
+      return std::string_view::npos;
     }
+
+    char firstResidue(std::string_view seq)
+    {
+      for (std::size_t i = 0; i < seq.size(); ++i)
+      {
+        if (seq[i] == '(' || seq[i] == '[')
+        {
+          i = tokenEnd(seq, i);
+          if (i == std::string_view::npos) { return 0; }
+        }
+        else if (std::isupper(static_cast<unsigned char>(seq[i]))) { return seq[i]; }
+      }
+      return 0;
+    }
+
+    std::string namedAccession(std::string_view token, char residue, bool n_term, bool c_term)
+    {
+      using Mod = OpenMS::ResidueModification;
+      const OpenMS::String name{std::string(token)};
+      const auto* database = OpenMS::ModificationsDB::getInstance();
+      // Avoid the database's per-token warning for unknown names; the caller counts them.
+      if (!database->has(name)) { return {}; }
+      std::set<const Mod*> matches;
+      database->searchModifications(matches, name, residue ? std::string(1, residue) : std::string{});
+      std::string accession;
+      for (const auto* mod : matches)
+      {
+        const auto term = mod->getTermSpecificity();
+        const bool same_site = n_term ? (term == Mod::N_TERM || term == Mod::PROTEIN_N_TERM)
+                             : c_term ? (term == Mod::C_TERM || term == Mod::PROTEIN_C_TERM)
+                                      : term == Mod::ANYWHERE;
+        if (!same_site) { continue; }
+        if (mod->getUniModRecordId() <= 0) { return {}; }
+        const std::string candidate = mod->getUniModAccession();
+        if (!accession.empty() && accession != candidate) { return {}; } // ambiguous synonym
+        accession = candidate;
+      }
+      return accession;
+    }
+
   }
 
   std::string canonicalModifiedSequence(std::string_view seq, std::size_t* unknown)
@@ -166,22 +212,28 @@ namespace ODIA
     if (seq.size() > 1 && seq[0] == '.' && (seq[1] == '(' || seq[1] == '[')) { seq.remove_prefix(1); }
     std::string out;
     out.reserve(seq.size());
+    char residue = 0;
+    bool c_term = false;
     for (std::size_t i = 0; i < seq.size();)
     {
       const char c = seq[i];
-      if (c != '(' && c != '[') { out.push_back(c); ++i; continue; }
-
-      // Balanced scan: nested brackets belong to the token. The previous
-      // implementation stopped at the FIRST closing bracket, so
-      // K(Label:13C(6)15N(2)) became K(Label:13C(6) and never matched anything.
-      const char open = c, close = (c == '(') ? ')' : ']';
-      std::size_t depth = 0, end = std::string_view::npos;
-      for (std::size_t j = i; j < seq.size(); ++j)
+      if (c != '(' && c != '[')
       {
-        if (seq[j] == open) { ++depth; }
-        else if (seq[j] == close && --depth == 0) { end = j; break; }
+        out.push_back(c);
+        if (std::isupper(static_cast<unsigned char>(c))) { residue = c; c_term = false; }
+        else if (c == '.' && residue) { c_term = true; }
+        ++i;
+        continue;
       }
-      if (end == std::string_view::npos) { out.append(seq.substr(i)); break; }
+
+      // Isotope labels contain nested brackets, which belong to the same token.
+      const std::size_t end = tokenEnd(seq, i);
+      if (end == std::string_view::npos)
+      {
+        if (unknown) { ++*unknown; }
+        out.append(seq.substr(i));
+        break;
+      }
 
       const std::string_view body = seq.substr(i + 1, end - i - 1);
       std::string canonical(body);
@@ -189,6 +241,12 @@ namespace ODIA
       for (const auto& a : MOD_ALIASES)
       { if (body == a.name) { canonical = a.unimod; known = true; break; } }
       if (!known && body.size() > 7 && body.substr(0, 7) == "UniMod:") { known = true; }
+      if (!known)
+      {
+        const auto accession = namedAccession(body, residue ? residue : firstResidue(seq.substr(end + 1)),
+                                             residue == 0, c_term);
+        if (!accession.empty()) { canonical = accession; known = true; }
+      }
       // Anything else -- a bare mass shift like (+57.0215), a bare number, an
       // unknown name -- passes through verbatim so it can never silently
       // collide with a known modification, and is counted.
@@ -261,6 +319,14 @@ namespace ODIA
       std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
       const auto st = reader->ReadTable(&table);
       if (!st.ok()) { throw std::runtime_error("cannot read reference table: " + path); }
+    }
+
+    if (const auto product = column(table, {"Product.Mz", "ProductMz"}))
+    {
+      const auto type = product->type()->id();
+      if (type == arrow::Type::LIST || type == arrow::Type::LARGE_LIST || type == arrow::Type::FIXED_SIZE_LIST)
+      { throw std::runtime_error("compact Parquet empirical references are not supported; use a DIA-NN report "
+                                 "or long-format Parquet with one scalar fragment per row"); }
     }
 
     auto seq_c    = column(table, {"Modified.Sequence", "ModifiedPeptideSequence", "FullUniModPeptideName"});
@@ -635,14 +701,20 @@ namespace ODIA
         {
           const std::uint32_t db = pre.transition_begin[d], dc = pre.transition_count[d];
           std::vector<Kept> dk;
+          std::unordered_set<std::uint32_t> decoy_ids;
           for (std::uint32_t j = db; j < db + dc; ++j)
           {
             if (t.loss[j] != LossType::None) { continue; }
             const unsigned z = t.charge[j] == 0 ? 1u : static_cast<unsigned>(std::abs(static_cast<int>(t.charge[j])));
-            if (const auto v = kept_by_ident.find(ident(t.type[j], t.ordinal[j], z)); v != kept_by_ident.end())
-            { dk.push_back({j, v->second}); }
+            const auto id = ident(t.type[j], t.ordinal[j], z);
+            if (const auto v = kept_by_ident.find(id); v != kept_by_ident.end())
+            {
+              if (!decoy_ids.insert(id).second) { symmetric = false; break; }
+              dk.push_back({j, v->second});
+            }
           }
-          if ((!p.intensity_restrict && dk.size() != dc) || dk.size() < p.intensity_min_fragments) { symmetric = false; break; }
+          if (!symmetric || dk.size() != kept.size() || (!p.intensity_restrict && dk.size() != dc) || dk.size() < p.intensity_min_fragments)
+          { symmetric = false; break; }
           decoy_plans.emplace_back(d, std::move(dk));
         }
         if (!symmetric) { ++stats.intensity_decoy_asymmetry; ++stats.intensity_kept_predicted; continue; }
@@ -688,8 +760,10 @@ namespace ODIA
       std::vector<std::uint32_t> begin(n), count(n);
       for (std::size_t i = 0; i < n; ++i)
       {
-        begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
         const auto it = plan.find(i);
+        Library::checkTransitionCapacity(built.product_mz.size(),
+                                        it == plan.end() ? pre.transition_count[i] : it->second.size());
+        begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
         if (it == plan.end())
         { for (std::uint32_t j = pre.transition_begin[i]; j < pre.transition_begin[i] + pre.transition_count[i]; ++j) { copy(j, t.library_intensity[j]); } }
         else
@@ -720,6 +794,10 @@ namespace ODIA
   void LibraryRefiner::refine(Library& library, const ObsMap& obs,
                               const RefineParams& p, RefineStats& stats)
   {
+    Library::checkTransitionCapacity(library.transitionCount());
+    if (p.write_rt && !p.filter && !p.library_rt_in_minutes)
+    { throw std::runtime_error("observed RT with the filter off would mix reference-run minutes with library predictions; "
+                               "disable RT writing or re-predict the whole library with a successfully tuned RT model first"); }
     if (p.write_intensity && !p.filter && !p.allow_mixed_intensity)
     { throw std::runtime_error("-write_intensity with the filter off would leave matched precursors carrying the run's "
                                "OBSERVED intensities and unmatched ones carrying MS2-model predictions in one library; "
@@ -737,12 +815,18 @@ namespace ODIA
     std::vector<double> rt_resid, im_resid;
     std::unordered_map<std::string, char> used;
     used.reserve(obs.size());
+    std::unordered_set<std::string_view> unknown_sequences;
+    bool observed_rt = false, missing_rt = false;
 
     for (std::size_t i = 0; i < n; ++i)
     {
-      const std::string k = key(library.strings().get(pre.modified_sequence[i]), static_cast<int>(pre.charge[i]));
-      auto it = obs.find(k);
       const bool is_decoy = pre.decoy[i] != 0;
+      const auto sequence = library.strings().get(pre.modified_sequence[i]);
+      std::size_t unknown = 0;
+      const std::string k = canonicalModifiedSequence(sequence, is_decoy ? nullptr : &unknown) +
+                            "/" + std::to_string(static_cast<int>(pre.charge[i]));
+      if (unknown && unknown_sequences.insert(sequence).second) { stats.lib_unknown_mod_tokens += unknown; }
+      auto it = obs.find(k);
 
       // A decoy is kept exactly when its key matched: ODIA's decoys carry the
       // TARGET's sequence with shifted fragments, so they share this key. Keeping
@@ -750,6 +834,8 @@ namespace ODIA
       if (it == obs.end()) { if (!p.filter) { keep.push_back(i); } continue; }
       keep.push_back(i);
       matched_idx.push_back(i);
+      if (std::isfinite(it->second.rt)) { observed_rt = true; }
+      else { missing_rt = true; }
       if (is_decoy) { ++stats.decoys_kept; continue; }
 
       used[k] = 1;
@@ -768,6 +854,9 @@ namespace ODIA
     if (p.min_match_fraction > 0.0 && stats.match_fraction < p.min_match_fraction)
     { throw std::runtime_error("only " + std::to_string(used.size()) + " of " + std::to_string(obs.size()) +
                                " reference precursors matched, below the required fraction"); }
+    if (p.write_rt && p.rt_unit == RefineParams::RtUnit::Observed && !p.library_rt_in_minutes && observed_rt && missing_rt)
+    { throw std::runtime_error("missing observed RT would mix library predictions with reference-run minutes; "
+                               "disable RT writing or re-predict the whole library with a successfully tuned RT model first"); }
 
     // Residuals BEFORE the write; after it they are zero by construction.
     auto summarise = [](std::vector<double>& v, double& m, double& s, double& p95, std::size_t& cnt)

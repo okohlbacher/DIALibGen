@@ -21,12 +21,27 @@
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 int main()
 {
   using namespace ODIA;
+
+  const std::size_t limit = std::numeric_limits<std::uint32_t>::max();
+  Library::checkTransitionCapacity(limit - 1, 1); // The boundary itself remains representable.
+  bool refused = false;
+  Library oversized;
+  try { oversized.reserve(1, limit + std::size_t{1}); }
+  catch (const std::length_error& e)
+  { refused = std::string(e.what()).find("32-bit transition limit") != std::string::npos; }
+  if (!refused || oversized.precursors().mz.capacity() || oversized.transitions().product_mz.capacity())
+  { std::cerr << "oversized transition reserve was not refused before allocation\n"; return EXIT_FAILURE; }
+  refused = false;
+  try { Library::checkTransitionCapacity(limit, std::numeric_limits<std::size_t>::max()); }
+  catch (const std::length_error&) { refused = true; }
+  if (!refused) { std::cerr << "overflowing append capacity was accepted\n"; return EXIT_FAILURE; }
 
   // Enough distinct strings to span more than one arena block, so the test
   // exercises the block-walking path rather than a single-block special case.

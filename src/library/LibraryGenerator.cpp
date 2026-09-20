@@ -276,8 +276,14 @@ namespace ODIA
     ModifiedPeptideGenerator::MapToResidueType variable_map =
       ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
 
-    library.reserve(peptide_to_proteins.size() * params.charges.size(),
-                    peptide_to_proteins.size() * params.charges.size() * params.max_fragments);
+    // Reject the estimate before multiplying: an extreme fragment cap must
+    // not wrap size_t and bypass the 32-bit CSR limit in reserve().
+    constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
+    Library::checkTransitionCapacity(peptide_to_proteins.size());
+    const auto estimated_precursors = peptide_to_proteins.size() * params.charges.size();
+    if (params.max_fragments && estimated_precursors > transition_limit / params.max_fragments)
+    { throw std::length_error("library exceeds the 32-bit transition limit (4294967295); split the input FASTA"); }
+    library.reserve(estimated_precursors, estimated_precursors * params.max_fragments);
 
     std::vector<Fragment> fragments;
     std::vector<AASequence> forms;
@@ -322,6 +328,7 @@ namespace ODIA
 
           auto& p = library.precursors();
           auto& t = library.transitions();
+          Library::checkTransitionCapacity(t.product_mz.size(), fragments.size());
           p.mz.push_back(toFixed(precursor_mz));
           p.irt.push_back(std::nanf(""));   // filled in by prediction
           p.im.push_back(std::nanf(""));
@@ -501,6 +508,7 @@ namespace ODIA
     // at the end. Editing in place is not possible: a precursor's fragment
     // count changes, so every later precursor's CSR offset moves.
     Library::TransitionArrays built;
+    Library::checkTransitionCapacity(t.product_mz.size());
     built.product_mz.reserve(t.product_mz.size());
     built.library_intensity.reserve(t.product_mz.size());
     built.type.reserve(t.product_mz.size());
@@ -541,6 +549,7 @@ namespace ODIA
 
         if (spectrum.positions == 0)
         {
+          Library::checkTransitionCapacity(built.product_mz.size(), p.transition_count[i]);
           // Prediction failed for this one. Keep what generate() chose rather
           // than dropping the precursor: an m/z-ranked assay is worse than a
           // predicted one but better than none, and it is counted.
@@ -652,6 +661,7 @@ namespace ODIA
         // drops it symmetrically at load.
         if (ranked.size() < params.min_fragments) { ranked.clear(); }
 
+        Library::checkTransitionCapacity(built.product_mz.size(), ranked.size());
         for (const auto& [intensity, f] : ranked)
         {
           built.product_mz.push_back(toFixed(f.mz));
@@ -1015,6 +1025,7 @@ namespace ODIA
 
       const std::uint32_t begin = p.transition_begin[i];
       const std::uint32_t count = p.transition_count[i];
+      Library::checkTransitionCapacity(t.product_mz.size());
       const std::uint32_t new_begin = static_cast<std::uint32_t>(t.product_mz.size());
 
       for (std::uint32_t k = 0; k < count; ++k)
@@ -1048,6 +1059,7 @@ namespace ODIA
         if (std::isnan(loss)) { continue; }   // cannot be reproduced faithfully
         mz -= loss / charge;
 
+        Library::checkTransitionCapacity(t.product_mz.size(), 1);
         t.product_mz.push_back(toFixed(mz));
         t.library_intensity.push_back(t.library_intensity[s]);
         t.type.push_back(t.type[s]);
@@ -1209,7 +1221,7 @@ namespace ODIA
        // Fixed modifications change every precursor and fragment mass. Without
        // this, flipping the alkylation silently reuses a library built with the
        // other one -- the stale-cache collision that would make a CAM-free run
-       // reproduce the CAM-inclusive result (doc/27).
+       // reproduce the CAM-inclusive result.
        << ";fixmod=" << join(p.fixed_modifications)
        << ";nme=" << (p.n_terminal_methionine_excision ? 1 : 0)
        // Changes the stored RT of every free-cysteine peptide, so a library

@@ -1,0 +1,47 @@
+{
+  "ccs_model": "",
+  "decoys": "none",
+  "derive_ion_mobility": true,
+  "enzyme": "Trypsin/P",
+  "fixed_modifications": [
+    "Carbamidomethyl (C)"
+  ],
+  "fragment_mz": [
+    200.0,
+    1800.0
+  ],
+  "fragments": [
+    3,
+    12
+  ],
+  "free_cysteine_rt_correction": true,
+  "instrument": "QE",
+  "irt_rescale": false,
+  "max_fragment_charge": 2,
+  "max_variable_modifications": 1,
+  "min_relative_intensity": 0.0001,
+  "missed_cleavages": 1,
+  "ms2_model": "",
+  "n_terminal_methionine_excision": true,
+  "nce": 30.0,
+  "nce_source": "instrument-default:QE",
+  "peptide_length": [
+    7,
+    30
+  ],
+  "precursor_charges": [
+    1,
+    2,
+    3,
+    4
+  ],
+  "precursor_mz": [
+    350.0,
+    1200.0
+  ],
+  "recompute_decoy_mz": false,
+  "reserved_doubly_charged": 0,
+  "rt_model": "",
+  "schema_version": 1,
+  "variable_modifications": []
+}

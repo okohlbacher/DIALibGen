@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Assert the free-cysteine RT correction (doc/30) is exactly what it claims.
+"""Assert the free-cysteine RT correction is exactly what it claims.
 
 Four libraries from one FASTA:
   on   -- CAM-free, correction on

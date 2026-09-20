@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare ODIA's C++ PeptDeep encoder against the independent Python reference.
 
-The two were written from doc/04-peptdeep-encoding.md separately -- the C++ from
+The two were written independently from the AlphaPeptDeep tensor specification -- the C++ from
 OpenMS's AASequence, the Python from the raw string -- so agreement is evidence
 that the spec was implemented rather than that one copied the other.
 

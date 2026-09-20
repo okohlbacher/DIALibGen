@@ -32,13 +32,15 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
                 'IM': 0.8, 'Q.Value': 0.001, 'Global.Q.Value': 0.001, 'PG.Q.Value': 0.001,
                 'Decoy': 0.0, 'Run': 'one', 'PEP': 0.01, 'Evidence': 1.0, **values}
 
-    def run(name, rows, *options, error=None, omit=(), out_override=None, in_override=None):
+    def run(name, rows, *options, error=None, omit=(), out_override=None, in_override=None, warning=None):
         report, output = root / f'{name}.parquet', out_override or root / f'{name}.tsv'
         data = {key: [r.get(key) for r in rows] for key in rows[0] if key not in omit}
         pq.write_table(pa.table(data), report, row_group_size=1)
         result = subprocess.run([binary, '-mode', 'refine', '-in', str(in_override or library), '-ids', str(report),
                                  '-out', str(output), *map(str, options)], capture_output=True, text=True, timeout=60)
         log = result.stdout + result.stderr
+        if warning:
+            assert warning in log, (name, log)
         if error:
             assert result.returncode != 0 and error in log, (name, result.returncode, log)
             if out_override is None:
@@ -65,6 +67,9 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
     actual, provenance = run('null-rt-im', [row(RT=None, IM=None)], '-write_im')
     assert {float(r['RT']) for r in actual} == {50} and {float(r['IM']) for r in actual} == {1}
     assert provenance['library']['rt_missing'] == 1 and provenance['library']['im_missing'] == 1
+    assert provenance['units']['rt'] == 'unchanged (library prediction)'
+    run('mixed-missing-rt', [row(RT=10), row('PEPTIDER', 1, RT=None)],
+        error='missing observed RT would mix library predictions')
     alias = row()
     for original, alternate in [('Modified.Sequence', 'FullUniModPeptideName'), ('Precursor.Charge', 'PrecursorCharge'),
                                 ('RT', 'Tr_recalibrated'), ('IM', 'IonMobility'), ('Q.Value', 'QValue')]:
@@ -73,6 +78,8 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
     assert {float(r['RT']) for r in actual} == {10}
     actual, provenance = run('empirical', [row()], '-empirical_library', omit=('Q.Value', 'Global.Q.Value', 'PG.Q.Value', 'Decoy'))
     assert set(provenance['gates_bypassed']) == {'Q.Value', 'Global.Q.Value', 'PG.Q.Value'}
+    run('empirical-compact', [row(**{'Product.Mz': [303.0, 304.0]})], '-empirical_library',
+        error='compact Parquet empirical references are not supported')
     for value in (None, float('nan'), float('inf'), -0.1):
         actual, provenance = run('bad-q-' + str(value), [row(**{'Q.Value': value}), row('PEPTIDER', 1)])
         assert {r['Modified.Sequence'] for r in actual} == {'PEPTIDER'}, (value, actual)
@@ -124,6 +131,14 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
     _, provenance = run('duplicate-library-keys', [row(), row('NOPEPTIDE')], in_override=duplicated)
     assert provenance['library']['matched_targets'] == 2 and provenance['library']['match_fraction'] == 0.5
     assert provenance['reference']['unmatched'] == 1
+    unknown_library = root / 'unknown-mod.tsv'
+    unknown_rows = [dict(r, **{'Modified.Sequence': r['Modified.Sequence'] + '(UnresolvableTestModification)'})
+                    if r['Modified.Sequence'] == 'PEPTIDER' else r for r in library_rows]
+    with unknown_library.open('w', newline='') as output:
+        writer = csv.DictWriter(output, columns, delimiter='\t'); writer.writeheader(); writer.writerows(unknown_rows)
+    _, provenance = run('unknown-library-modification', [row()], in_override=unknown_library,
+                         warning='library modification tokens could not be resolved to UniMod')
+    assert provenance['library']['unknown_mod_tokens'] == 1 and provenance['reference']['unknown_mod_tokens'] == 0
     run('duplicate-library-keys-gate', [row(), row('NOPEPTIDE')], '-min_match_fraction', 0.75,
         in_override=duplicated, error='below the required fraction')
     terminal_library = root / 'terminal.tsv'
@@ -143,7 +158,15 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
     run('minmax-degenerate', [row()], '-rt_unit', 'minmax', error='no finite range')
     run('minmax-mixed', [row(), row('PEPTIDER', 1, RT=30), row('PEPTIDEM', 3, RT=None)], '-rt_unit', 'minmax', error='missing observed RT')
     run('minmax-unfiltered', [row()], '-rt_unit', 'minmax', '-no_filter', error='filter off')
-    run('intensity-unfiltered', [row()], '-write_intensity', '-no_filter', error='needs Fragment.Info')
+    run('rt-unfiltered', [row()], '-no_filter', error='mix reference-run minutes')
+    ccs_models = root / 'ccs-only-models'
+    run('rt-unfiltered-ccs-only', [row()], '-no_filter', '-tune', '-tune_heads', 'ccs',
+        '-tune_out_models', ccs_models, error='mix reference-run minutes')
+    assert not ccs_models.exists(), 'CCS-only mixed RT units must be rejected before training'
+    actual, provenance = run('unfiltered-predicted-rt', [row()], '-no_filter', '-no_write_rt')
+    assert len(actual) == len(library_rows) and {float(r['RT']) for r in actual} == {50}
+    assert provenance['library']['rt_written'] == 0
+    run('intensity-unfiltered', [row()], '-write_intensity', '-no_filter', '-no_write_rt', error='needs Fragment.Info')
     # Refusing an existing file must leave the exact bytes untouched.
     protected = root / 'protected.tsv'
     protected.write_bytes(b'preserve me\n')

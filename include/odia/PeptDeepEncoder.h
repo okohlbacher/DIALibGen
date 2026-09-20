@@ -18,9 +18,8 @@ namespace ODIA
   ///
   /// OpenMS ships these models and a binding for them, but the binding rejects
   /// modified peptides outright and its headers are not installed, so ODIA
-  /// encodes for itself. The encoding is specified in doc/04-peptdeep-encoding.md
-  /// and cross-checked against test/peptdeep_reference.py, an independent
-  /// implementation written from that spec.
+  /// encodes for itself. The tensors are cross-checked against the independent
+  /// implementation in test/peptdeep_reference.py.
   ///
   /// Input is an OpenMS AASequence rather than a string: the terminal-versus-
   /// residue distinction is exactly where a string parser goes wrong, and
@@ -115,7 +114,6 @@ namespace ODIA
     /// the encoder ever sees it. AlphaPeptDeep would accumulate them. The
     /// accumulation in addModification_ is therefore correct but currently
     /// unreachable, and a doubly-modified residue is silently under-encoded.
-    /// See doc/BACKLOG.md.
     ///
     /// The 109-wide feature vector for a modification's elemental composition.
     ///

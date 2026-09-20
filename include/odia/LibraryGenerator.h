@@ -74,7 +74,7 @@ namespace ODIA
     std::size_t max_variable_modifications = 1;
 
     /// Add a measured offset to the predicted RT of peptides carrying an
-    /// UNMODIFIED cysteine (doc/30).
+    /// UNMODIFIED cysteine.
     ///
     /// AlphaPeptDeep and DIA-NN's predictor were both trained on corpora in
     /// which essentially every cysteine was carbamidomethylated, so the
@@ -91,7 +91,7 @@ namespace ODIA
     /// where it applies.
     bool free_cysteine_rt_correction = true;
 
-    /// Also emit 1/K0, derived from the predicted CCS (doc/32).
+    /// Also emit 1/K0, derived from the predicted CCS.
     ///
     /// CCS remains the authoritative value; this adds the nominal mobility a
     /// timsTOF would report for it. Off means the library carries angstroms
@@ -187,15 +187,6 @@ namespace ODIA
                           const DigestParams& params,
                           Library& library);
 
-    /// Fill in predicted retention times, replacing the placeholders.
-    ///
-    /// Predicts once per distinct modified sequence rather than once per
-    /// precursor: the RT model takes no charge input, so the charge states of
-    /// one peptide would otherwise be predicted identically several times over.
-    /// On the human proteome that is 1.25 M predictions instead of 4.0 M.
-    ///
-    /// @returns the number of precursors whose iRT could not be predicted;
-    ///          theirs are left NaN rather than given a made-up value.
     /// The canonical content-affecting parameter string for the library cache.
     ///
     /// ONE definition, called by every tool that builds a library. It used to
@@ -213,6 +204,15 @@ namespace ODIA
                                          double nce, const std::string& instrument,
                                          bool irt_rescale);
 
+    /// Fill in predicted retention times, replacing the placeholders.
+    ///
+    /// Predicts once per distinct modified sequence rather than once per
+    /// precursor: the RT model takes no charge input, so the charge states of
+    /// one peptide would otherwise be predicted identically several times over.
+    /// On the human proteome that is 1.25 M predictions instead of 4.0 M.
+    ///
+    /// @returns the number of precursors whose iRT could not be predicted;
+    ///          theirs are left NaN rather than given a made-up value.
     static std::size_t predictRetentionTimes(Library& library,
                                              const std::string& rt_model_path,
                                              bool prefer_gpu = true,
@@ -227,7 +227,7 @@ namespace ODIA
     /// Fitted on Astral (Orbitrap, 8.5-37.9 min) and S08 (timsTOF, 7-30 min)
     /// and cross-validated by holding each out: fitting on S08 and applying to
     /// Astral takes the cysteine-peptide residual p95 from 3.193 to 2.416 min,
-    /// and the reverse takes S08 from 3.327 to 2.678 min. See doc/30.
+    /// and the reverse takes S08 from 3.327 to 2.678 min.
     static float freeCysteineRtOffset(std::size_t free_cysteines);
 
     /// Replace placeholder intensities with predicted ones, and re-choose the

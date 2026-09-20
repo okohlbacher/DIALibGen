@@ -5,7 +5,7 @@
 #include <OpenMS/CONCEPT/VersionInfo.h>
 #include <OpenMS/FORMAT/ParamXMLFile.h>
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
-#include <OpenMS/SYSTEM/File.h>
+#include <odia/AtomicFile.h>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -117,27 +117,22 @@ namespace
       std::error_code ec;
       const fs::path base = fs::temp_directory_path(ec);
       if (ec) { return; }
-      const fs::path dir =
-        base / ("dialibgen-ttd-" + std::string(OpenMS::File::getUniqueName(false)));
-      fs::create_directories(dir, ec);
-      if (ec || !fs::is_directory(dir, ec)) { return; }
+      try { staged_ = std::make_unique<ODIA::AtomicFile>(base / "DIALibGen.ttd"); }
+      catch (const std::exception&) { return; }
+      const fs::path target = staged_->temporaryPath();
+      const fs::path dir = target.parent_path();
 
       static const char kTtd[] = "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n"
                                  "<ttd><tool status=\"internal\">"
                                  "<name>DIALibGen</name>"
                                  "<category/><type/></tool></ttd>\n";
       constexpr std::size_t kTtdLen = sizeof(kTtd) - 1;
-      const fs::path scratch = dir / "DIALibGen.ttd.part";
-      const fs::path target = dir / "DIALibGen.ttd";
       {
-        std::ofstream os(scratch, std::ios::binary | std::ios::trunc);
+        std::ofstream os(target, std::ios::binary | std::ios::trunc);
         os.write(kTtd, static_cast<std::streamsize>(kTtdLen));
         os.close();
-        if (!os) { fs::remove_all(dir, ec); return; }
+        if (!os) { staged_.reset(); return; }
       }
-      fs::rename(scratch, target, ec);
-      if (ec || fs::file_size(target, ec) != kTtdLen || ec)
-      { fs::remove_all(dir, ec); return; }
 
       const std::string dir_str = dir.string();
 #ifdef _WIN32
@@ -145,24 +140,14 @@ namespace
 #else
       const bool set_ok = (::setenv("OPENMS_TTD_INTERNAL_PATH", dir_str.c_str(), 1) == 0);
 #endif
-      if (!set_ok) { fs::remove_all(dir, ec); return; }
-      dir_ = dir;
-      active_ = true;
-    }
-
-    ~ToolHandlerRegistration()
-    {
-      if (!active_) { return; }
-      std::error_code ec;
-      fs::remove_all(dir_, ec);   // best effort, never throws
+      if (!set_ok) { staged_.reset(); }
     }
 
     ToolHandlerRegistration(const ToolHandlerRegistration&) = delete;
     ToolHandlerRegistration& operator=(const ToolHandlerRegistration&) = delete;
 
   private:
-    fs::path dir_;
-    bool active_ = false;
+    std::unique_ptr<ODIA::AtomicFile> staged_;
   };
 }
 

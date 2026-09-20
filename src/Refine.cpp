@@ -157,7 +157,7 @@ void DIALibGen::registerRefinementOptions_()
     registerOutputFile_("out_report", "<file>", "",
                         "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
     setValidFormats_("out_report", {"tsv"}, false);
-    registerFlag_("no_filter", "Keep precursors the reference did not identify; refinement filters by default.");
+    registerFlag_("no_filter", "Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent.");
     registerFlag_("empirical_library", "Declare -ids a pre-filtered empirical library rather than a report: gates "
                                        "whose columns are absent are BYPASSED and each bypass is recorded. Without "
                                        "this, a missing gate column is an error.");
@@ -343,6 +343,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     { writeLogError_("-mode tune preserves the whole library and writes predictions only; filtering or observed-value replacement requires -mode refine"); return ILLEGAL_PARAMETERS; }
     if (tune && p.rt_unit == ODIA::RefineParams::RtUnit::MinMax)
     { writeLogError_("tuning and rt_unit=minmax are incompatible: predictions use the reference run's minutes"); return ILLEGAL_PARAMETERS; }
+    if (p.write_rt && !p.filter && (!tune || getStringOption_("tune_heads") == "ccs"))
+    { writeLogError_("observed RT with the filter off would mix reference-run minutes with library predictions; use -no_write_rt or -tune with the RT head (rt or both)"); return ILLEGAL_PARAMETERS; }
     if (tune_only)
     {
       ODIA::RefineParams defaults;
@@ -549,6 +551,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           // reference run's minutes -- the same unit refine() writes for the
           // matched precursors, so the column stays one coherent object.
           for (auto& v : library.precursors().irt) { v *= r.rt_max_minutes; }
+          p.library_rt_in_minutes = true;
           tune_prov["rt"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
                              {"epochs_run", r.epochs_run}, {"rt_max_minutes", r.rt_max_minutes},
                              {"model_sha256", r.model_out_sha256}, {"stock_sha256", r.model_in_sha256},
@@ -608,6 +611,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                       " of the declared ramp top " + std::to_string(p.im_ramp_top) + " treated as censored"); }
 
       ODIA::LibraryRefiner::refine(library, obs, p, st);
+      if (st.lib_unknown_mod_tokens)
+      { writeLogWarn_(std::to_string(st.lib_unknown_mod_tokens) + " library modification tokens could not be resolved to UniMod; passed through verbatim and may fail the reference join"); }
       }
     }
     catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); return UNEXPECTED_RESULT; }
@@ -659,7 +664,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogWarn_("MIXED INTENSITY PROVENANCE: matched precursors carry this run's observed intensities, unmatched ones "
                       "carry MS2-model predictions (-allow_mixed_intensity)."); }
     }
-    if (p.write_rt)
+    if (p.write_rt && st.rt_written)
     {
       writeLogInfo_("NOTE: the RT column now holds the REFERENCE RUN's observed retention times (unit: " +
                     std::string(rtUnitName(p.rt_unit)) + "), not iRT. This library is a per-run object.");
@@ -683,6 +688,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                      {"too_few_fragments", st.ids_too_few_fragments},
                      {"ramp_censored", st.ids_ramp_censored}, {"unmatched", st.ids_unmatched}}},
       {"library", {{"before", st.library_before}, {"after", st.library_after}, {"matched_targets", st.matched},
+                   {"unknown_mod_tokens", st.lib_unknown_mod_tokens},
+                   {"rt_repredicted_in_reference_minutes", p.library_rt_in_minutes},
                    {"decoys_kept", st.decoys_kept}, {"match_fraction", st.match_fraction},
                    {"rt_written", st.rt_written}, {"rt_missing", st.rt_missing},
                    {"im_written", st.im_written}, {"im_missing", st.im_missing}, {"im_charge_excluded", st.im_charge_excluded}}},
@@ -703,7 +710,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       {"residual_before", {{"rt", {{"n", st.rt_resid_n}, {"mean", num(st.rt_resid_mean)}, {"sd", num(st.rt_resid_sd)}, {"p95_abs", num(st.rt_resid_p95)}}},
                            {"im", {{"n", st.im_resid_n}, {"mean", num(st.im_resid_mean)}, {"sd", num(st.im_resid_sd)}, {"p95_abs", num(st.im_resid_p95)}}},
                            {"sd_convention", "ddof=1; p95 = lower nearest-rank quantile of |residual|; NaN -> null when n<2"}}},
-      {"units", {{"rt", p.write_rt ? (p.rt_unit == ODIA::RefineParams::RtUnit::MinMax ? "0..100 minmax over the matched set" : "the reference run's own RT units") :
+      {"units", {{"rt", st.rt_written ? (p.rt_unit == ODIA::RefineParams::RtUnit::MinMax ? "0..100 minmax over the matched set" :
+                         (!p.filter ? "reference-run minutes: observed where available, tuned predictions otherwise" : "the reference run's own RT units")) :
                          (tune_prov.contains("rt") ? "tuned model predictions in reference-run minutes" : "unchanged (library prediction)")},
                  {"im", p.write_im ? "observed 1/K0 for charges >= im_min_charge; CCS cleared where written" :
                          (tune_prov.contains("ccs") ? "1/K0 derived from tuned CCS predictions" : "unchanged (library prediction)")},

@@ -42,8 +42,13 @@ if(NOT Eigen3_FOUND)
                  "(the installed Eigen rejects OpenMS's version range)")
 endif()
 
-find_package(OpenMS 3.5 REQUIRED)
-message(STATUS "OpenMS: ${OpenMS_DIR}")
+# OpenMS's package compatibility check can reject a newer minor version.
+# Enforce our source minimum after discovery; the installed SDK pins its ABI.
+find_package(OpenMS CONFIG REQUIRED)
+if(NOT OpenMS_VERSION OR OpenMS_VERSION VERSION_LESS 3.5)
+  message(FATAL_ERROR "OpenMS >= 3.5 required (found ${OpenMS_VERSION}).")
+endif()
+message(STATUS "OpenMS: ${OpenMS_VERSION} (${OpenMS_DIR})")
 
 find_package(Arrow CONFIG REQUIRED)
 find_package(Parquet CONFIG REQUIRED)

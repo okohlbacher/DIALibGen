@@ -283,7 +283,7 @@ namespace ODIA
       {"QE", 0}, {"LUMOS", 1}, {"TIMSTOF", 2}, {"SCIEXTOF", 3}, {"THERMOTOF", 4},
     };
     std::string upper;
-    for (const char c : name) { upper.push_back(static_cast<char>(std::toupper(c))); }
+    for (const char c : name) { upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c)))); }
     const auto it = known.find(upper);
     // max_instrument_num - 1, the "unknown" slot.
     return it == known.end() ? 7 : it->second;

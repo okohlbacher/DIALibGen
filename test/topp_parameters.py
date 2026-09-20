@@ -18,6 +18,11 @@ with tempfile.TemporaryDirectory() as directory:
         out = root / 'effective.json'
         run(*args, '-write_config', out)
         return json.loads(out.read_text())
+    fixture = Path(__file__).resolve().parents[1] / 'gui/src/testing/generation-defaults.json'
+    expected, actual = json.loads(fixture.read_text()), config('-mode', 'generate')
+    for key in ('rt_model', 'ms2_model', 'ccs_model'):
+        expected.pop(key); actual.pop(key)  # Resolved paths depend on the installation.
+    assert actual == expected, 'GUI default fixture differs from the native effective configuration'
     recipe = root / 'recipe.json'
     recipe.write_text(json.dumps({'missed_cleavages': 2, 'instrument': 'Lumos', 'nce': 28}))
     effective = config('-config', recipe, '-generation:missed_cleavages', 1,

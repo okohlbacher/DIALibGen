@@ -28,7 +28,7 @@ libraries and performs observed-value refinement.
 The runtime is native C++; Python, NumPy, PyArrow and the Python ONNX Runtime
 package are test dependencies only. Model-dependent tests require all three
 ONNX models in `ODIA_MODEL_DIR`. A smaller passing suite without models is
-not a prediction or end-to-end validation.
+not a prediction or end-to-end validation. See [validation and coverage](testing.md).
 
 ## CPU and CUDA
 

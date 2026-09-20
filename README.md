@@ -13,6 +13,7 @@ runtime.
 Version **0.11.0** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), and [changes](CHANGELOG.md).
+Final release checks are tracked in [BACKLOG.md](BACKLOG.md).
 
 ## Install
 
@@ -20,6 +21,9 @@ Download the CLI archive or desktop installer for your platform from
 [Releases](https://github.com/okohlbacher/DIALibGen/releases). Keep the archive's
 `bin`, `lib` and `share` directories together. The CLI is one executable with
 bundled runtime libraries, OpenMS data and the three prediction models.
+Each platform also has a `DIALibGen-sources-<platform>.tar.gz` asset containing
+corresponding dependency sources, recipes and patches. Runtime inventories and
+license texts are included with the binaries; see [third-party notices](THIRD-PARTY-NOTICES.md).
 
 ```bash
 curl -fsSLO https://github.com/okohlbacher/DIALibGen/releases/latest/download/DIALibGen-macos-arm64.tar.gz
@@ -35,10 +39,11 @@ brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli
 brew install --cask okohlbacher/dialibrarygenerator/dialibgen
 ```
 
-The first launch of a signed macOS CLI can be slow while macOS validates its
-bundled libraries. Earlier releases took between about 30 seconds and five
-minutes depending on the delivery route; those measurements are not a timing
-guarantee for 0.11.0. See [remaining validation work](BACKLOG.md).
+The signed 0.11.0 candidate measured about one second on its first CLI launch
+on fresh hosted Macs, through both archive and Homebrew delivery. Earlier
+releases showed much longer delays. These observations do not guarantee startup
+time on every Mac; the candidate, hashes and conditions are recorded in
+[BACKLOG.md](BACKLOG.md).
 
 ## Generate a library
 
@@ -72,6 +77,8 @@ DIALibGen -in proteins.fasta -config generation.json -out predicted.tsv
 
 Refinement writes observed values from the reference run. It filters to
 confident identifications by default; `-write_im` also replaces mobility.
+To retain unidentified precursors with `-no_filter`, also use `-no_write_rt`,
+or tune the RT head so the whole library first shares the reference run's RT units.
 
 ```bash
 DIALibGen -mode refine -in predicted.parquet -ids report.parquet \
@@ -87,8 +94,9 @@ DIALibGen -mode tune -in predicted.parquet -ids report.parquet \
   -out tuned.parquet -tune_out_models tuned-models
 ```
 
-Use a report containing one run. The mode records quality gates, training
-cohorts, input hashes and residuals in provenance. Observed RT and tuned RT are
+Use a report containing one run. Provenance records quality gates, input
+fingerprints, residuals and, when tuning, each head's complete recipe, cohorts,
+seed and model SHA-256 hashes, even when models are temporary. Observed RT and tuned RT are
 specific to the reference run's gradient; evaluate transfer to a different
 method before using them there. See [usage and interpretation](docs/usage.md).
 
@@ -117,7 +125,8 @@ verifies the pinned models. See [building](docs/building.md) and
 The [desktop app](gui/README.md) provides the generation workflow: select a
 FASTA, output and settings, then generate a library. Its form uses the
 executable's generation defaults. Refinement and tuning are available through
-the CLI.
+the CLI. The app requires an unused output path and validates thread counts
+before launch.
 
 ## Evidence and limitations
 
@@ -133,13 +142,22 @@ are in [the historical benchmark summary](docs/benchmark.md).
   fragment-intensity model.
 - Refinement requires the columns needed by enabled quality gates. Empirical
   libraries and fragment-intensity write-in have additional input contracts;
-  unsupported layouts are refused.
+  empirical references require long-format Parquet, and compact references are
+  refused. DIA-NN 2.x fragment-column parsing has synthetic contract tests;
+  interoperability with a real `--export-quant` fixture remains to be checked.
+- Prediction supports one modification per residue. Refinement normalizes known
+  modification names to UniMod accessions and reports unresolved names.
+- A library can contain at most 4,294,967,295 transitions. Larger inputs must
+  be split; oversized operations are refused before stored offsets can overflow.
 - Portable release training uses CPU. CUDA training is supported by source
   builds with compatible CUDA LibTorch and runtime libraries.
 - CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
   INI export do not.
 - Windows releases target x64. Platform-specific validation and macOS startup
   measurements are tracked in [BACKLOG.md](BACKLOG.md).
+
+See [validation and measured coverage](docs/testing.md) for what the tests
+establish and what remains untested.
 
 ## Citation and licence
 

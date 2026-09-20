@@ -5,6 +5,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.11.0] — 2026-09-20
 
+Release validation is in progress; see [BACKLOG.md](BACKLOG.md) for the
+remaining checks. The entries below describe the implemented changes.
+
 ### Added
 
 - One TOPP executable for generation, observed-value refinement and RT/CCS
@@ -21,21 +24,28 @@ This project follows [Semantic Versioning](https://semver.org/).
   summary of the completed 0.10.1 cross-run benchmark.
 - Instrument aliases and per-instrument NCE defaults. Unknown instruments are
   refused; the effective recipe records the selected NCE and its source.
+- Runtime dependency inventories, upstream license texts and platform-specific
+  corresponding-source archives, including desktop dependencies.
 
 ### Changed
 
 - `-threads` now follows the TOPP default of 1. Set 0 for automatic inference
   parallelism. Training uses its separate `-machine:threads` setting.
 - The desktop app explicitly selects generation mode and matches the CLI
-  thread default. Bundled-model guidance and parameter descriptions are current.
+  defaults. Fractional NCE and m/z settings remain editable; thread counts must
+  be whole numbers. Existing output paths are refused before starting a child
+  process.
 - User documentation replaces obsolete pre-release notes and same-run tuning
   recommendations. Superseded Python tuning helpers are not part of the tool.
+- Portable archives contain the executable, runtime libraries, data, models
+  and notices. Headers, static libraries and CMake development files remain
+  available through source installation rather than the portable archives.
 
 ### Fixed
 
 - Training provenance now records true SHA-256 model hashes. Earlier refiner
-  fields with that name held a 64-bit fingerprint.
-
+  fields with that name held a 64-bit fingerprint; library/report cache
+  fingerprints are now explicitly labelled FNV-1a64.
 - Met excision now retains N-terminal peptides at every permitted missed-cleavage
   count, including cases where the fully cleaved peptide is below the minimum
   length. Cache fingerprint v5 invalidates libraries containing the old omission.
@@ -51,6 +61,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 - Refinement validates the report before training, retains the full training
   recipe in library provenance and counts unique join keys. Terminal-modification
   aliases, min-max RT scaling and fragment-quality counters are corrected.
+- Keeping unidentified precursors while replacing RT now requires whole-library
+  RT re-prediction in reference-run minutes. This prevents mixed RT units;
+  keeping the original RT values remains available with `-no_write_rt`.
+- Refinement resolves additional named modifications through OpenMS with residue
+  and terminal specificity. Unresolved library tokens produce a warning and a
+  provenance count. Compact empirical Parquet references are refused explicitly.
+- Fragment-intensity replacement requires matching target/decoy fragment sets,
+  including when fragment restriction is disabled.
+- Library operations check the 32-bit transition capacity before allocation or
+  append, refusing oversized inputs instead of wrapping stored offsets.
 - Training validates its public API controls, measures elapsed wall time and
   rejects cross-charge protein-group conflicts before assigning held-out cohorts.
 - Windows builds prioritize the Arrow headers belonging to the linked runtime,

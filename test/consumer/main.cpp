@@ -11,9 +11,10 @@
 int main()
 {
   ODIA::Library library;
-  if (library.decoyCount() != 0) return 1;
+  library.precursors().decoy = {0, 1, 0, 1};
+  if (library.decoyCount() != 2) return 1;
 #ifdef HAS_REFINE
-  if (ODIA::canonicalModifiedSequence("AC(UniMod:4)DEFGK") != "AC(UniMod:4)DEFGK") return 2;
+  if (ODIA::canonicalModifiedSequence("AC(Carbamidomethyl)DEFGK") != "AC(UniMod:4)DEFGK") return 2;
 #endif
 #ifdef HAS_TUNE
   if (std::string(ODIA::tune::headName(ODIA::tune::HeadKind::RT)) != "rt") return 3;

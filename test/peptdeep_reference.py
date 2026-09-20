@@ -2,7 +2,7 @@
 """A reference PeptDeep encoder and RT predictor, written from the spec.
 
 This exists to cross-check ODIA's C++ implementation. It is written from
-`doc/04-peptdeep-encoding.md` only -- not from the C++ -- so agreement between
+the AlphaPeptDeep tensor specification -- not from the C++ -- so agreement between
 the two is evidence that the spec was implemented, rather than evidence that one
 implementation copied the other.
 

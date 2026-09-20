@@ -15,7 +15,7 @@ async function renderApp(opts: Parameters<typeof installMockBridge>[0] = {}, con
   await act(async () => {
     render(<App />)
   })
-  await waitFor(() => expect(screen.getByText(/DIALibGen 0\.2\.0|cannot execute/)).toBeTruthy())
+  await waitFor(() => expect(screen.getByText(/DIALibGen 0\.11\.0|cannot execute/)).toBeTruthy())
 }
 
 describe('withExtension', () => {
@@ -88,6 +88,38 @@ describe('App', () => {
     expect(sent.threads).toBe(1)
     expect(sent.config.enzyme).toBe('Trypsin/P')
     expect(Object.keys(sent.config).some((k) => k.startsWith('__'))).toBe(false)
+  })
+
+  it('accepts fractional collision energy and m/z despite whole-number native defaults', async () => {
+    await renderApp()
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    for (const [label, value] of [['nce', '27.5'], ['precursor mz minimum', '350.25'], ['fragment mz maximum', '1750.75']]) {
+      const input = screen.getByLabelText(label) as HTMLInputElement
+      fireEvent.change(input, { target: { value } })
+      expect(input.step).toBe('any')
+      expect(input.validity.valid).toBe(true)
+    }
+    await startRun()
+    expect(bridge.runs[0]).toMatchObject({ config: { nce: 27.5, precursor_mz: [350.25, 1200], fragment_mz: [200, 1750.75] } })
+  })
+
+  it('rejects fractional and negative thread counts before invoking the native command', async () => {
+    await renderApp()
+    fireEvent.change(screen.getByLabelText('protein FASTA'), { target: { value: '/d/p.fasta' } })
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/lib.tsv' } })
+    const threads = screen.getByLabelText('threads')
+    const run = screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement
+    for (const value of ['2.5', '-1']) {
+      fireEvent.change(threads, { target: { value } })
+      expect(run.disabled).toBe(true)
+      expect(screen.getByText('Enter a whole number of threads (0 or more).')).toBeTruthy()
+      await userEvent.click(run)
+      expect(bridge.runs).toHaveLength(0)
+    }
+    fireEvent.change(threads, { target: { value: '2' } })
+    expect(run.disabled).toBe(false)
+    await userEvent.click(run)
+    expect(bridge.runs[0]).toMatchObject({ threads: 2 })
   })
 
   it('streams the log and settles on the terminal event', async () => {
@@ -296,7 +328,7 @@ describe('App', () => {
     expect((screen.getByLabelText('nce') as HTMLInputElement).value).toBe('')
   })
 
-  it('keeps generation disabled for a failed health probe and uppercase output extensions', async () => {
+  it('keeps generation disabled for a failed health probe', async () => {
     await renderApp({ probeFails: true })
     await startRun()
     expect(bridge.runs).toHaveLength(0)

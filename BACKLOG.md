@@ -3,7 +3,34 @@
 The 0.11.0 integration combines the generation and refinement backlogs. This
 file distinguishes implemented changes from checks that still need evidence.
 
-## macOS first-launch measurement — completed
+## Final release gates — pending
+
+The fixes are implemented, but a passing earlier candidate does not validate
+the final release commit. Before publishing 0.11.0:
+
+- Run the complete CPU generation/refinement/training suite, installed CMake
+  consumer and relocated-bundle smoke checks on Linux x64/ARM64, macOS
+  x64/ARM64 and Windows x64. Attach the exact commit and job results.
+- Build the desktop installers on the same platforms. Check the packaged
+  executable, bundled models, native dependencies and installed GUI behavior.
+- Verify macOS signatures, accepted notarization, stapled desktop tickets and
+  candidate startup measurements against the final artifacts.
+- Verify that every binary has its required dependency inventory, notices and
+  corresponding-source asset. Inspect the completed desktop source inventories,
+  especially libraries added during AppImage packaging, and confirm that the
+  source archives upload within the release-host size limit.
+- Record final coverage and test counts after the review corrections. The
+  existing measurements in [docs/testing.md](docs/testing.md) are qualified
+  baselines, not a claim that every branch is covered.
+- Publish only after the tagged draft release contains all expected assets.
+  Update both Homebrew casks to 0.11.0 with the final ARM64/x64 CLI and DMG
+  SHA-256 digests, then verify installation from the public downloads.
+
+Linux ARM64 and Windows require actual training evidence: the earlier conda
+LibTorch 2.10.0 ARM package crashed during LSTM execution, and Windows uses a
+separate dependency build. A successful compile does not close these gates.
+
+## macOS first-launch evidence — earlier candidates
 
 Older signed CLI archives showed very different first-launch times: 335 s for
 a 0.9.0 tarball and about 33 s for a 0.10.0 Homebrew cask installation. Subsequent
@@ -42,18 +69,8 @@ signatures and policy logs are attached to the
 The several-minute delay did not reproduce in either comparison. These are
 single observations per delivery route on hosted VMs, not a guarantee for
 every Mac or network. The measured result does not justify changing the
-archive format; no speculative packaging change is needed for this release.
-
-## Portable CPU training — release CI pending
-
-- Linux ARM64: exercise the full training path with the selected runtime. The
-  earlier conda LibTorch 2.10.0 aarch64 package crashed in LSTM execution; a
-  successful compile is insufficient evidence that the replacement works.
-- Windows x64: verify generation, refinement, tuning and relocated-bundle
-  execution with the packaged LibTorch runtime.
-
-Evidence to attach before closing: successful platform jobs and installed
-bundle smoke-test logs. **Pending.**
+archive format. These measurements close the investigation of the historical
+delay on the tested candidates; they do not replace the final artifact check.
 
 ## Integrated work
 
@@ -69,6 +86,35 @@ bundle smoke-test logs. **Pending.**
   executable and supports a `--check` gate.
 - **Met-excised missed-cleavage peptides:** restored, covered by a regression,
   with cache fingerprint v5.
+- **RT units:** retaining unidentified entries while writing observed RT requires
+  whole-library RT re-prediction in reference-run minutes; otherwise use
+  `-no_write_rt`. CCS-only tuning cannot establish that RT contract.
+- **Modification joins:** additional names resolve through the OpenMS database
+  with residue/terminal context. Unresolved library tokens are warned about and
+  counted in provenance.
+- **Decoy intensities:** replacement preserves matching target/decoy fragment
+  sets, including the no-restriction path.
+- **Capacity:** generation, IO and library transformations guard 32-bit transition
+  offsets; libraries exceeding 4,294,967,295 transitions must be split.
+- **Desktop defaults:** tests use a real CLI configuration fixture; decimal NCE
+  and m/z values remain editable, thread counts are whole numbers, and existing
+  output paths are refused before a child process starts.
+- **Distribution:** runtime archives omit development files. Dependency notices,
+  exact-source inventories and accompanying source archives are part of the
+  packaging gates; final platform evidence remains required above.
+
+## Input and scientific limits
+
+- DIA-NN 2.x `Fr.N.Id` parsing is covered by synthetic fixtures. A real
+  `--export-quant` fixture is still needed to establish interoperability with
+  that exported grammar. Unsupported fragment layouts fail explicitly.
+- Compact Parquet is supported for input libraries, but empirical reference
+  libraries must use the long format. Compact empirical references are refused.
+- The OpenMS sequence representation supports one modification per residue;
+  prediction of stacked modifications on a single residue is unsupported.
+- The prior cross-run benchmark used exposed technical replicates. Confirmation
+  on untouched data remains scientific work, not a result implied by the software
+  contract tests or the 0.11.0 release.
 
 ## Explicit product scope
 

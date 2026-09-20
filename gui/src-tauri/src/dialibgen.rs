@@ -356,6 +356,12 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
         return refuse("the output file must end in .parquet or .tsv".into());
     }
 
+    match std::fs::symlink_metadata(params.out.trim()) {
+        Ok(_) => return refuse("the output path already exists; choose an unused file name".into()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+        Err(e) => return refuse(format!("cannot check the output path: {e}")),
+    }
+
     let reference = match default_config(app.clone()) {
         Ok(Value::Object(m)) => m,
         Ok(_) => return refuse("the tool's effective config is not a JSON object".into()),
@@ -626,6 +632,7 @@ mod tests {
         }
         let (dir, resolved) = fake_cli(r#"
 work=${0%/*}
+printf '%s\n' "$@" >> "$work/calls.txt"
 if [ "$1" = --help ]; then echo 'DIALibGen Version: 0.11.0'; exit 0; fi
 if [ "$3" = -write_config ]; then
   if [ -f "$work/fail-config" ]; then echo 'config failed' >&2; exit 12; fi
@@ -682,6 +689,24 @@ printf 'library' > "$out"
             assert_eq!(result["started"], false);
             assert!(result["reason"].as_str().unwrap().contains(reason));
         }
+        let calls_before = std::fs::read(dir.path().join("calls.txt")).unwrap();
+        std::fs::write(&output, "keep existing library").unwrap();
+        let result = invoke("run", serde_json::json!({"params":params})).unwrap();
+        assert_eq!(result["started"], false);
+        assert!(result["reason"].as_str().unwrap().contains("choose an unused file name"));
+        assert_eq!(std::fs::read_to_string(&output).unwrap(), "keep existing library");
+        assert_eq!(std::fs::read(dir.path().join("calls.txt")).unwrap(), calls_before);
+        assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
+        std::fs::remove_file(&output).unwrap();
+        // A dangling symlink is also an occupied output name.
+        std::os::unix::fs::symlink(dir.path().join("missing-target"), &output).unwrap();
+        assert_eq!(invoke("run", serde_json::json!({"params":params})).unwrap()["started"], false);
+        assert_eq!(std::fs::read(dir.path().join("calls.txt")).unwrap(), calls_before);
+        std::fs::remove_file(&output).unwrap();
+        let mut fractional_threads = params.clone();
+        fractional_threads["threads"] = serde_json::json!(2.5);
+        assert!(invoke("run", serde_json::json!({"params":fractional_threads})).is_err());
+        assert_eq!(std::fs::read(dir.path().join("calls.txt")).unwrap(), calls_before);
         {
             let state = app.state::<RunManager>();
             let _launch = state.launch.lock().unwrap();

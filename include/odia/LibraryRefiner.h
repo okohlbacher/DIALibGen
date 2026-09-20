@@ -134,6 +134,9 @@ namespace ODIA
     std::size_t min_fragments = 0;
 
     bool write_rt = true;
+    /// Caller evidence that the whole library was re-predicted in reference-run
+    /// minutes. Required to write observed RT without filtering; not a user override.
+    bool library_rt_in_minutes = false;
     bool write_im = false;          ///< opt-in; see the warning in refine()
     /// Replace predicted fragment intensities with the reference run's observed
     /// ones. Needs Fragment.Info/Fragment.Quant.Raw (--report-lib-info in 1.9)
@@ -247,6 +250,7 @@ namespace ODIA
     std::size_t ids_unmatched = 0;    ///< observed but absent from the library
     std::size_t ids_ramp_censored = 0;
     std::size_t ids_unknown_mod_tokens = 0;
+    std::size_t lib_unknown_mod_tokens = 0; ///< unresolved tokens across distinct target library sequences
     std::vector<std::string> gates_bypassed;   ///< names of gates whose column was absent (empirical mode only)
 
     std::size_t library_before = 0;

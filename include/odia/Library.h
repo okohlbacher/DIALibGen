@@ -67,7 +67,7 @@ namespace ODIA
   /// alternative measured worse: shipping no mobility at all costs a diaPASEF
   /// consumer the entire mobility dimension, whereas the derived value is good
   /// to 2.9% against 37,193 measured 1/K0 values on S08 -- and every consumer
-  /// recalibrates mobility against its own run regardless (doc/32).
+  /// recalibrates mobility against its own run regardless.
   ///
   /// Fitted against those measurements, the coefficient comes out 1039.07
   /// where this formula gives 18509/sqrt(305) = 1059.82 -- 2.0% apart, which is
@@ -291,7 +291,7 @@ namespace ODIA
     /// A new library holding only @p keep, in the order given, with their
     /// transitions gathered and the string arena carried over whole.
     ///
-    /// Exists for the CiRT seed. doc/19's enabling property is SMALLNESS: a
+    /// Exists for the CiRT seed: a
     /// few hundred precursors can be searched blind over the entire gradient,
     /// which is exactly what is unaffordable for 10^7. Searching them means
     /// running the real extractor and picker over them, and those take a
@@ -316,9 +316,12 @@ namespace ODIA
 
     bool isSortedByMz() const { return sorted_by_mz_; }
 
-    /// Bytes held by the arrays and the arena. Reported so the design claim in
-    /// doc/02-decisions.md D3 is measured rather than asserted.
+    /// Bytes held by the arrays and the arena, for measuring memory use.
     std::size_t footprintBytes() const;
+
+    /// CSR offsets/counts are 32-bit: at most 4,294,967,295 transitions per library.
+    /// Check before allocation or append; subtraction avoids overflow in current + additional.
+    static void checkTransitionCapacity(std::size_t current, std::size_t additional = 0);
 
     void reserve(std::size_t precursors, std::size_t transitions);
 

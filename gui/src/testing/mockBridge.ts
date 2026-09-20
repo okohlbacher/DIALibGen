@@ -1,37 +1,11 @@
-// A window.dialibgen that answers from memory, so App can be rendered without
-// Tauri. The defaults below are a REAL `-write_config` dump, trimmed: the whole
-// point of the form is that it is built from whatever the tool emits, so a
-// mock that invents its own shape would test nothing.
+// In-memory bridge using the native 0.11.0 `-mode generate -write_config` dump.
+// Only the three machine-specific model paths are normalized to empty strings
+// in generation-defaults.json. Native contract tests check this fixture for drift.
 
 import type { DialibgenApi, ModelStatus, RunResult } from '../types'
+import generationDefaults from './generation-defaults.json'
 
-export const SAMPLE_CONFIG: Record<string, unknown> = {
-  schema_version: 1,
-  enzyme: 'Trypsin/P',
-  missed_cleavages: 1,
-  peptide_length: [7, 30],
-  precursor_charges: [1, 2, 3, 4],
-  precursor_mz: [350.0, 1200.0],
-  fragment_mz: [200.0, 1800.0],
-  max_fragment_charge: 2,
-  fragments: [4, 12],
-  fixed_modifications: ['Carbamidomethyl (C)'],
-  variable_modifications: [],
-  max_variable_modifications: 2,
-  n_terminal_methionine_excision: true,
-  free_cysteine_rt_correction: true,
-  derive_ion_mobility: true,
-  min_relative_intensity: 0.0001,
-  reserved_doubly_charged: 3,
-  decoys: 'none',
-  rt_model: '',
-  ms2_model: '',
-  ccs_model: '',
-  instrument: 'QE',
-  nce: 30.0,
-  irt_rescale: false,
-  recompute_decoy_mz: false
-}
+export const SAMPLE_CONFIG: Record<string, unknown> = generationDefaults
 
 export interface MockOptions {
   models?: ModelStatus
@@ -60,8 +34,8 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
     probe: async () =>
       opts.probeFails
         ? { bin: 'DIALibGen', source: 'path', ok: false, detail: 'cannot execute: not found' }
-        : { bin: '/opt/bin/DIALibGen', source: 'bundled', ok: true, version: '0.2.0',
-            detail: 'DIALibGen 0.2.0 (bundled)' },
+        : { bin: '/opt/bin/DIALibGen', source: 'bundled', ok: true, version: '0.11.0',
+            detail: 'DIALibGen 0.11.0 (bundled)' },
     models: async () => opts.models ?? { dir: '/models', missing: [] },
     defaultConfig: async () => {
       if (opts.configError) throw new Error(opts.configError)

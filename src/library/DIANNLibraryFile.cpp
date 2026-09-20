@@ -48,12 +48,16 @@ namespace ODIA
     {
       double v = 0.0;
       if (s.empty()) { return std::nan(""); }
+      if (s.find_first_not_of("0123456789+-.eE") != std::string_view::npos)
+      {
+        std::string token(s);
+        std::transform(token.begin(), token.end(), token.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (token == "nan" || token == "+nan" || token == "-nan") { return std::nan(""); }
+        throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s));
+      }
 #ifdef __APPLE__
       // Apple's deployment SDKs do not yet provide floating-point from_chars.
-      std::string token(s);
-      std::transform(token.begin(), token.end(), token.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      if (token == "nan" || token == "+nan" || token == "-nan") { return std::nan(""); }
       std::istringstream input{std::string(s)};
       input.imbue(std::locale::classic());
       input >> std::noskipws >> v;
@@ -155,6 +159,7 @@ namespace ODIA
         }
 
         auto& t = lib_.transitions();
+        Library::checkTransitionCapacity(t.product_mz.size(), 1);
         t.product_mz.push_back(toFixed(r.product_mz));
         t.library_intensity.push_back(static_cast<float>(r.intensity));
         t.type.push_back(parseFragmentType(r.fragment_type));
@@ -175,6 +180,7 @@ namespace ODIA
     private:
       void startPrecursor(const Row& r)
       {
+        Library::checkTransitionCapacity(lib_.transitionCount());
         auto& p = lib_.precursors();
         p.mz.push_back(toFixed(r.precursor_mz));
         p.irt.push_back(static_cast<float>(r.rt));
@@ -251,7 +257,7 @@ namespace ODIA
     // other derived, so a consumer never has to know which the producer chose.
     // Measured need: our own generated library reached DIA-NN with 1/K0 absent
     // for every precursor, and DIA-NN's `iIM` was 0 on 100% of a diaPASEF run's
-    // identifications (doc/32).
+    // identifications.
     completeMobility(library);
     // The interning index answered "have I seen this string" while reading and
     // is never consulted again -- handles resolve through the arena's entries.
@@ -758,8 +764,9 @@ namespace ODIA
       p.protein_group.push_back(library.strings().intern(
         std::string_view(pg.data(), pg.size())));
 
-      p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
       const int64_t b = l_qmz->value_offset(i), e = l_qmz->value_offset(i + 1);
+      Library::checkTransitionCapacity(t.product_mz.size(), static_cast<std::size_t>(e - b));
+      p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
       for (int64_t k = b; k < e; ++k)
       {
         t.product_mz.push_back(toFixed(v_qmz->Value(k)));

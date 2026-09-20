@@ -43,7 +43,7 @@ namespace ODIA
       /// MEASURED 1/K0 values on S08: our derived mobility sits at 2.8%
       /// relative error, and the fitted coefficient is within 2.0% of the
       /// textbook constant, which is what establishes the units agree with
-      /// DIA-NN's (doc/32).
+      /// DIA-NN's.
       static constexpr const char* CCS = "CCS";
       static constexpr const char* PRECURSOR_MZ = "Precursor.Mz";
       static constexpr const char* PRODUCT_MZ = "Product.Mz";

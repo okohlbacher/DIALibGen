@@ -59,13 +59,20 @@ for header in headers:
 if versions != {'3.4.0'}:
     raise RuntimeError(f'Chocolatey Eigen source version is not the recorded 3.4.0: {versions}')
 
+# The pinned release/3.5.0 commit identifies itself as 3.6.0 in its source.
+# Record the installed SDK's version, rather than inferring it from the tag.
+openms_versions = {match[1] for path in args.openms.rglob('OpenMSConfigVersion.cmake')
+                   if (match := re.search(r'set\(PACKAGE_VERSION\s+"([0-9.]+)"\)', path.read_text()))}
+if len(openms_versions) != 1:
+    raise RuntimeError(f'cannot identify the installed OpenMS version: {openms_versions}')
+
 providers = [
     {'name': 'OpenMS-contrib', 'version': args.contrib_revision,
      'license': 'Multiple upstream licenses; includes EPL-1.0 and MPL-2.0',
      'scope': 'Conservative complete pinned ALL build inputs, including static/header dependencies; not all are linked.',
      'files': [str(p.resolve()) for folder in ('bin', 'lib') for p in (args.contrib / folder).glob('*.dll')],
      'force_include': True, 'collect_sources': True, 'source_recipe': recipes},
-    {'name': 'OpenMS', 'version': '3.5.0', 'license': 'BSD-3-Clause',
+    {'name': 'OpenMS', 'version': openms_versions.pop(), 'license': 'BSD-3-Clause',
      'files': [str(p.resolve()) for p in args.openms.rglob('*.dll')],
      'collect_sources': True,
      'source_recipe': [{'git_url': 'https://github.com/OpenMS/OpenMS.git', 'git_rev': args.openms_revision}],

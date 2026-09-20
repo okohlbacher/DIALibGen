@@ -3,16 +3,19 @@ import { buildSpecs, inferKind, inertBecause } from './paramLayout'
 import { SAMPLE_CONFIG } from './testing/mockBridge'
 
 describe('inferKind', () => {
-  it('separates int from double by the tool’s own default', () => {
+  it('preserves decimal semantics when JSON defaults are whole numbers', () => {
     // nce defaults to 30.0 but arrives as JSON 30, so an int/double split that
     // trusted the wire type alone would give it a step of 1.
     expect(inferKind('missed_cleavages', 1)).toBe('int')
+    expect(inferKind('nce', 30)).toBe('double')
+    expect(inferKind('min_relative_intensity', 0)).toBe('double')
     expect(inferKind('min_relative_intensity', 0.0001)).toBe('double')
   })
 
   it('treats a two-number array as a range only for the documented keys', () => {
     expect(inferKind('peptide_length', [7, 30])).toBe('int-range')
-    expect(inferKind('precursor_mz', [350.0, 1200.5])).toBe('double-range')
+    expect(inferKind('precursor_mz', [350, 1200])).toBe('double-range')
+    expect(inferKind('fragment_mz', [200, 1800])).toBe('double-range')
     // A charge list that happened to hold two entries must NOT become a range,
     // or a [2,3] default would render as "2 to 3" and write back a range.
     expect(inferKind('precursor_charges', [2, 3])).toBe('int-list')

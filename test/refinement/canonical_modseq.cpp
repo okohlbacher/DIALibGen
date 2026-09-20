@@ -52,6 +52,27 @@ int main()
   check(canonicalModifiedSequence("PEPTIDEK(Label:13C(6)15N(2))") == "PEPTIDEK(UniMod:259)",
         "and to the accession form");
 
+  // Other OpenMS names resolve through the modification database, including
+  // synonyms and explicit terminal sites, without interpreting bare masses.
+  check(LibraryRefiner::key("AC(Propionamide)DEK", 2) == LibraryRefiner::key("AC(UniMod:24)DEK", 2),
+        "Propionamide must join UniMod:24 reports");
+  check(canonicalModifiedSequence("AC(Propionamide (C))DEK") == "AC(UniMod:24)DEK",
+        "contextual full modification names resolve");
+  check(canonicalModifiedSequence("AC(Nethylmaleimide)DEK") == "AC(UniMod:108)DEK",
+        "Nethylmaleimide resolves beyond the common alias table");
+  check(canonicalModifiedSequence("AC(Methylthio)DEK") == "AC(UniMod:39)DEK",
+        "Methylthio resolves beyond the common alias table");
+  check(canonicalModifiedSequence(".(Formyl)MPEPTIDEK") == "(UniMod:122)MPEPTIDEK",
+        "protein N-terminal modifications resolve without changing the site");
+  check(canonicalModifiedSequence("PEPTIDEK.(Amidated)") == "PEPTIDEK.(UniMod:2)",
+        "C-terminal names preserve the explicit terminal marker");
+  std::size_t wrong_site = 0;
+  check(canonicalModifiedSequence("PEPTIDEK(Amidated)", &wrong_site) == "PEPTIDEK(Amidated)" && wrong_site == 1,
+        "a terminal-only name must not become a last-residue modification");
+  std::size_t named_unknown = 0;
+  canonicalModifiedSequence("AC(Propionamide)DEK(DIALibGen-unknown-token)", &named_unknown);
+  check(named_unknown == 1, "database-resolved names are excluded from the unknown-token count");
+
   // Unknown tokens are counted, known ones are not.
   std::size_t unknown = 0;
   canonicalModifiedSequence("AC(Carbamidomethyl)DM(Oxidation)K(Foo)R", &unknown);

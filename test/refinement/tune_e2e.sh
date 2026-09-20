@@ -62,7 +62,7 @@ if find "$TMP/gate-models" -type f 2>/dev/null | grep -q .; then fail "models tr
 # -q_global/-q_protein 1 disable the gates whose columns a synthetic report does
 # not carry; the precursor gate still applies.
 "$BIN" -mode refine -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/refined.tsv" \
-   -q_global 1 -q_protein 1 \
+   -q_global 1 -q_protein 1 -no_filter \
    -tune -tune_models "$MODELS" -tune_out_models "$TMP/tuned" \
    -filter:rt_max_minutes 30 \
    -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 -machine:threads 2 \
@@ -73,6 +73,37 @@ if find "$TMP/gate-models" -type f 2>/dev/null | grep -q .; then fail "models tr
 [ "$(wc -l < "$TMP/refined.tsv")" -gt 1 ] || fail "the refined library has no rows"
 [ -s "$TMP/refined.tsv.refine.json" ] || fail "no refine provenance sidecar"
 grep -q '"tool"' "$TMP/refined.tsv.refine.json" || fail "the sidecar names no tool"
+
+# Unfiltered observed RT is safe only after all predictions are in the run's minutes.
+"$PY" - "$TMP/library.tsv" "$TMP/refined.tsv" "$TMP/report.parquet" <<'PY_RT_UNITS' || exit 1
+import csv, json, math, sys
+import pyarrow.parquet as pq
+def rows(path):
+    with open(path) as source:
+        return list(csv.DictReader(source, delimiter="\t"))
+before, after = rows(sys.argv[1]), rows(sys.argv[2])
+observed = {(r["Modified.Sequence"], int(r["Precursor.Charge"])): r["RT"]
+            for r in pq.read_table(sys.argv[3]).to_pylist()}
+assert len(before) == len(after), "unfiltered RT tuning dropped library transitions"
+matched = unseen = 0
+for old, new in zip(before, after):
+    assert old["Precursor.Id"] == new["Precursor.Id"], "unfiltered RT tuning changed precursor order"
+    key = new["Modified.Sequence"], int(new["Precursor.Charge"])
+    rt = float(new["RT"])
+    assert math.isfinite(rt)
+    if key in observed:
+        assert math.isclose(rt, observed[key], rel_tol=2e-7, abs_tol=1e-6), "matched RT is not observed minutes"
+        matched += 1
+    else:
+        unseen += not math.isclose(rt, float(old["RT"]), abs_tol=1e-5)
+assert matched > 0 and unseen > 0, "fixture must exercise observations and unmatched re-predictions"
+provenance = json.load(open(sys.argv[2] + ".refine.json"))
+assert provenance["library"]["before"] == provenance["library"]["after"]
+assert provenance["library"]["rt_repredicted_in_reference_minutes"] is True
+assert provenance["tune"]["rt"]["repredicted"] == provenance["library"]["before"]
+assert "reference-run minutes" in provenance["units"]["rt"]
+print("ok   unfiltered RT refinement retains the whole library in reference-run minutes")
+PY_RT_UNITS
 
 # The write-back guarantees, unchanged, against the kept models.
 for head in rt ccs; do

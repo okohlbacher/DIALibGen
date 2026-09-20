@@ -75,13 +75,17 @@ The default workflow filters the library to identified precursors and
 replaces their RT with observed values. Precursor, peptide/global and protein
 q-value gates default to 0.01. An enabled gate requires its corresponding
 column; missing columns are errors. Reports containing multiple runs must be
-split before use.
+split before use. When only some matched precursors have observed RT, RT writing
+requires whole-library RT tuning first; otherwise predictions and observed minutes
+could be mixed. Use `-no_write_rt` to retain the original values.
 
 Useful options:
 
 - `-write_im`: also use observed 1/K0, subject to charge and ramp limits.
-- `-no_filter`: retain unidentified precursors. This creates a mixture of
-  observed and predicted entries; interpret it accordingly.
+- `-no_filter`: retain unidentified precursors. Pair it with `-no_write_rt` to
+  keep library RT values, or with `-tune -tune_heads rt` (or `both`) to re-predict
+  the whole library in reference-run minutes before writing observed RT. CCS-only
+  tuning does not establish compatible RT units and is refused in this combination.
 - `-empirical_library`: explicitly declare a pre-filtered empirical reference
   whose missing report gates are recorded as bypassed.
 - `-out_report residuals.tsv`: save residuals measured before replacement.

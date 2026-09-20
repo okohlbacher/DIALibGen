@@ -42,7 +42,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Pin the same OpenMS 3.5 release used by the Unix builds.
+  # Pin release/3.5.0's commit (its source metadata reports version 3.6.0).
   OPENMS_SHA: c49149d47d6fcc76d1271d87d3a7fad15d2219de
   # Use available contrib sources with MSVC-compatible Boost and kissfft.
   # OpenMS 3.5's original contrib pin references deleted source archives.

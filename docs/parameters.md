@@ -14,7 +14,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |
 | `-ids` | input-file | (empty) |  | DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised. |
 | `-out_report` | output-file | (empty) |  | Per-axis residual report (TSV), measured BEFORE the overwrite. |
-| `-no_filter` | bool | `false` |  | Keep precursors the reference did not identify; refinement filters by default. |
+| `-no_filter` | bool | `false` |  | Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent. |
 | `-empirical_library` | bool | `false` |  | Declare -ids a pre-filtered empirical library rather than a report: gates whose columns are absent are BYPASSED and each bypass is recorded. Without this, a missing gate column is an error. |
 | `-no_write_rt` | bool | `false` |  | Keep predicted RT rather than replacing it with observed RT. |
 | `-write_im` | bool | `false` |  | Also overwrite 1/K0 with the observed value for charges >= -im_min_charge; off by default. |

@@ -166,8 +166,16 @@ namespace ODIA
       std::count(transitions_.product_mz.begin(), transitions_.product_mz.end(), MZ_INVALID));
   }
 
+  void Library::checkTransitionCapacity(std::size_t current, std::size_t additional)
+  {
+    constexpr auto limit = std::numeric_limits<std::uint32_t>::max();
+    if (current > limit || additional > limit - current)
+    { throw std::length_error("library exceeds the 32-bit transition limit (4294967295); split the input library"); }
+  }
+
   void Library::reserve(std::size_t precursors, std::size_t transitions)
   {
+    checkTransitionCapacity(transitions);
     auto& p = precursors_;
     p.mz.reserve(precursors);
     p.irt.reserve(precursors);
@@ -206,6 +214,7 @@ namespace ODIA
 
   std::size_t Library::dropDecoys()
   {
+    checkTransitionCapacity(transitionCount());
     const std::size_t n = precursorCount();
     std::size_t removed = 0;
     for (std::size_t i = 0; i < n; ++i) { if (precursors_.decoy[i]) { ++removed; } }
@@ -240,6 +249,7 @@ namespace ODIA
 
       const std::uint32_t begin = precursors_.transition_begin[i];
       const std::uint32_t count = precursors_.transition_count[i];
+      checkTransitionCapacity(nt.product_mz.size(), count);
       np.transition_begin.push_back(static_cast<std::uint32_t>(nt.product_mz.size()));
       np.transition_count.push_back(count);
       for (std::uint32_t k = 0; k < count; ++k)
@@ -260,6 +270,7 @@ namespace ODIA
 
   Library Library::subsetByIndex(const std::vector<std::size_t>& keep) const
   {
+    checkTransitionCapacity(transitionCount());
     Library out;
     // Handles are RE-INTERNED, not copied. `StringArena::Entry` holds a raw
     // pointer into the arena's own blocks, so copying the arena produces
@@ -311,6 +322,7 @@ namespace ODIA
 
       const std::uint32_t begin = precursors_.transition_begin[i];
       const std::uint32_t count = precursors_.transition_count[i];
+      checkTransitionCapacity(out.transitions_.product_mz.size(), count);
       out.precursors_.transition_begin.push_back(
         static_cast<std::uint32_t>(out.transitions_.product_mz.size()));
       out.precursors_.transition_count.push_back(count);
@@ -334,7 +346,10 @@ namespace ODIA
 
   void Library::sortByPrecursorMz()
   {
+    checkTransitionCapacity(transitionCount());
     const std::size_t n = precursorCount();
+    if (n > std::numeric_limits<std::uint32_t>::max())
+    { throw std::length_error("library exceeds the 32-bit precursor sorting limit; split the input library"); }
     std::vector<std::uint32_t> order(n);
     std::iota(order.begin(), order.end(), 0u);
     std::sort(order.begin(), order.end(), [this](std::uint32_t a, std::uint32_t b) {
@@ -379,6 +394,7 @@ namespace ODIA
 
       const std::uint32_t begin = precursors_.transition_begin[src];
       const std::uint32_t count = precursors_.transition_count[src];
+      checkTransitionCapacity(nt.product_mz.size(), count);
       np.transition_begin[i] = static_cast<std::uint32_t>(nt.product_mz.size());
       np.transition_count[i] = count;
       for (std::uint32_t k = 0; k < count; ++k)

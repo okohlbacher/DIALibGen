@@ -4,9 +4,19 @@ name: macOS first-launch measurement
 # Never run DIALibGen or assess it with spctl before the timed first invocation.
 on:
   workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: 'Build run containing bundles-macos-arm64; empty measures archived v0.10.1'
+        type: string
+        default: ''
   workflow_call:
+    inputs:
+      candidate_run_id:
+        type: string
+        default: ''
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -25,8 +35,90 @@ jobs:
     env:
       HOMEBREW_NO_AUTO_UPDATE: '1'
       ROUTE: ${{ matrix.route }}
+      CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
     steps:
+      - name: Download the candidate payload without launching it
+        if: inputs.candidate_run_id != ''
+        uses: actions/download-artifact@v5
+        with:
+          name: bundles-macos-arm64
+          path: payload
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install the candidate through tar or Homebrew defaults
+        if: inputs.candidate_run_id != ''
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import functools, http.server, json, os, pathlib, subprocess, threading, time
+          out = pathlib.Path('measurements')
+          out.mkdir()
+          archive = pathlib.Path('payload/DIALibGen-macos-arm64.tar.gz').resolve()
+          def checksum(path):
+              return subprocess.check_output(['shasum', '-a', '256', str(path)], text=True).split()[0]
+          digest = checksum(archive)
+          route = os.environ['ROUTE']
+          # Staging proxy only: both routes receive the identical CI archive.
+          # Homebrew itself downloads, quarantines, extracts and wraps the cask.
+          handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(archive.parent))
+          server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
+          threading.Thread(target=server.serve_forever, daemon=True).start()
+          url = f'http://127.0.0.1:{server.server_port}/{archive.name}'
+          with (out / 'system.txt').open('w') as log:
+              for command in (['sw_vers'], ['uname', '-a'], ['brew', '--version']):
+                  subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
+          started = time.perf_counter()
+          try:
+              with (out / 'install.txt').open('w') as log:
+                  def run(*args):
+                      subprocess.run(args, stdout=log, stderr=subprocess.STDOUT, check=True)
+                  if route == 'tarball':
+                      installed = pathlib.Path('candidate').resolve()
+                      installed.mkdir()
+                      run('curl', '-fL', '--retry', '3', '-o', 'candidate.tar.gz', url)
+                      assert checksum('candidate.tar.gz') == digest
+                      run('tar', 'xzf', 'candidate.tar.gz', '-C', str(installed))
+                      binary = installed / 'bin/DIALibGen'
+                  else:
+                      run('brew', 'tap-new', 'dialibgen/startup')
+                      tap = pathlib.Path(subprocess.check_output(['brew', '--repository', 'dialibgen/startup'], text=True).strip())
+                      (tap / 'Casks').mkdir(exist_ok=True)
+                      (tap / 'Casks/dialibgen-candidate.rb').write_text(f'''cask "dialibgen-candidate" do
+            version "0.11.0"
+            sha256 "{digest}"
+            url "{url}"
+            name "DIALibGen release candidate"
+            desc "DIA spectral library generation and refinement"
+            homepage "https://github.com/okohlbacher/DIALibGen"
+            depends_on macos: :sonoma
+            command_wrapper "DIALibGen", executable: "#{{staged_path}}/bin/DIALibGen"
+            command_wrapper "dialibgen-fetch-models", executable: "#{{staged_path}}/bin/dialibgen-fetch-models"
+          end
+          ''')
+                      run('brew', 'install', '--cask', 'dialibgen/startup/dialibgen-candidate')
+                      prefix = subprocess.check_output(['brew', '--prefix'], text=True).strip()
+                      caskroom = subprocess.check_output(['brew', '--caskroom'], text=True).strip()
+                      installed = pathlib.Path(caskroom) / 'dialibgen-candidate'
+                      binary = pathlib.Path(prefix) / 'bin/DIALibGen'
+              elapsed = time.perf_counter() - started
+          finally:
+              server.shutdown()
+          record = {'route': route, 'source_run_id': os.environ['CANDIDATE_RUN_ID'],
+                    'archive_sha256': digest, 'install_seconds': elapsed,
+                    'delivery': 'same CI archive via localhost; unmodified Homebrew quarantine defaults'}
+          (out / 'installation.json').write_text(json.dumps(record, indent=2) + '\n')
+          print(record, flush=True)
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'MEASURE_BINARY={binary}\nMEASURE_TREE={installed}\n')
+          attrs = subprocess.run(['xattr', '-lr', str(installed)], capture_output=True, text=True)
+          (out / 'xattrs-before.txt').write_text(attrs.stdout + attrs.stderr)
+          if route == 'cask' and 'com.apple.quarantine' not in attrs.stdout:
+              raise SystemExit('Homebrew did not quarantine the candidate; this cannot measure normal cask first launch')
+          PY
+
       - name: Install the archived v0.10.1 payload without launching it
+        if: inputs.candidate_run_id == ''
         shell: bash
         run: |
           set -euo pipefail
@@ -73,7 +165,12 @@ jobs:
               summary.write('| Route | Invocation | Seconds |\n|---|---:|---:|\n')
               for r in records:
                   summary.write(f"| {r['route']} | {r['invocation']} | {r['seconds']:.3f} |\n")
-              summary.write('\nFresh hosted VM; archived v0.10.1 ARM payload. Raw curl and Homebrew preserve their normal quarantine behavior; the artifact records attributes.\n')
+              if os.environ['CANDIDATE_RUN_ID']:
+                  install = json.loads((out / 'installation.json').read_text())
+                  summary.write(f"\nFresh hosted VM; candidate from run {install['source_run_id']}; installation {install['install_seconds']:.3f} s.\n")
+                  summary.write('Both routes use the identical artifact through a localhost staging proxy. Homebrew uses its normal cask installation and quarantine defaults; this excludes public GitHub download latency. No execution or policy assessment precedes the first timed launch, apart from any Homebrew installation checks.\n')
+              else:
+                  summary.write('\nFresh hosted VM; archived v0.10.1 ARM payload. Raw curl and Homebrew preserve their normal quarantine behavior; the artifact records attributes.\n')
           PY
 
       - name: Collect policy diagnostics after measurement
@@ -84,10 +181,17 @@ jobs:
             --predicate 'process == "syspolicyd"' > measurements/syspolicyd.log 2>&1 || true
           if [ -n "${MEASURE_BINARY:-}" ]; then
             shasum -a 256 "$MEASURE_BINARY" > measurements/launcher-sha256.txt
+            if [ -n "${MEASURE_TREE:-}" ]; then
+              find "$MEASURE_TREE" -type f -name DIALibGen -print -exec shasum -a 256 {} \; \
+                > measurements/executable-sha256.txt
+              find "$MEASURE_TREE" -type f -name DIALibGen -exec codesign -dv --verbose=4 {} \; \
+                > measurements/signature.txt 2>&1 || true
+              xattr -lr "$MEASURE_TREE" > measurements/xattrs-after.txt 2>&1 || true
+            fi
           fi
 
       - uses: actions/upload-artifact@v5
         if: always()
         with:
-          name: startup-v0.10.1-${{ matrix.route }}
+          name: startup-${{ inputs.candidate_run_id != '' && format('candidate-{0}', inputs.candidate_run_id) || 'v0.10.1' }}-${{ matrix.route }}
           path: measurements/

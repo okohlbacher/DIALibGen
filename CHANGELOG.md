@@ -33,6 +33,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Training provenance now records true SHA-256 model hashes. Earlier refiner
+  fields with that name held a 64-bit fingerprint.
+
 - Met excision now retains N-terminal peptides at every permitted missed-cleavage
   count, including cases where the fully cleaved peptide is below the minimum
   length. Cache fingerprint v4 invalidates libraries containing the old omission.

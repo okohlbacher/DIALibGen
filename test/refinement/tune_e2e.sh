@@ -46,9 +46,16 @@ for head in rt ccs; do
   [ -s "$tuned" ] || fail "$head: no tuned ONNX kept"
   [ -s "$tuned.tune.json" ] || fail "$head: no provenance sidecar"
   cmp -s "$stock" "$tuned" && fail "$head: the tuned ONNX is byte-identical to the stock one"
-  "$PY" - "$tuned.tune.json" "$head" "$tuned" <<'PYEOF' || exit 1
-import json, sys
+  "$PY" - "$tuned.tune.json" "$head" "$tuned" "$stock" <<'PYEOF' || exit 1
+import hashlib, json, pathlib, sys
 p = json.load(open(sys.argv[1])); head = sys.argv[2]
+tuned_bytes = pathlib.Path(sys.argv[3]).read_bytes()
+stock_sha256 = hashlib.sha256(pathlib.Path(sys.argv[4]).read_bytes()).hexdigest()
+tuned_sha256 = hashlib.sha256(tuned_bytes).hexdigest()
+if p["inputs"]["model_in_sha256"] != stock_sha256:
+    raise AssertionError("stock model SHA-256 differs from hashlib")
+if p["output"]["model_out_sha256"] != tuned_sha256:
+    raise AssertionError("tuned model SHA-256 differs from hashlib")
 # Read only the protobuf fields needed for metadata: no Python ONNX dependency.
 def fields(data):
     i = 0
@@ -69,7 +76,7 @@ def fields(data):
         else: raise ValueError(f"unsupported protobuf wire {wire}")
         yield number, value
 metadata = {}
-for field, value in fields(open(sys.argv[3], "rb").read()):
+for field, value in fields(tuned_bytes):
     if field == 14:
         entry = dict(fields(value)); metadata[entry[1].decode()] = entry[2].decode()
 embedded = json.loads(metadata["org.openms.dialibgen.training"])
@@ -92,8 +99,8 @@ done
 # that it re-predicted precursors. predictRetentionTimes returns what it could
 # NOT do, so a caller reading it as a success count reports 0 when everything
 # worked, and every assertion above still passes.
-"$PY" - "$TMP/refined.tsv.refine.json" <<'PYEOF2' || exit 1
-import json, sys
+"$PY" - "$TMP/refined.tsv.refine.json" "$MODELS" "$TMP/tuned" <<'PYEOF2' || exit 1
+import hashlib, json, pathlib, sys
 p = json.load(open(sys.argv[1]))
 t = p.get("tune") or {}
 def die(m): print("FAIL: " + m, file=sys.stderr); sys.exit(1)
@@ -104,6 +111,9 @@ for head in ("rt", "ccs"):
         die(f"{head}: re-predicted {h.get('repredicted')} precursors -- the stage ran and changed nothing")
     if not h.get("model_sha256") or h["model_sha256"] == h.get("stock_sha256"):
         die(f"{head}: the tuned model hash equals the stock one")
+    for key, directory in (("stock_sha256", sys.argv[2]), ("model_sha256", sys.argv[3])):
+        digest = hashlib.sha256((pathlib.Path(directory) / f"peptdeep_{head}_dynamic.onnx").read_bytes()).hexdigest()
+        if h[key] != digest: die(f"{head}: refine {key} differs from hashlib")
 print("ok   re-predicted rt=%d ccs=%d precursors" % (t["rt"]["repredicted"], t["ccs"]["repredicted"]))
 PYEOF2
 echo "PASSED"

@@ -93,7 +93,7 @@ namespace ODIA::tune
 
     explicit HeadImpl(bool ccs_) : ccs(ccs_)
     {
-      encoder = register_module("encoder", Encoder(ccs));
+      encoder = register_module("encoder", std::make_shared<EncoderImpl>(ccs));
       dropout = register_module("dropout", torch::nn::Dropout(torch::nn::DropoutOptions(0.1)));
       dec0 = register_module("dec0", torch::nn::Linear(2 * HIDDEN + (ccs ? 1 : 0), 64));
       prelu = register_module("prelu", torch::nn::PReLU());            // one shared slope, init 0.25

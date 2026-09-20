@@ -5,7 +5,6 @@
 #include <odia/tune/PeptDeepModel.h>
 #include <odia/tune/OnnxWeights.h>
 
-#include <odia/DIANNLibraryFile.h>
 #include <odia/Library.h>
 #include <odia/PeptDeepEncoder.h>
 
@@ -18,6 +17,8 @@
 
 #include <nlohmann/json.hpp>
 #include <torch/torch.h>
+#include <QCryptographicHash>
+#include <QFile>
 
 #include <algorithm>
 #include <array>
@@ -46,6 +47,15 @@ namespace ODIA::tune
   {
     using Clock = std::chrono::steady_clock;
     double seconds(Clock::time_point a) { return std::chrono::duration<double>(Clock::now() - a).count(); }
+
+    std::string sha256File(const std::string& path)
+    {
+      QFile file(QString::fromStdString(path));
+      QCryptographicHash hash(QCryptographicHash::Sha256);
+      if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file))
+      { throw std::runtime_error("cannot hash model " + path + ": " + file.errorString().toStdString()); }
+      return hash.result().toHex().toStdString();
+    }
 
     // ---- Parquet -------------------------------------------------------------
 
@@ -540,8 +550,8 @@ namespace ODIA::tune
 
     // model
     OnnxFile onnx = OnnxFile::read(p.model_in);
-    res.model_in_sha256 = DIANNLibraryFile::hashFile(p.model_in);
-    Head model(ccs);
+    res.model_in_sha256 = sha256File(p.model_in);
+    Head model(std::make_shared<HeadImpl>(ccs));
     loadWeights(onnx, model);
     model->to(dev);
     const auto stock = snapshot(model);
@@ -702,7 +712,7 @@ namespace ODIA::tune
     // The output digest belongs only in the sidecar: embedding it would hash itself.
     onnx.setMetadata("org.openms.dialibgen.training", prov.dump());
     writeAtomically(p.model_out, [&](const std::string& part) { onnx.write(part); });
-    res.model_out_sha256 = DIANNLibraryFile::hashFile(p.model_out);
+    res.model_out_sha256 = sha256File(p.model_out);
     prov["output"] = {{"model_out", p.model_out}, {"model_out_sha256", res.model_out_sha256}};
     writeAtomically(p.model_out + ".tune.json", [&](const std::string& part)
     {

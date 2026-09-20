@@ -161,7 +161,7 @@ namespace
     stage("reading the ONNX");
     OnnxFile f = OnnxFile::read(path);
     stage("building the libtorch model");
-    Head model(ccs);
+    Head model(std::make_shared<HeadImpl>(ccs));
     stage("loading the weights");
     const std::size_t n = loadWeights(f, model);
     check(n == 21, std::string(ccs ? "ccs" : "rt") + ": 21 initializers loaded (" + std::to_string(n) + ")");
@@ -190,7 +190,7 @@ namespace
     }
     OnnxFile h = f;
     storeWeights(h, model);
-    Head again(ccs);
+    Head again(std::make_shared<HeadImpl>(ccs));
     loadWeights(h, again);
     double worst = 0;
     auto a = model->named_parameters(); auto b = again->named_parameters();

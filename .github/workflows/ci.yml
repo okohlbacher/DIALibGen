@@ -42,6 +42,17 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.gui_dry_run
     uses: ./.github/workflows/macos-startup.yml
     permissions:
+      actions: read
+      contents: read
+
+  macos-candidate-startup:
+    needs: build
+    if: always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.gui_dry_run))
+    uses: ./.github/workflows/macos-startup.yml
+    with:
+      candidate_run_id: ${{ format('{0}', github.run_id) }}
+    permissions:
+      actions: read
       contents: read
 
   build:

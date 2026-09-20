@@ -3,7 +3,7 @@
 The 0.11.0 integration combines the generation and refinement backlogs. This
 file distinguishes implemented changes from checks that still need evidence.
 
-## macOS first-launch measurement — pending
+## macOS first-launch measurement — candidate pending
 
 Older signed CLI archives showed very different first-launch times: 335 s for
 a 0.9.0 tarball and about 33 s for a 0.10.0 Homebrew cask installation. Subsequent
@@ -18,8 +18,14 @@ second cold measurement. Choose a packaging change only after that comparison;
 wrapping loose CLI files in a stapled container does not itself demonstrate
 that the installed files avoid individual validation.
 
-Evidence to attach before closing: workflow URL and both route measurements
-for the released 0.11.0 artifact. **Pending.**
+The archived 0.10.1 comparison completed on separate macOS 14.8.9 ARM VMs:
+raw tarball first/warm launch **0.554 / 0.063 s**, Homebrew cask
+**0.525 / 0.061 s**. Homebrew retained quarantine attributes; the curl archive
+had none. The older long delay did not reproduce on these hosted machines.
+[Measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35521436604).
+
+The 0.11.0 candidate is measured separately after packaging, on fresh VMs for
+both delivery routes. **Candidate result pending.**
 
 ## Portable CPU training — release CI pending
 

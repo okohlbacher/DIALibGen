@@ -1,0 +1,672 @@
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
+// SPDX-License-Identifier: BSD-3-Clause
+
+#include <odia/DIANNLibraryFile.h>
+#include <odia/Library.h>
+#include <odia/LibraryGenerator.h>
+#include <odia/LibraryRefiner.h>
+
+#ifdef DIALIBGEN_WITH_FINETUNE
+#include <odia/tune/Trainer.h>
+#endif
+
+#include "DIALibGen.h"
+
+#include <OpenMS/APPLICATIONS/TOPPBase.h>
+
+#include <nlohmann/json.hpp>
+
+#include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <map>
+#include <random>
+#include <sstream>
+
+using json = nlohmann::json;
+
+namespace
+{
+  const char* rtUnitName(ODIA::RefineParams::RtUnit u)
+  { return u == ODIA::RefineParams::RtUnit::MinMax ? "minmax" : "observed"; }
+  const char* intensityNormName(ODIA::RefineParams::IntensityNorm n)
+  {
+    switch (n)
+    {
+      case ODIA::RefineParams::IntensityNorm::BasePeak: return "base_peak";
+      case ODIA::RefineParams::IntensityNorm::Sum: return "sum";
+      case ODIA::RefineParams::IntensityNorm::Raw: return "raw";
+      case ODIA::RefineParams::IntensityNorm::LibraryMax: break;
+    }
+    return "library_max";
+  }
+
+  ODIA::RefineParams::IntensityNorm intensityNormFrom(const std::string& s)
+  {
+    if (s == "library_max") { return ODIA::RefineParams::IntensityNorm::LibraryMax; }
+    if (s == "base_peak") { return ODIA::RefineParams::IntensityNorm::BasePeak; }
+    if (s == "sum") { return ODIA::RefineParams::IntensityNorm::Sum; }
+    if (s == "raw") { return ODIA::RefineParams::IntensityNorm::Raw; }
+    throw std::runtime_error("intensity_norm must be library_max, base_peak, sum or raw; got '" + s + "'");
+  }
+
+  const char* dedupName(ODIA::RefineParams::Dedup d)
+  { return d == ODIA::RefineParams::Dedup::HighestEvidence ? "highest_evidence" : "lowest_q"; }
+
+  json effectiveConfig(const ODIA::RefineParams& p)
+  {
+    return json{
+      {"schema_version", 1},
+      {"filter", p.filter},
+      {"q_precursor", p.q_precursor}, {"q_global", p.q_global}, {"q_protein", p.q_protein},
+      {"require_gates", p.require_gates},
+      {"min_fragments", p.min_fragments},
+      {"write_rt", p.write_rt}, {"write_im", p.write_im}, {"write_intensity", p.write_intensity},
+      {"rt_unit", rtUnitName(p.rt_unit)},
+      {"dedup", dedupName(p.dedup)},
+      {"im_min_charge", p.im_min_charge},
+      {"im_ramp_top", p.im_ramp_top}, {"im_ramp_margin", p.im_ramp_margin},
+      {"min_match_fraction", p.min_match_fraction},
+      {"intensity_min_correlation", p.intensity_min_correlation},
+      {"intensity_restrict", p.intensity_restrict}, {"intensity_rerank", p.intensity_rerank},
+      {"intensity_min_fragments", p.intensity_min_fragments},
+      {"intensity_norm", intensityNormName(p.intensity_norm)},
+      {"intensity_min_relative", p.intensity_min_relative},
+      {"intensity_mz_tol_ppm", p.intensity_mz_tol_ppm},
+      {"intensity_max_mz_mismatch", p.intensity_max_mz_mismatch},
+      {"allow_mixed_intensity", p.allow_mixed_intensity}};
+  }
+
+  json num(double v) { return std::isfinite(v) ? json(v) : json(nullptr); }
+}
+
+  static void applyJson_(const json& j, ODIA::RefineParams& p)
+  {
+    if (!j.is_object()) { throw std::runtime_error("refinement config must be a JSON object"); }
+    const json ref = effectiveConfig(p);
+    for (const auto& [k, v] : j.items())
+    { if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); } }
+    if (j.contains("schema_version") && j["schema_version"] != 1)
+    { throw std::runtime_error("unsupported schema_version " + j["schema_version"].dump() + "; this tool writes 1"); }
+
+    auto get_bool = [&](const char* k, bool& dst) { if (j.contains(k)) { dst = j.at(k).get<bool>(); } };
+    auto get_num = [&](const char* k, double& dst, double lo, double hi)
+    {
+      if (!j.contains(k)) { return; }
+      const double v = j.at(k).get<double>();
+      if (!(v >= lo && v <= hi)) { throw std::runtime_error(std::string(k) + " out of range"); }
+      dst = v;
+    };
+    get_bool("filter", p.filter); get_bool("require_gates", p.require_gates);
+    get_bool("write_rt", p.write_rt); get_bool("write_im", p.write_im); get_bool("write_intensity", p.write_intensity);
+    get_num("q_precursor", p.q_precursor, 0.0, 1.0); get_num("q_global", p.q_global, 0.0, 1.0); get_num("q_protein", p.q_protein, 0.0, 1.0);
+    get_num("im_ramp_top", p.im_ramp_top, 0.0, 10.0); get_num("im_ramp_margin", p.im_ramp_margin, 0.0, 1.0);
+    get_num("min_match_fraction", p.min_match_fraction, 0.0, 1.0);
+    get_bool("intensity_restrict", p.intensity_restrict); get_bool("intensity_rerank", p.intensity_rerank);
+    get_bool("allow_mixed_intensity", p.allow_mixed_intensity);
+    get_num("intensity_min_correlation", p.intensity_min_correlation, -1.0, 1.0);
+    get_num("intensity_min_relative", p.intensity_min_relative, 0.0, 1.0);
+    get_num("intensity_mz_tol_ppm", p.intensity_mz_tol_ppm, 0.0, 1000.0);
+    get_num("intensity_max_mz_mismatch", p.intensity_max_mz_mismatch, 0.0, 1.0);
+    auto get_size = [&](const char* name, std::size_t& value)
+    {
+      if (!j.contains(name)) { return; }
+      const auto& v = j.at(name);
+      if (!v.is_number_integer() || (v.is_number_integer() && !v.is_number_unsigned() && v.get<std::int64_t>() < 0))
+      { throw std::runtime_error(std::string(name) + " must be a nonnegative integer"); }
+      value = v.get<std::size_t>();
+    };
+    get_size("intensity_min_fragments", p.intensity_min_fragments);
+    if (j.contains("intensity_norm")) { p.intensity_norm = intensityNormFrom(j.at("intensity_norm").get<std::string>()); }
+    get_size("min_fragments", p.min_fragments);
+    if (j.contains("im_min_charge"))
+    {
+      if (!j.at("im_min_charge").is_number_integer() || j.at("im_min_charge") < 1 || j.at("im_min_charge") > 8)
+      { throw std::runtime_error("im_min_charge must be an integer in [1, 8]"); }
+      p.im_min_charge = j.at("im_min_charge").get<int>();
+    }
+    if (j.contains("rt_unit"))
+    {
+      const auto s = j.at("rt_unit").get<std::string>();
+      if (s == "observed") { p.rt_unit = ODIA::RefineParams::RtUnit::Observed; }
+      else if (s == "minmax") { p.rt_unit = ODIA::RefineParams::RtUnit::MinMax; }
+      else { throw std::runtime_error("rt_unit must be observed or minmax, not '" + s + "'"); }
+    }
+    if (j.contains("dedup"))
+    {
+      const auto s = j.at("dedup").get<std::string>();
+      if (s == "lowest_q") { p.dedup = ODIA::RefineParams::Dedup::LowestQ; }
+      else if (s == "highest_evidence") { p.dedup = ODIA::RefineParams::Dedup::HighestEvidence; }
+      else { throw std::runtime_error("dedup must be lowest_q or highest_evidence, not '" + s + "'"); }
+    }
+  }
+
+
+void DIALibGen::registerRefinementOptions_()
+  {
+    registerInputFile_("ids", "<file>", "",
+                       "Reference identifications: a DIA-NN report.parquet, or -- with -empirical_library -- "
+                       "a DIA-NN empirical library. Modification naming is canonicalised, so C(UniMod:4) "
+                       "and C(Carbamidomethyl) join; a verbatim join silently drops every cysteine precursor "
+                       "on an alkylated sample.", false);
+    setValidFormats_("ids", {"parquet"}, false);
+    registerOutputFile_("out_report", "<file>", "",
+                        "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
+    setValidFormats_("out_report", {"tsv"}, false);
+    registerFlag_("no_filter", "Keep precursors the reference did not identify; refinement filters by default.");
+    registerFlag_("empirical_library", "Declare -ids a pre-filtered empirical library rather than a report: gates "
+                                       "whose columns are absent are BYPASSED and each bypass is recorded. Without "
+                                       "this, a missing gate column is an error.");
+    registerFlag_("no_write_rt", "Keep predicted RT rather than replacing it with observed RT.");
+    registerFlag_("write_im", "Also overwrite 1/K0 with the observed value for charges >= -im_min_charge; off by default.");
+    registerFlag_("write_intensity", "Replace predicted fragment intensities with the reference run's observed ones. "
+                                     "Needs Fragment.Info/Fragment.Quant.Raw (1.9) or Fr.N.Id/Quantity (2.x), exported with "
+                                     "--report-lib-info or --export-quant respectively. Every match is cross-checked on fragment m/z, and a run that "
+                                     "replaces nothing is an error.");
+    registerDoubleOption_("intensity_min_correlation", "<r>", 0.0, "Require fragment quality greater than this: "
+                          "correlation in DIA-NN 1.9, Score in DIA-NN 2.x. -1 disables the quality gate.", false);
+    registerFlag_("intensity_no_restrict", "Replace a precursor only when EVERY one of its transitions is trusted, else keep "
+                                           "its predictions whole. Transition counts then cannot change, so a benchmark "
+                                           "difference is attributable to the values alone.");
+    registerFlag_("intensity_no_rerank", "Keep a replaced precursor's transitions in their original order.");
+    registerIntOption_("intensity_min_fragments", "<n>", 3, "A replaced precursor keeps at least this many transitions or "
+                       "keeps its predictions whole.", false);
+    registerStringOption_("intensity_norm", "<rule>", "library_max", "How an observed area becomes a library intensity. "
+                          "library_max scales to the maximum that precursor already held, which preserves the file's own "
+                          "convention -- base peak = 1 is not an invariant of these libraries.", false);
+    setValidStrings_("intensity_norm", {"library_max", "base_peak", "sum", "raw"});
+    registerDoubleOption_("intensity_min_relative", "<fraction>", 1e-4,
+                          "Drop observed intensities below this fraction of the kept maximum.", false);
+    registerDoubleOption_("intensity_mz_tol_ppm", "<ppm>", 20.0, "A fragment matches only when the report's m/z agrees with "
+                          "the library's to within this.", false);
+    registerDoubleOption_("intensity_max_mz_mismatch", "<frac>", 0.01, "Refuse when more than this fraction of identity "
+                          "matches fail the m/z check. 1 surveys a suspect pairing instead of failing.", false);
+    registerFlag_("allow_mixed_intensity", "Permit -write_intensity with -no_filter, which leaves observed and predicted "
+                                           "intensities in one library. Recorded in the provenance.");
+    registerDoubleOption_("q_precursor", "<q>", 0.01, "Precursor q-value gate (>= 1 disables).", false);
+    registerDoubleOption_("q_global", "<q>", 0.01, "Global/peptide q-value gate (>= 1 disables).", false);
+    registerDoubleOption_("q_protein", "<q>", 0.01, "Protein q-value gate (>= 1 disables).", false);
+    registerIntOption_("min_fragments", "<n>", 0,
+                       "Minimum DISTINCT reference fragments per precursor; needs fragment identities in -ids. 0 = off.", false);
+    registerStringOption_("rt_unit", "<unit>", "observed",
+                          "observed = the reference's own units; minmax = rescaled to 0..100 over the matched set "
+                          "(refused with -no_filter).", false);
+    setValidStrings_("rt_unit", {"observed", "minmax"});
+    registerStringOption_("dedup", "<rule>", "lowest_q",
+                          "Which observation wins when a precursor was seen more than once: lowest_q (ties: lower "
+                          "PEP, then first seen) or highest_evidence (needs an Evidence column).", false);
+    setValidStrings_("dedup", {"lowest_q", "highest_evidence"});
+    registerIntOption_("im_min_charge", "<z>", 2, "Charges below this never receive an observed 1/K0 (z1 is censored "
+                                                  "at the ramp top on timsTOF diaPASEF).", false);
+    registerDoubleOption_("im_ramp_top", "<1/K0>", 0.0, "The instrument's mobility ramp top, if known; observations "
+                                                        "within -im_ramp_margin of it are treated as censored. 0 = unknown.", false);
+    registerDoubleOption_("im_ramp_margin", "<1/K0>", 0.02, "See -im_ramp_top.", false);
+    registerDoubleOption_("min_match_fraction", "<f>", 0.0,
+                          "Refuse when fewer than this fraction of passing reference precursors match the library. "
+                          "0 = refuse only when nothing matches.", false);
+
+    // Registered in EVERY build, including one without libtorch, so --help,
+    // -write_ini and -write_ctd describe the same tool on every platform. -tune
+    // itself is what fails when the stage was not compiled in.
+    registerFlag_("tune", "Fine-tune the RT and CCS models on -ids and re-predict the whole library through them "
+                          "BEFORE refining, so precursors the reference never identified are corrected too. "
+                          "Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a "
+                          "training run plus whole-library inference.");
+    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs}_dynamic.onnx. "
+                                                      "Default: $DIALIBGEN_MODEL_DIR or the bundled models.", false);
+    registerStringOption_("tune_heads", "<which>", "both", "Which models to tune.", false);
+    setValidStrings_("tune_heads", {"rt", "ccs", "both"});
+    registerStringOption_("tune_out_models", "<dir>", "", "Keep the tuned ONNX files (and their .tune.json and "
+                                                          "and .trajectory.tsv sidecars) here. Default: a scratch "
+                                                          "directory, removed on exit -- the deliverable is the library.", false);
+    registerFlag_("tune_predict_gpu", "Use the GPU for the re-prediction pass (the ONNX one, not training).");
+    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = default.", false);
+    registerFlag_("tune_keep_free_cysteine_offset",
+                  "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by "
+                  "default: that offset was fitted against the STOCK model, and a model tuned on this run's own "
+                  "identifications has had the chance to learn the effect itself -- applying both counts it twice.");
+
+    registerTOPPSubsection_("filter", "Fine-tuning: which observations train the model. NOTE: this is the TRAINING-set filter, not the library filter -- that is -q_precursor and friends.");
+    registerDoubleOption_("filter:q_value", "<q>", 0.01, "Precursor Q.Value threshold", false);
+    registerIntOption_("filter:min_charge", "<z>", 2, "CCS only: lowest precursor charge used (RT collapses all charges). z1 is censored at the mobility ramp top on timsTOF", false);
+    setMinInt_("filter:min_charge", 1); setMaxInt_("filter:min_charge", 8);
+    registerFlag_("filter:allow_z1", "CCS: permit filter:min_charge 1 (censored observations enter training)");
+    registerDoubleOption_("filter:rt_spread_max", "<min>", 0.2, "Drop a sequence whose charge states' RTs span more than this (minutes)", false);
+    registerDoubleOption_("filter:rt_max_minutes", "<min>", 0.0, "rt_norm denominator; 0 = the run's maximum observed RT", false);
+
+    registerTOPPSubsection_("cohort", "Fine-tuning: protein-level cohorts (frozen before subsampling)");
+    registerIntOption_("cohort:train_size", "<n>", 0, "Training units (sequences for rt, sequence x charge for ccs); 0 = full pool", false);
+    registerDoubleOption_("cohort:train_frac", "<f>", 0.0, "Alternative to train_size: fraction of the pool", false);
+    registerFlag_("cohort:full_fit", "Train on EVERY unit of the run, the test and validation cohorts included: the closest "
+                                     "fit the data allows. val and TEST are then in-sample; judge this mode by searching a "
+                                     "DIFFERENT run with the result, never by its own numbers");
+    registerFlag_("cohort:no_inner_val", "No inner validation cohort: its units rejoin the pool and checkpoints are selected on TEST, which is then no longer a held-out number");
+
+    registerTOPPSubsection_("train", "Fine-tuning: recipe");
+    registerIntOption_("train:epochs", "<n>", 100, "Horizon of the cosine schedule (and the maximum epochs)", false);
+    registerIntOption_("train:warmup", "<n>", 10, "Linear warmup epochs", false);
+    registerDoubleOption_("train:lr", "<lr>", 1e-4, "Peak learning rate (Adam)", false);
+    registerIntOption_("train:batch_size", "<n>", 1024, "Batch size within a length group", false);
+
+    registerTOPPSubsection_("stop", "Fine-tuning: convergence");
+    registerIntOption_("stop:eval_every", "<n>", 1, "Validate every n epochs", false);
+    registerIntOption_("stop:min_epochs", "<n>", 20, "Never stop before this epoch", false);
+    registerIntOption_("stop:patience", "<n>", 10, "Stop after this many epochs without progress (never before max(min_epochs, warmup))", false);
+    registerDoubleOption_("stop:rel_tol", "<f>", 0.005, "Progress = the selection metric beats the anchor by this fraction", false);
+    registerDoubleOption_("stop:abs_tol", "<f>", 0.0, "Progress = beats the anchor by this absolute amount (0 = use rel_tol)", false);
+    registerDoubleOption_("stop:max_seconds", "<s>", 0.0, "Wall-clock budget per head (0 = none)", false);
+    registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false);
+    setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
+
+    registerTOPPSubsection_("machine", "Fine-tuning: device");
+    registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
+    registerIntOption_("machine:threads", "<n>", 4, "Torch threads on CPU (4 measured fastest on this model; more thrashes)", false);
+    registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
+    registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+    for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
+                            "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
+    for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
+  }
+
+
+DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
+  {
+    ODIA::RefineParams p;
+    p.q_precursor = getDoubleOption_("q_precursor");
+    p.q_global = getDoubleOption_("q_global");
+    p.q_protein = getDoubleOption_("q_protein");
+    p.min_fragments = static_cast<std::size_t>(std::max(0, getIntOption_("min_fragments")));
+    p.filter = !getFlag_("no_filter");
+    p.require_gates = !getFlag_("empirical_library");
+    p.write_rt = !getFlag_("no_write_rt");
+    p.write_im = getFlag_("write_im");
+    p.write_intensity = getFlag_("write_intensity");
+    p.intensity_min_correlation = getDoubleOption_("intensity_min_correlation");
+    p.intensity_restrict = !getFlag_("intensity_no_restrict");
+    p.intensity_rerank = !getFlag_("intensity_no_rerank");
+    p.intensity_min_fragments = static_cast<std::size_t>(std::max(0, getIntOption_("intensity_min_fragments")));
+    p.intensity_norm = intensityNormFrom(getStringOption_("intensity_norm"));
+    p.intensity_min_relative = getDoubleOption_("intensity_min_relative");
+    p.intensity_mz_tol_ppm = getDoubleOption_("intensity_mz_tol_ppm");
+    p.intensity_max_mz_mismatch = getDoubleOption_("intensity_max_mz_mismatch");
+    p.allow_mixed_intensity = getFlag_("allow_mixed_intensity");
+    p.im_min_charge = getIntOption_("im_min_charge");
+    p.im_ramp_top = getDoubleOption_("im_ramp_top");
+    p.im_ramp_margin = getDoubleOption_("im_ramp_margin");
+    p.min_match_fraction = getDoubleOption_("min_match_fraction");
+    p.rt_unit = getStringOption_("rt_unit") == "minmax" ? ODIA::RefineParams::RtUnit::MinMax : ODIA::RefineParams::RtUnit::Observed;
+    p.dedup = getStringOption_("dedup") == "highest_evidence" ? ODIA::RefineParams::Dedup::HighestEvidence : ODIA::RefineParams::Dedup::LowestQ;
+
+    const bool tune = tune_only || getFlag_("tune");
+    if (tune_only) { p.filter = false; p.write_rt = false; }
+    const json cli = effectiveConfig(p);
+
+    if (const std::string cfg = getStringOption_("config"); !cfg.empty())
+    {
+      std::ifstream in(cfg);
+      if (!in) { writeLogError_("cannot read config: " + cfg); return INPUT_FILE_NOT_FOUND; }
+      try
+      {
+        applyJson_(json::parse(in, nullptr, true, true), p);
+        // Explicit TOPP options (CLI or INI) override the JSON compatibility config.
+        json overrides = json::object();
+        const std::map<std::string, std::string> flags = {{"filter", "no_filter"}, {"require_gates", "empirical_library"},
+          {"write_rt", "no_write_rt"}, {"intensity_restrict", "intensity_no_restrict"}, {"intensity_rerank", "intensity_no_rerank"}};
+        for (const auto& [key, value] : cli.items())
+        {
+          const auto f = flags.find(key);
+          if (supplied_.count(f == flags.end() ? key : f->second)) { overrides[key] = value; }
+        }
+        applyJson_(overrides, p);
+      }
+      catch (const std::exception& e) { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
+    }
+    try { applyJson_(effectiveConfig(p), p); }
+    catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+    if (tune_only && (p.filter || p.write_rt || p.write_im || p.write_intensity))
+    { writeLogError_("-mode tune preserves the whole library and writes predictions only; filtering or observed-value replacement requires -mode refine"); return ILLEGAL_PARAMETERS; }
+    if (tune && p.rt_unit == ODIA::RefineParams::RtUnit::MinMax)
+    { writeLogError_("tuning and rt_unit=minmax are incompatible: predictions use the reference run's minutes"); return ILLEGAL_PARAMETERS; }
+
+    const json eff = effectiveConfig(p);
+    if (const std::string wc = getStringOption_("write_config"); !wc.empty())
+    {
+      std::ofstream o(wc);
+      o << eff.dump(2) << '\n';
+      if (!o) { writeLogError_("cannot write " + wc); return CANNOT_WRITE_OUTPUT_FILE; }
+      writeLogInfo_("wrote effective config to " + wc);
+      return EXECUTION_OK;
+    }
+
+    const std::string in = getStringOption_("in"), ids = getStringOption_("ids"), out = getStringOption_("out");
+    if (in.empty() || ids.empty() || out.empty())
+    { writeLogError_("-in, -ids and -out are required"); return ILLEGAL_PARAMETERS; }
+#ifndef DIALIBGEN_WITH_FINETUNE
+    if (tune)
+    { writeLogError_("this build has no fine-tuning stage; configure DIALIBGEN_BUILD_FINETUNE with libtorch"); return ILLEGAL_PARAMETERS; }
+#endif
+    if (!out.ends_with(".parquet") && !out.ends_with(".tsv"))
+    { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
+    const std::string report = getStringOption_("out_report");
+    std::set<std::filesystem::path> destinations;
+    for (const auto& file : {out, out + ".refine.json", report})
+    {
+      if (file.empty()) { continue; }
+      if (std::filesystem::exists(file) || std::filesystem::is_symlink(file))
+      { writeLogError_("refusing to overwrite existing output: " + file); return CANNOT_WRITE_OUTPUT_FILE; }
+      if (!destinations.insert(std::filesystem::weakly_canonical(file)).second)
+      { writeLogError_("output paths must be distinct: " + file); return ILLEGAL_PARAMETERS; }
+    }
+
+    ODIA::Library library;
+    ODIA::RefineStats st;
+    json tune_prov = json::object();
+    try
+    {
+      ODIA::DIANNLibraryFile::load(in, library);
+      writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
+                    std::to_string(library.transitionCount()) + " transitions");
+
+#ifdef DIALIBGEN_WITH_FINETUNE
+      if (tune)
+      {
+        namespace fs = std::filesystem;
+        std::string models = getStringOption_("tune_models");
+        if (models.empty())
+        { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
+        if (models.empty()) { models = bundledModelDir(); }
+        if (models.empty())
+        { throw std::runtime_error("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); }
+
+        const std::string heads = getStringOption_("tune_heads");
+        const bool want_rt = heads != "ccs", want_ccs = heads != "rt";
+
+        const std::string keep = getStringOption_("tune_out_models");
+        struct WorkDirectory
+        {
+          fs::path path;
+          bool temporary = false;
+          ~WorkDirectory() { if (temporary) { std::error_code ec; fs::remove_all(path, ec); } }
+        } directory;
+        if (keep.empty())
+        {
+          std::random_device random;
+          for (int attempt = 0; attempt < 16; ++attempt)
+          {
+            directory.path = fs::temp_directory_path() / ("dialibgen-tune-" + std::to_string(random()) + "-" + std::to_string(random()));
+            if (fs::create_directory(directory.path)) { directory.temporary = true; break; }
+          }
+          if (!directory.temporary) { throw std::runtime_error("cannot create a unique tuning directory"); }
+        }
+        else { directory.path = keep; fs::create_directories(directory.path); }
+        const fs::path& work = directory.path;
+        for (const char* head : {"rt", "ccs"})
+        {
+          if ((std::string(head) == "rt" && !want_rt) || (std::string(head) == "ccs" && !want_ccs)) { continue; }
+          for (const char* suffix : {".onnx", ".onnx.tune.json", ".onnx.trajectory.tsv"})
+          {
+            const fs::path file = work / (std::string("peptdeep_") + head + "_dynamic" + suffix);
+            if (fs::exists(file) || fs::is_symlink(file)) { throw std::runtime_error("refusing to overwrite tuned model artifact: " + file.string()); }
+          }
+        }
+
+        ODIA::tune::TuneParams tp;
+        tp.report = ids;
+        tp.q_value = getDoubleOption_("filter:q_value");
+        tp.min_charge = getIntOption_("filter:min_charge");
+        tp.allow_z1 = getFlag_("filter:allow_z1");
+        tp.rt_spread_max = getDoubleOption_("filter:rt_spread_max");
+        tp.rt_max_minutes = getDoubleOption_("filter:rt_max_minutes");
+        tp.train_size = static_cast<std::size_t>(std::max(0, getIntOption_("cohort:train_size")));
+        tp.train_frac = getDoubleOption_("cohort:train_frac");
+        tp.inner_val = !getFlag_("cohort:no_inner_val");
+        tp.full_fit = getFlag_("cohort:full_fit");
+        tp.epochs = getIntOption_("train:epochs");
+        tp.warmup = getIntOption_("train:warmup");
+        tp.lr = getDoubleOption_("train:lr");
+        tp.batch_size = getIntOption_("train:batch_size");
+        tp.eval_every = getIntOption_("stop:eval_every");
+        tp.min_epochs = getIntOption_("stop:min_epochs");
+        tp.patience = getIntOption_("stop:patience");
+        tp.rel_tol = getDoubleOption_("stop:rel_tol");
+        tp.abs_tol = getDoubleOption_("stop:abs_tol");
+        tp.max_seconds = getDoubleOption_("stop:max_seconds");
+        tp.select = getStringOption_("stop:select") == "rmse" ? ODIA::tune::Select::Rmse : ODIA::tune::Select::CalibratedSd;
+        tp.device = getStringOption_("machine:device");
+        tp.threads = getIntOption_("machine:threads");
+        tp.cudnn = !getFlag_("machine:no_cudnn");
+        tp.seed = static_cast<std::uint32_t>(getIntOption_("machine:seed"));
+        if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
+        { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
+        if (tp.train_size && tp.train_frac > 0)
+        { throw std::runtime_error("give cohort:train_size or cohort:train_frac, not both"); }
+
+        auto run_head = [&](ODIA::tune::HeadKind head, const char* file)
+        {
+          tp.head = head;
+          tp.model_in = (fs::path(models) / file).string();
+          tp.model_out = (work / file).string();
+          if (!fs::exists(tp.model_in))
+          { throw std::runtime_error("no " + std::string(file) + " in " + models); }
+          // finetune throws when nothing beat the stock model, the same way it
+          // throws on a corrupt report -- TuneResult carries no "exported" flag
+          // to tell them apart, so a head that does not improve aborts the run
+          // rather than silently refining with stock predictions.
+          return ODIA::tune::finetune(tp, std::cout);
+        };
+
+        const bool free_cys = getFlag_("tune_keep_free_cysteine_offset");
+        const bool gpu = getFlag_("tune_predict_gpu");
+        const unsigned sessions = static_cast<unsigned>(std::max(0, getIntOption_("tune_predict_sessions")));
+
+        if (want_rt)
+        {
+          const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::RT, "peptdeep_rt_dynamic.onnx");
+          writeLogInfo_("tuned RT: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
+                        " of " + std::to_string(r.epochs_run));
+          // predictRetentionTimes returns what it could NOT predict, not what it
+          // did -- undocumented, and it reads exactly the other way round.
+          const std::size_t unpredicted =
+            ODIA::LibraryGenerator::predictRetentionTimes(library, r.model_out, gpu, sessions, free_cys);
+          if (unpredicted) { throw std::runtime_error("tuned RT could not encode " + std::to_string(unpredicted) + " precursors; refusing mixed RT units"); }
+          const std::size_t n = library.precursorCount() - unpredicted;
+          // The model emits rt_norm = RT / rt_max_minutes, and that denominator
+          // lives nowhere else. Multiplying it back puts the WHOLE library in the
+          // reference run's minutes -- the same unit refine() writes for the
+          // matched precursors, so the column stays one coherent object.
+          for (auto& v : library.precursors().irt) { v *= r.rt_max_minutes; }
+          tune_prov["rt"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
+                             {"epochs_run", r.epochs_run}, {"rt_max_minutes", r.rt_max_minutes},
+                             {"model_sha256", r.model_out_sha256}, {"stock_sha256", r.model_in_sha256},
+                             {"repredicted", n}, {"unpredicted", unpredicted}};
+          writeLogInfo_("re-predicted RT for " + std::to_string(n) + " of " + std::to_string(library.precursorCount()) +
+                        " precursors, in the run's minutes" +
+                        (unpredicted ? " (" + std::to_string(unpredicted) + " could not be encoded)" : ""));
+        }
+        if (want_ccs)
+        {
+          const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::CCS, "peptdeep_ccs_dynamic.onnx");
+          writeLogInfo_("tuned CCS: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
+                        " of " + std::to_string(r.epochs_run));
+          // derive_mobility rewrites the WHOLE 1/K0 column, so it runs only when
+          // the CCS head actually tuned -- otherwise a library that arrived with
+          // measured mobilities would lose them to stock predictions.
+          const std::size_t unpredicted =
+            ODIA::LibraryGenerator::predictCollisionCrossSections(library, r.model_out, gpu, sessions, true);
+          if (unpredicted) { throw std::runtime_error("tuned CCS could not encode " + std::to_string(unpredicted) + " precursors; refusing a partially re-predicted library"); }
+          const std::size_t n = library.precursorCount() - unpredicted;
+          tune_prov["ccs"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
+                              {"epochs_run", r.epochs_run},
+                              {"model_sha256", r.model_out_sha256}, {"stock_sha256", r.model_in_sha256},
+                              {"repredicted", n}, {"unpredicted", unpredicted}};
+          writeLogInfo_("re-predicted CCS and 1/K0 for " + std::to_string(n) + " of " +
+                        std::to_string(library.precursorCount()) + " precursors" +
+                        (unpredicted ? " (" + std::to_string(unpredicted) + " could not be encoded)" : ""));
+        }
+
+        tune_prov["full_fit"] = tp.full_fit;   // recorded for either head, not only when RT was tuned
+        tune_prov["models_kept"] = keep.empty() ? json(nullptr) : json(fs::absolute(work).string());
+      }
+#endif
+      if (tune_only)
+      {
+        st.library_before = st.library_after = library.precursorCount();
+        writeLogInfo_("tune mode preserved all " + std::to_string(library.precursorCount()) + " precursors; no observed values written");
+      }
+      else
+      {
+      const auto obs = ODIA::LibraryRefiner::readObservations(ids, p, st);
+      writeLogInfo_("reference" + (st.run.empty() ? std::string() : " (run " + st.run + ")") + ": " +
+                    std::to_string(st.ids_rows) + " rows, " + std::to_string(st.ids_precursors) + " precursors, " +
+                    std::to_string(st.ids_passing) + " passing the gates; rejected: " +
+                    std::to_string(st.ids_decoy) + " decoy, " + std::to_string(st.ids_q_invalid) + " invalid q, " +
+                    std::to_string(st.ids_q_above) + " above threshold, " + std::to_string(st.ids_charge_invalid) + " bad charge");
+      for (const auto& g : st.gates_bypassed)
+      { writeLogWarn_("gate " + g + " BYPASSED: the reference has no such column (-empirical_library); recorded in provenance"); }
+      if (st.ids_unknown_mod_tokens)
+      { writeLogWarn_(std::to_string(st.ids_unknown_mod_tokens) + " modification tokens were neither a known name nor a UniMod accession; passed through verbatim"); }
+      if (st.ids_ramp_censored)
+      { writeLogInfo_(std::to_string(st.ids_ramp_censored) + " observed 1/K0 values within " + std::to_string(p.im_ramp_margin) +
+                      " of the declared ramp top " + std::to_string(p.im_ramp_top) + " treated as censored"); }
+
+      ODIA::LibraryRefiner::refine(library, obs, p, st);
+      }
+    }
+    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); return UNEXPECTED_RESULT; }
+
+    if (!tune_only)
+    {
+    std::ostringstream m;
+    m.setf(std::ios::fixed); m.precision(1);
+    m << "matched " << st.matched << " of " << st.ids_passing << " reference precursors ("
+      << 100.0 * st.match_fraction << "%); " << st.ids_unmatched << " observed but absent from the library";
+    writeLogInfo_(m.str());
+    auto resid = [&](const char* axis, std::size_t n, double mean, double sd, double p95, int prec)
+    {
+      if (!n) { return; }
+      std::ostringstream r; r.setf(std::ios::fixed); r.precision(prec);
+      r << axis << " residual BEFORE refinement (library prediction - observed), n=" << n
+        << ": mean " << mean << ", sd " << sd << ", p95 |resid| " << p95;
+      writeLogInfo_(r.str());
+    };
+    resid("RT", st.rt_resid_n, st.rt_resid_mean, st.rt_resid_sd, st.rt_resid_p95, 4);
+    resid("1/K0", st.im_resid_n, st.im_resid_mean, st.im_resid_sd, st.im_resid_p95, 5);
+    writeLogInfo_("wrote " + std::to_string(st.rt_written) + " RT values" +
+                  (st.rt_missing ? " (" + std::to_string(st.rt_missing) + " matched targets had no observed RT and keep their prediction)" : "") +
+                  " and " + std::to_string(st.im_written) + " 1/K0 values" +
+                  (st.im_charge_excluded ? " (" + std::to_string(st.im_charge_excluded) + " below im_min_charge kept their prediction)" : "") +
+                  (st.im_missing ? " (" + std::to_string(st.im_missing) + " had no usable observed 1/K0)" : ""));
+    writeLogInfo_("library " + std::to_string(st.library_before) + " -> " + std::to_string(st.library_after) +
+                  " precursors (" + std::to_string(st.matched) + " targets + " + std::to_string(st.decoys_kept) + " decoys)" +
+                  (p.filter ? "" : " (filter off)"));
+    if (p.write_intensity)
+    {
+      std::ostringstream r; r.setf(std::ios::fixed); r.precision(3);
+      r << "replaced fragment intensities on " << st.intensity_replaced_precursors << " of " << st.intensity_candidate_precursors
+        << " candidate precursors (" << st.intensity_kept_predicted << " kept their predictions); transitions per replaced precursor "
+        << st.intensity_transitions_before << " -> " << st.intensity_transitions_after
+        << "; observed base peak was already the library's top transition in " << 100.0 * st.intensity_rank_agreement << "%";
+      writeLogInfo_(r.str());
+      writeLogInfo_("fragment fates over " + std::to_string(st.intensity_candidate_transitions) + " candidate transitions: " +
+                    std::to_string(st.intensity_matched_transitions) + " matched (" + std::to_string(st.intensity_gated_zero_quant) +
+                    " zero area, " + std::to_string(st.intensity_gated_correlation) + " below the correlation gate, " +
+                    std::to_string(st.intensity_gated_floor) + " below the floor), " + std::to_string(st.intensity_unmatched_in_library) +
+                    " not in the report, " + std::to_string(st.intensity_mz_mismatch) + " m/z disagreements, " +
+                    std::to_string(st.intensity_loss_bearing) + " loss-bearing; " + std::to_string(st.intensity_observed_not_in_library) +
+                    " report fragments the library never carried were NOT added");
+      if (st.intensity_loss_bearing)
+      { writeLogWarn_(std::to_string(st.intensity_loss_bearing) + " neutral-loss transitions could not be matched: the report has "
+                      "no loss field. Under the default restriction they were dropped from replaced precursors."); }
+      if (!p.filter)
+      { writeLogWarn_("MIXED INTENSITY PROVENANCE: matched precursors carry this run's observed intensities, unmatched ones "
+                      "carry MS2-model predictions (-allow_mixed_intensity)."); }
+    }
+    if (p.write_rt)
+    {
+      writeLogInfo_("NOTE: the RT column now holds the REFERENCE RUN's observed retention times (unit: " +
+                    std::string(rtUnitName(p.rt_unit)) + "), not iRT. This library is a per-run object.");
+    }
+    }
+
+    // Provenance: the recipe, the inputs by content hash, the run, the units and every
+    // count above -- embedded in the Parquet and always written as a sidecar (M13).
+    json prov = {
+      {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
+      {"config", eff},
+      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_sha", ODIA::DIANNLibraryFile::hashFile(in)},
+                  {"reference", std::filesystem::absolute(ids).string()}, {"reference_sha", ODIA::DIANNLibraryFile::hashFile(ids)},
+                  {"reference_run", st.run}}},
+      {"gates_bypassed", st.gates_bypassed},
+      {"tune", tune_prov},
+      {"reference", {{"rows", st.ids_rows}, {"precursors", st.ids_precursors}, {"passing", st.ids_passing},
+                     {"decoy", st.ids_decoy}, {"q_invalid", st.ids_q_invalid}, {"q_above", st.ids_q_above},
+                     {"charge_invalid", st.ids_charge_invalid}, {"unknown_mod_tokens", st.ids_unknown_mod_tokens},
+                     {"ramp_censored", st.ids_ramp_censored}, {"unmatched", st.ids_unmatched}}},
+      {"library", {{"before", st.library_before}, {"after", st.library_after}, {"matched_targets", st.matched},
+                   {"decoys_kept", st.decoys_kept}, {"match_fraction", st.match_fraction},
+                   {"rt_written", st.rt_written}, {"rt_missing", st.rt_missing},
+                   {"im_written", st.im_written}, {"im_missing", st.im_missing}, {"im_charge_excluded", st.im_charge_excluded}}},
+      {"intensity", p.write_intensity ? json{
+                   {"candidate_precursors", st.intensity_candidate_precursors}, {"replaced_precursors", st.intensity_replaced_precursors},
+                   {"replaced_decoys", st.intensity_replaced_decoys}, {"kept_predicted", st.intensity_kept_predicted},
+                   {"decoy_asymmetry", st.intensity_decoy_asymmetry}, {"duplicate_key", st.intensity_duplicate_key},
+                   {"candidate_transitions", st.intensity_candidate_transitions}, {"matched_transitions", st.intensity_matched_transitions},
+                   {"mz_mismatch", st.intensity_mz_mismatch}, {"mz_mismatch_fraction", st.intensity_mz_mismatch_fraction},
+                   {"unmatched_in_library", st.intensity_unmatched_in_library}, {"loss_bearing", st.intensity_loss_bearing},
+                   {"observed_not_in_library", st.intensity_observed_not_in_library},
+                   {"gated_zero_quant", st.intensity_gated_zero_quant}, {"gated_correlation", st.intensity_gated_correlation},
+                   {"gated_floor", st.intensity_gated_floor}, {"bad_tokens", st.intensity_bad_tokens},
+                   {"row_length_mismatch", st.intensity_row_length_mismatch},
+                   {"rank_agreement", num(st.intensity_rank_agreement)},
+                   {"transitions_before", num(st.intensity_transitions_before)}, {"transitions_after", num(st.intensity_transitions_after)},
+                   {"mixed_provenance", !p.filter}} : json(nullptr)},
+      {"residual_before", {{"rt", {{"n", st.rt_resid_n}, {"mean", num(st.rt_resid_mean)}, {"sd", num(st.rt_resid_sd)}, {"p95_abs", num(st.rt_resid_p95)}}},
+                           {"im", {{"n", st.im_resid_n}, {"mean", num(st.im_resid_mean)}, {"sd", num(st.im_resid_sd)}, {"p95_abs", num(st.im_resid_p95)}}},
+                           {"sd_convention", "ddof=1; p95 = lower nearest-rank quantile of |residual|; NaN -> null when n<2"}}},
+      {"units", {{"rt", p.write_rt ? (p.rt_unit == ODIA::RefineParams::RtUnit::MinMax ? "0..100 minmax over the matched set" : "the reference run's own RT units") :
+                         (tune_prov.contains("rt") ? "tuned model predictions in reference-run minutes" : "unchanged (library prediction)")},
+                 {"im", p.write_im ? "observed 1/K0 for charges >= im_min_charge; CCS cleared where written" :
+                         (tune_prov.contains("ccs") ? "1/K0 derived from tuned CCS predictions" : "unchanged (library prediction)")},
+                 {"intensity", p.write_intensity ? std::string("observed fragment areas from the reference run, normalised by ") + intensityNormName(p.intensity_norm) +
+                                                   (p.filter ? "" : "; UNMATCHED precursors keep MS2-model predictions") : std::string("unchanged (library prediction)")}}},
+      {"warning", tune_only ? "Predictions adapted to one reference run; evaluate transfer on a different run." :
+                             "Observed values describe the reference run and its gradient; evaluate transfer on a different run."}};
+    if (tune_only)
+    {
+      prov["reference"] = nullptr;
+      prov["residual_before"] = nullptr;
+      prov["inputs"]["reference_run"] = nullptr;
+      for (const char* key : {"matched_targets", "decoys_kept", "match_fraction"}) { prov["library"].erase(key); }
+    }
+
+    try
+    {
+      if (out.ends_with(".parquet"))
+      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, ODIA::DIANNLibraryFile::Fingerprint{}, prov.dump()); }
+      else if (out.ends_with(".tsv"))
+      { ODIA::DIANNLibraryFile::storeTSV(out, library); }
+      else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
+      std::ofstream side(out + ".refine.json");
+      side << prov.dump(2) << '\n';
+      if (!side) { writeLogError_("cannot write " + out + ".refine.json"); return CANNOT_WRITE_OUTPUT_FILE; }
+      writeLogInfo_("wrote " + out + " and " + out + ".refine.json");
+    }
+    catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+
+    if (const std::string rep = getStringOption_("out_report"); !rep.empty())
+    {
+      std::ofstream o(rep);
+      o << "metric\tvalue\n";
+      for (const auto& [k, v] : prov["reference"].items()) { o << "ids_" << k << '\t' << v << '\n'; }
+      for (const auto& [k, v] : prov["library"].items()) { o << "library_" << k << '\t' << v << '\n'; }
+      o.setf(std::ios::fixed); o.precision(6);
+      o << "rt_resid_n\t" << st.rt_resid_n << "\nrt_resid_mean\t" << st.rt_resid_mean << "\nrt_resid_sd\t" << st.rt_resid_sd
+        << "\nrt_resid_p95\t" << st.rt_resid_p95 << "\nim_resid_n\t" << st.im_resid_n << "\nim_resid_mean\t" << st.im_resid_mean
+        << "\nim_resid_sd\t" << st.im_resid_sd << "\nim_resid_p95\t" << st.im_resid_p95 << '\n';
+      if (!o) { writeLogError_("cannot write " + rep); return CANNOT_WRITE_OUTPUT_FILE; }
+      writeLogInfo_("wrote report to " + rep);
+    }
+    return EXECUTION_OK;
+  }

@@ -359,6 +359,18 @@ jobs:
             || { echo "::error::$CP lacks the test dependencies"; exit 1; }
           echo "CONDA_PYTHON=$CP" >> "$GITHUB_ENV"
 
+      - name: Restore the CPU libtorch SDK
+        id: torch-cache
+        uses: actions/cache@v4
+        with:
+          path: libtorch-sdk
+          key: libtorch-cpu-2.10.0-windows-x64-17a09465-v1
+
+      - name: Extract the CPU libtorch SDK
+        if: steps.torch-cache.outputs.cache-hit != 'true'
+        shell: bash -el {0}
+        run: python .github/fetch-libtorch.py windows-x64 libtorch-sdk
+
       - name: Restore the PeptDeep models
         id: cache-models
         uses: actions/cache@v4
@@ -460,14 +472,17 @@ jobs:
             -DCMAKE_PREFIX_PATH="$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
             -DCMAKE_MODULE_PATH="$OPENMS_MODULES" \
             -DODIA_PYTHON="$CONDA_PYTHON" \
+            -DDIALIBGEN_REFINEMENT_PYTHON="$CONDA_PYTHON" \
             -DODIA_MODEL_DIR="$PWD/models" \
+            -DDIALIBGEN_BUILD_FINETUNE=ON \
+            -DTorch_DIR="$PWD/libtorch-sdk/share/cmake/Torch" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 
       - name: Build and install
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          cmake --build build --parallel
+          cmake --build build --parallel 2
           cmake --install build
 
       # Everything the binary links lives in three prefixes. Collected once,
@@ -492,7 +507,7 @@ jobs:
           # into ':' does NOT work -- it leaves the drive letters, so "C:/x:D:/y"
           # splits at the colon after C and every entry is garbage. That is what
           # made every test die with 0xc0000135, STATUS_DLL_NOT_FOUND.
-          RUNTIME_DLL_PATH="$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin;$OPENMS_BIN"
+          RUNTIME_DLL_PATH="$GITHUB_WORKSPACE/libtorch-sdk/lib;$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin;$OPENMS_BIN"
           POSIX=""
           IFS=';' read -ra _dirs <<< "$RUNTIME_DLL_PATH"
           for d in "${_dirs[@]}"; do
@@ -543,7 +558,18 @@ jobs:
           case "$PATH_KEEP" in
             *"$BUILD_ABS"*) echo "::error::the build tree survived the PATH filter"; exit 1 ;;
           esac
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build -N > registered-tests.txt
+          for name in tune_parity tune_e2e; do
+            grep -Eq "[ :]+$name$" registered-tests.txt \
+              || { echo "::error::$name is not registered; this release must include training"; exit 1; }
+          done
+          ctest --test-dir build --output-on-failure --output-junit "$PWD/build/ctest.xml"
+          python - <<'PYTEST'
+          import xml.etree.ElementTree as ET
+          tests = {case.get("name"): case for case in ET.parse("build/ctest.xml").iter("testcase")}
+          for name in ("tune_parity", "tune_e2e"):
+              assert name in tests and tests[name].find("skipped") is None, f"{name} must pass, not skip"
+          PYTEST
           # A tier that fails to register does not fail -- it disappears, and
           # the run goes green on a smaller suite. Assert the Python-dependent
           # tests are actually there.
@@ -573,8 +599,9 @@ jobs:
           # this gate is about -- it is about the BUILD TREE not being on it. So
           # the three runtime prefixes are handed back explicitly and nothing
           # else is.
-          export PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
-          export OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
+          PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
+          OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
+          export PATH_KEEP OPENMS_DATA_PATH
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
             example/proteins.fasta
@@ -605,6 +632,12 @@ jobs:
       # this the artefact runs only on a machine that already has a conda env,
       # a Qt and an OpenMS build in the same places -- which is to say, on this
       # runner and nowhere else.
+      - name: Exercise all installed modes
+        shell: bash -el {0}
+        run: |
+          export PATH="$DLL_PATH_POSIX:$PATH"
+          "$CONDA_PYTHON" .github/release-smoke.py stage/bin/DIALibGen.exe --output smoke-installed
+
       - name: Decide whether to package
         id: pkg
         shell: bash
@@ -691,7 +724,7 @@ jobs:
             # paths for the same reason. Both the import table and the
             # delay-load table are printed, and both are dependencies.
             while IFS= read -r dep; do
-              key=$(printf '%s' "$dep" | tr 'A-Z' 'a-z')
+              key=$(printf '%s' "$dep" | tr '[:upper:]' '[:lower:]')
               if [ -n "${seen[$key]:-}" ]; then continue; fi
               seen[$key]=1
               src=$(resolve "$dep") || continue
@@ -715,13 +748,13 @@ jobs:
             done
             echo "carried $n file(s) for $1"
           }
-          if ls stage/bin/ | grep -qi '^onnxruntime'; then
+          if find stage/bin -maxdepth 1 -iname 'onnxruntime*' | grep -q .; then
             carry 'onnxruntime_providers_*.dll'
           fi
           # mkl_rt is a dispatcher: it LoadLibrary's the kernel matching the CPU
           # it finds. If anything in the closure links it, the kernels have to
           # come too.
-          if ls stage/bin/ | grep -qi '^mkl_rt'; then
+          if find stage/bin -maxdepth 1 -iname 'mkl_rt*' | grep -q .; then
             carry 'mkl_*.dll'
           fi
 
@@ -748,7 +781,16 @@ jobs:
             || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }
           [ "$(wc -l < portable.tsv)" -gt 1 ] \
             || { echo "::error::the staged bundle produced an empty library"; exit 1; }
-          echo "portable bundle: $(ls stage/bin/*.dll | wc -l) DLLs, $(du -sm stage | cut -f1) MB"
+          echo "portable bundle: $(find stage/bin -iname '*.dll' | wc -l) DLLs, $(du -sm stage | cut -f1) MB"
+
+      - name: Exercise all relocated modes in a bare environment
+        if: steps.pkg.outputs.package == 'true'
+        shell: bash -el {0}
+        run: |
+          "$CONDA_PYTHON" .github/release-smoke.py stage/bin/DIALibGen.exe --bare --output smoke-portable
+          if find stage/bin -iname '*python*.dll' | grep -q .; then
+            echo "::error::the C++ release unexpectedly depends on Python"; exit 1
+          fi
 
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
@@ -860,3 +902,14 @@ jobs:
               || { echo "::error::$n is not on $GITHUB_REF_NAME"; missing=1; }
           done
           exit $missing
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: smoke-windows-x64
+          path: |
+            build/Testing/Temporary/LastTest.log
+            smoke-installed/*.log
+            smoke-installed/**/*.tune.json
+            smoke-portable/*.log
+            smoke-portable/**/*.tune.json

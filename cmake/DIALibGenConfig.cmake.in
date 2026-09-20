@@ -1,36 +1,34 @@
 @PACKAGE_INIT@
-
 include(CMakeFindDependencyMacro)
-
 find_dependency(OpenMS)
 find_dependency(Arrow)
 find_dependency(Parquet)
-
-# ONNX Runtime ships no CMake config in most distributions, so it is located the
-# same way the build located it.
-if(NOT TARGET onnxruntime)
-  # Kept in step with the top-level CMakeLists, including conda-forge's
-  # onnxruntime_conda spelling on Windows.
+if(@OpenMP_CXX_FOUND@)
+  find_dependency(OpenMP)
+endif()
+if(@DIALIBGEN_BUILD_FINETUNE@)
+  find_dependency(Torch CONFIG)
+  find_dependency(nlohmann_json CONFIG)
+endif()
+if(NOT TARGET ONNXRuntime::ONNXRuntime)
   find_path(ONNXRuntime_INCLUDE_DIR NAMES onnxruntime_cxx_api.h
-            PATH_SUFFIXES include onnxruntime include/onnxruntime
-                          onnxruntime/core/session include/onnxruntime/core/session)
-  find_library(ONNXRuntime_LIBRARY NAMES onnxruntime onnxruntime_conda
-               PATH_SUFFIXES lib)
+    PATH_SUFFIXES include onnxruntime include/onnxruntime
+                  onnxruntime/core/session include/onnxruntime/core/session)
+  find_library(ONNXRuntime_LIBRARY NAMES onnxruntime onnxruntime_conda PATH_SUFFIXES lib)
   if(NOT ONNXRuntime_INCLUDE_DIR OR NOT ONNXRuntime_LIBRARY)
     set(DIALibGen_FOUND FALSE)
     set(DIALibGen_NOT_FOUND_MESSAGE "ONNX Runtime not found")
     return()
   endif()
+  add_library(ONNXRuntime::ONNXRuntime UNKNOWN IMPORTED)
+  set_target_properties(ONNXRuntime::ONNXRuntime PROPERTIES
+    IMPORTED_LOCATION "${ONNXRuntime_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${ONNXRuntime_INCLUDE_DIR}")
 endif()
-
 include("${CMAKE_CURRENT_LIST_DIR}/DIALibGenTargets.cmake")
-
-# The exported target carries no ONNX Runtime include path of its own (see the
-# BUILD_INTERFACE note in the top-level CMakeLists), so supply the one found
-# above to whoever links it.
-if(TARGET DIALibGen::odia_library AND ONNXRuntime_INCLUDE_DIR)
+find_path(BOOST_INCLUDE_DIR NAMES boost/version.hpp)
+if(BOOST_INCLUDE_DIR)
   set_property(TARGET DIALibGen::odia_library APPEND PROPERTY
-               INTERFACE_INCLUDE_DIRECTORIES "${ONNXRuntime_INCLUDE_DIR}")
+    INTERFACE_INCLUDE_DIRECTORIES "${BOOST_INCLUDE_DIR}")
 endif()
-
 check_required_components(DIALibGen)

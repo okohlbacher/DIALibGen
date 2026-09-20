@@ -1,0 +1,92 @@
+name: macOS first-launch measurement
+
+# Each route gets a fresh VM: Gatekeeper caches code-directory hashes globally.
+# Never run DIALibGen or assess it with spctl before the timed first invocation.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        route: [tarball, cask]
+        include:
+          - route: tarball
+            runner: macos-14
+          - route: cask
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      ROUTE: ${{ matrix.route }}
+    steps:
+      - name: Install the archived v0.10.1 payload without launching it
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p measurements
+          sw_vers > measurements/system.txt
+          uname -a >> measurements/system.txt
+          if [ "$ROUTE" = tarball ]; then
+            curl -fL --retry 3 -o archived.tar.gz \
+              https://github.com/okohlbacher/DIALibGen/releases/download/v0.10.1/DIALibGen-macos-arm64.tar.gz
+            echo '0dc1d9a8252b2cea3445c3c7f92ea33645347f0d1ea91074bf5a9e77643b6476  archived.tar.gz' | shasum -a 256 -c -
+            mkdir archived
+            tar xzf archived.tar.gz -C archived
+            echo "MEASURE_BINARY=$PWD/archived/bin/DIALibGen" >> "$GITHUB_ENV"
+            xattr -lr archived > measurements/xattrs-before.txt 2>&1 || true
+          else
+            # Pin the historical cask, including its version and both digests.
+            brew tap okohlbacher/dialibrarygenerator
+            tap_dir=$(brew --repository okohlbacher/dialibrarygenerator)
+            git -C "$tap_dir" checkout e20ed6042c98a271b7c5afb7d78485086f7d41ab
+            brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli \
+              2>&1 | tee measurements/install.txt
+            echo "MEASURE_BINARY=$(brew --prefix)/bin/DIALibGen" >> "$GITHUB_ENV"
+            xattr -lr "$(brew --caskroom)/dialibgen-cli" > measurements/xattrs-before.txt 2>&1 || true
+          fi
+
+      - name: Time the first and second invocation
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess, time
+          out = pathlib.Path('measurements')
+          records = []
+          for number in (1, 2):
+              started = time.perf_counter()
+              run = subprocess.run([os.environ['MEASURE_BINARY'], '--help'], capture_output=True, timeout=900)
+              elapsed = time.perf_counter() - started
+              (out / f'launch-{number}.log').write_bytes(run.stdout + run.stderr)
+              records.append({'route': os.environ['ROUTE'], 'invocation': number, 'seconds': elapsed, 'exit_code': run.returncode})
+              (out / 'timings.json').write_text(json.dumps(records, indent=2) + '\n')
+              print(records[-1], flush=True)
+              if run.returncode:
+                  raise SystemExit(run.returncode)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('| Route | Invocation | Seconds |\n|---|---:|---:|\n')
+              for r in records:
+                  summary.write(f"| {r['route']} | {r['invocation']} | {r['seconds']:.3f} |\n")
+              summary.write('\nFresh hosted VM; archived v0.10.1 ARM payload. Raw curl and Homebrew preserve their normal quarantine behavior; the artifact records attributes.\n')
+          PY
+
+      - name: Collect policy diagnostics after measurement
+        if: always()
+        shell: bash
+        run: |
+          /usr/bin/log show --last 30m --style compact \
+            --predicate 'process == "syspolicyd"' > measurements/syspolicyd.log 2>&1 || true
+          if [ -n "${MEASURE_BINARY:-}" ]; then
+            shasum -a 256 "$MEASURE_BINARY" > measurements/launcher-sha256.txt
+          fi
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: startup-v0.10.1-${{ matrix.route }}
+          path: measurements/

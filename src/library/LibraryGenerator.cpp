@@ -210,12 +210,9 @@ namespace ODIA
       peptides.clear();
       digestion.digest(protein, peptides, params.min_length, params.max_length);
 
-      // The initiator methionine is cleaved from most proteins before they are
-      // ever seen, so the N-terminal peptide observed in a spectrum usually
-      // starts one residue in. Digesting the truncated sequence as well is what
-      // produces it. Only the peptides that actually differ are added: every
-      // peptide not spanning position 1 is identical in both digests, and
-      // adding it twice would inflate nothing but the work.
+      // Include the Met-excised N-terminus at every allowed missed-cleavage
+      // count. Internal peptides repeat the original digest and are removed
+      // by the peptide-to-protein map below.
       if (params.n_terminal_methionine_excision && !entry.sequence.empty() &&
           entry.sequence.front() == 'M')
       {
@@ -224,9 +221,7 @@ namespace ODIA
           const auto excised = AASequence::fromString(entry.sequence.substr(1));
           std::vector<AASequence> more;
           digestion.digest(excised, more, params.min_length, params.max_length);
-          // The first peptide of the excised digest is the only one that can be
-          // new; the rest repeat the untruncated digest exactly.
-          if (!more.empty()) { peptides.push_back(more.front()); }
+          peptides.insert(peptides.end(), more.begin(), more.end());
         }
         catch (const std::exception&) {}   // non-standard residues, as above
       }
@@ -1149,11 +1144,9 @@ namespace ODIA
       for (const auto& m : v) { j += m; j += "."; }
       return j.empty() ? std::string("none") : j;
     };
-    // v2: v1 omitted the enzyme and the variable-modification IDENTITIES (it
-    // carried only their maximum count), so two libraries digested differently
-    // shared a key. Bumping misses every v1 cache once, which is the safe
-    // direction.
-    ps << "v3"
+    // v4 includes Met-excised peptides with missed cleavages, which earlier
+    // versions omitted. Do not reuse a library generated with that omission.
+    ps << "v4"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages

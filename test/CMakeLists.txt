@@ -20,7 +20,7 @@ set(ODIA_FIXTURE_DIR "" CACHE PATH "Optional external fixtures (diann_library_sm
 set(ODIA_IRT_FIXTURE "$ENV{ODIA_OPENMS_SOURCE}/src/tests/class_tests/openms/data/peptdeep_irt_peptides_predicted.csv"
     CACHE FILEPATH "OpenMS's predicted iRT standards fixture")
 
-foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset
+foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
                odia_irt_calibration odia_ms2_sessions odia_instrument_dump)
   add_executable(${helper} tools/${helper}.cpp)
@@ -140,6 +140,11 @@ set_tests_properties(peptdeep_modification_symbols PROPERTIES
 # blocks, so a subset resolved into the PARENT's storage -- correct until the
 # parent died. The test destroys the parent before reading a single string.
 add_test(NAME library_subset_outlives_parent COMMAND odia_library_subset)
+
+# Met excision must retain N-terminal products with missed cleavages, including
+# when the fully cleaved N-terminal peptide is below the length limit.
+add_test(NAME digest_methionine_excision
+         COMMAND odia_digest "${CMAKE_CURRENT_BINARY_DIR}/digest.fasta")
 
 # --------------------------------------------------------------- tier 2
 
@@ -303,4 +308,9 @@ if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
                    -DMS2_MODEL=${ODIA_MS2_MODEL_PATH}
                    -DCCS_MODEL=${ODIA_CCS_MODEL_PATH}
                    -P ${CMAKE_CURRENT_SOURCE_DIR}/decoy_methods.cmake)
+endif()
+
+if(TARGET DIALibGen AND ODIA_PYTHON)
+  add_test(NAME topp_parameters COMMAND ${ODIA_PYTHON}
+    "${CMAKE_CURRENT_SOURCE_DIR}/topp_parameters.py" $<TARGET_FILE:DIALibGen>)
 endif()

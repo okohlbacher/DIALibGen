@@ -759,7 +759,7 @@ jobs:
 
           Set-Location gui
           npm ci
-          npm run tauri build
+          npm run tauri build -- --verbose
 
       - name: Collect desktop corresponding sources
         if: steps.pkg.outputs.gui == 'true'

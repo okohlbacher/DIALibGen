@@ -64,9 +64,29 @@ After publication, both Homebrew casks must pin the final CLI/DMG SHA-256
 hashes and pass normal installation checks on Apple Silicon and Intel Macs.
 A required workflow step is not evidence that the check passed.
 
-Final 0.11.0 verification is in progress. The final commit, platform job results
-and public artifact/installer verification have not yet been recorded here;
-the local measurements and earlier candidate evidence below do not replace them.
+The 0.11.0 candidates passed CPU generation/refinement/training, installed SDK
+consumers and relocated execution on all five target platforms. The
+[Unix packaging run at `8cd1726`](https://github.com/okohlbacher/DIALibGen/actions/runs/35534187789)
+passed both Linux Debian/AppImage installation and native-window checks, both
+Mac signing/notarization/stapling checks, corresponding-source verification
+and fresh-machine startup measurements. The
+[Windows run at `222bf79`](https://github.com/okohlbacher/DIALibGen/actions/runs/35537203627)
+verified MSI administrative extraction, an actual NSIS installation, identical
+embedded payloads and all three CLI modes. Native UI Automation confirmed a
+rendered, enabled control after the configuration response, followed by clean
+window closure and complete NSIS removal. MSI installation/upgrade behavior is
+not established by extraction.
+
+The [follow-up code checks at `4219a21`](https://github.com/okohlbacher/DIALibGen/actions/runs/35535916865)
+passed all four Unix builds and the desktop suites on Linux, macOS and Windows.
+They include the application-exit cleanup regression without a mocked Windows
+application.
+
+These are candidate results. Final tagged-build results, public asset checksums
+and Homebrew installation verification belong to the
+[0.11.0 release record](https://github.com/okohlbacher/DIALibGen/releases/tag/v0.11.0);
+tagged-build and asset checks must pass before publication. Homebrew installation
+checks then validate the public downloads before the tap is updated.
 
 ## Measured coverage and limits
 
@@ -86,15 +106,26 @@ The frontend suite, including desktop refinement and fine-tuning, passed
 **92 tests** and measured **100% lines (365/365)**, **100% functions (164/164)**,
 **98.03% statements (498/508)** and **93.32% branches (573/614)**. Tests cover
 mode-specific inputs and settings, all native tuning controls, selected-head
-model checks, stale asynchronous results, configuration round-trips and errors. Type checking and the frontend build also passed. The native
+model checks, stale asynchronous results, configuration round-trips and errors.
+Type checking and the frontend build also passed. The native
 GUI passed **24 macOS Rust tests** and Clippy with warnings treated as errors.
 Instrumented native tests measured **83.54% of production-library lines
 (543/650)**, including the new training schema, command validation and model
-directory selection, cancellation during startup and shutdown. Bootstrap and several native error paths remain uncovered. Linux also checks isolation of the bundled CLI from the
-AppImage launcher’s library environment.
+directory selection, cancellation during startup and shutdown. Bootstrap and
+several native error paths remain uncovered. Linux also checks isolation of the
+bundled CLI from the AppImage launcher’s library environment.
 
-These are local measurements, not final platform CI results or claims of
-complete coverage. The final release record must identify the validated commit.
+These are local coverage measurements, not claims of complete coverage or
+measurements of the final packaged artifacts.
+
+Actual local macOS desktop interactions exercised both-head tuning, refinement,
+combined tuning/refinement, selected-model generation, overwrite refusal and
+cancellation followed by a successful restart. Tuning retained all 4,701 input
+precursor keys in the synthetic fixture. The real-child application-exit
+regression verifies process reaping and temporary configuration removal; a final
+manual Command-Q retest was unavailable while the test Mac was locked. Linux
+installer checks establish native-window startup and embedded CLI execution,
+not full interactive form coverage.
 
 Unexecuted code includes platform-specific bootstrap and error paths, GPU
 provider selection and CUDA training. CPU release checks do not validate a
@@ -127,23 +158,22 @@ raw tarball first/warm launch **0.554 / 0.063 s**, Homebrew cask
 had none. The older long delay did not reproduce on these hosted machines.
 [Measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35521436604).
 
-The signed, notarized **0.11.0 candidate `79932aa`** was then measured on two
+The signed, notarized **0.11.0 candidate `8cd1726`** was then measured on two
 fresh macOS 14.8.9 ARM VMs with Homebrew 6.0.20:
 
 | Delivery | Installation | First `--help` | Warm `--help` | Quarantine attributes |
 |---|---:|---:|---:|---:|
-| curl + tar | 2.502 s | 0.987 s | 0.214 s | 0 |
-| Homebrew cask | 7.844 s | 1.329 s | 0.245 s | 387 |
+| curl + tar | 3.806 s | 1.959 s | 0.391 s | 0 |
+| Homebrew cask | 7.561 s | 0.792 s | 0.188 s | 4,263 |
 
 Both routes used archive SHA-256
-`12e89c76a2ad0d221bd23b0cf925fcf1017df15bc88be56c5a5f089650e96ad4`
-and executable code-directory hash `14f127b03fc40a1cc2a27ed24d06b3a1713646ed`.
+`6da8aa0a54573bd827a4e407685aa354157dc6d26cc68ddc9ac4a28fd027cedd`.
 The cask used the published command-wrapper layout and unmodified Homebrew
 quarantine behavior. A localhost staging proxy served the CI artifact before
 publication, so installation timing excludes public GitHub download latency.
 Each invocation exited successfully and reported version 0.11.0. Raw records,
 signatures and policy logs are attached to the
-[candidate measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35522179576).
+[candidate measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35534187789).
 
 The several-minute delay did not reproduce in either comparison. These are
 single observations per delivery route on hosted VMs, not a guarantee for

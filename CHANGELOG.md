@@ -5,9 +5,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.11.0] — 2026-09-20
 
-Release validation is in progress; see the
-[validation record](docs/testing.md#release-verification). The entries below
-describe the implemented changes.
+See the [validation record](docs/testing.md#release-verification) for tested
+contracts, platform checks and coverage limits.
 
 ### Added
 
@@ -35,9 +34,9 @@ describe the implemented changes.
 - `-threads` now follows the TOPP default of 1. Set 0 for automatic inference
   parallelism. Training uses its separate `-machine:threads` setting.
 - The desktop app explicitly selects the requested mode and uses the CLI's
-  defaults and training schema. Fractional NCE and m/z settings remain editable; thread counts must
-  be whole numbers. Existing output paths are refused before starting a child
-  process.
+  defaults and training schema. Fractional NCE and m/z settings remain editable;
+  thread counts must be whole numbers. Existing output paths are refused before
+  starting a child process.
 - User documentation replaces obsolete pre-release notes and same-run tuning
   recommendations. Superseded Python tuning helpers are not part of the tool.
 - Portable archives contain the executable, runtime libraries, data, models

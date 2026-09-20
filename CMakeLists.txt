@@ -126,6 +126,11 @@ if(BOOST_INCLUDE_DIR)
   target_include_directories(odia_library SYSTEM PUBLIC
     $<BUILD_INTERFACE:${BOOST_INCLUDE_DIR}>)
 endif()
+# OpenMS contrib may also contain older Arrow headers alongside Boost. Keep the
+# headers of the linked Arrow/Parquet targets first, including for SDK consumers.
+target_include_directories(odia_library SYSTEM BEFORE PUBLIC
+  "$<TARGET_PROPERTY:${DIALIBGEN_ARROW_TARGET},INTERFACE_INCLUDE_DIRECTORIES>"
+  "$<TARGET_PROPERTY:${DIALIBGEN_PARQUET_TARGET},INTERFACE_INCLUDE_DIRECTORIES>")
 
 target_link_libraries(odia_library PUBLIC
   OpenMS

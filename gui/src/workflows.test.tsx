@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { installMockBridge, type MockBridge } from './testing/mockBridge'
+import { installMockBridge, SAMPLE_CONFIG, type MockBridge } from './testing/mockBridge'
 import refinementDefaults from './testing/refinement-defaults.json'
 import nativeTuning from './testing/tuning-options.json'
 import type { Mode, TuningOption } from './types'
@@ -325,6 +325,32 @@ describe('desktop refinement and fine-tuning', () => {
     await userEvent.click(browseFor('ids'))
     expect((screen.getByLabelText('DIA-NN report (Parquet)') as HTMLInputElement).value).toBe('/data/observations.parquet')
     expect(screen.queryByText('dialog unavailable')).toBeNull()
+  })
+
+  it('does not let nonempty native/imported model paths override the desktop directory', async () => {
+    await setup((b) => {
+      const original = b.api.defaultConfig
+      b.api.defaultConfig = async (selected) => selected === 'generate'
+        ? { ...SAMPLE_CONFIG, rt_model: '/startup/rt.onnx', ms2_model: '/startup/ms2.onnx', ccs_model: '/startup/ccs.onnx' }
+        : original(selected)
+      b.api.models = vi.fn(async (directory) => ({ dir: directory || '/checked/bundled/models', missing: [] }))
+      b.api.readConfig = async () => ({ rt_model: '/imported/rt.onnx', ms2_model: '/imported/ms2.onnx', ccs_model: '/imported/ccs.onnx' })
+    })
+    await userEvent.click(screen.getByRole('button', { name: 'Load…' }))
+    fireEvent.change(screen.getByLabelText('model directory'), { target: { value: '/selected/models' } })
+    fireEvent.change(screen.getByLabelText('protein FASTA'), { target: { value: '/data/proteins.fasta' } })
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/data/generation.parquet' } })
+    await userEvent.click(screen.getByRole('button', { name: 'Generate library' }))
+    expect(bridge.runs[0]).toMatchObject({ modelDir: '/selected/models' })
+    for (const key of ['rt_model', 'ms2_model', 'ccs_model']) expect((bridge.runs[0] as { config: object }).config).not.toHaveProperty(key)
+  })
+
+  it('binds an automatic tuning run to the checked fallback directory', async () => {
+    await setup((b) => { b.api.models = vi.fn().mockResolvedValue({ dir: '/complete/fallback/models', missing: [] }) })
+    await mode('tune'); fillRefinement()
+    expect((screen.getByLabelText('model directory') as HTMLInputElement).value).toBe('')
+    await userEvent.click(button('Fine-tune library'))
+    expect(bridge.runs[0]).toMatchObject({ modelDir: '/complete/fallback/models' })
   })
 
   it('shows future native tuning options without hard-coding them in the frontend', async () => {

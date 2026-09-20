@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline failures for the shared MSI/NSIS payload verifier."""
 import importlib.util
+import ntpath
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -74,6 +75,15 @@ with tempfile.TemporaryDirectory() as temporary:
         pass
     else:
         raise AssertionError('accepted missing expected embedded CLI layout')
+
+system = {'SystemDrive': 'C:', 'SystemRoot': r'C:\Windows', 'WINDIR': r'C:\Windows',
+          'ProgramData': r'C:\ProgramData', 'ALLUSERSPROFILE': r'C:\ProgramData'}
+with patch.dict(installer.os.environ, {**system, 'PATH': 'build-sdk', 'OPENMS_DATA_PATH': 'build-data'}, clear=True):
+    environment = installer.gui_environment(Path('installed/dialibgen-gui.exe'))
+assert all(environment[key] == value for key, value in system.items())
+assert 'build-sdk' not in environment['PATH'] and 'OPENMS_DATA_PATH' not in environment
+with patch.dict(installer.os.environ, environment, clear=True):
+    assert ntpath.expandvars(r'%SystemDrive%\ProgramData\Microsoft\Windows\Caches') == r'C:\ProgramData\Microsoft\Windows\Caches'
 
 # No native Windows API is mocked into success: these exercise the timing gate;
 # the actual EnumWindows/installed-process proof runs on the Windows runner.

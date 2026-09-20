@@ -609,7 +609,35 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
         Ok(_) => return refuse("the tool's effective config is not a JSON object".into()),
         Err(e) => return refuse(e),
     };
-    let config = build_config(&reference, &params.config);
+    let mut config = build_config(&reference, &params.config);
+    // Bind the run to the same complete directory the readiness check reports.
+    // An explicit incomplete directory must never fall back to bundled models.
+    let model_dir = if params.mode == Mode::Generate || params.mode == Mode::Tune || params.tune {
+        let heads = if params.mode == Mode::Generate { None } else {
+            Some(match params.tuning.get("tune_heads").and_then(Value::as_str).unwrap_or("both") {
+                "rt" => vec!["rt".into()], "ccs" => vec!["ccs".into()], _ => vec!["rt".into(), "ccs".into()],
+            })
+        };
+        let selected = match models(app.clone(), params.model_dir.clone(), heads) {
+            Ok(status) if status.missing.is_empty() => status.dir,
+            Ok(status) => return refuse(format!("missing models in the selected directory: {}", status.missing.join(", "))),
+            Err(error) => return refuse(error),
+        };
+        let Some(selected) = selected else { return refuse("no model directory found".into()); };
+        let selected = match std::fs::canonicalize(&selected) {
+            Ok(path) => path,
+            Err(error) => return refuse(format!("cannot resolve model directory {selected}: {error}")),
+        };
+        if params.mode == Mode::Generate {
+            // Effective generation defaults contain resolved model paths. Replace
+            // them rather than letting stale/imported paths override the picker.
+            // Explicit file paths also stop the CLI's per-head fallback search.
+            for (key, file) in ["rt_model", "ms2_model", "ccs_model"].into_iter().zip(MODEL_FILES) {
+                config.insert(key.into(), Value::String(selected.join(file).display().to_string()));
+            }
+        }
+        Some(selected)
+    } else { None };
 
     // The config goes to the child as a FILE. Two reasons: the tool takes it
     // that way and embeds it verbatim in the Parquet output as the recipe, and
@@ -642,8 +670,8 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
     }
     cmd.args(training_args);
     apply_env(&mut cmd, &r);
-    if let Some(d) = params.model_dir.as_deref().filter(|d| !d.trim().is_empty()) {
-        cmd.env("DIALIBGEN_MODEL_DIR", d.trim());
+    if let Some(directory) = model_dir {
+        cmd.env("DIALIBGEN_MODEL_DIR", directory);
     }
 
     let mut child = match cmd.spawn() {
@@ -979,7 +1007,7 @@ if [ "$1" = --help ]; then echo 'DIALibGen Version: 0.11.0'; exit 0; fi
 if [ "$1" = -write_ini ]; then cp "$work/schema.ini" "$2"; exit 0; fi
 if [ "$3" = -write_config ]; then
   if [ -f "$work/fail-config" ]; then echo 'config failed' >&2; exit 12; fi
-  printf '{"instrument":"QE","nce":30,"precursor_charges":[2,3],"requested_mode":"%s"}' "$2" > "$4"
+  printf '{"instrument":"QE","nce":30,"precursor_charges":[2,3],"requested_mode":"%s","rt_model":"/stale/rt.onnx","ms2_model":"/stale/ms2.onnx","ccs_model":"/stale/ccs.onnx"}' "$2" > "$4"
   exit 0
 fi
 printf '%s\n' "$@" > "$work/argv.txt"
@@ -1000,6 +1028,7 @@ printf 'library' > "$out"
         std::fs::write(dir.path().join("schema.ini"), TOPP_INI).unwrap();
         let _restore = RestoreEnv("DIALIBGEN_BIN", std::env::var_os("DIALIBGEN_BIN"));
         let _restore_models = RestoreEnv("DIALIBGEN_MODEL_DIR", std::env::var_os("DIALIBGEN_MODEL_DIR"));
+        let _restore_data = RestoreEnv("OPENMS_DATA_PATH", std::env::var_os("OPENMS_DATA_PATH"));
         std::env::set_var("DIALIBGEN_BIN", &resolved.bin);
         let app = mock_builder().manage(RunManager::default())
             .invoke_handler(tauri::generate_handler![probe, models, default_config, tuning_options, run, cancel, read_config, write_config])
@@ -1048,13 +1077,19 @@ printf 'library' > "$out"
         assert!(invoke("read_config", serde_json::json!({"path":dir.path().join("missing.json")})).is_err());
         let output = dir.path().join("output with spaces.tsv");
         let mut params = serde_json::json!({"in":"-fasta with spaces","out":output,
-            "threads":3,"modelDir":model_dir,"config":{"instrument":"Lumos","nce":null,"unknown":"drop"}});
+            "threads":3,"modelDir":model_dir,"config":{"instrument":"Lumos","nce":null,"unknown":"drop","rt_model":"/imported/rt.onnx","ms2_model":"/imported/ms2.onnx","ccs_model":"/imported/ccs.onnx"}});
         for (key, value, reason) in [("in", "", "required"), ("out", "output.TSV", "must end")] {
             let mut invalid = params.clone(); invalid[key] = value.into();
             let result = invoke("run", serde_json::json!({"params":invalid})).unwrap();
             assert_eq!(result["started"], false);
             assert!(result["reason"].as_str().unwrap().contains(reason));
         }
+        let mut missing_model = params.clone();
+        missing_model["modelDir"] = incomplete.display().to_string().into();
+        assert_eq!(invoke("run", serde_json::json!({"params":missing_model})).unwrap()["started"], false);
+        std::fs::remove_file(model_dir.join(MODEL_FILES[2])).unwrap();
+        assert_eq!(invoke("run", serde_json::json!({"params":params})).unwrap()["started"], false);
+        std::fs::write(model_dir.join(MODEL_FILES[2]), "model").unwrap();
         let calls_before = std::fs::read(dir.path().join("calls.txt")).unwrap();
         std::fs::write(&output, "keep existing library").unwrap();
         let result = invoke("run", serde_json::json!({"params":params})).unwrap();
@@ -1089,18 +1124,55 @@ printf 'library' > "$out"
         let done = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(done, serde_json::json!({"ok":true,"code":0,"bytes":7}));
         assert_eq!(std::fs::read_to_string(&output).unwrap(), "library");
-        assert_eq!(read_config(dir.path().join("received.json").display().to_string()).unwrap(), picked);
+        let received = read_config(dir.path().join("received.json").display().to_string()).unwrap();
+        assert_eq!(received["instrument"], "Lumos");
+        assert!(received.get("nce").is_none());
+        assert!(received.get("unknown").is_none());
+        for (key, file) in ["rt_model", "ms2_model", "ccs_model"].into_iter().zip(MODEL_FILES) {
+            assert_eq!(received[key], model_dir.join(file).canonicalize().unwrap().display().to_string());
+        }
         let argv = std::fs::read_to_string(dir.path().join("argv.txt")).unwrap();
         let args: Vec<_> = argv.lines().collect();
         assert_eq!(&args[..4], &["-mode", "generate", "-in", "./-fasta with spaces"]);
         assert_eq!(&args[args.len()-2..], &["-threads", "3"]);
-        assert_eq!(std::fs::read_to_string(dir.path().join("model-env.txt")).unwrap(), model_dir.display().to_string());
+        assert_eq!(std::fs::read_to_string(dir.path().join("model-env.txt")).unwrap(), model_dir.canonicalize().unwrap().display().to_string());
         let temporary = std::fs::read_to_string(dir.path().join("config-path.txt")).unwrap();
         assert!(!Path::new(&temporary).exists());
         let mut lines: Vec<_> = logs.try_iter().collect(); lines.sort();
         assert_eq!(lines, ["stderr log", "stdout log"]);
         assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
         assert_eq!(invoke("cancel", serde_json::json!({})).unwrap()["cancelled"], false);
+
+        // Readiness may choose a complete data-directory fallback after an
+        // incomplete environment override. Launch must use that exact choice.
+        let data = dir.path().join("fallback data");
+        let fallback_models = data.join("models");
+        std::fs::create_dir_all(&fallback_models).unwrap();
+        for file in MODEL_FILES { std::fs::write(fallback_models.join(file), "fallback model").unwrap(); }
+        std::env::set_var("DIALIBGEN_MODEL_DIR", &incomplete);
+        std::env::set_var("OPENMS_DATA_PATH", &data);
+        assert_eq!(invoke("models", serde_json::json!({})).unwrap()["dir"], fallback_models.display().to_string());
+        for mode in ["generate", "tune"] {
+            let mut fallback = params.clone();
+            fallback["mode"] = mode.into();
+            fallback["modelDir"] = Value::Null;
+            fallback["out"] = dir.path().join(format!("fallback-{mode}.tsv")).display().to_string().into();
+            if mode == "tune" {
+                fallback["in"] = "library.tsv".into();
+                fallback["ids"] = "report.parquet".into();
+                fallback["config"] = serde_json::json!({});
+            }
+            assert_eq!(invoke("run", serde_json::json!({"params":fallback})).unwrap()["started"], true);
+            assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap()["ok"], true);
+            assert_eq!(std::fs::read_to_string(dir.path().join("model-env.txt")).unwrap(), fallback_models.canonicalize().unwrap().display().to_string());
+            if mode == "generate" {
+                let config = read_config(dir.path().join("received.json").display().to_string()).unwrap();
+                for (key, file) in ["rt_model", "ms2_model", "ccs_model"].into_iter().zip(MODEL_FILES) {
+                    assert_eq!(config[key], fallback_models.join(file).canonicalize().unwrap().display().to_string());
+                }
+            }
+        }
+        std::env::set_var("DIALIBGEN_MODEL_DIR", &model_dir);
 
         for mode in ["refine", "tune"] {
             let trained = serde_json::json!({"mode":mode,"in":"-library with spaces.tsv", "ids":"-force.parquet",

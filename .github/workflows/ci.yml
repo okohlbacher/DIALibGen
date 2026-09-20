@@ -711,10 +711,10 @@ jobs:
             export APPLE_ID="$MACOS_APPLE_ID" APPLE_PASSWORD="$MACOS_NOTARY_PASSWORD" \
               APPLE_TEAM_ID="$MACOS_TEAM_ID"
           fi
-          # Linux ships only DEB and AppImage; do not build an unused RPM.
+          # DEB keeps the complete resources; AppImage collects its GUI dependencies separately.
           # Positional arguments allow an empty list under macOS Bash 3.2 + nounset.
           set --
-          if [ "$RUNNER_OS" = "Linux" ]; then set -- --bundles "deb,appimage"; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then set -- --bundles deb; fi
           # Keep verbose bundler diagnostics. Retry once after detaching transient DMG mounts.
           npm run tauri build -- "$@" || {
             echo "::warning::tauri build failed -- retrying once, verbosely"
@@ -724,6 +724,12 @@ jobs:
             fi
             npm run tauri build -- --verbose "$@"
           }
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # linuxdeploy recursively scans usr/lib, including resource subdirectories.
+            # Keep the private CLI out of that scan so its Conda libraries cannot replace GTK's.
+            npm run tauri -- bundle --bundles appimage \
+              --config '{"bundle":{"resources":["resources/third-party-licenses"]}}'
+          fi
 
       - name: Collect desktop corresponding sources
         if: steps.pkg.outputs.gui == 'true'
@@ -768,6 +774,29 @@ jobs:
           APPDIR="$PWD/gui/src-tauri/target/release/bundle/appimage/DIALibGen.AppDir"
           APPIMAGE="$PWD/dist-bundles/DIALibGen-gui-${{ matrix.name }}.AppImage"
           test -d "$APPDIR" && test -f "$APPIMAGE"
+          CLI_RESOURCES="$APPDIR/usr/lib/DIALibGen/resources/dialibgen"
+          test ! -e "$CLI_RESOURCES" \
+            || { echo "::error::private CLI resources were present during linuxdeploy's scan"; exit 1; }
+          mkdir -p "$CLI_RESOURCES"
+          cp -a stage/. "$CLI_RESOURCES/"
+          diff --no-dereference --brief --recursive stage "$CLI_RESOURCES"
+
+          # The standalone output plugin only packs AppDir; invoking linuxdeploy again
+          # would flatten the private CLI libraries into the GUI's dependency directory.
+          PACKER="$HOME/.cache/tauri/linuxdeploy-plugin-appimage.AppImage"
+          test -x "$PACKER" \
+            || { echo "::error::the cached standalone AppImage output plugin is missing"; exit 1; }
+          PACKER_CHECKSUM="$PWD/corresponding-sources/build-instructions/appimage-output-plugin.sha256"
+          sha256sum "$PACKER" > "$PACKER_CHECKSUM"
+          repack() {
+            sha256sum --check "$PACKER_CHECKSUM"
+            rm -f "$APPIMAGE"
+            ARCH="$(uname -m)" OUTPUT="$APPIMAGE" APPIMAGE_EXTRACT_AND_RUN=1 \
+              "$PACKER" --appimage-extract-and-run --appdir "$APPDIR"
+            test -s "$APPIMAGE"
+            diff --no-dereference --brief --recursive stage "$CLI_RESOURCES"
+          }
+          repack
           python3 .github/appimage-helper-providers.py \
             --appdir "$APPDIR" --appimage "$APPIMAGE" --tools "$HOME/.cache/tauri" \
             --output corresponding-sources/appimage-helper-providers.json
@@ -778,15 +807,10 @@ jobs:
             --providers corresponding-sources/appimage-helper-providers.json \
             --sources corresponding-sources \
             --source-asset "DIALibGen-sources-${{ matrix.name }}.json" --prepare-notices
-          # Keep the same system toolchain environment used for the first bundle.
-          PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
-          export PATH
-          # The locked CLI rebundles the existing binary with the exact discovered notices.
-          (cd gui && npm run tauri -- bundle --bundles appimage)
-          shopt -s nullglob
-          images=(gui/src-tauri/target/release/bundle/appimage/*.AppImage)
-          [ "${#images[@]}" -eq 1 ] || { echo "::error::expected one rebuilt AppImage"; exit 1; }
-          cp "${images[0]}" "$APPIMAGE"
+          # Add the exact discovered notices without another dependency scan.
+          cp -a gui/src-tauri/resources/third-party-licenses/appimage \
+            "$APPDIR/usr/lib/DIALibGen/resources/third-party-licenses/"
+          repack
           python3 .github/appimage-helper-providers.py \
             --appdir "$APPDIR" --appimage "$APPIMAGE" --tools "$HOME/.cache/tauri" \
             --output corresponding-sources/appimage-helper-providers.json
@@ -797,7 +821,7 @@ jobs:
             --providers corresponding-sources/appimage-helper-providers.json \
             --sources corresponding-sources \
             --source-asset "DIALibGen-sources-${{ matrix.name }}.json"
-          # Verify the CLI after linuxdeploy has changed its binary and library RPATHs.
+          # Exercise the unchanged private CLI in the verified final AppImage payload.
           "$MAMBA_ROOT_PREFIX/envs/dialibgen/bin/python" .github/release-smoke.py \
             "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
             --bare --output smoke-appimage
@@ -937,6 +961,8 @@ jobs:
             corresponding-sources/appimage/*.json
             corresponding-sources/appimage/*.txt
             corresponding-sources/appimage-helper-providers.json
+            corresponding-sources/build-instructions/appimage-output-plugin.sha256
+            dist-bundles/*.AppImage
             gui/src-tauri/target/release/bundle/appimage/*.AppImage
 
       # Remove the temporary keychain even after an earlier failure.

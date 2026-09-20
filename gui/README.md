@@ -32,8 +32,8 @@ option. The CLI refuses combinations that would mix RT units.
 ## Fine-tuning
 
 1. Select Fine-tune, an input library, a single-run DIA-NN report and a new output.
-2. Choose RT, CCS or both heads. Leave the model directory blank for bundled
-   models, or choose a directory containing the selected heads' ONNX files.
+2. Choose RT, CCS or both heads. Leave the model directory blank for discovered
+   models (bundled in releases), or choose a directory containing the selected heads' ONNX files.
 3. Set the training recipe. Controls include observation filters, protein
    cohorts, learning rate, epochs, batch size, stopping rules, device and seed.
    Training threads are separate from inference threads.
@@ -58,6 +58,10 @@ Each mode retains its own settings. Presets and saved desktop JSON include the
 selected mode and training recipe. Reopen these files in the desktop app; they
 are not the CLI's plain `-config` files. Plain CLI JSON can also be loaded for
 the selected mode, and older generation presets remain usable.
+
+The desktop uses the model directory shown in the form for every selected
+head. Imported generation JSON's individual model paths are replaced by that
+directory's models. Use the CLI when models must come from different directories.
 
 Parquet includes provenance. Refinement and tuning also write a `.refine.json`
 sidecar beside the library. Retained tuned models have `.tune.json` and

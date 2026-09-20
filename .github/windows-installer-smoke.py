@@ -90,6 +90,17 @@ def wait_for_gui_window(process, find_window, timeout=60, stable_seconds=3):
     raise RuntimeError('installed GUI did not keep a visible DIALibGen main window open')
 
 
+def gui_environment(gui):
+    # Windows shell/WebView cache paths expand these OS variables. Missing
+    # SystemDrive creates a literal %SystemDrive% directory beneath the cwd.
+    env = {key: os.environ[key] for key in ('SystemDrive', 'SystemRoot', 'WINDIR', 'ProgramData',
+           'ALLUSERSPROFILE', 'TEMP', 'TMP', 'COMSPEC', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+           'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432') if key in os.environ}
+    env['PATH'] = str(gui.parent) + os.pathsep + str(Path(os.environ['SystemRoot']) / 'System32')
+    env['OPENMS_DISABLE_UPDATE_CHECK'] = 'ON'
+    return env
+
+
 def exercise_gui(gui, log):
     # Native window ownership excludes another single-instance process and
     # WebView2 helper processes. This checks startup, not frontend rendering.
@@ -131,13 +142,9 @@ def exercise_gui(gui, log):
             raise ctypes.WinError(ctypes.get_last_error())
         return windows[0] if windows else None
 
-    env = {key: os.environ[key] for key in ('SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC',
-           'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432')
-           if key in os.environ}
-    env['PATH'] = str(gui.parent) + os.pathsep + str(Path(os.environ['SystemRoot']) / 'System32')
-    env['OPENMS_DISABLE_UPDATE_CHECK'] = 'ON'
     with log.open('w', encoding='utf-8') as output:
-        process = subprocess.Popen([str(gui)], cwd=gui.parent, env=env, stdout=output, stderr=subprocess.STDOUT)
+        process = subprocess.Popen([str(gui)], cwd=gui.parent, env=gui_environment(gui),
+                                   stdout=output, stderr=subprocess.STDOUT)
         output.write(f'launched installed GUI: {gui}; pid={process.pid}\n'); output.flush()
         try:
             window = wait_for_gui_window(process, find_window)

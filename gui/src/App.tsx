@@ -25,6 +25,8 @@ export function stripPrivate(v: Values): Values {
 function toolConfig(v: Values): Values {
   const config = stripPrivate(v)
   if (config.nce == null) delete config.nce
+  // The desktop's checked directory owns these paths, including native imports.
+  for (const key of ['rt_model', 'ms2_model', 'ccs_model']) delete config[key]
   return config
 }
 
@@ -188,7 +190,7 @@ export default function App(): JSX.Element {
     try {
       if (!await window.dialibgen.saveLast(snapshot())) throw new Error('could not save settings; check that the app config directory is writable')
       const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out,
-        config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || null : null, threads,
+        config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
         ...(mode !== 'generate' ? { ids, ...(outReport ? { outReport } : {}) } : {}),
         ...(usesTuning ? { tuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
       if (!result.started) { setRunning(false); setOutcome({ ok: false, text: result.reason ?? 'could not start' }) }

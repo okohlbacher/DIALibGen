@@ -4,11 +4,11 @@ mod settings;
 use dialibgen::RunManager;
 use tauri::{Manager, WindowEvent};
 
-fn on_run_event<R: tauri::Runtime>(app: &tauri::AppHandle<R>, event: tauri::RunEvent) {
+fn on_run_event(state: &RunManager, event: tauri::RunEvent) {
     // Application Quit can bypass window destruction; finish cleanup before
     // Tauri exits the process and drops the worker threads.
     if let tauri::RunEvent::Exit = event {
-        dialibgen::shutdown(&app.state::<RunManager>());
+        dialibgen::shutdown(state);
     }
 }
 
@@ -50,7 +50,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(on_run_event);
+        .run(|app, event| on_run_event(&app.state::<RunManager>(), event));
 }
 
 #[cfg(test)]
@@ -58,11 +58,10 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
-    use tauri::test::{mock_builder, mock_context, noop_assets};
 
     #[test]
     fn application_exit_reaps_the_child_and_removes_its_config_without_a_window_event() {
-        let app = mock_builder().manage(RunManager::default()).build(mock_context(noop_assets())).unwrap();
+        let state = RunManager::default();
         #[cfg(windows)]
         let child = Command::new("powershell.exe")
             .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
@@ -74,19 +73,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.json");
         std::fs::write(&config, "{}").unwrap();
-        *app.state::<RunManager>().current.lock().unwrap() = Some(dialibgen::CurrentRun {
+        *state.current.lock().unwrap() = Some(dialibgen::CurrentRun {
             run_id: 1, child: child.clone(), config_dir: Some(dir),
         });
 
-        on_run_event(app.handle(), tauri::RunEvent::Ready);
+        on_run_event(&state, tauri::RunEvent::Ready);
         assert!(child.lock().unwrap().try_wait().unwrap().is_none());
         assert!(config.exists());
-        on_run_event(app.handle(), tauri::RunEvent::Exit);
+        on_run_event(&state, tauri::RunEvent::Exit);
         assert!(!child.lock().unwrap().try_wait().unwrap().unwrap().success());
-        assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
+        assert!(state.current.lock().unwrap().is_none());
         assert!(!config.parent().unwrap().exists());
         // A window-destruction callback and app-exit callback may both fire.
-        on_run_event(app.handle(), tauri::RunEvent::Exit);
-        assert!(app.state::<RunManager>().current.lock().unwrap().is_none());
+        on_run_event(&state, tauri::RunEvent::Exit);
+        assert!(state.current.lock().unwrap().is_none());
     }
 }

@@ -13,7 +13,9 @@
 #include <odia/LibraryRefiner.h>
 
 #include <arrow/api.h>
+#include <arrow/compute/api.h>
 #include <arrow/io/file.h>
+#include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 
 #include <chrono>
@@ -209,9 +211,33 @@ namespace
     };
     RefineParams p; p.write_rt = false; p.write_intensity = true; p.intensity_min_fragments = 2;
     RefineStats old_stats, new_stats;
+    std::cerr << "report layouts: writing DIA-NN 1.9 fixture\n";
     write(false);
+    {
+      std::cerr << "report layouts: opening Arrow input\n";
+      auto input = arrow::io::ReadableFile::Open(path.string());
+      if (!input.ok()) { throw std::runtime_error(input.status().ToString()); }
+      std::cerr << "report layouts: opening Parquet reader\n";
+      auto reader = parquet::arrow::OpenFile(*input, arrow::default_memory_pool());
+      if (!reader.ok()) { throw std::runtime_error(reader.status().ToString()); }
+      std::shared_ptr<arrow::Table> table;
+      std::cerr << "report layouts: reading Parquet table\n";
+      status((*reader)->ReadTable(&table));
+      std::cerr << "report layouts: casting numeric ChunkedArray\n";
+      auto numbers = arrow::compute::Cast(table->GetColumnByName("Precursor.Charge"), arrow::float64());
+      if (!numbers.ok()) { throw std::runtime_error(numbers.status().ToString()); }
+      check(numbers->chunked_array()->length() == 5, "numeric cast preserves all rows");
+      std::cerr << "report layouts: casting string ChunkedArray\n";
+      auto strings = arrow::compute::Cast(table->GetColumnByName("Modified.Sequence"), arrow::utf8());
+      if (!strings.ok()) { throw std::runtime_error(strings.status().ToString()); }
+      check(strings->chunked_array()->length() == 5, "string cast preserves all rows");
+      std::cerr << "report layouts: Arrow input and casts passed\n";
+    }
+    std::cerr << "report layouts: reading DIA-NN 1.9 fixture\n";
     const auto old_obs = LibraryRefiner::readObservations(path.string(), p, old_stats);
+    std::cerr << "report layouts: writing DIA-NN 2 fixture\n";
     write(true);
+    std::cerr << "report layouts: reading DIA-NN 2 fixture\n";
     const auto new_obs = LibraryRefiner::readObservations(path.string(), p, new_stats);
     check(new_obs.size() == 2 && new_obs.count(LibraryRefiner::key("ENTRAPK", 2)) == 1,
       "DIA-NN 2 applies the same gates to target and ENTRAP proteins; rejects q, NaN and decoy rows");
@@ -261,11 +287,15 @@ namespace
 
 int main()
 {
+  std::cerr << "intensity_match: parser\n";
   parser();
+  std::cerr << "intensity_match: replacement and reranking\n";
   replaces_and_reranks();
+  std::cerr << "intensity_match: preservation and refusal guards\n";
   no_restrict_preserves_counts();
   mz_mismatch_throws();
   mixed_provenance_refused();
+  std::cerr << "intensity_match: report layouts\n";
   report_layouts();
   if (failures) { std::cerr << failures << " failure(s)\n"; return 1; }
   std::cout << "intensity_match: ok\n";

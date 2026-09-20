@@ -1,28 +1,14 @@
 name: build
 
-# Linux x64/arm64 and macOS x64/arm64, tests included.
-#
-# OpenMS comes from bioconda, installed in seconds. Windows is a separate
-# workflow (windows.yml) for the unrelated reason that bioconda has no win-64
-# package and OpenMS has to be built from source there.
-#
-# The gates that matter are at the END, against the INSTALLED tree rather than
-# the build tree: a tool that links OpenMS but is not part of it gets OpenMS's
-# defaults for its version, its update check and its data lookup, and all three
-# are wrong for it. Every one of those has shipped past a green pipeline in a
-# sibling project, found only by installing the artefact and typing a command.
+# Linux/macOS release builds use bioconda OpenMS; Windows builds it separately.
+# Validate installed and relocated bundles, including all three modes.
 
 on:
   push:
     branches: [main]
     tags: ['v*']
   pull_request:
-  # gui_dry_run exists because every desktop-app step below runs ONLY on a v*
-  # tag, so its first execution would otherwise be a real release -- the one run
-  # where a mistake is expensive, and one that cannot be repaired by fixing main
-  # (a tag build reruns against the tag's tree). Dispatch with the switch on to
-  # build the app without cutting a tag; nothing is uploaded to a release in
-  # that mode, the bundle comes back as a workflow artifact instead.
+  # Manual dry runs validate CLI/desktop packaging without publishing a release.
   workflow_dispatch:
     inputs:
       gui_dry_run:
@@ -35,9 +21,7 @@ on:
         default: false
 
 concurrency:
-  # A dispatch gets its OWN group. Sharing one with the branch means the next
-  # push to main cancels a dry run someone is watching -- and, on a leg that
-  # builds OpenMS, poisons the build cache mid-write.
+  # Give manual dispatches independent concurrency groups.
   group: ci-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
   cancel-in-progress: true
 
@@ -62,19 +46,14 @@ jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    # write, not the default: needed only by the tag-triggered release upload.
-    # Safe on pull_request runs, including from forks -- GitHub issues a
-    # read-only token for those regardless of what is declared here.
+    # Release asset uploads require write permission; fork PR tokens remain read-only.
     permissions:
       contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          # `extra` carries per-platform conda packages on top of the shared
-          # set. macOS asks for llvm-openmp explicitly because Apple's clang
-          # ships no OpenMP runtime; on Linux OpenMP comes from the gcc
-          # toolchain and adding llvm-openmp risks clashing with libgomp.
+          # macOS needs llvm-openmp; Linux uses the GCC OpenMP runtime.
           - { name: linux-x64,   runner: ubuntu-24.04,     extra: "libtorch=2.10.0=cpu_generic* libblas=*=*openblas", wheel: false }
           - { name: linux-arm64, runner: ubuntu-24.04-arm, extra: "libblas=*=*openblas", wheel: true }
           - { name: macos-arm64, runner: macos-14,         extra: "llvm-openmp libtorch=2.10.0=cpu*", wheel: false }
@@ -83,27 +62,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # libboost-devel and qt6-main are dependencies OpenMSConfig.cmake needs
-      # but the openms package does not pull in:
-      #   libboost-devel  OpenMS/config.h is public and #includes
-      #                   <boost/current_function.hpp>, so every downstream
-      #                   translation unit needs Boost headers
-      #   qt6-main        OpenMSConfig.cmake does find_dependency(Qt6)
-      #
-      # python/numpy/pyarrow/onnxruntime are for the TESTS, not the tool: the
-      # C++ encoder is checked against an independent Python reference written
-      # from the same spec but from different inputs, so agreement is evidence
-      # the spec was implemented rather than that one copied the other. Without
-      # them those tests do not fail -- they are simply never added, which is
-      # the quiet way a test suite shrinks.
-      #
-      # libarrow is deliberately NOT pinned: openms pins it itself, and this
-      # project is built against whatever that resolves to. That is the point of
-      # having dropped the Arrow >= 23 floor to the 19 the code actually needs.
-      #
-      # create-args is a FOLDED scalar: every line is joined into one command
-      # line, so a `#` comment inside it becomes a literal argument. All prose
-      # belongs up here.
+      # Boost headers and Qt are required by OpenMS public interfaces.
+      # Python dependencies are only for reference tests, whose registration is checked.
+      # Let OpenMS constrain Arrow. Keep comments outside the folded create-args scalar.
       - name: Install OpenMS, ONNX Runtime and the toolchain
         uses: mamba-org/setup-micromamba@v2
         with:
@@ -143,9 +104,8 @@ jobs:
           init-shell: bash
           cache-environment: true
 
-      # Use the official ARM CPU wheel's C++ SDK outside the conda solve.
-      # Parity and optimizer tests below must pass before this can be released.
-      # The other legs retain the tested OpenBLAS builds (no MKL dispatch libs).
+      # ARM uses the official wheel C++ SDK; other platforms use tested OpenBLAS builds.
+      # Every release must pass both prediction parity and optimizer tests.
       - name: Restore the ARM libtorch SDK
         if: matrix.wheel
         id: torch-cache
@@ -173,8 +133,7 @@ jobs:
             echo "TORCH_ROOT=$torch_root"
             echo "TORCH_DIR=$torch_root/share/cmake/Torch"
           } >> "$GITHUB_ENV"
-          # Use one libgomp.so.1 across OpenMS and the ARM SDK. Both have the
-          # ordinary SONAME, so conda's toolchain runtime wins consistently.
+          # Use conda's libgomp.so.1 consistently across OpenMS and the ARM SDK.
           echo "LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$torch_root/lib" >> "$GITHUB_ENV"
 
       # Pinned stock models are required for prediction and training tests.
@@ -195,9 +154,7 @@ jobs:
             curl -fsSL --retry 3 -o "models/$1" "http://archive.openms.de/openms/models/$1"
             echo "$2  models/$1" | shasum -a 256 -c -
           }
-          # OpenMS lists the files as ccs, ms2, rt and the hashes in that same
-          # order; pairing them by eye got rt and ccs swapped, and the check
-          # below is the only reason that was noticed rather than shipped.
+          # Keep model filenames and pinned hashes paired in ccs, ms2, rt order.
           fetch peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
           fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
           fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
@@ -206,10 +163,7 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          # QT_HOST_PATH: conda-forge's Qt6 for aarch64 and osx-arm64 is marked
-          # as a cross-compiled Qt, so Qt6Config.cmake refuses to load without a
-          # host Qt. This build is native, so the same prefix IS the host Qt.
-          # x64 is unaffected, which is why it only shows up on the ARM legs.
+          # Native ARM conda Qt packages require QT_HOST_PATH to point to the same prefix.
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
@@ -239,10 +193,7 @@ jobs:
           for name in ("tune_parity", "tune_e2e"):
               assert name in tests and tests[name].find("skipped") is None, f"{name} must pass, not skip"
           PYTEST
-          # A test that is never ADDED does not fail -- it disappears. The
-          # prediction tier is gated on the models being present, which is
-          # exactly the condition that used to be false everywhere, so assert
-          # the gate opened rather than trusting a green run.
+          # Require model-dependent tests to be registered; missing tests cannot pass.
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered -- models missing?"; exit 1; }
           ctest --test-dir build -N | grep -q "e2e" \
@@ -305,15 +256,7 @@ jobs:
         shell: bash -el {0}
         run: cmake --install build
 
-      # ---------------------------------------------------------------------
-      # The standalone-tool gates, against the INSTALLED tree.
-      #
-      # `env -i` is the load-bearing part: a runner that still has the build
-      # tree on PATH, or OPENMS_DATA_PATH set, will happily pass a binary that
-      # cannot stand on its own. OPENMS_DATA_PATH and the conda lib path are
-      # passed back explicitly -- naming them is the difference between "the
-      # binary needs these" and "the binary happened to inherit these".
-      # ---------------------------------------------------------------------
+      # Installed-tree checks use an empty environment with explicit runtime dependencies.
       - name: Verify installed CMake libraries
         shell: bash -el {0}
         run: |
@@ -331,15 +274,11 @@ jobs:
           BIN="$PWD/stage/bin/DIALibGen"
           test -x "$BIN" || { echo "::error::no installed binary at $BIN"; exit 1; }
 
-          # The data tables must be INSIDE the install, at the path the tool
-          # searches. Before this they resolved to an absolute path in the
-          # source tree, so an installed or relocated binary found nothing.
+          # Require data at the path resolved relative to the installed executable.
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
-          # The three models must be IN the install tree. They are bundled from
-          # 0.10.1, and an install that silently lacks them is an install that
-          # cannot predict anything.
+          # Require all three bundled prediction models.
           for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
             test -s "$PWD/stage/share/DIALibGen/models/$m" \
               || { echo "::error::$m is not in the install tree"; exit 1; }
@@ -353,16 +292,13 @@ jobs:
             example/proteins.fasta
           bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
 
-      # End to end, against the INSTALLED binary and the real models: a FASTA in,
-      # a library out, in both formats. Everything above proves the tool starts
-      # and refuses bad input; this is the only step that proves it predicts.
+      # Generate both library formats using the installed binary and real models.
       - name: Build a real library
         shell: bash -el {0}
         run: |
           set -euo pipefail
           export OPENMS_DATA_PATH="$CONDA_PREFIX/share/OpenMS"
-          # No DIALIBGEN_MODEL_DIR: the installed tree carries the models now, and
-          # the point of this step is that the tool finds them by itself.
+          # Leave DIALIBGEN_MODEL_DIR unset to verify bundled-model discovery.
           export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$TORCH_ROOT/lib"
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
           BIN="$PWD/stage/bin/DIALibGen"
@@ -373,8 +309,7 @@ jobs:
           test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
           test -s out.tsv     || { echo "::error::no TSV library"; exit 1; }
 
-          # A library with no rows is not a library, and a Parquet that does not
-          # carry the recipe is the whole reason to prefer it over the TSV.
+          # Require nonempty Parquet output with embedded configuration.
           python - <<'PY'
           import pyarrow.parquet as pq, json, sys
           f = pq.ParquetFile("out.parquet")
@@ -389,16 +324,14 @@ jobs:
           for k in ("enzyme", "fixed_modifications", "schema_version"):
               if k not in cfg:
                   sys.exit(f"::error::the embedded recipe is missing {k!r}")
-          # One row per PRECURSOR: the compact schema carries the fragments as
-          # list columns, so this is not a transition count.
+          # Compact Parquet has one row per precursor and fragments in list columns.
           print(f"library: {n} precursors, recipe embedded ({len(cfg)} keys)")
           PY
 
           # The TSV is the DIA-NN dialect: a header and at least one row.
           rows=$(wc -l < out.tsv)
           [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
-          # The dotted spellings, which is what makes this the DIA-NN dialect
-          # rather than merely a table -- see DIANNLibraryFile::Columns.
+          # Require DIA-NN column spellings (DIANNLibraryFile::Columns).
           for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
                      Relative.Intensity Fragment.Type Protein.Group; do
             head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
@@ -410,19 +343,12 @@ jobs:
         shell: bash -el {0}
         run: python .github/release-smoke.py stage/bin/DIALibGen --output smoke-installed
 
-      # ---------------------------------------------------------------------
-      # Release. Everything below runs on a v* tag, or on a dispatch with
-      # cli_dry_run/gui_dry_run to exercise packaging before a tag depends on it.
-      # ---------------------------------------------------------------------
+      # Package on tags or manual dry runs; only tag events upload release assets.
       - name: Decide whether to package
         id: pkg
         shell: bash
         run: |
-          # event_name FIRST, and a dispatch never releases whatever ref it was
-          # selected against. Testing the ref first meant that dispatching this
-          # workflow with a TAG selected in the Actions UI took the release
-          # branch -- so the run whose entire purpose is to touch no release
-          # would have uploaded to the real one.
+          # Check event_name first so a manual dispatch against a tag cannot publish.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "gui=${{ inputs.gui_dry_run }}" >> "$GITHUB_OUTPUT"
@@ -437,30 +363,13 @@ jobs:
             printf '%s\n' package=false release=false gui=false >> "$GITHUB_OUTPUT"
           fi
 
-      # ---------------------------------------------------------------------
-      # macOS code signing and notarization. Entirely optional: with no
-      # MACOS_CERTIFICATE_BASE64 secret every step here is skipped and the macOS
-      # artefacts are ad-hoc signed exactly as they were, so forks and pull
-      # requests -- which cannot read secrets at all -- keep building.
-      #
-      # The secret NAMES and the notarization route are BALL's and FASTag's, not
-      # this repo's invention: one Developer ID Application certificate covers
-      # every app on the team, and ~/Documents/Admin/Software Signing supplies
-      # the same seven values to all three repos through its copy-secret.sh.
-      # Diverging here would mean a second set of names for one identity.
-      #
-      # Why it matters: an unsigned payload installed by a package manager
-      # carries a provenance record Gatekeeper refuses, clearing the quarantine
-      # attribute does not remove it, and Homebrew 6 dropped --no-quarantine --
-      # so the casks cannot work until this is on.
-      # ---------------------------------------------------------------------
+      # Developer ID signing and notarization require secrets.
+      # Forks and unsigned builds retain ad-hoc signing.
       - name: Decide whether to sign
         id: sign
         if: runner.os == 'macOS' && steps.pkg.outputs.package == 'true'
         shell: bash
-        # Mapped into env and gated on a step OUTPUT below. `secrets.*` in an
-        # `if:` is not merely ignored -- it makes the whole workflow invalid and
-        # every push returns a 0-job startup_failure.
+        # Map secrets through env; step conditions cannot refer directly to secrets.
         env:
           CERT: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
           NOTARY: ${{ secrets.MACOS_NOTARY_PASSWORD }}
@@ -475,17 +384,13 @@ jobs:
             exit 0
           fi
           echo "sign=true" >> "$GITHUB_OUTPUT"
-          # ALL THREE, not the password alone. Deciding on one of them exported
-          # the other two as set-but-empty to Tauri -- which is the exact trap
-          # documented twenty lines below, reintroduced here.
+          # Export notarization credentials only when all three values are present.
           if [ -n "$NOTARY" ] && [ -n "$NOTARY_ID" ] && [ -n "$NOTARY_TEAM" ]; then
             echo "notarize=true" >> "$GITHUB_OUTPUT"
           else
             [ -z "$NOTARY" ] || echo "::warning::MACOS_NOTARY_PASSWORD is set but MACOS_APPLE_ID/MACOS_TEAM_ID are not"
 
-            # Worth saying out loud: Gatekeeper refuses a signed-but-unnotarized
-            # build exactly as it refuses an unsigned one, so this half-state
-            # buys nothing.
+            # Report the incomplete signing/notarization configuration explicitly.
             echo "::warning::signing without notarizing -- Gatekeeper still refuses these"
             echo "notarize=false" >> "$GITHUB_OUTPUT"
           fi
@@ -503,13 +408,10 @@ jobs:
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: |
           set -euo pipefail
-          # The secret if it is there; otherwise generated, because it protects
-          # only a keychain that lives for one job on a runner that is then
-          # destroyed, and an empty password is worse than a random one.
+          # Use a random password when none is provided for this temporary keychain.
           KCPW="${MACOS_KEYCHAIN_PASSWORD:-$(uuidgen)}"
           echo "::add-mask::$KCPW"
-          # An ephemeral keychain, never the runner's login keychain: that one is
-          # locked, and importing into it waits on a prompt nobody can answer.
+          # Use an ephemeral keychain to avoid prompts from the locked login keychain.
           KC="$RUNNER_TEMP/dialibgen-signing.keychain-db"
           security create-keychain -p "$KCPW" "$KC"
           security set-keychain-settings -lut 21600 "$KC"
@@ -518,8 +420,7 @@ jobs:
           security import "$RUNNER_TEMP/cert.p12" -k "$KC" \
             -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12
           rm -f "$RUNNER_TEMP/cert.p12"
-          # Without the partition list codesign blocks on a GUI prompt and the
-          # job sits there producing no output until the timeout.
+          # Authorize codesign without an interactive keychain prompt.
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KCPW" "$KC" > /dev/null
           keychains=()
@@ -528,9 +429,7 @@ jobs:
           security list-keychain -d user -s "$KC" "${keychains[@]}"
           security default-keychain -d user -s "$KC"
 
-          # Read back what was actually imported and hold the secret to it. A
-          # MACOS_SIGNING_IDENTITY that disagrees with the certificate fails
-          # later, inside codesign, with a message that names neither.
+          # Check the configured identity against the imported certificate.
           IDENT=$(security find-identity -p codesigning -v "$KC" \
                     | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
           [ -n "$IDENT" ] || {
@@ -547,17 +446,8 @@ jobs:
           echo "MACOS_KEYCHAIN=$KC" >> "$GITHUB_ENV"
           echo "signing as: $IDENT"
 
-          # Tauri's own variable names, exported HERE and only here -- that is
-          # the whole point. Declaring them in the build step's `env:` instead
-          # does not work: GitHub sets an absent secret to the EMPTY STRING,
-          # which is still *set*, and Tauri tests presence rather than
-          # emptiness. An unsigned build then tried to sign and died with
-          # "failed to run command security import: failed to import keychain
-          # certificate". This step runs only when there is a certificate, so
-          # an unsigned build sees no such variables at all.
-          #
-          # The heredoc form because a base64 secret may arrive wrapped; the
-          # delimiter cannot occur in base64, which has no underscore.
+          # Export Tauri signing variables only when credentials exist; empty values count as set.
+          # A heredoc preserves wrapped base64 certificate data.
           {
             echo "APPLE_CERTIFICATE<<__ODIA_EOF__"
             printf '%s\n' "$MACOS_CERTIFICATE_BASE64"
@@ -574,42 +464,30 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
-      # The installed tree links libOpenMS, Arrow and onnxruntime out of the
-      # conda prefix by ABSOLUTE path, so it runs on this runner and nowhere
-      # else. Collecting the closure and rewriting the load paths to be relative
-      # is what turns it into something a user can unpack.
+      # Collect dependency libraries and rewrite load paths for a relocatable bundle.
       - name: Make the install tree portable
         if: steps.pkg.outputs.package == 'true'
-        # Bounded on purpose: everything here is seconds of real work, so a
-        # step that runs for twenty minutes is hung, not slow.
+        # Bound dependency collection to detect hung tools.
         timeout-minutes: 20
         shell: bash -el {0}
         run: |
           set -euo pipefail
+          # Source installs retain the SDK; portable applications carry only runtime files.
+          rm -rf stage/include stage/lib/cmake stage/lib/*.a stage/bin/dialibgen-fetch-models
           mkdir -p stage/lib
-          # The tool resolves share/OpenMS through OPENMS_DATA_PATH or the
-          # install prefix, and neither is where CMake thought it would be once
-          # the tree moves -- so carry OpenMS's own data inside the bundle.
+          # Bundle OpenMS data so relocated binaries do not require the build prefix.
           mkdir -p stage/share/OpenMS
           cp -R "$CONDA_PREFIX/share/OpenMS/." stage/share/OpenMS/
 
           if [ "$RUNNER_OS" = "macOS" ]; then
-            # An explicit otool/install_name_tool walk, NOT dylibbundler.
-            # dylibbundler failed twice here in two different ways: it hung for
-            # forty minutes on an interactive prompt, and with stdin closed it
-            # spun forever printing "libOpenMS.dylib does not exist. Try again"
-            # -- it cannot resolve the @rpath install names a conda build uses
-            # and asks a human where they are. Fifteen lines that resolve
-            # @rpath against a known prefix are easier to reason about than a
-            # tool whose failure mode is a question.
+            # Resolve conda @rpath dependencies explicitly with noninteractive system tools.
             copy_closure() {
               otool -L "$1" | tail -n +2 | awk '{print $1}' | while read -r dep; do
                 case "$dep" in
                   /usr/lib/*|/System/*) continue ;;
                 esac
                 base=$(basename "$dep")
-                # @rpath/@loader_path/@executable_path all resolve to the conda
-                # prefix here, which is where the build actually linked from.
+                # Resolve build-time loader-relative dependencies against their known prefixes.
                 src="$dep"
                 case "$dep" in
                   @*)
@@ -630,8 +508,7 @@ jobs:
               for dy in stage/lib/*.dylib; do copy_closure "$dy"; done
             done
 
-            # Rewrite every load command to the bundle-relative path, and give
-            # each library an id to match.
+            # Use bundle-relative load commands and library IDs.
             retarget() {
               otool -L "$1" | tail -n +2 | awk '{print $1}' | while read -r dep; do
                 case "$dep" in
@@ -647,15 +524,8 @@ jobs:
               install_name_tool -id "@executable_path/../lib/$(basename "$dy")" "$dy"
               retarget "$dy"
             done
-            # Editing a Mach-O invalidates its signature, and arm64 macOS
-            # REFUSES to load an invalidly-signed one -- so an ad-hoc
-            # re-signature is not optional cleanup, it is what makes the
-            # bundle runnable at all.
-            #
-            # With a Developer ID imported this is also the real signature: the
-            # hardened runtime (--options runtime) and a timestamp are both
-            # required for notarization, and every Mach-O in the payload needs
-            # them, not just the executable.
+            # Re-sign every modified Mach-O. Developer ID builds also require
+            # hardened runtime and timestamps for notarization.
             if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
               sign() { codesign --force --timestamp --options runtime \
                          --keychain "$MACOS_KEYCHAIN" --sign "$MACOS_SIGN_IDENTITY" "$@"; }
@@ -666,16 +536,8 @@ jobs:
             sign stage/bin/DIALibGen
             codesign --verify --strict --verbose=2 stage/bin/DIALibGen
           else
-            # patchelf plus a manual closure: ldd names everything the loader
-            # would open, minus the system libraries a distro certainly has.
-            #
-            # LD_LIBRARY_PATH is the load-bearing line. A conda library carries
-            # an RPATH like $ORIGIN/../lib, which resolves inside the conda
-            # prefix and NOT from stage/lib -- so ldd on a COPY reports its
-            # dependencies as "not found", the `=> /` filter drops them
-            # silently, and the closure stops one level in. That shipped a
-            # bundle missing libblas.so.3, and the only symptom was the
-            # portability check below.
+            # Resolve the complete dependency closure using the build runtime prefixes.
+            # Copied conda RPATHs alone do not resolve libraries from stage/lib.
             export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$TORCH_ROOT/lib"
             copy_closure() {
               local missing
@@ -689,8 +551,7 @@ jobs:
               done
             }
             copy_closure stage/bin/DIALibGen
-            # Iterate to a fixed point rather than a guessed depth: each round
-            # can pull in libraries whose own dependencies are not yet present.
+            # Repeat until no dependency adds another library.
             prev=0
             for _ in 1 2 3 4 5 6 7 8; do
               n=$(find stage/lib -type f | wc -l)
@@ -704,9 +565,7 @@ jobs:
             for so in stage/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" || true; done
           fi
 
-          # The load-bearing check, and the reason this step is not decorative:
-          # NOTHING from the build environment on the path. A bundle verified
-          # with the conda prefix still visible proves only that conda is there.
+          # Verify portability without build-environment paths.
           env -i HOME="$HOME" "$PWD/stage/bin/DIALibGen" --help > portable.txt 2>&1 \
             || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
           want=$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
@@ -715,15 +574,11 @@ jobs:
           test -s stage/share/DIALibGen/irt_standards.tsv
           test -s stage/share/DIALibGen/models/peptdeep_ms2_dynamic.onnx \
             || { echo "::error::the staged bundle carries no models"; exit 1; }
-          # unimod.xml, not just the directory: that one file is the whole of
-          # File::isOpenMSDataPath_, so this is the runtime test spelled here.
+          # OpenMS identifies its data directory by CHEMISTRY/unimod.xml.
           test -s stage/share/OpenMS/CHEMISTRY/unimod.xml \
             || { echo "::error::the staged tree is not a valid OpenMS data path"; exit 1; }
 
-          # --help loads neither ONNX Runtime nor Arrow and reads none of
-          # OpenMS's data tables, so it separates a startable bundle from an
-          # unstartable one and nothing more. Generate a real library from the
-          # bare tree: that is the claim the archive actually makes.
+          # Generate a real library to exercise models, Arrow and OpenMS data.
           env -i HOME="$HOME" \
               "$PWD/stage/bin/DIALibGen" \
               -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
@@ -732,20 +587,18 @@ jobs:
             || { echo "::error::the staged bundle produced an empty library"; exit 1; }
           echo "portable bundle ok: $(find stage/lib -name '*.so*' -o -name '*.dylib' | wc -l) libraries"
 
-      # notarytool takes a .zip, a .dmg or a .pkg and not a .tar.gz, so the
-      # staged tree is zipped for SUBMISSION only. That is not a workaround:
-      # notarization registers the code-directory hash of each signed binary
-      # with Apple, and the ticket then applies to those binaries in whatever
-      # container they arrive in.
-      #
-      # What a .tar.gz cannot have is a STAPLED ticket, so the first run of a
-      # quarantined copy checks with Apple over the network. The .dmg below is
-      # stapled and does not -- the one behavioural difference between the two
-      # downloads.
+      # Submit a ZIP for notarization; Apple records the signed code hashes.
+      # The distributed tarball cannot carry a stapled ticket.
       - name: Exercise all relocated modes in a bare environment
         if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
         run: |
+          if [ -e stage/include ] || [ -e stage/lib/cmake ] || [ -e stage/bin/dialibgen-fetch-models ]; then
+            echo "::error::the portable application contains development files"; exit 1
+          fi
+          if find stage/lib -type f \( -name '*.a' -o -name '*.lib' \) | grep -q .; then
+            echo "::error::the portable application contains development libraries"; exit 1
+          fi
           python .github/release-smoke.py stage/bin/DIALibGen --bare --output smoke-portable
           if find stage/lib -iname '*python*' | grep -q .; then
             echo "::error::the C++ release unexpectedly depends on Python"; exit 1
@@ -762,9 +615,7 @@ jobs:
         run: |
           set -euo pipefail
           ditto -c -k --keepParent stage "$RUNNER_TEMP/cli.zip"
-          # Through .github/notarize.sh, which fetches `notarytool log` when
-          # Apple says Invalid -- otherwise a rejection is a submission id and
-          # nothing else, and the reason costs another submission to find.
+          # The helper fetches the rejection log when notarization fails.
           bash .github/notarize.sh "$RUNNER_TEMP/cli.zip"
 
       - name: Package the CLI
@@ -772,43 +623,22 @@ jobs:
         shell: bash -el {0}
         run: tar -C stage -czf "DIALibGen-${{ matrix.name }}.tar.gz" .
 
-      # The desktop app, with that same portable tree as its bundled resources.
-      # Staged BEFORE the Tauri build, because tauri copies resources/ during
-      # the build: doing it afterwards produces an app whose resources are the
-      # empty skeleton, and every check that looks at the source tree passes.
-      # `bash`, NOT `bash -el`: the micromamba environment must not be active
-      # here, and its bin directory is scrubbed from PATH below for the same
-      # reason. cargo resolves its linker by PATH name, so with the conda
-      # toolchain in front it links with aarch64-conda-linux-gnu-ld -- which
-      # cannot resolve the SYSTEM webkit2gtk this app links against, and
-      # produces several hundred lines of undefined references to epoxy, gst
-      # and icu. Nothing in this step wants conda: it copies an already-built
-      # tree and runs node and cargo.
+      # Stage CLI resources before Tauri copies them. Use a non-login shell and
+      # remove conda from PATH so Cargo links against the system webview libraries.
       - name: Build the desktop app
         if: steps.pkg.outputs.gui == 'true'
-        # Tauri notarizes the .app inside this step, so it inherits Apple's queue
-        # and was the only long step here with no bound at all -- a stuck
-        # submission would have held a runner for the job's six-hour default.
+        # Allow for notarization latency while bounding the desktop build.
         timeout-minutes: 90
         shell: bash
-        # No `env:` block here on purpose -- the APPLE_* variables Tauri reads
-        # are exported by the certificate-import step above, which runs only
-        # when there is something to sign with. See the note there.
-        #
-        # Tauri staples the .app, NOT the .dmg -- it only signs the image. The
-        # image is notarized and stapled in a later step; `stapler validate` on
-        # a Tauri .dmg fails, which reads as a broken build and is not one.
+        # Tauri signing variables come only from the credential step.
+        # Tauri staples the app; the DMG is notarized and stapled separately below.
         run: |
           set -euo pipefail
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
           export PATH
           if [ "$RUNNER_OS" = "Linux" ]; then
             sudo apt-get update
-            # xdg-utils and file are for the BUNDLER, not the build: Tauri's
-            # AppImage step shells out to xdg-open and dies with
-            # "xdg-open binary not found". The x64 runner image happens to
-            # carry them and the arm64 one does not, which is the only reason
-            # this was an arm64-only failure.
+            # AppImage packaging requires xdg-utils and file on both Linux architectures.
             sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
               librsvg2-dev patchelf libgtk-3-dev xdg-utils file \
               desktop-file-utils
@@ -820,15 +650,7 @@ jobs:
             || { echo "::error::the CLI was not staged into the app's resources"; exit 1; }
           cd gui
           npm ci
-          # bundle_dmg.sh's own stderr is SWALLOWED by tauri unless --verbose is
-          # on, so its failure arrives as "error running bundle_dmg.sh" and
-          # nothing else -- which is how macos-x64 failed with no diagnosable
-          # cause while macos-arm64 built the same commit fine.
-          #
-          # One retry, verbose, after detaching any half-attached image: if this
-          # is the transient hdiutil/Finder failure the macOS runners are known
-          # for, the release survives it; if it is real, the reason is in the log
-          # instead of being lost a second time.
+          # Keep verbose bundler diagnostics. Retry once after detaching transient DMG mounts.
           npm run tauri build || {
             echo "::warning::tauri build failed -- retrying once, verbosely"
             if [ "$RUNNER_OS" = "macOS" ]; then
@@ -838,11 +660,7 @@ jobs:
             npm run tauri build -- --verbose
           }
 
-      # Renamed to FIXED names. Tauri spells them with its own version and
-      # architecture (DIALibGen_0.2.0_aarch64.dmg), which makes every
-      # URL that points at them -- the README's, and the Homebrew cask's --
-      # depend on Tauri's naming rather than on ours. A cask pins a digest to a
-      # URL, so a name that moves is a cask that 404s.
+      # Use stable asset names expected by the README and Homebrew casks.
       - name: Collect the desktop bundles
         if: steps.pkg.outputs.gui == 'true'
         shell: bash
@@ -857,15 +675,11 @@ jobs:
           done < <(find gui/src-tauri/target/release/bundle \
                      \( -name '*.dmg' -o -name '*.deb' -o -name '*.AppImage' \) -type f)
           ls -la dist-bundles
-          # A bundle step that produces nothing must fail here, not go unnoticed
-          # until a README link 404s.
+          # Fail if the desktop build produced no installer.
           [ "$n" -gt 0 ] \
             || { echo "::error::the desktop build produced no installer"; exit 1; }
 
-      # Tauri notarized and stapled the .app INSIDE the image; the image itself
-      # it only signed. Without this the .dmg carries no ticket of its own, so
-      # Gatekeeper checks it online -- which is the difference between a
-      # download that works on a train and one that does not.
+      # Notarize and staple the DMG separately from the app it contains.
       - name: Notarize and staple the disk image
         if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
         timeout-minutes: 60
@@ -878,17 +692,13 @@ jobs:
           set -euo pipefail
           DMG="dist-bundles/DIALibGen-gui-${{ matrix.name }}.dmg"
           test -f "$DMG" || { echo "::error::no $DMG to notarize"; exit 1; }
-          # --force because Tauri already signed it: the rename this repo does
-          # afterwards does not invalidate that, but re-signing costs nothing
-          # and makes the identity on the shipped name certain.
+          # Re-sign the final DMG with the configured identity.
           codesign --force --timestamp --keychain "$MACOS_KEYCHAIN" \
             --sign "$MACOS_SIGN_IDENTITY" "$DMG"
           bash .github/notarize.sh "$DMG"
           xcrun stapler staple "$DMG"
 
-      # Gatekeeper's own verdict, not codesign's. codesign says the signature is
-      # intact; spctl says the system would actually open it, and only the
-      # second is the question a cask install turns on.
+      # Check signature integrity and Gatekeeper acceptance.
       - name: The signed artefacts are what they claim to be
         if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
         shell: bash
@@ -899,17 +709,8 @@ jobs:
           xcrun stapler validate "$DMG"
           codesign --verify --strict --verbose=2 stage/bin/DIALibGen
 
-          # The .app's OWN ticket, which is a separate claim from the image's:
-          # a user drags the app OUT of the image, and the image's ticket does
-          # not travel with it. Tauri runs `stapler staple` on the bundle and
-          # DISCARDS the exit status, so a ticket that failed to attach -- most
-          # often error 65, the ticket not yet propagated moments after an
-          # Accept -- leaves the build green and the app refused offline.
-          #
-          # Checked against bundle/macos, which is the bundle the .dmg was built
-          # FROM, after Tauri stapled it. Nothing can repair it here: the image
-          # already contains whatever was stapled, so this fails the run and a
-          # re-run picks up the propagated ticket.
+          # Validate the app's own stapled ticket, which must survive extraction from the DMG.
+          # Check the source bundle used for the image; a missing ticket requires a rebuild.
           shopt -s nullglob
           apps=(gui/src-tauri/target/release/bundle/macos/*.app)
           [ "${#apps[@]}" -gt 0 ] \
@@ -948,24 +749,16 @@ jobs:
             smoke-portable/*.log
             smoke-portable/**/*.tune.json
 
-      # Last, because everything above that needs the identity has run, and
-      # always(), so an earlier failure still takes the keychain with it.
+      # Remove the temporary keychain even after an earlier failure.
       - name: Delete the signing keychain
         if: always() && steps.sign.outputs.sign == 'true'
         shell: bash
         run: security delete-keychain "$RUNNER_TEMP/dialibgen-signing.keychain-db" || true
 
-  # A release whose README links 404 is worse than a missing release: the links
-  # are written for the asset names that were MEANT to be published, not the
-  # ones that were. This asserts the four this workflow is responsible for are
-  # actually on the tag. (windows-x64 comes from windows.yml and asserts its
-  # own, because a cross-workflow wait would be a race either way.)
+  # Check every Unix release asset; windows.yml checks its own assets.
   release-complete:
     needs: build
-    # always(), because `needs: build` alone makes this SKIPPED exactly when a
-    # build leg fails -- which is the one case it exists for. fail-fast is off,
-    # so the surviving legs still publish their assets and the release goes
-    # public missing whatever the failed leg owed it.
+    # Run the completeness gate even when a build leg fails.
     if: always() && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
@@ -985,9 +778,7 @@ jobs:
             printf '%s' "$have" | grep -qx "DIALibGen-$n.tar.gz" \
               || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
           done
-          # Named exactly, not by extension: the Homebrew cask and the README
-          # both point at these spellings, so "some dmg exists" is not the
-          # property that matters.
+          # Require the exact asset names used by download links.
           for n in macos-x64 macos-arm64; do
             printf '%s' "$have" | grep -qx "DIALibGen-gui-$n.dmg" \
               || { echo "::error::no desktop .dmg for $n on $tag"; missing=1; }
@@ -996,9 +787,7 @@ jobs:
             || { echo "::error::no Linux desktop bundle on $tag"; missing=1; }
           exit $missing
 
-  # The desktop GUI's own checks. They need no OpenMS and no models, so they run
-  # on all three OSes in a couple of minutes and catch the frontend regressions
-  # the C++ matrix never would.
+  # Run desktop checks on all three OSes without OpenMS or model dependencies.
   gui:
     if: github.event_name != 'workflow_dispatch' || !inputs.cli_dry_run || inputs.gui_dry_run
     name: gui-${{ matrix.os }}
@@ -1023,9 +812,7 @@ jobs:
       - run: npm run build
         working-directory: gui
 
-      # The Rust side: its unit tests cover the trust boundary (which config
-      # keys may reach the CLI, and how a dash-leading path is defanged), and
-      # clippy is denied warnings so a lint does not accumulate until a release.
+      # Test the Rust command boundary and enforce warning-free clippy.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

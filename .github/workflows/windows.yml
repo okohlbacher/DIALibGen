@@ -1,23 +1,13 @@
 name: windows
 
-# Windows x64, in two jobs.
-#
-# bioconda has no win-64 `openms`, so OpenMS has to be built from source here --
-# the one reason this is a separate workflow from ci.yml rather than another
-# matrix leg. contrib (~40 min) and OpenMS itself (~60 min) are each cached on
-# their pinned commit, so only the first run pays for them.
-#
-# They are SEPARATE JOBS on purpose: a failure in this project's own build must
-# not suppress the cache-save step for a perfectly good OpenMS, which is what a
-# single-job version would do and which turns every subsequent iteration into
-# another two hours.
+# Build OpenMS from source because bioconda has no Windows package.
+# A separate cached dependency job survives product-build failures.
 
 on:
   push:
     branches: [main]
     tags: ['v*']
-    # Same filter as the pull_request trigger below: a docs-only push has no
-    # business starting a two-hour OpenMS build.
+    # Avoid rebuilding for documentation-only changes.
     paths:
       - '.github/workflows/windows.yml'
       - 'CMakeLists.txt'
@@ -46,49 +36,26 @@ on:
         default: false
 
 concurrency:
-  # A dispatch gets its OWN group. Sharing one with the branch means the next
-  # push to main cancels a dry run someone is watching -- and, on a leg that
-  # builds OpenMS, poisons the build cache mid-write.
+  # Give manual dispatches independent concurrency groups.
   group: windows-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  # NOT cancel-in-progress, unlike ci.yml. The OpenMS job here runs for about
-  # two hours and its whole value is the cache it saves at the end; cancelling
-  # it on the next push means it never finishes, never saves, and the next run
-  # starts from nothing. Three pushes in a row did exactly that. Queuing costs
-  # wall-clock once; cancelling costs it every time.
+  # Queue runs so interrupted OpenMS builds do not lose their dependency caches.
   cancel-in-progress: false
 
 env:
-  # OpenMS release/3.5.0, the same version ci.yml gets from bioconda. Pinned by
-  # SHA rather than by tag so a retag cannot silently change what was built.
+  # Pin the same OpenMS 3.5 release used by the Unix builds.
   OPENMS_SHA: c49149d47d6fcc76d1271d87d3a7fad15d2219de
-  # NOT the contrib that OpenMS 3.5.0 pins as a submodule (e6fde7cf). That one
-  # cannot be built any more, by anybody: it names zlib-1.2.11 and boost_1_78_0
-  # and downloads from the contrib-sources release 2024-04-29-000000, and that
-  # release has been DELETED upstream. Neither archive exists in any surviving
-  # release, so there is no base-URL substitution that rescues it -- the pin is
-  # dead, not merely stale. (contrib does not check the HTTP status, only that
-  # an archive extracts, so this presents as "Found empty archive" with no
-  # mention of a download anywhere in the failure.)
-  #
-  # 186aacfb is the oldest contrib whose sources all still exist (it downloads
-  # from the 3.6.0 release, which every contrib since early 2026 does) AND
-  # whose Boost is new enough to compile under the MSVC on windows-2022:
-  # contrib's own Boost 1.81 headers fail there with C3878/C7510 in
-  # boost/process/detail/windows/pipe_in.hpp. It still carries kissfft, which
-  # a later contrib drops and OpenMS 3.5.0 still wants.
+  # Use available contrib sources with MSVC-compatible Boost and kissfft.
+  # OpenMS 3.5's original contrib pin references deleted source archives.
   CONTRIB_REV: 186aacfbc1157719735b497cd6de1b3e83289eea
 
 jobs:
-  # ------------------------------------------------------------ OpenMS itself
+  # OpenMS dependencies and development files.
   openms:
     name: windows-x64-openms
     runs-on: windows-2022
     timeout-minutes: 180
     steps:
-      # OpenMS contrib's CMakeLists shells out to cl.exe to decide the target
-      # word size and fails with "Could not determine if cl.exe builds x86 or
-      # x64 apps" without this. Writes GITHUB_PATH/GITHUB_ENV, so it persists to
-      # every later step whatever shell they use.
+      # Initialize cl.exe for contrib architecture detection and later build steps.
       - uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
@@ -100,24 +67,14 @@ jobs:
           git init -q openms-src
           cd openms-src
           git remote add origin https://github.com/OpenMS/OpenMS.git
-          # A bare `git fetch origin <sha>` is refused -- GitHub serves only
-          # advertised refs -- so fetch the tag this commit is, then verify.
+          # Fetch the advertised release tag, then verify its commit.
           git fetch -q --depth 1 origin refs/tags/release/3.5.0
           git checkout -q FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$OPENMS_SHA" \
             || { echo "::error::release/3.5.0 is no longer $OPENMS_SHA"; exit 1; }
 
-          # A missing include in OpenMS 3.5.0, visible only on MSVC.
-          # DIAPrescoring.cpp uses std::divides but includes <algorithm> and
-          # <utility> and not <functional>; libstdc++ and libc++ pull it in
-          # transitively, MSVC's STL does not. With the template undeclared,
-          # MSVC parses `std::divides<double>()` as a chain of comparisons and
-          # reports "syntax error: '>' was unexpected here" -- which reads like
-          # a conformance problem and is not one.
-          #
-          # Guarded on both sides: if the include is ever added upstream, or the
-          # line it is anchored to moves, this fails loudly instead of patching
-          # nothing and letting the build fail 60 minutes later.
+          # OpenMS 3.5 omits <functional> for std::divides; MSVC requires it.
+          # Guard the patch so upstream changes fail explicitly.
           F=src/openms/source/ANALYSIS/OPENSWATH/DIAPrescoring.cpp
           if grep -q "std::divides" "$F" && ! grep -q "^#include <functional>" "$F"; then
             grep -q "^#include <utility>" "$F" \
@@ -138,19 +95,11 @@ jobs:
           git fetch -q --depth 1 origin "$CONTRIB_REV"
           git checkout -q FETCH_HEAD
 
-          # Guard, not a patch: if this contrib ever stops resolving to a live
-          # contrib-sources release, fail here with the reason rather than
-          # 40 minutes later with "Found empty archive".
+          # Require the pinned contrib to reference an available source release.
           grep -q "releases/download/3.6.0/" macros.cmake \
             || { echo "::error::contrib $CONTRIB_REV no longer downloads from the 3.6.0 sources"; exit 1; }
 
-      # The REPOSITORY NAME is part of both keys, because both caches bake absolute
-      # paths into what they hold: OpenMS compiles its install prefix in as
-      # OPENMS_INSTALL_DATA_PATH, and the runner's workspace is
-      # D:\a\<repo>\<repo>. Renaming the repository moved that workspace, a
-      # cache keyed only on the OpenMS and contrib commits restored an install
-      # that pointed at the old directory, and 12 tests failed with "Cannot find
-      # shared data!" -- on a tree whose only change was a URL.
+      # Cache keys include the repository name because installed OpenMS embeds its path.
       - name: Cache contrib build
         id: cache-contrib
         uses: actions/cache@v4
@@ -164,14 +113,11 @@ jobs:
           cmake -S contrib-src -B contrib-build -G "Visual Studio 17 2022" -A x64 -DBUILD_TYPE=ALL
           cmake --build contrib-build --config Release
 
-      # Eigen and Ninja via choco, matching OpenMS's own Windows recipe -- their
-      # CI points Eigen3_DIR at choco's copy rather than contrib's.
+      # Use Eigen and Ninja from Chocolatey, matching OpenMS's Windows build.
       - name: Install Eigen and Ninja
         run: choco install -y --no-progress eigen ninja
 
-      # qtbase/qtsvg/qtimageformats: OpenMSConfig.cmake does find_dependency(Qt6)
-      # even with WITH_GUI=OFF -- Qt is a core-library dependency here, not only
-      # a GUI one, exactly as it is on the conda platforms.
+      # OpenMS requires these Qt modules even when its GUI is disabled.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
@@ -180,12 +126,7 @@ jobs:
           cache: 'false'
           archives: 'qtbase qtsvg qtimageformats'
 
-      # Arrow/Parquet/libzip via conda, which is what OpenMS's own Windows CI
-      # does. NO libarrow-dataset/acero, unlike ci.yml: OpenMS makes LibXml2
-      # REQUIRED the moment ArrowDataset is found, and CMake's FindLibXml2 does
-      # not accept the layout conda-forge's MSVC build presents. Nothing here
-      # uses Arrow Dataset, so dropping it removes the requirement at its source
-      # rather than fighting the find module.
+      # Omit unused Arrow Dataset/Acero, whose LibXml2 discovery fails with this MSVC layout.
       - uses: conda-incubator/setup-miniconda@v3
         with:
           auto-update-conda: true
@@ -200,10 +141,7 @@ jobs:
           PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
           echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
 
-      # Built separately rather than via contrib, mirroring OpenMS's own recipe,
-      # and installed into contrib-build so it shares a prefix with everything
-      # else contrib produces. CURL_USE_SCHANNEL uses Windows' own TLS rather
-      # than pulling in another dependency for that alone.
+      # Install curl alongside contrib and use Windows Schannel for TLS.
       - name: Build libcurl from source
         shell: bash
         run: |
@@ -235,10 +173,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # GUI, tests, docs and packaging all OFF: this project needs the
-          # library, the headers and an installed OpenMSConfig.cmake, nothing
-          # else. That is the one place this deliberately diverges from OpenMS's
-          # own recipe, which builds and tests all of OpenMS.
+          # Build only the OpenMS library and development files needed by DIALibGen.
           cmake -S openms-src -B openms-build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DOPENMS_CONTRIB_LIBS="$GITHUB_WORKSPACE/contrib-build" \
@@ -275,29 +210,18 @@ jobs:
           [ -n "$HDR" ] || { echo "::error::installed OpenMS has no TOPPBase.h"; exit 1; }
           echo "found: $CFG"
           echo "found: $HDR"
-          # OpenMSConfig.cmake prepends <its dir>/Modules/ to CMAKE_MODULE_PATH
-          # and then does find_dependency(LIBSVM), but 3.5.0 does not install
-          # that Modules directory -- so every consumer falls through to CONFIG
-          # mode and fails with "no LIBSVMConfig.cmake". Reported, not fixed
-          # here: the tool job supplies the modules itself, so this stays a
-          # statement about the install rather than a patch to a cached one.
+          # OpenMS 3.5 omits its Find modules; the product job supplies them separately.
           if [ ! -f "$(dirname "$CFG")/Modules/FindLIBSVM.cmake" ]; then
             echo "::warning::installed OpenMS has no CMake/Modules -- consumers must supply them"
           fi
 
-  # -------------------------------------------------------------- this project
-  #
-  # Everything expensive above is a cache restore by the time this runs; choco,
-  # Qt and conda still have to be redone on a fresh runner, but those are
-  # seconds rather than two hours.
+  # DIALibGen uses the cached dependency builds on a fresh runner.
   tool:
     name: windows-x64
     runs-on: windows-2022
     needs: openms
     timeout-minutes: 60
-    # write, not the default: needed only by the tag-triggered release upload.
-    # Safe on pull_request runs, including from forks -- GitHub issues a
-    # read-only token for those regardless of what is declared here.
+    # Release asset uploads require write permission; fork PR tokens remain read-only.
     permissions:
       contents: write
     steps:
@@ -339,23 +263,13 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          # onnxruntime-cpp is this project's own dependency, not OpenMS's:
-          # OpenMS's ONNX binding rejects modified peptides, which is the whole
-          # reason this code binds ONNX Runtime directly.
+          # Use ONNX Runtime directly to support modified peptides.
           conda install -y -c conda-forge libarrow libparquet libzip nlohmann_json \
             onnxruntime-cpp numpy pyarrow onnxruntime
           PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
           echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
-          # The interpreter that HAS numpy/pyarrow/onnxruntime. CMake's
-          # find_program(python3) picks whatever is first on PATH, which on a
-          # Windows runner is a bare system Python -- the reference tests were
-          # then registered and failed on `import numpy` rather than skipping.
-          #
-          # Assigned in its own step, not inlined into the echo: the nested
-          # quoting needed for that produced an EMPTY value, and an empty
-          # -DODIA_PYTHON does not fail the configure -- it unregisters the
-          # whole Python tier, which is worse than a failure because the suite
-          # simply gets smaller.
+          # Select and validate the Python environment containing the reference-test dependencies.
+          # An empty interpreter path would silently unregister those tests.
           CP=$(python -c 'import sys; print(sys.executable)')
           CP=${CP//\\//}
           [ -x "$CP" ] || { echo "::error::conda python not found (got '$CP')"; exit 1; }
@@ -396,11 +310,7 @@ jobs:
           fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
           fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
 
-      # OpenMSConfig.cmake expects its own Find modules next to it and 3.5.0
-      # does not install them, so find_dependency(LIBSVM) falls through to
-      # CONFIG mode and fails. Fetched from the exact commit the install was
-      # built from -- a sparse checkout of one directory, not another clone of
-      # OpenMS -- and handed to CMake as a module path.
+      # Fetch OpenMS 3.5's omitted Find modules and add them to CMAKE_MODULE_PATH.
       - name: Fetch OpenMS's CMake find modules
         shell: bash
         run: |
@@ -420,26 +330,12 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          # No -DEigen3_DIR here, unlike the OpenMS build above. OpenMSConfig
-          # asks for the version range Eigen 3.4 refuses, and this project's
-          # CMakeLists detects that and substitutes cmake/eigen3-range-shim --
-          # but only when nothing has already pinned Eigen3_DIR past it.
+          # Let DIALibGen choose its Eigen version-range shim; do not pin Eigen3_DIR here.
           OPENMS_DIR=$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")
 
-          # OpenMS installs its config and its targets file to two different
-          # places on Windows: the config goes to <prefix>/CMake (the non-UNIX
-          # branch of DEF_INSTALL_CMAKE_DIR) while install_export_targets()
-          # sends OpenMSTargets.cmake to <prefix>/bin/cmake/OpenMS. The config
-          # then does include(${CMAKE_CURRENT_LIST_DIR}/OpenMSTargets.cmake) and
-          # cannot find it.
-          #
-          # The targets file is NOT copied next to the config, which was the
-          # obvious fix and is wrong: CMake bakes the number of parent steps
-          # needed to recover the install prefix into the generated file, so a
-          # targets file read from a different depth computes a prefix two
-          # levels too high and every imported target points at
-          # D:/a/DIALibGen/bin/OpenSwathAlgo.lib. Point the config at
-          # the real file instead, so it is read where it was installed.
+          # OpenMS installs its config and targets to different Windows directories.
+          # Redirect the include to the targets' actual location; moving the file
+          # would break its relative install-prefix calculation.
           if [ ! -f "$OPENMS_DIR/OpenMSTargets.cmake" ]; then
             TGT=$(find openms-install -name 'OpenMSTargets.cmake' | head -1)
             [ -n "$TGT" ] \
@@ -449,10 +345,7 @@ jobs:
           import re, sys
           cfg, target = sys.argv[1], sys.argv[2].replace("\\", "/")
           s = open(cfg).read()
-          # Matched by intent, not by exact spelling: the line is
-          #   include("${OPENMS_CMAKE_DIR}/OpenMSTargets.cmake")
-          # and an earlier version of this patch guessed
-          # ${CMAKE_CURRENT_LIST_DIR} instead, which matched nothing.
+          # Match the OpenMSTargets include independently of the variable naming its directory.
           pat = re.compile(r'^\s*include\([^)\n]*OpenMSTargets\.cmake[^)\n]*\)\s*$', re.M)
           hits = pat.findall(s)
           if not hits:
@@ -464,8 +357,7 @@ jobs:
           PYEOF
           fi
 
-          # What conda actually laid down for ONNX Runtime, so a find failure
-          # below is one log line away from its cause rather than another run.
+          # Record the installed ONNX Runtime layout for configure diagnostics.
           find "$CONDA_LIB_PREFIX" -iname 'onnxruntime*' -maxdepth 4 | head -20 || true
           find "$CONDA_LIB_PREFIX" -name 'onnxruntime_cxx_api.h' | head -3 || true
 
@@ -489,28 +381,18 @@ jobs:
           cmake --build build --parallel 2
           cmake --install build
 
-      # Everything the binary links lives in three prefixes. Collected once,
-      # here, and reused by every step below -- and by the staged bundle, which
-      # has to carry them.
+      # Reuse the runtime dependency directories for tests and bundle assembly.
       - name: Collect the runtime DLL directories
         shell: bash -el {0}
         run: |
           set -euo pipefail
-          # ABSOLUTE. find returns a relative path here and cygpath keeps it
-          # relative, so the last PATH entry was "openms-install/bin" -- which
-          # resolves only from the workspace root, and ctest runs tests from the
-          # build directory. Every test died with 0xc0000135 for want of a `cd`.
+          # Use absolute DLL paths because CTest changes the working directory.
           _dll=$(find openms-install -name 'OpenMS.dll' | head -1)
           [ -n "$_dll" ] || { echo "::error::no OpenMS.dll in the install"; exit 1; }
           OPENMS_BIN=$(cd "$(dirname "$_dll")" && pwd)
 
-          # Two spellings, because both are needed and they are not
-          # interchangeable. RUNTIME_DLL_PATH is Windows-style (C:/...;D:/...)
-          # for anything handed to Windows; DLL_PATH_POSIX is what Git Bash's
-          # PATH needs. Translating the first into the second by turning ';'
-          # into ':' does NOT work -- it leaves the drive letters, so "C:/x:D:/y"
-          # splits at the colon after C and every entry is garbage. That is what
-          # made every test die with 0xc0000135, STATUS_DLL_NOT_FOUND.
+          # Keep Windows and Git Bash path spellings separately. Convert each path
+          # with cygpath; replacing semicolons would split Windows drive letters.
           RUNTIME_DLL_PATH="$GITHUB_WORKSPACE/libtorch-sdk/lib;$CONDA_LIB_PREFIX/bin;$QT_ROOT_DIR/bin;$GITHUB_WORKSPACE/contrib-build/bin;$OPENMS_BIN"
           POSIX=""
           IFS=';' read -ra _dirs <<< "$RUNTIME_DLL_PATH"
@@ -519,8 +401,7 @@ jobs:
             POSIX="$POSIX:$(cygpath -u "$d")"
           done
           POSIX="${POSIX#:}"
-          # A relative entry is a silent no-op from any other directory, which
-          # is exactly how the above was missed. Refuse one.
+          # Require absolute paths for every runtime directory.
           IFS=':' read -ra _check <<< "$POSIX"
           for d in "${_check[@]}"; do
             case "$d" in
@@ -538,19 +419,8 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$DLL_PATH_POSIX:$PATH"
-          # standalone_test.sh runs the binary under `env -i` and needs the DLL
-          # directories handed back explicitly on Windows; ctest does not pass
-          # this job's PATH through to it in a form the bare environment keeps.
-          # PATH_KEEP is this PATH with the BUILD TREE removed -- which is the
-          # claim standalone_test.sh makes, spelled directly.
-          #
-          # It is not a hand-built list of directories. Two attempts at that
-          # failed the same way: the Universal CRT (api-ms-win-crt-*.dll) lives
-          # in the toolchain's redistributable directory, which msvc-dev-cmd put
-          # on PATH, and any list assembled from conda/Qt/contrib/OpenMS plus
-          # System32 omits it. A developer has that directory too; what a
-          # developer does NOT have is this build tree, so that is the only
-          # thing taken away.
+          # Pass explicit DLL paths through standalone_test.sh's empty environment.
+          # Preserve toolchain CRT directories while removing the product build tree.
           BUILD_ABS=$(cd build && pwd)
           FILTERED=""
           IFS=':' read -ra _entries <<< "$PATH"
@@ -574,13 +444,26 @@ jobs:
           for name in ("tune_parity", "tune_e2e"):
               assert name in tests and tests[name].find("skipped") is None, f"{name} must pass, not skip"
           PYTEST
-          # A tier that fails to register does not fail -- it disappears, and
-          # the run goes green on a smaller suite. Assert the Python-dependent
-          # tests are actually there.
+          # Require reference and end-to-end tests to remain registered.
           ctest --test-dir build -N | grep -q "peptdeep_predictions_match_reference" \
             || { echo "::error::the prediction tests were not registered"; exit 1; }
           ctest --test-dir build -N | grep -q "e2e" \
             || { echo "::error::the e2e test was not registered"; exit 1; }
+
+      - name: Diagnose a Windows report-reader crash
+        if: failure()
+        timeout-minutes: 5
+        shell: bash -el {0}
+        run: |
+          export PATH="$DLL_PATH_POSIX:$PATH"
+          CDB='/c/Program Files (x86)/Windows Kits/10/Debuggers/x64/cdb.exe'
+          TEST=build/test/refinement/dialibgen_intensity_match.exe
+          if [ -x "$CDB" ] && [ -f "$TEST" ]; then
+            "$CDB" -o -G -c 'sxe av; g; .ecxr; kb; lm; q' "$TEST" > windows-reader-crash.txt 2>&1
+            cat windows-reader-crash.txt
+          else
+            echo "CDB or the report-reader test is unavailable; use the test's stage diagnostics."
+          fi
 
       - name: Verify installed CMake libraries
         shell: bash -el {0}
@@ -603,18 +486,13 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
-          # The three models must be IN the install tree. They are bundled from
-          # 0.10.1, and an install that silently lacks them is an install that
-          # cannot predict anything.
+          # Require all three bundled prediction models.
           for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
             test -s "$PWD/stage/share/DIALibGen/models/$m" \
               || { echo "::error::$m is not in the install tree"; exit 1; }
           done
 
-          # env -i on Windows also strips the DLL search path, which is not what
-          # this gate is about -- it is about the BUILD TREE not being on it. So
-          # the three runtime prefixes are handed back explicitly and nothing
-          # else is.
+          # Restore runtime dependency paths explicitly in the empty-environment check.
           PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
           OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
           export PATH_KEEP OPENMS_DATA_PATH
@@ -628,7 +506,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$DLL_PATH_POSIX:$PATH"
-          # No DIALIBGEN_MODEL_DIR: the installed tree carries the models now.
+          # Leave DIALIBGEN_MODEL_DIR unset to verify bundled-model discovery.
           BIN="$PWD/stage/bin/DIALibGen.exe"
           "$BIN" -in example/proteins.fasta -out out.parquet
           "$BIN" -in example/proteins.fasta -out out.tsv
@@ -644,10 +522,7 @@ jobs:
           print(f"library: {f.metadata.num_rows} precursors")
           PY
 
-      # A portable tree: the binary, its data, and every DLL it needs. Without
-      # this the artefact runs only on a machine that already has a conda env,
-      # a Qt and an OpenMS build in the same places -- which is to say, on this
-      # runner and nowhere else.
+      # Portable bundles carry the executable, runtime DLLs, models and data.
       - name: Exercise all installed modes
         shell: bash -el {0}
         run: |
@@ -658,11 +533,7 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          # event_name FIRST, and a dispatch never releases whatever ref it was
-          # selected against. Testing the ref first meant that dispatching this
-          # workflow with a TAG selected in the Actions UI took the release
-          # branch -- so the run whose entire purpose is to touch no release
-          # would have uploaded to the real one.
+          # Check event_name first so a manual dispatch against a tag cannot publish.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
             echo "gui=${{ inputs.gui_dry_run }}" >> "$GITHUB_OUTPUT"
@@ -682,21 +553,10 @@ jobs:
         shell: bash -el {0}
         run: |
           set -euo pipefail
+          # Source installs retain the SDK; portable applications carry only runtime files.
+          rm -rf stage/include stage/lib/cmake stage/lib/*.a stage/lib/*.lib stage/bin/dialibgen-fetch-models
 
-          # OpenMS's own data tables. The tool reaches them through
-          # OPENMS_DATA_PATH or a path compiled into OpenMS, and on a user's
-          # machine that compiled path is this runner's openms-install -- so the
-          # bundle has to carry them, exactly as the conda legs in ci.yml do.
-          # Without this the bundle prints --help and then dies on the first mass
-          # calculation with "Cannot find shared data! OpenMS cannot function
-          # without it!", which is how v0.2.3 shipped.
-          #
-          # Found AND asserted by CHEMISTRY/unimod.xml, because that one file is
-          # the whole of File::isOpenMSDataPath_ -- so "found" here means exactly
-          # what the tool will mean by it at runtime, whatever the install layout
-          # turns out to be. NOT Elements.xml: OpenMS 3.5 compiles the element
-          # table in and ships no such file, so a check for it fails against a
-          # perfectly good data directory.
+          # Bundle OpenMS data and verify CHEMISTRY/unimod.xml, its runtime path marker.
           UNIMOD=$(find openms-install -path '*CHEMISTRY/unimod.xml' | head -1)
           [ -n "$UNIMOD" ] \
             || { echo "::error::no CHEMISTRY/unimod.xml in the OpenMS install"; exit 1; }
@@ -707,19 +567,13 @@ jobs:
             || { echo "::error::the staged tree is not a valid OpenMS data path"; exit 1; }
           echo "staged OpenMS data from $SHARE"
 
-          # The dependency CLOSURE, not every DLL in the build prefixes. The
-          # sweep this replaces shipped 271 DLLs and 267 MB -- all of MKL, gRPC,
-          # ICU's data blob and a debug Qt -- because it copied what conda
-          # happened to have installed rather than what the binary loads.
+          # Copy the imported DLL dependency closure instead of every installed DLL.
           command -v dumpbin >/dev/null \
             || { echo "::error::no dumpbin on PATH; cannot compute the DLL closure"; exit 1; }
           IFS=';' read -ra PREFIXES <<< "$RUNTIME_DLL_PATH"
 
-          # A name is resolved the way the loader would resolve it, against the
-          # same prefixes. A name that resolves NOWHERE is a system DLL: every
-          # Windows has it in System32, and carrying a copy would be wrong.
-          # `cp -n` is deliberately not used: BSD cp returns 1 when it declines
-          # to overwrite, and under set -e that ends the step mid-bundle.
+          # Resolve dependencies in runtime search order; system DLLs remain external.
+          # Copy each file once without relying on platform-specific cp -n exit status.
           copy_once() { [ -f "stage/bin/$(basename "$1")" ] || cp "$1" stage/bin/; }
 
           resolve() {
@@ -736,10 +590,8 @@ jobs:
           todo=(stage/bin/DIALibGen.exe)
           while [ ${#todo[@]} -gt 0 ]; do
             f="${todo[0]}"; todo=("${todo[@]:1}")
-            # `-dependents`, not `/dependents`: MSYS rewrites a leading slash
-            # into a Windows path and dumpbin then rejects the option. Relative
-            # paths for the same reason. Both the import table and the
-            # delay-load table are printed, and both are dependencies.
+            # Use -dependents and relative paths to avoid MSYS slash conversion.
+            # Include both regular imports and delay-load dependencies.
             while IFS= read -r dep; do
               key=$(printf '%s' "$dep" | tr '[:upper:]' '[:lower:]')
               if [ -n "${seen[$key]:-}" ]; then continue; fi
@@ -752,10 +604,7 @@ jobs:
                        | awk '{print $1}')
           done
 
-          # Loaded by name at runtime rather than imported, so no dependency
-          # walk can find them. Each set is carried only when the module that
-          # loads it is itself in the closure -- so a bundle that does not use
-          # MKL does not ship 150 MB of it.
+          # Include dynamically loaded provider libraries only when their loader is present.
           carry() {
             local d m n=0
             for d in "${PREFIXES[@]}"; do
@@ -768,21 +617,13 @@ jobs:
           if find stage/bin -maxdepth 1 -iname 'onnxruntime*' | grep -q .; then
             carry 'onnxruntime_providers_*.dll'
           fi
-          # mkl_rt is a dispatcher: it LoadLibrary's the kernel matching the CPU
-          # it finds. If anything in the closure links it, the kernels have to
-          # come too.
+          # The MKL dispatcher loads CPU-specific kernels at runtime.
           if find stage/bin -maxdepth 1 -iname 'mkl_rt*' | grep -q .; then
             carry 'mkl_*.dll'
           fi
 
-          # The load-bearing check, and what makes the closure above safe to
-          # trust: NOTHING but the bundle and Windows itself on PATH, and a real
-          # library rather than --help. --help loads neither ONNX Runtime nor
-          # Arrow and reads none of OpenMS's data, which is exactly how a bundle
-          # with no share/OpenMS passed this step for three releases.
-          #
-          # cygpath, not $SYSTEMROOT and not a hardcoded C:/Windows/System32:
-          # the same reason the gate above stopped trusting that variable.
+          # Generate a real library with only the bundle and Windows on PATH.
+          # Resolve Windows system directories through cygpath.
           BARE_PATH="$(cygpath -u "$PWD")/stage/bin:$(cygpath -S)"
           run_bare() {
             env -i SystemRoot="$(cygpath -w "$(cygpath -W)")" \
@@ -804,6 +645,12 @@ jobs:
         if: steps.pkg.outputs.package == 'true'
         shell: bash -el {0}
         run: |
+          if [ -e stage/include ] || [ -e stage/lib/cmake ] || [ -e stage/bin/dialibgen-fetch-models ]; then
+            echo "::error::the portable application contains development files"; exit 1
+          fi
+          if find stage/lib -type f \( -name '*.a' -o -name '*.lib' \) | grep -q .; then
+            echo "::error::the portable application contains development libraries"; exit 1
+          fi
           "$CONDA_PYTHON" .github/release-smoke.py stage/bin/DIALibGen.exe --bare --output smoke-portable
           if find stage/bin -iname '*python*.dll' | grep -q .; then
             echo "::error::the C++ release unexpectedly depends on Python"; exit 1
@@ -814,9 +661,7 @@ jobs:
         shell: bash
         run: 7z a -tzip "DIALibGen-windows-x64.zip" ./stage/*
 
-      # Staged BEFORE the Tauri build, because tauri copies resources/ during
-      # the build: doing it afterwards yields an app whose resources are the
-      # empty skeleton, and every check that reads the source tree still passes.
+      # Stage CLI resources before Tauri copies them into the app.
       - uses: actions/setup-node@v5
         if: steps.pkg.outputs.gui == 'true'
         with:
@@ -824,13 +669,7 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
 
-      # pwsh, NOT bash. Git Bash puts /usr/bin on PATH, and coreutils ships a
-      # link.exe there -- the POSIX hard-link command. rustc resolves its
-      # linker by PATH NAME, so every cargo build script dies with
-      # "/usr/bin/link: extra operand" and the error blames the Visual Studio
-      # installation. CMake is immune because it takes the linker from cl.exe's
-      # own directory, which is exactly why every step above passes under bash
-      # and this one cannot.
+      # Use PowerShell so Cargo finds MSVC link.exe instead of Git Bash's coreutils link.
       - name: Build the desktop app
         if: steps.pkg.outputs.gui == 'true'
         shell: pwsh
@@ -845,8 +684,7 @@ jobs:
             exit 1
           }
 
-          # Assert the linker before paying for the build, because the failure
-          # arrives 200 crates later and names the wrong culprit.
+          # Verify the linker before starting the Cargo build.
           $link = (Get-Command link.exe -ErrorAction SilentlyContinue).Source
           Write-Output "link.exe: $link"
           if (-not $link) { Write-Output '::error::no link.exe on PATH'; exit 1 }
@@ -864,9 +702,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Fixed names: Tauri spells them with its own version and
-          # architecture, and every URL pointing at them -- the README's -- would
-          # then depend on Tauri's naming rather than on ours.
+          # Use stable asset names expected by download links.
           mkdir -p dist-bundles
           n=0
           while IFS= read -r f; do
@@ -899,9 +735,7 @@ jobs:
             dist-bundles/*
           fail_on_unmatched_files: true
 
-      # The completeness gate ci.yml runs for its own assets, for this
-      # workflow's. Named exactly, not by extension: the README points at these
-      # spellings, so "some installer exists" is not the property that matters.
+      # Require every Windows asset by its published name.
       - name: Assert this workflow's assets are on the release
         if: steps.pkg.outputs.release == 'true'
         shell: bash
@@ -927,6 +761,7 @@ jobs:
           name: smoke-windows-x64
           path: |
             build/Testing/Temporary/LastTest.log
+            windows-reader-crash.txt
             smoke-installed/*.log
             smoke-installed/**/*.tune.json
             smoke-portable/*.log

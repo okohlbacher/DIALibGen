@@ -3,20 +3,17 @@
 The 0.11.0 integration combines the generation and refinement backlogs. This
 file distinguishes implemented changes from checks that still need evidence.
 
-## macOS first-launch measurement — candidate pending
+## macOS first-launch measurement — completed
 
 Older signed CLI archives showed very different first-launch times: 335 s for
 a 0.9.0 tarball and about 33 s for a 0.10.0 Homebrew cask installation. Subsequent
 launches were about one second. Those observations do not establish the
 behavior of the new bundle.
 
-The release measurement workflow must compare archive and cask delivery on
-fresh machines that have not validated the tested code-directory hashes.
-Record OS/architecture, artifact hashes, quarantine state, first and warm
-launch times, and the delivery route. A warm retry on the same Mac is not a
-second cold measurement. Choose a packaging change only after that comparison;
-wrapping loose CLI files in a stapled container does not itself demonstrate
-that the installed files avoid individual validation.
+The release measurement workflow compares archive and cask delivery on
+separate fresh VMs, recording artifact hashes, quarantine attributes, first
+and warm launch times. It does not launch or assess the candidate before the
+first timed invocation, apart from Homebrew's own installation checks.
 
 The archived 0.10.1 comparison completed on separate macOS 14.8.9 ARM VMs:
 raw tarball first/warm launch **0.554 / 0.063 s**, Homebrew cask
@@ -24,8 +21,28 @@ raw tarball first/warm launch **0.554 / 0.063 s**, Homebrew cask
 had none. The older long delay did not reproduce on these hosted machines.
 [Measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35521436604).
 
-The 0.11.0 candidate is measured separately after packaging, on fresh VMs for
-both delivery routes. **Candidate result pending.**
+The signed, notarized **0.11.0 candidate `79932aa`** was then measured on two
+fresh macOS 14.8.9 ARM VMs with Homebrew 6.0.20:
+
+| Delivery | Installation | First `--help` | Warm `--help` | Quarantine attributes |
+|---|---:|---:|---:|---:|
+| curl + tar | 2.502 s | 0.987 s | 0.214 s | 0 |
+| Homebrew cask | 7.844 s | 1.329 s | 0.245 s | 387 |
+
+Both routes used archive SHA-256
+`12e89c76a2ad0d221bd23b0cf925fcf1017df15bc88be56c5a5f089650e96ad4`
+and executable code-directory hash `14f127b03fc40a1cc2a27ed24d06b3a1713646ed`.
+The cask used the published command-wrapper layout and unmodified Homebrew
+quarantine behavior. A localhost staging proxy served the CI artifact before
+publication, so installation timing excludes public GitHub download latency.
+Each invocation exited successfully and reported version 0.11.0. Raw records,
+signatures and policy logs are attached to the
+[candidate measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35522179576).
+
+The several-minute delay did not reproduce in either comparison. These are
+single observations per delivery route on hosted VMs, not a guarantee for
+every Mac or network. The measured result does not justify changing the
+archive format; no speculative packaging change is needed for this release.
 
 ## Portable CPU training — release CI pending
 

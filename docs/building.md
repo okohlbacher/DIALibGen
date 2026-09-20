@@ -1,9 +1,9 @@
 # Build from source
 
-DIALibGen requires CMake 3.21+, a compiler compatible with the installed
+DIALibGen requires CMake 3.21+, a C++23 compiler compatible with the installed
 OpenMS, OpenMS 3.5, Arrow/Parquet 19+, ONNX Runtime and nlohmann/json. OpenMS's
 public headers also require Boost, Eigen and its other exported dependencies.
-LibTorch enables RT/CCS training and is enabled by default.
+LibTorch and Qt6 Core enable RT/CCS training and are enabled by default.
 
 Point `CMAKE_PREFIX_PATH` at your installed dependency prefixes. On macOS,
 install an OpenMP runtime such as `llvm-openmp`. Match LibTorch's C++ ABI to

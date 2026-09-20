@@ -171,4 +171,5 @@ Cite the components and methods used:
   bioRxiv, DOI 10.64898/2026.04.29.721088.
 
 BSD-3-Clause. See [LICENSE](LICENSE) and
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Bundled dependencies retain
+their own terms, including Intel OpenMP's separate Windows redistribution terms.

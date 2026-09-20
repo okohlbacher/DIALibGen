@@ -26,7 +26,8 @@ def fetch(url, destination, expected):
             destination.unlink(missing_ok=True)
             raise
     if sha256(destination.read_bytes()) != expected:
-        raise RuntimeError(f'unrecognized AppImage source/runtime bytes: {url}')
+        destination.unlink(missing_ok=True)
+        raise RuntimeError(f'unrecognized AppImage source/runtime bytes: {url}; removed invalid cache {destination}')
     return destination
 
 

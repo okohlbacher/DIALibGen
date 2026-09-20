@@ -6,6 +6,9 @@ runtime package or SDK and records their versions in `runtime-dependencies.json`
 
 | Files | Origin |
 |---|---|
+| `Apache-2.0.txt` | Apache Software Foundation standard text, https://www.apache.org/licenses/LICENSE-2.0.txt |
+| `MPL-2.0.txt` | Mozilla standard text, https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt |
+| `EPL-1.0.txt` | SPDX standard text, https://github.com/spdx/license-list-data/blob/main/text/EPL-1.0.txt; original publisher https://www.eclipse.org/org/documents/epl-v10.html |
 | `OpenMS-LICENSE.txt`, `OpenMS-AUTHORS.txt` | OpenMS source distribution, https://github.com/OpenMS/OpenMS |
 | `Apache-Arrow-LICENSE.txt` | Apache Arrow 25 conda package aggregate LICENSE, https://github.com/apache/arrow |
 | `ONNX-Runtime-LICENSE.txt` | ONNX Runtime distribution LICENSE, https://github.com/microsoft/onnxruntime |

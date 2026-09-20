@@ -51,7 +51,8 @@ with embedded training provenance and sidecars.
 
 Redistribution here is with the agreement of the upstream authors. Releases up
 to and including 0.10.0 did not ship the weights and fetched them on first use;
-`dialibgen-fetch-models` still exists for source builds and for refreshing them.
+Source builds install `dialibgen-fetch-models` to verify or refresh the weights;
+portable archives already contain them and omit that development helper.
 
 ## Runtime libraries and corresponding sources
 
@@ -75,6 +76,8 @@ corresponding-source release asset.
 | nlohmann/json | MIT |
 | Boost | BSL-1.0 |
 | LLVM OpenMP, where bundled | Apache-2.0 with LLVM exception |
+| Intel OpenMP (Windows) | Intel Developer Tools EULA, August 2024, plus its third-party terms |
+| Arm Compute Library (Linux ARM64) | MIT, with bundled third-party notices |
 | GCC runtime libraries, where bundled | GPL-3.0 with GCC Runtime Library Exception 3.1 |
 
 Other transitive runtime libraries are listed in the generated inventory, with
@@ -95,12 +98,12 @@ mechanism: the corresponding source is uploaded as a release asset under the
 same distributor's control. Packaging fails if required notices, package
 ownership, or corresponding-source evidence is unavailable.
 
-Qt and the other replaceable runtime libraries are dynamically linked. You may
-replace them with interface-compatible modified versions: use `lib/` in the
+Qt and other LGPL-covered runtime libraries are dynamically linked. You may
+replace those libraries with interface-compatible modified versions: use `lib/` in the
 Unix CLI package or `bin/` in the Windows package. Locally modified macOS code
-may need to be re-signed with your own or an ad-hoc signature. These packages
-impose no additional restriction on modification, debugging those changes, or
-reverse engineering for that purpose. The LGPL and GPL texts are included;
+may need to be re-signed with your own or an ad-hoc signature. DIALibGen imposes
+no additional restriction on modifying those LGPL components, debugging those
+changes, or reverse engineering for that purpose. The LGPL and GPL texts are included;
 see also [Qt's licensing documentation](https://doc.qt.io/qt-6/licensing.html)
 and [LGPL obligations](https://www.qt.io/development/open-source-lgpl-obligations).
 
@@ -108,6 +111,20 @@ The static notices in this repository include the complete PyTorch 2.10 CPU
 wheel LICENSE and NOTICE, not only its primary BSD grant. The generated runtime
 notices additionally preserve the exact release SDK/package texts when a
 platform uses another pinned version. See `licenses/README.md` for origins.
+
+The Windows Torch wheel also carries Intel OpenMP DLLs. Their bytes are matched
+against the checksum-pinned Intel 2025.3.1 package before its complete
+`LICENSE.txt` and `third-party-programs.txt` are bundled. These DLLs retain
+Intel's Developer Tools EULA and the listed third-party terms; DIALibGen's BSD
+license and the LGPL replacement statement above do not replace those terms.
+The inventory identifies Intel OpenMP separately from PyTorch. Likewise, the
+ARM Compute libraries have their own pinned source revision and notices.
+Wheel copies of GCC runtimes or OpenBLAS cannot be attributed to PyTorch:
+packaging requires their actual package owner or fails.
+
+Source-derived notices use short filenames to keep Windows installation paths
+bounded. Each `source-notices/index.json` maps them back to the exact source
+archive, checksum and original path; source archives retain their full trees.
 
 ## Test fixture derived from OpenMS
 

@@ -20,7 +20,7 @@ shutil.copy2(args.inventory, root / 'inventory.json')
 shutil.copy2(args.inventory.with_name('THIRD_PARTY_NOTICES.txt'), root / 'THIRD_PARTY_NOTICES.txt')
 components = []
 for package in inventory['packages']:
-    if not re.search(r'GPL|EPL|MPL|CDDL', package['license']):
+    if not re.search(r'GPL|EPL|MPL|CDDL', package['license'], re.I):
         continue
     name = package['ecosystem'] + '-' + package['name'].replace('/', '-') + '-' + package['version']
     record = {'url': package['source'], 'fn': name + '.tar.gz'}

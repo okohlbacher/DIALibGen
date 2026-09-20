@@ -8,6 +8,9 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 
+if not __debug__:
+    raise SystemExit("release checks require Python assertions; unset PYTHONOPTIMIZE")
+
 p = argparse.ArgumentParser()
 p.add_argument("binary", type=Path)
 p.add_argument("--bare", action="store_true", help="run the tool without the build environment")

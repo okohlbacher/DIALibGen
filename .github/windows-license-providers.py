@@ -44,6 +44,8 @@ for name in sorted(required):
         raise RuntimeError(f'contrib cache omitted original source archive: {cached}; rebuild its cache')
     recipes.append({'url': 'https://github.com/OpenMS/contrib-sources/releases/download/3.6.0/' + filename,
                     'sha256': checksum, 'local_file': str(cached.resolve())})
+if not re.search(r'(?<![0-9])3\.4\.0(?![0-9])', values['EIGEN']):
+    raise RuntimeError(f'contrib Eigen source archive does not match Chocolatey 3.4.0: {values["EIGEN"]}')
 
 # OpenMS finds Chocolatey's Eigen headers rather than contrib's copy. Refuse an
 # unrecorded version change; 3.4.0 corresponds to the source archive above.
@@ -70,8 +72,15 @@ providers = [
     {'name': 'OpenMS-contrib', 'version': args.contrib_revision,
      'license': 'Multiple upstream licenses; includes EPL-1.0 and MPL-2.0',
      'scope': 'Conservative complete pinned ALL build inputs, including static/header dependencies; not all are linked.',
-     'files': [str(p.resolve()) for folder in ('bin', 'lib') for p in (args.contrib / folder).glob('*.dll')],
+     'files': [str(p.resolve()) for folder in ('bin', 'lib') for p in (args.contrib / folder).glob('*.dll')
+               if p.name.lower() != 'libcurl.dll'],
      'force_include': True, 'collect_sources': True, 'source_recipe': recipes},
+    {'name': 'curl', 'version': '8.12.1', 'license': 'curl',
+     'files': [str(p.resolve()) for folder in ('bin', 'lib') for p in (args.contrib / folder).glob('*.dll')
+               if p.name.lower() == 'libcurl.dll'],
+     'collect_sources': True,
+     'source_recipe': [{'url': 'https://curl.se/download/curl-8.12.1.tar.gz',
+                        'sha256': '7b40ea64947e0b440716a4d7f0b7aa56230a5341c8377d7b609649d4aea8dbcf'}]},
     {'name': 'OpenMS', 'version': openms_versions.pop(), 'license': 'BSD-3-Clause',
      'files': [str(p.resolve()) for p in args.openms.rglob('*.dll')],
      'collect_sources': True,

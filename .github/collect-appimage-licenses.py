@@ -78,7 +78,8 @@ def get_json(url):
 
 
 def dsc_fields(text):
-    # Debian .dsc files may be clearsigned. Parse only the RFC822 payload.
+    # Parse the RFC822 payload, not a verified signature. Descriptor authenticity
+    # uses HTTPS to the authoritative Launchpad publication (see ubuntu_sources).
     if text.startswith('-----BEGIN PGP SIGNED MESSAGE-----'):
         text = text.split('\n\n', 1)[1].split('\n-----BEGIN PGP SIGNATURE-----', 1)[0]
         text = '\n'.join(line[2:] if line.startswith('- ') else line for line in text.splitlines())
@@ -122,7 +123,8 @@ def ubuntu_sources(name, version, directory):
                 records.append(fetch(by_name[filename], directory / filename, checksum))
                 if (directory / filename).stat().st_size != int(size):
                     raise RuntimeError(f'source size mismatch: {filename}')
-            return {'publication': entry['self_link'], 'files': records}
+            return {'publication': entry['self_link'], 'files': records,
+                    'descriptor_trust': 'HTTPS to Launchpad; OpenPGP signature not verified. Source members verified against descriptor SHA-256.'}
         except Exception as error:
             errors.append(str(error))
     raise RuntimeError(f'cannot retrieve exact source {name}={version}: {errors}')
@@ -219,6 +221,34 @@ def generated_cache_owner(path, appdir, candidates):
     return None
 
 
+def payload_manifest(directory):
+    if not directory.is_dir():
+        raise RuntimeError(f'AppImage payload directory does not exist: {directory}')
+    result = {}
+    for path in directory.rglob('*'):
+        relative = path.relative_to(directory).as_posix()
+        if path.is_symlink():
+            result[relative] = ('symlink', os.readlink(path))
+        elif path.is_file():
+            result[relative] = ('file', digest(path))
+        elif not path.is_dir():
+            raise RuntimeError(f'unsupported AppImage payload entry: {relative}')
+    return result
+
+
+def validate_appimage_payload(appdir, image):
+    expected = payload_manifest(appdir)
+    with tempfile.TemporaryDirectory(prefix='dialibgen-appimage-proof-') as temporary:
+        subprocess.run([str(image), '--appimage-extract'], cwd=temporary, check=True,
+                       stdout=subprocess.DEVNULL, timeout=180)
+        actual = payload_manifest(Path(temporary) / 'squashfs-root')
+    if actual != expected:
+        missing = sorted(expected.keys() - actual.keys())
+        extra = sorted(actual.keys() - expected.keys())
+        changed = sorted(path for path in expected.keys() & actual.keys() if expected[path] != actual[path])
+        raise RuntimeError(f'AppImage payload differs from AppDir: missing={missing}, extra={extra}, changed={changed}')
+
+
 def validate_runtime_provider(image, runtime):
     actual_offset = int(run(str(image), '--appimage-offset'))
     if runtime['size'] != actual_offset or not 0 < actual_offset < image.stat().st_size:
@@ -242,6 +272,7 @@ def main():
     parser.add_argument('--providers', type=Path)
     args = parser.parse_args()
     appdir, image = args.appdir.resolve(), args.appimage.resolve()
+    validate_appimage_payload(appdir, image)
     output = args.sources.resolve() / 'appimage'
     output.mkdir(parents=True, exist_ok=True)
     providers = json.loads(args.providers.read_text()) if args.providers else []
@@ -294,7 +325,7 @@ def main():
                     unknown.append(record)
         records.append(record)
     inventory = {'appimage': image.name, 'sha256': digest(image), 'source_asset': args.source_asset,
-                 'scope': 'Every regular file and symlink in the AppDir; data requires exact SHA-256, ELF RPATH changes may match build IDs. AppImage header runtime has separate provider proof.',
+                 'scope': 'Every regular file and symlink in the AppDir, verified against the extracted final AppImage by path, exact file SHA-256 and link target. Attribution of ELF RPATH changes may match original build IDs; data requires exact SHA-256. AppImage header runtime has separate provider proof.',
                  'files': records, 'packages': [], 'providers': [], 'unknown': unknown, 'complete': False}
     report = output / 'inventory.json'
     report.write_text(json.dumps(inventory, indent=2) + '\n')
@@ -317,6 +348,8 @@ def main():
             source_cache[key] = ubuntu_sources(package['source'], package['source_version'], output / 'sources' / key)
         inventory['packages'].append({**package, 'copyright': str((target / 'copyright').relative_to(output)),
                                       'copyright_sha256': digest(target / 'copyright'),
+                                      'bundled_copyright_paths': [record['path'] for record in records
+                                                                  if record.get('sha256') == digest(target / 'copyright')],
                                       'corresponding_source': source_cache[key]})
     for provider in providers:
         if provider['name'] not in used_providers and not provider.get('appimage_runtime'):
@@ -333,7 +366,7 @@ def main():
         runtime = provider.get('appimage_runtime')
         if runtime:
             validate_runtime_provider(image, runtime)
-        if re.search(r'GPL|MPL|EPL|CDDL', provider['license']) and not provider.get('sources'):
+        if re.search(r'GPL|MPL|EPL|CDDL', provider['license'], re.I) and not provider.get('sources'):
             raise RuntimeError(f'no corresponding helper source: {provider["name"]}')
         sources = [fetch(source['url'], target / source['filename'], source['sha256'])
                    for source in provider.get('sources', [])]
@@ -343,6 +376,10 @@ def main():
     (output / 'README.txt').write_text(
         'This directory accompanies the AppImage named and SHA-256 identified in inventory.json.\n'
         'Ubuntu packages retain their original copyright notices and exact source versions.\n'
+        'bundled_copyright_paths identifies byte-identical copyright files inside the AppImage;\n'
+        'an empty list means no exact file match, not a search of aggregate notice contents.\n'
+        'Source descriptors are trusted through HTTPS to their authoritative Launchpad publication;\n'
+        'their OpenPGP signatures are not verified. Source archives match descriptor SHA-256 checksums.\n'
         'sources/ contains the complete upstream archives and Debian/Ubuntu packaging/patches.\n'
         'Rebuild on matching Ubuntu: install build dependencies, run dpkg-source -x PACKAGE.dsc,\n'
         'then dpkg-buildpackage -us -uc in the extracted source directory.\n'

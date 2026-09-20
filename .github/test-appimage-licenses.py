@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import io
+import shutil
 from pathlib import Path
 import tempfile
 import tarfile
@@ -123,6 +124,7 @@ class AttributionTests(unittest.TestCase):
              patch.object(collector.urllib.request, 'urlopen', side_effect=urlopen):
             result = collector.ubuntu_sources('example', '1:2.3-4ubuntu5', self.root / 'good')
         self.assertEqual(result['files'][1]['sha256'], checksum)
+        self.assertIn('OpenPGP signature not verified', result['descriptor_trust'])
         self.assertEqual((self.root / 'good/example.orig.tar.xz').read_bytes(), source)
         content[urls[1]] = b'tampered source'
         with patch.object(collector, 'get_json', side_effect=[{'entries': [entry]}, urls]), \
@@ -138,6 +140,37 @@ class AttributionTests(unittest.TestCase):
         text = ('-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n'
                 'Source: sample\nVersion: 1:2-3\n\n-----BEGIN PGP SIGNATURE-----\nsignature\n')
         self.assertEqual(collector.dsc_fields(text)['Version'], '1:2-3')
+
+    def test_final_appimage_payload_must_match_every_file_and_link(self):
+        appdir = self.root / 'AppDir'
+        appdir.mkdir()
+        (appdir / 'usr').mkdir()
+        (appdir / 'usr/library.so').write_bytes(b'actual library bytes')
+        (appdir / 'AppRun').symlink_to('usr/library.so')
+        (appdir / 'dangling').symlink_to('missing-target')
+        image = self.root / 'final.AppImage'
+        mutations = {
+            'same': lambda tree: None,
+            'missing': lambda tree: (tree / 'usr/library.so').unlink(),
+            'extra': lambda tree: (tree / 'unattributed').write_bytes(b'extra payload'),
+            'changed': lambda tree: (tree / 'usr/library.so').write_bytes(b'changed library bytes'),
+            'link-target': lambda tree: ((tree / 'AppRun').unlink(), (tree / 'AppRun').symlink_to('different-target')),
+            'file-type': lambda tree: ((tree / 'AppRun').unlink(), (tree / 'AppRun').write_text('usr/library.so')),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                def extract(command, *, cwd, **kwargs):
+                    self.assertEqual(command, [str(image), '--appimage-extract'])
+                    self.assertTrue(kwargs['check'])
+                    tree = Path(cwd) / 'squashfs-root'
+                    shutil.copytree(appdir, tree, symlinks=True)
+                    mutate(tree)
+                with patch.object(collector.subprocess, 'run', side_effect=extract):
+                    if name == 'same':
+                        collector.validate_appimage_payload(appdir, image)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'payload differs from AppDir'):
+                            collector.validate_appimage_payload(appdir, image)
 
     def test_runtime_provider_is_bound_to_exact_header(self):
         image = self.root / 'sample.AppImage'

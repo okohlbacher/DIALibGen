@@ -29,6 +29,11 @@ def digest(path, algorithm='sha256'):
     return value.hexdigest()
 
 
+def has_notices(directory):
+    return directory.is_dir() and any(p.is_file() and p.suffix.lower() != '.json' and p.stat().st_size
+                                       for p in directory.rglob('*'))
+
+
 def fetch(urls, destination, checksums=None):
     urls = [urls] if isinstance(urls, str) else urls
     checksums = checksums or {}
@@ -102,17 +107,41 @@ def source_records(recipe):
 def collect_source_notices(archive, target):
     """Retain upstream notices for embedded components, without extracting source trees."""
     pattern = re.compile(r'^(COPYING|LICENSE|LICENCE|NOTICE|COPYRIGHT|AUTHORS|Third[_-]?Party[_-]?Notices?)([._-].*)?$', re.I)
-    with tarfile.open(archive) as source:
-        for member in source:
-            path = Path(member.name)
-            if not member.isfile() or not (pattern.match(path.name) or any(part.lower() in {'licenses', 'license'} for part in path.parts[:-1])):
-                continue
-            if path.is_absolute() or '..' in path.parts:
-                raise RuntimeError(f'unsafe source notice path: {member.name}')
-            destination = target / path
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            with source.extractfile(member) as stream, destination.open('wb') as output:
-                shutil.copyfileobj(stream, output)
+    archive_sha256 = digest(archive)
+    manifest_file = target / 'index.json'
+    manifest = json.loads(manifest_file.read_text()) if manifest_file.is_file() else {}
+    def destination(name):
+        path = Path(name)
+        if not (pattern.match(path.name) or path.name == 'REUSE.toml' or path.suffix.lower() == '.license'
+                or any(part.lower() in {'licenses', 'license'} for part in path.parts[:-1])):
+            return None
+        if path.is_absolute() or '..' in path.parts or '\\' in name or ':' in name:
+            raise RuntimeError(f'unsafe source notice path: {name}')
+        # Keep installer paths short; the manifest retains the complete upstream name.
+        key = hashlib.sha256((archive_sha256 + '\0' + name).encode()).hexdigest()[:16]
+        filename = key + '-' + re.sub(r'[^A-Za-z0-9._-]', '_', path.name)[:24]
+        record = {'archive': archive.name, 'archive_sha256': archive_sha256, 'path': name}
+        if filename in manifest and manifest[filename] != record:
+            raise RuntimeError(f'source notice filename collision: {name}')
+        manifest[filename] = record
+        result = target / filename
+        result.parent.mkdir(parents=True, exist_ok=True)
+        return result
+
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as source:
+            for member in source.infolist():
+                if not member.is_dir() and (output := destination(member.filename)):
+                    with source.open(member) as stream, output.open('wb') as sink:
+                        shutil.copyfileobj(stream, sink)
+    else:
+        with tarfile.open(archive) as source:
+            for member in source:
+                if member.isfile() and (output := destination(member.name)):
+                    with source.extractfile(member) as stream, output.open('wb') as sink:
+                        shutil.copyfileobj(stream, sink)
+    if manifest:
+        manifest_file.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
 
 
 def collect_sources(records, directory, notices):
@@ -120,12 +149,14 @@ def collect_sources(records, directory, notices):
     result = []
     for source in records:
         urls = source.get('url')
+        pinned_git = False
         if not urls and source.get('git_url'):
             git = source['git_url'].removesuffix('.git')
             revision = source.get('git_rev')
-            if not git.startswith('https://github.com/') or not revision:
+            if not git.startswith('https://github.com/') or not isinstance(revision, str) or not re.fullmatch(r'[a-fA-F0-9]{40}', revision):
                 raise RuntimeError(f'unsupported unpinned source checkout: {source}')
             urls = f'{git}/archive/{revision}.tar.gz'
+            pinned_git = True
         if not urls:
             raise RuntimeError(f'no downloadable source in recipe: {source}')
         urls = [urls] if isinstance(urls, str) else urls
@@ -140,7 +171,7 @@ def collect_sources(records, directory, notices):
         checksums = {k: source[k] for k in ('sha256', 'sha512', 'sha1', 'md5') if k in source}
         if any(not isinstance(value, str) or not re.fullmatch('[a-fA-F0-9]+', value) for value in checksums.values()):
             raise RuntimeError(f'invalid source checksum in recipe: {source}')
-        if not checksums and not source.get('git_rev'):
+        if not checksums and not pinned_git:
             raise RuntimeError(f'no source checksum in recipe: {source}')
         identity = next(iter(checksums.values()), source.get('git_rev'))
         destination = directory.parent / 'archives' / f'{identity}-{name}'
@@ -152,8 +183,7 @@ def collect_sources(records, directory, notices):
         item['patches'] = source.get('patches', [])
         # Qt and other libraries embed third parties whose notices are in their sources.
         archive = directory / item['file']
-        if tarfile.is_tarfile(archive):
-            collect_source_notices(archive, notices / 'source-notices')
+        collect_source_notices(archive, notices / 'source-notices')
         result.append(item)
     if not result:
         raise RuntimeError(f'no corresponding source records for {directory.name}')
@@ -192,15 +222,32 @@ def main():
         provenance = torch / 'share/licenses/Torch/provenance.json'
         if not provenance.is_file():
             raise RuntimeError('Torch SDK lacks provenance; refresh its cache using fetch-libtorch.py')
+        license_file = provenance.with_name('LICENSE')
+        if not license_file.is_file() or not license_file.stat().st_size:
+            raise RuntimeError('Torch SDK lacks a non-empty primary LICENSE; refresh its cache using fetch-libtorch.py')
         data = json.loads(provenance.read_text())
-        providers.append({**data, 'files': [str(p) for p in (torch / 'lib').glob('*') if p.is_file()],
+        native = data.pop('native_providers', [])
+        native_files = set()
+        for provider in native:
+            for filename, expected in provider['sdk_file_sha256'].items():
+                if digest(torch / filename) != expected:
+                    raise RuntimeError(f'Torch native dependency differs from its licensing record: {filename}')
+            provider['files'] = [str((torch / filename).resolve()) for filename in provider['sdk_file_sha256']]
+            native_files.update(provider['files'])
+            if provider.get('license_directory'):
+                provider['license_directory'] = str(torch / provider['license_directory'])
+        # These are separate upstream components, not covered by PyTorch's BSD grant.
+        separate = re.compile(r'^(libarm_compute|libgomp|libgfortran|libopenblas|libiomp)', re.I)
+        providers.append({**data, 'files': [str(p) for p in (torch / 'lib').rglob('*')
+                          if p.is_file() and str(p.resolve()) not in native_files and not separate.match(p.name)],
                           'license_directory': str(torch / 'share/licenses/Torch')})
+        providers.extend(native)
     origins = dict(line.split('\t', 1) for line in args.origins.read_text().splitlines()) if args.origins else {}
     external = {}
     for provider in providers:
         for filename in provider['files']:
             external[str(Path(filename).resolve()).lower()] = provider
-    bundled = [p for folder in ('lib', 'bin') for p in (stage / folder).glob('*')
+    bundled = [p for folder in ('lib', 'bin') for p in (stage / folder).rglob('*')
                if p.is_file() and ('.so' in p.name or p.suffix.lower() in {'.dylib', '.dll'})]
     components, files = {}, []
     with tempfile.TemporaryDirectory(prefix='dialibgen-license-packages-') as temporary:
@@ -213,14 +260,14 @@ def main():
             about = json.loads((info / 'about.json').read_text())
             license_dir = info / 'licenses'
             target = notices / key
-            if license_dir.is_dir() and any(p.is_file() for p in license_dir.rglob('*')):
+            if target.exists():
+                shutil.rmtree(target)
+            if has_notices(license_dir):
                 shutil.copytree(license_dir, target, dirs_exist_ok=True)
             elif 'GCC-exception' in record.get('license', ''):
                 target.mkdir(parents=True, exist_ok=True)
                 for name in ('GPL-3.0-or-later.txt', 'GCC-Runtime-Exception-3.1.txt'):
                     shutil.copy2(repository_licenses / name, target / name)
-            else:
-                raise RuntimeError(f'no license texts in original package {key}')
             recipe = info / 'recipe'
             component = {'name': record['name'], 'version': record['version'], 'build': record['build'],
                          'license': record.get('license', about.get('license')),
@@ -231,9 +278,9 @@ def main():
                 shutil.copytree(recipe, sources / key / 'recipe', dirs_exist_ok=True)
                 component['source_recipe'] = source_records(recipe)
             aggregate = record['name'] in {'onnxruntime-cpp', 'libopenms', 'libparquet'} or record['name'].startswith('libarrow')
-            if aggregate or re.search(r'GPL|EPL|MPL|CDDL', component['license'] or ''):
+            if aggregate or re.search(r'GPL|EPL|MPL|CDDL', component['license'] or '', re.I) or not has_notices(target):
                 if not recipe.is_dir():
-                    raise RuntimeError(f'no corresponding-source recipe for {key}')
+                    raise RuntimeError(f'no license texts or corresponding-source recipe for {key}')
                 selected = component['source_recipe']
                 if record['name'] == 'qt6-main':
                     # Qt's cross-platform recipe also downloads a Windows software
@@ -251,6 +298,8 @@ def main():
                             selected.append(source)
                 component['sources'] = collect_sources(selected, sources / key, target)
                 component['source_asset'] = args.source_asset
+            if not has_notices(target):
+                raise RuntimeError(f'no license texts in original package or its pinned sources: {key}')
             components[key] = component
             return key
 
@@ -259,15 +308,17 @@ def main():
             if key in components:
                 return key
             target = notices / key
+            if target.exists():
+                shutil.rmtree(target)
             license_dir = Path(provider['license_directory']) if provider.get('license_directory') else None
             if license_dir and license_dir.is_dir():
                 shutil.copytree(license_dir, target, dirs_exist_ok=True)
             component = {k: v for k, v in provider.items() if k not in {'files', 'license_directory', 'force_include', 'collect_sources'}}
             component['licenses'] = str(target.relative_to(stage))
-            if provider.get('collect_sources') or re.search(r'GPL|EPL|MPL|CDDL', component['license']):
+            if provider.get('collect_sources') or re.search(r'GPL|EPL|MPL|CDDL', component['license'], re.I):
                 component['sources'] = collect_sources(component.get('source_recipe', []), sources / key, target)
                 component['source_asset'] = args.source_asset
-            if not target.is_dir() or not any(p.is_file() for p in target.rglob('*')):
+            if not has_notices(target):
                 raise RuntimeError(f'missing external SDK notices: {key}')
             if 'source_recipe' in component:
                 component['source_recipe'] = [{k: v for k, v in record.items() if k != 'local_file'}

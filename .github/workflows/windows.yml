@@ -52,6 +52,8 @@ jobs:
   # OpenMS dependencies and development files.
   openms:
     name: windows-x64-openms
+    permissions:
+      contents: read
     runs-on: windows-2022
     timeout-minutes: 180
     steps:
@@ -289,7 +291,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: libtorch-sdk
-          key: libtorch-cpu-2.10.0-windows-x64-17a09465-v2
+          key: libtorch-cpu-2.10.0-windows-x64-17a09465-v3
 
       - name: Extract the CPU libtorch SDK
         if: steps.torch-cache.outputs.cache-hit != 'true'
@@ -316,6 +318,10 @@ jobs:
           fetch peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
           fetch peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
           fetch peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
+
+      - name: Verify cached prediction models
+        shell: bash
+        run: bash scripts/fetch-models.sh --check --dir models
 
       # Fetch OpenMS 3.5's omitted Find modules and add them to CMAKE_MODULE_PATH.
       - name: Fetch OpenMS's CMake find modules
@@ -444,7 +450,7 @@ jobs:
             grep -Eq "[ :]+$name$" registered-tests.txt \
               || { echo "::error::$name is not registered; this release must include training"; exit 1; }
           done
-          ctest --test-dir build --output-on-failure --output-junit "$PWD/build/ctest.xml"
+          ctest --test-dir build --output-on-failure --timeout 2400 --output-junit "$PWD/build/ctest.xml"
           python - <<'PYTEST'
           import xml.etree.ElementTree as ET
           tests = {case.get("name"): case for case in ET.parse("build/ctest.xml").iter("testcase")}
@@ -454,6 +460,8 @@ jobs:
               "peptdeep_ms2_matches_reference", "irt_calibration_matches_openms",
               "ms2_sessions_are_deterministic", "free_cysteine_correction", "decoy_methods_distinct",
               "library_io_contract", "text_writer_contract", "atomic_file_contract", "refinement_report_contract",
+              "peptdeep_reference_encoding", "peptdeep_element_table", "peptdeep_meta_inputs",
+              "peptdeep_encoder_matches_reference", "topp_parameters", "parameter_docs_current",
           }
           assert required <= tests.keys(), f"required tests missing: {required - tests.keys()}"
           for name, case in tests.items():
@@ -504,12 +512,11 @@ jobs:
 
           # Restore runtime dependency paths explicitly in the empty-environment check.
           PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
-          OPENMS_DATA_PATH="$(cygpath -w "$(dirname "$(find openms-install -name 'OpenMSConfig.cmake' | head -1)")/../../share/OpenMS" 2>/dev/null || true)"
-          export PATH_KEEP OPENMS_DATA_PATH
+          export PATH_KEEP
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
             example/proteins.fasta
-          bash test/write_ctd_test.sh "$BIN" || [ $? -eq 77 ]
+          bash test/write_ctd_test.sh "$BIN"
 
       - name: Build a real library
         shell: bash -el {0}
@@ -529,8 +536,17 @@ jobs:
               sys.exit("::error::the Parquet library has no rows")
           if not (f.schema_arrow.metadata or {}).get(b"odia.config_json"):
               sys.exit("::error::the Parquet library does not carry odia.config_json")
+          cfg = json.loads(f.schema_arrow.metadata[b"odia.config_json"])
+          for key in ("enzyme", "fixed_modifications", "schema_version"):
+              if key not in cfg:
+                  sys.exit(f"::error::the embedded recipe is missing {key!r}")
           print(f"library: {f.metadata.num_rows} precursors")
           PY
+          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
+                     Relative.Intensity Fragment.Type Protein.Group; do
+            head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
+              || { echo "::error::the TSV header has no $col column"; exit 1; }
+          done
 
       # Portable bundles carry the executable, runtime DLLs, models and data.
       - name: Exercise all installed modes
@@ -614,7 +630,10 @@ jobs:
               key=$(printf '%s' "$dep" | tr '[:upper:]' '[:lower:]')
               if [ -n "${seen[$key]:-}" ]; then continue; fi
               seen[$key]=1
-              src=$(resolve "$dep") || continue
+              src=$(resolve "$dep") || {
+                if [[ "$key" == api-ms-* || "$key" == ext-ms-* ]] || [ -f "$(cygpath -S)/$dep" ]; then continue; fi
+                echo "::error::unresolved non-system DLL $dep imported by $f"; exit 1
+              }
               copy_once "$src"
               todo+=("stage/bin/$(basename "$src")")
             done < <(dumpbin -nologo -dependents "$f" \
@@ -651,7 +670,9 @@ jobs:
           }
           run_bare --help > portable.txt 2>&1 \
             || { echo "::error::the staged bundle is not portable"; cat portable.txt; exit 1; }
-          grep -q "^Version: $(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" portable.txt \
+          want=$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          [ -n "$want" ] || { echo "::error::empty expected version"; exit 1; }
+          grep -q "^Version: $want" portable.txt \
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
           run_bare -in example/proteins.fasta -out portable.tsv > portable-run.txt 2>&1 \
             || { echo "::error::the staged bundle cannot generate a library"; cat portable-run.txt; exit 1; }
@@ -695,7 +716,14 @@ jobs:
       - name: Package the CLI
         if: steps.pkg.outputs.package == 'true'
         shell: bash
-        run: 7z a -tzip "DIALibGen-windows-x64.zip" ./stage/*
+        run: |
+          (cd stage && 7z a -tzip ../DIALibGen-windows-x64.zip .)
+          python - <<'PYZIP'
+          import zipfile
+          with zipfile.ZipFile('DIALibGen-windows-x64.zip') as archive:
+              if 'bin/DIALibGen.exe' not in archive.namelist():
+                  raise SystemExit('CLI archive does not contain bin/DIALibGen.exe at its root')
+          PYZIP
 
       # Stage CLI resources before Tauri copies them into the app.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -758,8 +786,10 @@ jobs:
           done < <(find gui/src-tauri/target/release/bundle \
                      \( -name '*.msi' -o -name '*-setup.exe' \) -type f)
           ls -la dist-bundles
-          [ "$n" -gt 0 ] \
-            || { echo "::error::the desktop build produced no installer"; exit 1; }
+          for asset in DIALibGen-gui-windows-x64.msi DIALibGen-gui-windows-x64-setup.exe; do
+            test -s "dist-bundles/$asset" \
+              || { echo "::error::missing desktop installer $asset"; exit 1; }
+          done
 
       - name: Package corresponding sources
         if: steps.pkg.outputs.package == 'true'

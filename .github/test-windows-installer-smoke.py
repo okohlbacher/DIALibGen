@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('installer', Path(__file__).with_name('windows-installer-smoke.py'))
 installer = importlib.util.module_from_spec(spec)
@@ -72,4 +74,30 @@ with tempfile.TemporaryDirectory() as temporary:
         pass
     else:
         raise AssertionError('accepted missing expected embedded CLI layout')
-print('PASS: exact per-installer Tauri patch; missing or changed model, notice, GUI and CLI payloads refused')
+
+# No native Windows API is mocked into success: these exercise the timing gate;
+# the actual EnumWindows/installed-process proof runs on the Windows runner.
+def window_check(find_window, exits=False):
+    clock = [0.0]
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    process = SimpleNamespace(pid=42, returncode=0 if exits else None, poll=lambda: 0 if exits else None)
+    with patch.object(installer.time, 'monotonic', lambda: clock[0]), patch.object(installer.time, 'sleep', advance):
+        return installer.wait_for_gui_window(process, lambda pid: find_window(clock[0], pid), timeout=2, stable_seconds=1)
+
+
+window = {'hwnd': 123, 'title': 'DIALibGen', 'width': 1180, 'height': 820}
+assert window_check(lambda elapsed, pid: window if pid == 42 and elapsed >= 0.25 else None) == window
+for finder, exits in ((lambda elapsed, pid: None, False),
+                      (lambda elapsed, pid: window if elapsed < 0.5 else None, False),
+                      (lambda elapsed, pid: {**window, 'hwnd': int(elapsed * 4)}, False),
+                      (lambda elapsed, pid: window, True)):
+    try:
+        window_check(finder, exits)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('accepted missing, disappearing, replaced window or exited GUI process')
+print('PASS: exact installer bytes; changed payloads refused; GUI process/window must remain present')

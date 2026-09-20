@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 def digest(path):
@@ -73,6 +74,103 @@ def run(command, log, timeout):
         raise RuntimeError(f'command exited {result.returncode}; see {log}')
 
 
+def wait_for_gui_window(process, find_window, timeout=60, stable_seconds=3):
+    deadline = time.monotonic() + timeout
+    first_seen, previous = None, None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(f'installed GUI exited before its window check: {process.returncode}')
+        window = find_window(process.pid)
+        if window is None or previous is None or window['hwnd'] != previous['hwnd']:
+            first_seen = time.monotonic() if window else None
+        if window and time.monotonic() - first_seen >= stable_seconds:
+            return window
+        previous = window
+        time.sleep(0.25)
+    raise RuntimeError('installed GUI did not keep a visible DIALibGen main window open')
+
+
+def exercise_gui(gui, log):
+    # Native window ownership excludes another single-instance process and
+    # WebView2 helper processes. This checks startup, not frontend rendering.
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL('user32', use_last_error=True)
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
+    user32.EnumWindows.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindowVisible.restype = wintypes.BOOL
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.GetClientRect.restype = wintypes.BOOL
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowTextW.restype = ctypes.c_int
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.PostMessageW.restype = wintypes.BOOL
+
+    def find_window(pid):
+        windows = []
+
+        @callback_type
+        def inspect(hwnd, _):
+            owner = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+            if owner.value == pid and user32.IsWindowVisible(hwnd):
+                title = ctypes.create_unicode_buffer(256)
+                rect = wintypes.RECT()
+                user32.GetWindowTextW(hwnd, title, len(title))
+                if (title.value == 'DIALibGen' and user32.GetClientRect(hwnd, ctypes.byref(rect))
+                        and rect.right > rect.left and rect.bottom > rect.top):
+                    windows.append({'hwnd': hwnd, 'title': title.value,
+                                    'width': rect.right - rect.left, 'height': rect.bottom - rect.top})
+            return True
+
+        if not user32.EnumWindows(inspect, 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return windows[0] if windows else None
+
+    env = {key: os.environ[key] for key in ('SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC',
+           'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432')
+           if key in os.environ}
+    env['PATH'] = str(gui.parent) + os.pathsep + str(Path(os.environ['SystemRoot']) / 'System32')
+    env['OPENMS_DISABLE_UPDATE_CHECK'] = 'ON'
+    with log.open('w', encoding='utf-8') as output:
+        process = subprocess.Popen([str(gui)], cwd=gui.parent, env=env, stdout=output, stderr=subprocess.STDOUT)
+        output.write(f'launched installed GUI: {gui}; pid={process.pid}\n'); output.flush()
+        try:
+            window = wait_for_gui_window(process, find_window)
+            output.write(f'visible native main window stayed open for 3 seconds: {json.dumps(window)}\n')
+            output.flush()
+        finally:
+            if process.poll() is None:
+                # Recheck ownership immediately before closing this process's window.
+                try:
+                    closing = find_window(process.pid)
+                    if closing:
+                        user32.PostMessageW(closing['hwnd'], 0x0010, 0, 0)  # WM_CLOSE
+                except OSError as error:
+                    output.write(f'window enumeration failed during cleanup: {error}\n')
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    output.write('GUI did not close; forcibly cleaning its process tree\n'); output.flush()
+                    try:
+                        subprocess.run([str(Path(os.environ['SystemRoot']) / 'System32/taskkill.exe'),
+                                        '/PID', str(process.pid), '/T', '/F'], stdout=output,
+                                       stderr=subprocess.STDOUT, timeout=15, check=True)
+                    finally:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait(timeout=5)
+                    raise RuntimeError(f'installed GUI required forced termination; see {log}')
+            output.write(f'GUI exit: {process.returncode}\n')
+        if process.returncode != 0:
+            raise RuntimeError(f'installed GUI exited abnormally: {process.returncode}; see {log}')
+    return {**window, 'stable_seconds': 3, 'clean_exit': True}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--msi', type=Path, required=True)
@@ -126,6 +224,7 @@ def main():
                 if not uninstaller.is_file():
                     raise RuntimeError(f'NSIS did not install its uninstaller into {nsis_root}')
                 exercise('nsis', nsis_root)
+                record['checks']['nsis']['gui_window'] = exercise_gui(nsis_root / 'dialibgen-gui.exe', out / 'nsis-gui.log')
             finally:
                 if uninstaller.is_file():
                     # Run an external copy with _?= so NSIS waits rather than
@@ -140,7 +239,8 @@ def main():
                     record['nsis_payload_removed'] = True
     finally:
         (out / 'verification.json').write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
-    print('PASS: MSI and NSIS preserve packaged resources; embedded generate/refine/tune work; NSIS payload removed')
+    print('PASS: MSI and NSIS preserve packaged resources; embedded generate/refine/tune work; '
+          'installed NSIS GUI opens a native main window; NSIS payload removed')
 
 
 if __name__ == '__main__':

@@ -801,6 +801,21 @@ jobs:
             "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
             --bare --output smoke-appimage
 
+      - name: Install and open the Linux desktop packages
+        if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset LD_LIBRARY_PATH
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          sudo apt-get install -y xvfb xauth x11-utils dbus-x11
+          /usr/bin/python3 .github/linux-desktop-smoke.py \
+            --deb "dist-bundles/DIALibGen-gui-${{ matrix.name }}.deb" \
+            --appdir gui/src-tauri/target/release/bundle/appimage/DIALibGen.AppDir \
+            --python "$MAMBA_ROOT_PREFIX/envs/dialibgen/bin/python" \
+            --output smoke-linux-desktop
+
       # Notarize and staple the DMG separately from the app it contains.
       - name: Notarize and staple the disk image
         if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
@@ -886,6 +901,8 @@ jobs:
             smoke-portable/**/*.tune.json
             smoke-appimage/*.log
             smoke-appimage/**/*.tune.json
+            smoke-linux-desktop/**/*.log
+            smoke-linux-desktop/**/*.json
 
       - name: Preserve failed Linux bundle diagnostics
         if: failure() && steps.pkg.outputs.package == 'true' && runner.os == 'Linux'

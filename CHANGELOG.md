@@ -5,8 +5,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.11.0] — 2026-09-20
 
-Release validation is in progress; see [BACKLOG.md](BACKLOG.md) for the
-remaining checks. The entries below describe the implemented changes.
+Release validation is in progress; see the
+[validation record](docs/testing.md#release-verification). The entries below
+describe the implemented changes.
 
 ### Added
 
@@ -80,9 +81,6 @@ remaining checks. The entries below describe the implemented changes.
 - Update Vite and Vitest to patched versions, removing the reported development
   server and test-server dependency vulnerabilities.
 
-See [BACKLOG.md](BACKLOG.md) for platform and first-launch validation that still
-requires release evidence.
-
 ## [0.10.1] — 2026-09-17
 
 ### Added
@@ -152,7 +150,8 @@ requires release evidence.
   against the published 0.9.0 tarball, 1 s on every run after. macOS validates
   each of the 145 bundled libraries with Apple individually, and a `.tar.gz`
   cannot carry a stapled ticket that would answer for all of them at once. It is
-  not stuck. The `.dmg` is stapled and unaffected. See BACKLOG.md for the fix.
+  not stuck. The `.dmg` is stapled and unaffected. See the
+  [subsequent startup measurements](docs/testing.md#macos-startup).
 
 ## [0.9.0] — 2026-09-12
 

@@ -13,7 +13,6 @@ runtime.
 Version **0.11.0** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), and [changes](CHANGELOG.md).
-Final release checks are tracked in [BACKLOG.md](BACKLOG.md).
 
 ## Install
 
@@ -41,11 +40,11 @@ brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli
 brew install --cask okohlbacher/dialibrarygenerator/dialibgen
 ```
 
-The signed 0.11.0 candidate measured about one second on its first CLI launch
-on fresh hosted Macs, through both archive and Homebrew delivery. Earlier
+Signed 0.11.0 candidate `79932aa` measured about one second on its first CLI
+launch on fresh hosted Macs, through both archive and Homebrew delivery. Earlier
 releases showed much longer delays. These observations do not guarantee startup
-time on every Mac; the candidate, hashes and conditions are recorded in
-[BACKLOG.md](BACKLOG.md).
+time on every Mac; the hashes and conditions are recorded in the
+[macOS startup measurements](docs/testing.md#macos-startup).
 
 ## Generate a library
 
@@ -145,8 +144,9 @@ are in [the historical benchmark summary](docs/benchmark.md).
 - Refinement requires the columns needed by enabled quality gates. Empirical
   libraries and fragment-intensity write-in have additional input contracts;
   empirical references require long-format Parquet, and compact references are
-  refused. DIA-NN 2.x fragment-column parsing has synthetic contract tests;
-  interoperability with a real `--export-quant` fixture remains to be checked.
+  refused. DIA-NN 2.x fragment parsing has synthetic tests and a regression
+  using one real DIA-NN 2.0 `--export-quant` report row; other versions and
+  export settings remain unverified.
 - Prediction supports one modification per residue. Refinement normalizes known
   modification names to UniMod accessions and reports unresolved names.
 - A library can contain at most 4,294,967,295 transitions. Larger inputs must
@@ -155,8 +155,8 @@ are in [the historical benchmark summary](docs/benchmark.md).
   builds with compatible CUDA LibTorch and runtime libraries.
 - CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
   INI export do not.
-- Windows releases target x64. Platform-specific validation and macOS startup
-  measurements are tracked in [BACKLOG.md](BACKLOG.md).
+- Windows releases target x64. The macOS desktop app and Homebrew casks
+  require macOS 14 or later.
 
 See [validation and measured coverage](docs/testing.md) for what the tests
 establish and what remains untested.

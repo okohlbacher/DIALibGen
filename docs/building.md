@@ -38,10 +38,9 @@ runtime libraries. GPU prediction additionally needs an ONNX Runtime build
 with the CUDA execution provider. The standard CPU archive is not a CUDA
 bundle.
 
-Linux ARM64 and Windows CPU training have dedicated release validation because
-their LibTorch packaging differs. Consult [BACKLOG.md](../BACKLOG.md) for
-unresolved release checks rather than assuming that a successful compilation
-proves training works.
+Linux ARM64 and Windows use different native runtime packages. The
+[release checks](testing.md#release-verification) require actual CPU training
+on each platform; a successful compilation does not establish that it works.
 
 ## Check documentation
 
@@ -58,7 +57,6 @@ See [gui/README.md](../gui/README.md) for desktop development and checks.
 
 ## Release verification
 
-Tagged builds attach packages to a draft release. Publish only after every
-platform passes the prediction, refinement, training, installed-library and
-relocated-binary checks, and the expected assets are present. The macOS
-archives and desktop images also undergo signature and notarization checks.
+Tagged builds attach packages to a draft release. The
+[validation guide](testing.md#release-verification) defines the required
+platform, installer, signing and distribution checks before publication.

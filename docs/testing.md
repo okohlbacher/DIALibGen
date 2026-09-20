@@ -46,14 +46,27 @@ which does not establish prediction or training correctness.
   Native tests verify that an occupied output path, including a dangling
   symlink, is refused without starting a child or changing the existing file.
 
-Release workflows require an installed CMake consumer and execution of all
-three modes after runtime relocation on each platform. macOS packaging requires
-signing, notarization and startup checks. Distribution gates attribute actual
-bundled libraries and AppImage payload files, retain upstream notices and supply
-checksum-verified corresponding-source assets. These gates describe the required
-release evidence; their presence in the workflow is not a passing result.
-Final candidate jobs and artifact verification remain tracked in
-[BACKLOG.md](../BACKLOG.md).
+## Release verification
+
+Each release requires the complete CPU generation/refinement/training suite,
+an installed CMake consumer and execution of all three modes after runtime
+relocation on Linux x64/ARM64, macOS x64/ARM64 and Windows x64. The desktop
+packages must contain the expected executable, models and runtime libraries,
+and pass installation and launch checks. Successful compilation alone does
+not establish runtime or installer correctness.
+
+macOS gates require valid signatures, accepted notarization, stapled desktop
+tickets and fresh-machine startup measurements. Distribution gates attribute
+bundled libraries and the final AppImage payload, retain upstream notices,
+and verify the corresponding-source manifests, archive parts and checksums.
+The tagged draft must contain every expected asset before publication.
+After publication, both Homebrew casks must pin the final CLI/DMG SHA-256
+hashes and pass normal installation checks on Apple Silicon and Intel Macs.
+A required workflow step is not evidence that the check passed.
+
+Final 0.11.0 verification is in progress. The final commit, platform job results
+and public artifact/installer verification have not yet been recorded here;
+the local measurements and earlier candidate evidence below do not replace them.
 
 ## Measured coverage and limits
 
@@ -63,6 +76,11 @@ coverage was **48.2% (8,324/17,270)**, including compiler-generated exception
 edges. The run passed all 45 CTest cases after the RT-unit, modification-join,
 capacity, numeric-parser and overwrite corrections. A second build without
 training passed all 41 applicable tests and its installed SDK consumer.
+
+A Linux installed-package check on the same date linked and called all three
+libraries from a moved install prefix. The exported CMake targets contained no
+build-machine ONNX Runtime or LibTorch path. This local result does not stand
+in for the required consumer checks on the other release platforms.
 
 The current frontend suite passed **59 tests** and measured **100% lines
 (277/277)**, **100% functions (113/113)**, **98.43% statements (315/320)** and
@@ -87,3 +105,44 @@ or export setting.
 Tests on synthetic reports prove software contracts; they do not establish
 improved proteomics performance. The qualified
 [benchmark results](benchmark.md) remain the scientific evidence.
+
+## macOS startup
+
+Older signed CLI archives showed very different first-launch times: 335 s for
+a 0.9.0 tarball and about 33 s for a 0.10.0 Homebrew cask installation. Subsequent
+launches were about one second. Those observations do not establish the
+behavior of the new bundle.
+
+The release measurement workflow compares archive and cask delivery on
+separate fresh VMs, recording artifact hashes, quarantine attributes, first
+and warm launch times. It does not launch or assess the candidate before the
+first timed invocation, apart from Homebrew's own installation checks.
+
+The archived 0.10.1 comparison completed on separate macOS 14.8.9 ARM VMs:
+raw tarball first/warm launch **0.554 / 0.063 s**, Homebrew cask
+**0.525 / 0.061 s**. Homebrew retained quarantine attributes; the curl archive
+had none. The older long delay did not reproduce on these hosted machines.
+[Measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35521436604).
+
+The signed, notarized **0.11.0 candidate `79932aa`** was then measured on two
+fresh macOS 14.8.9 ARM VMs with Homebrew 6.0.20:
+
+| Delivery | Installation | First `--help` | Warm `--help` | Quarantine attributes |
+|---|---:|---:|---:|---:|
+| curl + tar | 2.502 s | 0.987 s | 0.214 s | 0 |
+| Homebrew cask | 7.844 s | 1.329 s | 0.245 s | 387 |
+
+Both routes used archive SHA-256
+`12e89c76a2ad0d221bd23b0cf925fcf1017df15bc88be56c5a5f089650e96ad4`
+and executable code-directory hash `14f127b03fc40a1cc2a27ed24d06b3a1713646ed`.
+The cask used the published command-wrapper layout and unmodified Homebrew
+quarantine behavior. A localhost staging proxy served the CI artifact before
+publication, so installation timing excludes public GitHub download latency.
+Each invocation exited successfully and reported version 0.11.0. Raw records,
+signatures and policy logs are attached to the
+[candidate measurement run](https://github.com/okohlbacher/DIALibGen/actions/runs/35522179576).
+
+The several-minute delay did not reproduce in either comparison. These are
+single observations per delivery route on hosted VMs, not a guarantee for
+every Mac or network. These prior-candidate measurements do not replace checks
+against the final release artifacts.

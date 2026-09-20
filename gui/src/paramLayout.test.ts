@@ -25,6 +25,7 @@ describe('inferKind', () => {
   it('does not drop a value it cannot edit', () => {
     expect(inferKind('whatever', { a: 1 })).toBe('unsupported')
     expect(inferKind('whatever', null)).toBe('unsupported')
+    expect(inferKind('whatever', [1, 'mixed'])).toBe('unsupported')
   })
 })
 
@@ -57,6 +58,15 @@ describe('buildSpecs', () => {
     const core = buildSpecs(SAMPLE_CONFIG).filter((s) => s.group === 'core' && !s.hidden)
     expect(core[0].name).toBe('enzyme')
     expect(core.map((s) => s.name)).toContain('fixed_modifications')
+  })
+
+  it('sorts new keys after known keys without dropping either kind', () => {
+    expect(buildSpecs({ z_future: 1, enzyme: 'Trypsin', a_future: true }).map((s) => s.name))
+      .toEqual(['enzyme', 'a_future', 'z_future'])
+  })
+
+  it('limits fragment charges to the two channels the model predicts', () => {
+    expect(buildSpecs({ max_fragment_charge: 2 })[0]).toMatchObject({ min: 1, max: 2 })
   })
 })
 

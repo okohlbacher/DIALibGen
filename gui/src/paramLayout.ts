@@ -72,7 +72,7 @@ const OVERLAY: Record<string, Overlay> = {
   precursor_charges: {
     group: 'core',
     description:
-      'Charge states to include in the library. Match these to the acquisition method.'
+      'Unique charge states from 1 to 8. Match these to the acquisition method.'
   },
   precursor_mz: { group: 'core', description: 'Precursor m/z window. Match it to the instrument method.' },
   fixed_modifications: {
@@ -103,7 +103,7 @@ const OVERLAY: Record<string, Overlay> = {
     description: 'Instrument the MS2 model conditions on.',
     choices: ['QE', 'Lumos', 'timsTOF', 'SciexTOF', 'ThermoTOF', 'Astral', 'Fusion', 'Eclipse', 'Velos', 'Elite', 'OrbitrapTribrid', 'ThermoTribrid']
   },
-  nce: { group: 'core', description: 'Normalised collision energy the MS2 model conditions on.', min: 0, max: 100 },
+  nce: { group: 'core', description: 'Leave blank for the instrument default (QE 30, Lumos 25). Enter a value to override it.', min: 0, max: 100 },
   irt_rescale: {
     group: 'core',
     description:
@@ -116,7 +116,7 @@ const OVERLAY: Record<string, Overlay> = {
   },
 
   fragment_mz: { group: 'advanced', description: 'Fragment m/z window.' },
-  max_fragment_charge: { group: 'advanced', description: 'Highest fragment charge to enumerate.', min: 1, max: 3 },
+  max_fragment_charge: { group: 'advanced', description: 'Highest fragment charge supported by the MS2 model.', min: 1, max: 2 },
   fragments: { group: 'advanced', description: 'Fragments kept per precursor, as [minimum, maximum].', min: 1, max: 50 },
   min_relative_intensity: {
     group: 'advanced',
@@ -172,7 +172,6 @@ export function inferKind(name: string, value: unknown): ParamKind {
     }
     if (value.length > 0 && nums.length === value.length) return 'int-list'
     if (value.every((v) => typeof v === 'string')) return 'string-list'
-    if (value.length === 0) return 'string-list' // an empty list is a list of strings until told otherwise
   }
   // null, objects, mixed arrays: shown read-only rather than dropped, so a key
   // the form cannot edit is still visible instead of vanishing.

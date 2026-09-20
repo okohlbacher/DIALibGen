@@ -29,11 +29,6 @@ export interface RunResult {
   bytes?: number | null
 }
 
-export interface Progress {
-  label: string
-  percent: number
-}
-
 export interface Settings {
   schemaVersion: number
   lastUsed: Record<string, unknown> | null
@@ -80,6 +75,5 @@ export interface DialibgenApi {
   deletePreset: (name: string) => Promise<boolean>
 
   onLog: (cb: (line: string) => void) => () => void
-  onProgress: (cb: (p: Progress) => void) => () => void
   onDone: (cb: (r: RunResult) => void) => () => void
 }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react'
 import ParamField from './ParamField'
 import { buildSpecs, inertBecause, type ParamSpec } from './paramLayout'
-import type { BinaryInfo, ModelStatus, Progress, RunResult } from './types'
+import type { BinaryInfo, ModelStatus, RunResult } from './types'
 
 type Values = Record<string, unknown>
 
@@ -42,7 +42,6 @@ export default function App(): JSX.Element {
   const [threads, setThreads] = useState(1)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [log, setLog] = useState<string[]>([])
-  const [progress, setProgress] = useState<Progress | null>(null)
   const [running, setRunning] = useState(false)
   const [outcome, setOutcome] = useState<Outcome | null>(null)
   const [presets, setPresets] = useState<Record<string, Values>>({})
@@ -66,7 +65,7 @@ export default function App(): JSX.Element {
         const d = await window.dialibgen.defaultConfig()
         if (!alive) return
         setDefaults(d)
-        setValues({ ...d })
+        setValues({ ...d, nce: null })
         setConfigError(null)
       } catch (e) {
         if (alive) setConfigError(String(e))
@@ -101,10 +100,8 @@ export default function App(): JSX.Element {
     const offLog = window.dialibgen.onLog((line) => {
       setLog((l) => (l.length >= MAX_LOG_LINES ? [...l.slice(1), line] : [...l, line]))
     })
-    const offProgress = window.dialibgen.onProgress((p) => setProgress(p))
     const offDone = window.dialibgen.onDone((r: RunResult) => {
       setRunning(false)
-      setProgress(null)
       if (r.ok && r.bytes) {
         setOutcome({ ok: true, text: `Wrote ${humanBytes(r.bytes)}`, path: outRef.current })
       } else if (r.ok) {
@@ -117,14 +114,9 @@ export default function App(): JSX.Element {
     })
     return () => {
       offLog()
-      offProgress()
       offDone()
     }
   }, [])
-
-  useEffect(() => {
-    outRef.current = out
-  }, [out])
 
   useEffect(() => {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
@@ -135,25 +127,30 @@ export default function App(): JSX.Element {
   }, [])
 
   const modelsReady = !!models && models.missing.length === 0
-  const outExt = /\.parquet$/i.test(out) ? 'parquet' : /\.tsv$/i.test(out) ? 'tsv' : null
-  const canRun = !running && !!fasta && !!out && !!outExt && modelsReady && !!defaults
+  const outExt = /\.parquet$/.test(out) ? 'parquet' : /\.tsv$/.test(out) ? 'tsv' : null
+  const canRun = !running && !!fasta && !!out && !!outExt && modelsReady && !!defaults && !!info?.ok
 
   async function start(): Promise<void> {
+    setRunning(true)
+    outRef.current = out
     setLog([])
     setOutcome(null)
-    setProgress(null)
-    await window.dialibgen.saveLast({ ...values, __modelDir: modelDir })
-    const r = await window.dialibgen.run({
-      in: fasta,
-      out,
-      config: stripPrivate(values),
-      modelDir: modelDir || null,
-      threads
-    })
-    if (r.started) {
-      setRunning(true)
-    } else {
-      setOutcome({ ok: false, text: r.reason ?? 'could not start' })
+    try {
+      await window.dialibgen.saveLast({ ...values, __modelDir: modelDir })
+      const r = await window.dialibgen.run({
+        in: fasta,
+        out,
+        config: toolConfig(values),
+        modelDir: modelDir || null,
+        threads
+      })
+      if (!r.started) {
+        setRunning(false)
+        setOutcome({ ok: false, text: r.reason ?? 'could not start' })
+      }
+    } catch (e) {
+      setRunning(false)
+      setOutcome({ ok: false, text: `Could not start: ${String(e)}` })
     }
   }
 
@@ -257,7 +254,8 @@ export default function App(): JSX.Element {
               {running ? 'Running…' : 'Generate library'}
             </button>
             <button type="button" className="secondary" disabled={!running}
-                    onClick={() => void window.dialibgen.cancel()}>
+                    onClick={() => void window.dialibgen.cancel().catch((e: unknown) =>
+                      setOutcome({ ok: false, text: `Could not cancel: ${String(e)}` }))}>
               Cancel
             </button>
           </div>
@@ -288,14 +286,16 @@ export default function App(): JSX.Element {
               <h2>Library configuration</h2>
               <div className="row tight actions">
                 <button type="button" className="secondary slim"
-                        disabled={!defaults} onClick={() => defaults && setValues({ ...defaults })}>
+                        disabled={!defaults} onClick={() => defaults && setValues({ ...defaults, nce: null })}>
                   Reset
                 </button>
-                <button type="button" className="secondary slim" onClick={() => void loadConfig(setValues)}>
+                <button type="button" className="secondary slim" onClick={() => void loadConfig(setValues).catch((e: unknown) =>
+                  setOutcome({ ok: false, text: `Could not load config: ${String(e)}` }))}>
                   Load…
                 </button>
                 <button type="button" className="secondary slim"
-                        onClick={() => void saveConfig(stripPrivate(values))}>
+                        onClick={() => void saveConfig(toolConfig(values)).catch((e: unknown) =>
+                          setOutcome({ ok: false, text: `Could not save config: ${String(e)}` }))}>
                   Save…
                 </button>
               </div>
@@ -334,12 +334,6 @@ export default function App(): JSX.Element {
           <div className="logpane">
             <div className="section-head">
               <h2>Log</h2>
-              {progress && (
-                <span className="progress" title={`${progress.label} ${progress.percent.toFixed(0)}%`}>
-                  <span className="bar" style={{ width: `${Math.min(100, progress.percent)}%` }} />
-                  <span className="pct">{progress.label} {progress.percent.toFixed(0)}%</span>
-                </span>
-              )}
             </div>
             <pre ref={logRef} className="log">{log.join('\n')}</pre>
           </div>
@@ -359,19 +353,21 @@ export function stripPrivate(v: Values): Values {
   return out
 }
 
+// A blank NCE lets the CLI resolve the selected instrument's default. Presets
+// retain null to preserve this choice; JSON sent to the CLI must omit the key.
+function toolConfig(v: Values): Values {
+  const config = stripPrivate(v)
+  if (config.nce == null) delete config.nce
+  return config
+}
+
 async function loadConfig(setValues: (f: (v: Values) => Values) => void): Promise<void> {
   const p = await window.dialibgen.pickConfig()
   if (!p) return
-  try {
-    const parsed = (await window.dialibgen.readConfig(p)) as Values
-    // Merged, not replaced: a config written by hand may carry only the few
-    // keys the author cared about, and dropping the rest would silently reset
-    // every other field to nothing.
-    setValues((v) => ({ ...v, ...parsed }))
-  } catch {
-    // A bad file is the user's to fix; the form is unchanged, which is the
-    // visible signal.
-  }
+  const parsed = (await window.dialibgen.readConfig(p)) as Values
+  // A partial config preserves the form's other values; a read failure leaves
+  // the form unchanged and is reported by the caller.
+  setValues((v) => ({ ...v, ...parsed, nce: parsed.nce ?? null }))
 }
 
 async function saveConfig(values: Values): Promise<void> {

@@ -126,6 +126,7 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
       <div className={cls}>
         {label}
         <input id={id} type="number" step={spec.kind === 'double' ? 'any' : 1} min={spec.min} max={spec.max}
+               placeholder={spec.name === 'nce' ? 'automatic' : undefined}
                disabled={off} value={value === null || value === undefined ? '' : String(value)}
                onChange={(e) => onChange(e.target.value === '' ? null : num(e.target.value, 0))} />
         {help}

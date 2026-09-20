@@ -11,7 +11,6 @@ import type {
   BinaryInfo,
   DialibgenApi,
   ModelStatus,
-  Progress,
   RunResult,
   RunStarted,
   Settings
@@ -85,7 +84,6 @@ const api: DialibgenApi = {
   deletePreset: (name) => invoke<boolean>('delete_preset', { name }),
 
   onLog: (cb) => subscribe<string>('dialibgen:log', cb),
-  onProgress: (cb) => subscribe<Progress>('dialibgen:progress', cb),
   onDone: (cb) => subscribe<RunResult>('dialibgen:done', cb)
 }
 

@@ -3,7 +3,7 @@
 // point of the form is that it is built from whatever the tool emits, so a
 // mock that invents its own shape would test nothing.
 
-import type { DialibgenApi, ModelStatus, Progress, RunResult } from '../types'
+import type { DialibgenApi, ModelStatus, RunResult } from '../types'
 
 export const SAMPLE_CONFIG: Record<string, unknown> = {
   schema_version: 1,
@@ -44,7 +44,6 @@ export interface MockOptions {
 export interface MockBridge {
   api: DialibgenApi
   emitLog: (line: string) => void
-  emitProgress: (p: Progress) => void
   emitDone: (r: RunResult) => void
   runs: unknown[]
   saved: Record<string, unknown>[]
@@ -52,7 +51,6 @@ export interface MockBridge {
 
 export function installMockBridge(opts: MockOptions = {}): MockBridge {
   const logs: ((s: string) => void)[] = []
-  const progs: ((p: Progress) => void)[] = []
   const dones: ((r: RunResult) => void)[] = []
   const runs: unknown[] = []
   const saved: Record<string, unknown>[] = []
@@ -105,10 +103,6 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
       logs.push(cb)
       return () => logs.splice(logs.indexOf(cb), 1)
     },
-    onProgress: (cb) => {
-      progs.push(cb)
-      return () => progs.splice(progs.indexOf(cb), 1)
-    },
     onDone: (cb) => {
       dones.push(cb)
       return () => dones.splice(dones.indexOf(cb), 1)
@@ -119,7 +113,6 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
   return {
     api,
     emitLog: (s) => logs.forEach((f) => f(s)),
-    emitProgress: (p) => progs.forEach((f) => f(p)),
     emitDone: (r) => dones.forEach((f) => f(r)),
     runs,
     saved

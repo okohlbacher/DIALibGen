@@ -36,18 +36,7 @@ pub fn run() {
             // library build can hold gigabytes and run for an hour.
             if let WindowEvent::Destroyed = event {
                 let app = window.app_handle().clone();
-                let child = app
-                    .state::<RunManager>()
-                    .current
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map(|r| r.child.clone());
-                if let Some(child) = child {
-                    if let Ok(mut c) = child.lock() {
-                        let _ = c.kill();
-                    }
-                }
+                dialibgen::shutdown(&app.state::<RunManager>());
             }
         })
         .run(tauri::generate_context!())

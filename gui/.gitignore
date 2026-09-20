@@ -3,3 +3,6 @@ dist
 .vite
 .tsbuild
 *.tsbuildinfo
+coverage/
+src-tauri/resources/third-party-licenses/inventory.json
+src-tauri/resources/third-party-licenses/THIRD_PARTY_NOTICES.txt

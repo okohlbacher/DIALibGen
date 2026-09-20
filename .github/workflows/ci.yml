@@ -128,14 +128,19 @@ jobs:
           if [ "${{ matrix.wheel }}" = true ]; then
             torch_root="$PWD/libtorch-sdk"
             # Use one attributable GNU/OpenBLAS runtime throughout all build and scientific checks.
-            # Executable RPATHs can precede LD_LIBRARY_PATH, so remove the wheel duplicates.
+            # Torch's $ORIGIN RUNPATH must also find these dependencies without LD_LIBRARY_PATH.
+            # Replace wheel duplicates with links whose resolved origins identify the conda packages.
             for runtime in libgomp.so.1 libgfortran.so.5 libopenblas.so.0; do
               test -f "$CONDA_PREFIX/lib/$runtime" \
                 || { echo "::error::missing conda ARM runtime $runtime"; exit 1; }
               rm -f "$torch_root/lib/$runtime"
+              ln -s "$(readlink -f "$CONDA_PREFIX/lib/$runtime")" "$torch_root/lib/$runtime"
             done
-            LD_LIBRARY_PATH="$CONDA_PREFIX/lib" ldd "$torch_root/lib/libtorch_cpu.so" \
+            env -u LD_LIBRARY_PATH ldd "$torch_root/lib/libtorch_cpu.so" \
               | tee torch-runtime-dependencies.txt
+            if grep -q 'not found' torch-runtime-dependencies.txt; then
+              echo "::error::Torch has unresolved dependencies without LD_LIBRARY_PATH"; exit 1
+            fi
             for runtime in libgomp.so.1 libgfortran.so.5 libopenblas.so.0; do
               resolved=$(awk -v name="$runtime" '$1 == name && $2 == "=>" {print $3}' torch-runtime-dependencies.txt)
               [ -n "$resolved" ] && [ "$(readlink -f "$resolved")" = "$(readlink -f "$CONDA_PREFIX/lib/$runtime")" ] \

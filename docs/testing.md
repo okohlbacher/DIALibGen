@@ -87,9 +87,9 @@ The frontend suite, including desktop refinement and fine-tuning, passed
 **98.03% statements (498/508)** and **93.32% branches (573/614)**. Tests cover
 mode-specific inputs and settings, all native tuning controls, selected-head
 model checks, stale asynchronous results, configuration round-trips and errors. Type checking and the frontend build also passed. The native
-GUI passed **23 macOS Rust tests** and Clippy with warnings treated as errors.
+GUI passed **24 macOS Rust tests** and Clippy with warnings treated as errors.
 Instrumented native tests measured **83.54% of production-library lines
-(538/644)**, including the new training schema, command validation and model
+(543/650)**, including the new training schema, command validation and model
 directory selection, cancellation during startup and shutdown. Bootstrap and several native error paths remain uncovered. Linux also checks isolation of the bundled CLI from the
 AppImage launcher’s library environment.
 

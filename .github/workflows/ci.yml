@@ -127,6 +127,20 @@ jobs:
           set -euo pipefail
           if [ "${{ matrix.wheel }}" = true ]; then
             torch_root="$PWD/libtorch-sdk"
+            # Use one attributable GNU/OpenBLAS runtime throughout all build and scientific checks.
+            # Executable RPATHs can precede LD_LIBRARY_PATH, so remove the wheel duplicates.
+            for runtime in libgomp.so.1 libgfortran.so.5 libopenblas.so.0; do
+              test -f "$CONDA_PREFIX/lib/$runtime" \
+                || { echo "::error::missing conda ARM runtime $runtime"; exit 1; }
+              rm -f "$torch_root/lib/$runtime"
+            done
+            LD_LIBRARY_PATH="$CONDA_PREFIX/lib" ldd "$torch_root/lib/libtorch_cpu.so" \
+              | tee torch-runtime-dependencies.txt
+            for runtime in libgomp.so.1 libgfortran.so.5 libopenblas.so.0; do
+              resolved=$(awk -v name="$runtime" '$1 == name && $2 == "=>" {print $3}' torch-runtime-dependencies.txt)
+              [ -n "$resolved" ] && [ "$(readlink -f "$resolved")" = "$(readlink -f "$CONDA_PREFIX/lib/$runtime")" ] \
+                || { echo "::error::Torch did not select the conda runtime $runtime: $resolved"; exit 1; }
+            done
           else
             torch_root="$CONDA_PREFIX"
           fi
@@ -501,6 +515,7 @@ jobs:
                 if [ ! -f "stage/lib/$base" ]; then
                   cp "$src" "stage/lib/$base"
                   printf 'lib/%s\t%s\n' "$base" "$src" >> runtime-origins.tsv
+                  echo "bundled lib/$base from $src"
                 fi
               done
             }
@@ -556,6 +571,7 @@ jobs:
                 if [ ! -f "stage/lib/$base" ]; then
                   cp "$so" "stage/lib/$base"
                   printf 'lib/%s\t%s\n' "$base" "$so" >> runtime-origins.tsv
+                  echo "bundled lib/$base from $so"
                 fi
               done
             }
@@ -871,7 +887,7 @@ jobs:
             smoke-appimage/**/*.tune.json
 
       - name: Preserve failed Linux bundle diagnostics
-        if: failure() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        if: failure() && steps.pkg.outputs.package == 'true' && runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -889,13 +905,16 @@ jobs:
           fi
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
-        if: failure() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        if: failure() && steps.pkg.outputs.package == 'true' && runner.os == 'Linux'
         with:
           name: packaging-diagnostics-${{ matrix.name }}
           compression-level: 0
           retention-days: 7
           path: |
             packaging-diagnostics/
+            runtime-origins.tsv
+            torch-runtime-dependencies.txt
+            corresponding-sources/runtime-attribution-failure.json
             corresponding-sources/appimage/*.json
             corresponding-sources/appimage/*.txt
             corresponding-sources/appimage-helper-providers.json

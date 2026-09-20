@@ -243,6 +243,8 @@ def main():
                           'license_directory': str(torch / 'share/licenses/Torch')})
         providers.extend(native)
     origins = dict(line.split('\t', 1) for line in args.origins.read_text().splitlines()) if args.origins else {}
+    if args.origins:
+        shutil.copy2(args.origins, sources / 'runtime-origins.tsv')
     external = {}
     for provider in providers:
         for filename in provider['files']:
@@ -347,7 +349,20 @@ def main():
                     raise RuntimeError(f'ambiguous package owner for {file.name}: {sorted(keys)}')
                 owner = conda_component(next(iter(keys)))
             else:
-                raise RuntimeError(f'no licensing owner for bundled runtime {file}; provide exact SDK metadata')
+                recorded_origin = origins.get(file.relative_to(stage).as_posix())
+                candidates = {path: key for name in {file.name.lower(), Path(original).name.lower() if original else ''}
+                              for path, key in owners.get(name, [])}
+                failure = {'file': str(file), 'sha256': digest(file), 'recorded_origin': recorded_origin,
+                           'resolved_origin': str(Path(recorded_origin).resolve()) if recorded_origin else None,
+                           'conda_candidates': [{'path': str(path), 'resolved_path': str(path.resolve()),
+                                                 'package': key, 'is_symlink': path.is_symlink(),
+                                                 'sha256': digest(path) if path.is_file() else None}
+                                                for path, key in candidates.items()],
+                           'sdk_candidates': [{'path': path, 'provider': provider['name']}
+                                              for path, provider in external.items() if Path(path).name.lower() == file.name.lower()]}
+                (sources / 'runtime-attribution-failure.json').write_text(json.dumps(failure, indent=2) + '\n')
+                raise RuntimeError(f'no licensing owner for bundled runtime {file}; origin={recorded_origin}; '
+                                   f'see {sources / "runtime-attribution-failure.json"}')
             files.append({'path': str(file.relative_to(stage)), 'sha256': digest(file), 'component': owner})
         for provider in providers:
             if provider.get('force_include'):

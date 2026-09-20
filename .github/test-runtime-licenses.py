@@ -59,8 +59,28 @@ with tempfile.TemporaryDirectory() as temporary:
     assert notice_text(notices / 'source-notices', 'example/ThirdPartyNotices.txt') == 'aggregate notices'
     assert notice_text(notices / 'source-notices', 'example/LICENSES/LGPL-3.0-only.txt') == 'LGPL terms'
     assert (output / 'example-1.0-0/recipe/meta.yaml').is_file()
+    # Conda's libgomp runtime owns the real .so.1.0.0; _openmp_mutex owns its .so.1 symlink.
+    # A recorded loader alias must resolve to the runtime package, not the mutex package.
+    if sys.platform != "win32":  # This GNU/Linux alias contract does not require Windows symlink privileges.
+        real_library = prefix / 'lib/libexample.so.1.0.0'
+        (prefix / 'lib/libexample.so.1').rename(real_library)
+        (prefix / 'lib/libexample.so.1').symlink_to(real_library.name)
+        record['files'] = ['lib/libexample.so.1.0.0']
+        (prefix / 'conda-meta/example.json').write_text(json.dumps(record))
+        (prefix / 'conda-meta/mutex.json').write_text(json.dumps({**record, 'name': 'mutex', 'files': ['lib/libexample.so.1']}))
+        run(True)
+        inventory = json.loads((output / 'runtime-dependencies.json').read_text())
+        assert inventory['files'][0]['component'] == 'example-1.0-0'
+        (prefix / 'lib/libexample.so.1').unlink()
+        real_library.rename(prefix / 'lib/libexample.so.1')
+        record['files'] = ['lib/libexample.so.1']
+        (prefix / 'conda-meta/example.json').write_text(json.dumps(record))
+        (prefix / 'conda-meta/mutex.json').unlink()
     (stage / 'lib/unknown.so').write_bytes(b'unknown')
     run(False, 'no licensing owner')
+    failure = json.loads((output / 'runtime-attribution-failure.json').read_text())
+    assert failure['file'] == str((stage / 'lib/unknown.so').resolve())
+    assert (output / 'runtime-origins.tsv').read_text() == origins.read_text()
     (stage / 'lib/unknown.so').unlink()
     (cached / 'info/recipe/meta.yaml').write_text(f'source:\n  url: {source.as_uri()}\n  sha256: {chr(34)}{"0" * 64}{chr(34)}\n')
     run(False, 'sha256 mismatch')
@@ -227,6 +247,9 @@ with tempfile.TemporaryDirectory() as temporary:
     with origins.open('a') as stream:
         stream.write(f'lib/libgfortran.so.5\t{torch}/lib/libgfortran.so.5\n')
     run(False, 'no licensing owner')
+    failure = json.loads((output / 'runtime-attribution-failure.json').read_text())
+    assert failure['recorded_origin'] == str(torch / 'lib/libgfortran.so.5')
+    assert failure['resolved_origin'] == str((torch / 'lib/libgfortran.so.5').resolve())
     (stage / 'lib/libgfortran.so.5').unlink()
 
     gui = root / 'gui'

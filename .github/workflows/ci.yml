@@ -655,7 +655,7 @@ jobs:
           python .github/collect-runtime-licenses.py --stage stage \
             --conda-prefix "$CONDA_PREFIX" --torch-root "$TORCH_ROOT" \
             --origins runtime-origins.tsv --sources corresponding-sources \
-            --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+            --source-asset "DIALibGen-sources-${{ matrix.name }}.json"
           mkdir -p corresponding-sources/build-instructions
           cp .github/workflows/ci.yml .github/fetch-libtorch.py corresponding-sources/build-instructions/
           cp LICENSE THIRD-PARTY-NOTICES.md corresponding-sources/
@@ -771,7 +771,7 @@ jobs:
             --deb "dist-bundles/DIALibGen-gui-${{ matrix.name }}.deb" \
             --providers corresponding-sources/appimage-helper-providers.json \
             --sources corresponding-sources \
-            --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz" --prepare-notices
+            --source-asset "DIALibGen-sources-${{ matrix.name }}.json" --prepare-notices
           # Keep the same system toolchain environment used for the first bundle.
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
           export PATH
@@ -790,7 +790,7 @@ jobs:
             --deb "dist-bundles/DIALibGen-gui-${{ matrix.name }}.deb" \
             --providers corresponding-sources/appimage-helper-providers.json \
             --sources corresponding-sources \
-            --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+            --source-asset "DIALibGen-sources-${{ matrix.name }}.json"
           # Verify the CLI after linuxdeploy has changed its binary and library RPATHs.
           "$MAMBA_ROOT_PREFIX/envs/dialibgen/bin/python" .github/release-smoke.py \
             "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
@@ -844,15 +844,11 @@ jobs:
         if: steps.pkg.outputs.package == 'true'
         shell: bash
         run: |
+          python3 .github/test-source-archive.py
           tar -C corresponding-sources -czf "DIALibGen-sources-${{ matrix.name }}.tar.gz" .
-          python3 - <<'PY'
-          from pathlib import Path
-          asset = Path('DIALibGen-sources-${{ matrix.name }}.tar.gz')
-          size = asset.stat().st_size
-          print(f'{asset.name}: {size:,} bytes')
-          if size >= 2 * 1024**3:
-              raise SystemExit('Corresponding-source asset exceeds the GitHub 2 GiB limit; split it before release.')
-          PY
+          python3 .github/source-archive.py "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+          shasum -a 256 DIALibGen-${{ matrix.name }}.tar.gz DIALibGen-sources-${{ matrix.name }}.*
+          if [ -d dist-bundles ]; then shasum -a 256 dist-bundles/*; fi
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: steps.pkg.outputs.package == 'true'
@@ -860,7 +856,7 @@ jobs:
           name: bundles-${{ matrix.name }}
           path: |
             DIALibGen-${{ matrix.name }}.tar.gz
-            DIALibGen-sources-${{ matrix.name }}.tar.gz
+            DIALibGen-sources-${{ matrix.name }}.*
             dist-bundles/*
 
       - name: Attach to the release
@@ -870,7 +866,7 @@ jobs:
           draft: true
           files: |
             DIALibGen-${{ matrix.name }}.tar.gz
-            DIALibGen-sources-${{ matrix.name }}.tar.gz
+            DIALibGen-sources-${{ matrix.name }}.*
             dist-bundles/*
           fail_on_unmatched_files: true
 
@@ -935,20 +931,21 @@ jobs:
     permissions:
       contents: write # Draft release metadata is visible only to writers.
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Assert this workflow's assets are on the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          have=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-                   --json assets -q '.assets[].name')
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets > release-assets.json
+          have=$(jq -r '.assets[].name' release-assets.json)
           echo "$have"
           missing=0
           for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
             printf '%s' "$have" | grep -qx "DIALibGen-$n.tar.gz" \
               || { echo "::error::no CLI tarball for $n on $tag"; missing=1; }
-            printf '%s' "$have" | grep -qx "DIALibGen-sources-$n.tar.gz" \
+            printf '%s' "$have" | grep -qx "DIALibGen-sources-$n.json" \
               || { echo "::error::no corresponding sources for $n on $tag"; missing=1; }
           done
           # Require the exact asset names used by download links.
@@ -962,7 +959,13 @@ jobs:
                 || { echo "::error::no $ext desktop bundle for $n on $tag"; missing=1; }
             done
           done
-          exit $missing
+          [ "$missing" -eq 0 ] || exit "$missing"
+          mkdir source-manifests
+          for n in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern "DIALibGen-sources-$n.json" --dir source-manifests
+          done
+          python3 .github/source-archive.py --verify-assets release-assets.json source-manifests/*.json
 
   # Run desktop checks on all three OSes without OpenMS or model dependencies.
   gui:

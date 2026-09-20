@@ -21,9 +21,11 @@ Download the CLI archive or desktop installer for your platform from
 [Releases](https://github.com/okohlbacher/DIALibGen/releases). Keep the archive's
 `bin`, `lib` and `share` directories together. The CLI is one executable with
 bundled runtime libraries, OpenMS data and the three prediction models.
-Each platform also has a `DIALibGen-sources-<platform>.tar.gz` asset containing
-corresponding dependency sources, recipes and patches. Runtime inventories and
-license texts are included with the binaries; see [third-party notices](THIRD-PARTY-NOTICES.md).
+Each platform's `DIALibGen-sources-<platform>.json` manifest lists its corresponding
+dependency sources, recipes and patches. Large source archives are split into
+numbered parts; [third-party notices](THIRD-PARTY-NOTICES.md#corresponding-sources)
+explain how to reconstruct them. Runtime inventories and license texts are
+included with the binaries.
 
 ```bash
 curl -fsSLO https://github.com/okohlbacher/DIALibGen/releases/latest/download/DIALibGen-macos-arm64.tar.gz

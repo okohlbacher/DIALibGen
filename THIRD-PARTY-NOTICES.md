@@ -87,8 +87,14 @@ does not establish that a library is distributed: the release collector records
 the actual copied dependency closure. The pinned Windows contrib `ALL` build
 uses Coin-OR and excludes GLPK.
 
-Every platform's release includes `DIALibGen-sources-<platform>.tar.gz` alongside
-its CLI and desktop downloads. This archive accompanies the binaries and
+## Corresponding sources
+
+Every platform's release includes `DIALibGen-sources-<platform>.json` alongside
+its CLI and desktop downloads. This manifest lists the source archive's size,
+SHA-256 and required download files. Archives below GitHub's per-file size
+limit are provided as `.tar.gz`; larger archives are split into 1 GiB parts
+named `.tar.gz.part-001`, `.tar.gz.part-002`, and so on. All parts are required.
+The complete archive accompanies the binaries and
 contains the exact source archives for bundled copyleft components, their
 recorded checksums, package build recipes and patches, and our packaging build
 instructions. Shared source archives are stored once. The Windows archive also
@@ -97,6 +103,24 @@ static/header dependencies. An upstream URL alone is not the distribution
 mechanism: the corresponding source is uploaded as a release asset under the
 same distributor's control. Packaging fails if required notices, package
 ownership, or corresponding-source evidence is unavailable.
+
+Download the manifest and every file in its `files` list from the same release.
+Verify each file against its listed SHA-256. For a split archive, concatenate
+parts in the manifest's order, then verify the reconstructed archive against
+`archive.sha256` before extraction. For example, on macOS or Linux:
+
+```bash
+cat DIALibGen-sources-macos-arm64.tar.gz.part-* > DIALibGen-sources-macos-arm64.tar.gz
+shasum -a 256 DIALibGen-sources-macos-arm64.tar.gz
+tar xzf DIALibGen-sources-macos-arm64.tar.gz
+```
+
+On Windows, concatenate the listed parts with `copy /b` in Command Prompt
+(for example, `copy /b archive.part-001+archive.part-002 archive.tar.gz`),
+then use PowerShell's `Get-FileHash archive.tar.gz -Algorithm SHA256` and
+`tar xzf archive.tar.gz`. Substitute the exact filenames and include every
+part listed in the manifest. Unsplit archives need only checksum verification
+and extraction.
 
 Qt and other LGPL-covered runtime libraries are dynamically linked. You may
 replace those libraries with interface-compatible modified versions: use `lib/` in the

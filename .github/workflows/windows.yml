@@ -710,7 +710,7 @@ jobs:
           "$CONDA_PYTHON" .github/collect-runtime-licenses.py --stage stage \
             --conda-prefix "$CONDA_PREFIX" --torch-root libtorch-sdk \
             --providers runtime-providers.json --origins runtime-origins.tsv \
-            --sources corresponding-sources --source-asset DIALibGen-sources-windows-x64.tar.gz
+            --sources corresponding-sources --source-asset DIALibGen-sources-windows-x64.json
           mkdir -p corresponding-sources/build-instructions
           cp .github/workflows/windows.yml .github/fetch-libtorch.py corresponding-sources/build-instructions/
           cp LICENSE THIRD-PARTY-NOTICES.md corresponding-sources/
@@ -793,19 +793,27 @@ jobs:
               || { echo "::error::missing desktop installer $asset"; exit 1; }
           done
 
+      - name: Verify both desktop installer payloads and embedded modes
+        if: steps.pkg.outputs.gui == 'true'
+        timeout-minutes: 45
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          "$CONDA_PYTHON" .github/test-windows-installer-smoke.py
+          "$CONDA_PYTHON" .github/windows-installer-smoke.py \
+            --msi dist-bundles/DIALibGen-gui-windows-x64.msi \
+            --nsis dist-bundles/DIALibGen-gui-windows-x64-setup.exe \
+            --stage stage --output smoke-installers
+
       - name: Package corresponding sources
         if: steps.pkg.outputs.package == 'true'
         shell: bash
         run: |
+          python .github/test-source-archive.py
           tar -C corresponding-sources -czf DIALibGen-sources-windows-x64.tar.gz .
-          python - <<'PY'
-          from pathlib import Path
-          asset = Path('DIALibGen-sources-windows-x64.tar.gz')
-          size = asset.stat().st_size
-          print(f'{asset.name}: {size:,} bytes')
-          if size >= 2 * 1024**3:
-              raise SystemExit('Corresponding-source asset exceeds the GitHub 2 GiB limit; split it before release.')
-          PY
+          python .github/source-archive.py DIALibGen-sources-windows-x64.tar.gz
+          sha256sum DIALibGen-windows-x64.zip DIALibGen-sources-windows-x64.*
+          if [ -d dist-bundles ]; then sha256sum dist-bundles/*; fi
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: steps.pkg.outputs.package == 'true'
@@ -813,7 +821,7 @@ jobs:
           name: bundles-windows-x64
           path: |
             DIALibGen-windows-x64.zip
-            DIALibGen-sources-windows-x64.tar.gz
+            DIALibGen-sources-windows-x64.*
             dist-bundles/*
 
       - name: Attach to the release
@@ -823,7 +831,7 @@ jobs:
           draft: true
           files: |
             DIALibGen-windows-x64.zip
-            DIALibGen-sources-windows-x64.tar.gz
+            DIALibGen-sources-windows-x64.*
             dist-bundles/*
           fail_on_unmatched_files: true
 
@@ -835,18 +843,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          have=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-                   --json assets -q '.assets[].name')
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets > release-assets.json
+          have=$(jq -r '.assets[].name' release-assets.json)
           echo "$have"
           missing=0
           for n in DIALibGen-windows-x64.zip \
-                   DIALibGen-sources-windows-x64.tar.gz \
+                   DIALibGen-sources-windows-x64.json \
                    DIALibGen-gui-windows-x64.msi \
                    DIALibGen-gui-windows-x64-setup.exe; do
             printf '%s' "$have" | grep -qx "$n" \
               || { echo "::error::$n is not on $GITHUB_REF_NAME"; missing=1; }
           done
-          exit $missing
+          [ "$missing" -eq 0 ] || exit "$missing"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern DIALibGen-sources-windows-x64.json --dir source-manifests
+          python .github/source-archive.py --verify-assets release-assets.json source-manifests/DIALibGen-sources-windows-x64.json
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         if: always()
@@ -859,3 +870,6 @@ jobs:
             smoke-installed/**/*.tune.json
             smoke-portable/*.log
             smoke-portable/**/*.tune.json
+            smoke-installers/**/*.log
+            smoke-installers/**/*.tune.json
+            smoke-installers/verification.json

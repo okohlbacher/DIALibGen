@@ -435,6 +435,73 @@ namespace
     write(true, "", "y5^1/600.30", std::numeric_limits<double>::infinity()); RefineStats nonfinite;
     LibraryRefiner::readObservations(path.string(), p, nonfinite);
     check(nonfinite.intensity_bad_tokens == 2, "DIA-NN 2 rejects nonfinite fragment quantities");
+
+    // Real fragment fields from diann-bench-3.0/out/D0_r2.parquet, row 0.
+    // DIA-NN 2.0 Academia, compiled Jan 28 2025 05:36:10;
+    // --report-lib-info --export-quant. Report SHA-256:
+    // 634897a30468ca1a6f9aa802fb874aeb6b12216164d339ca533c0b08cd19fb50
+    // Only fragment fields are copied; the joining key and gates below are synthetic.
+    struct RealFragment { const char* id; FragmentType type; int ordinal; double mz; float quant, score; };
+    const RealFragment captured[] = {
+      {"y16^1/1364.691650", FragmentType::Y, 16, 1364.691650, 318.015380859375f, 0.5786356925964355f},
+      {"b8^1/569.304199", FragmentType::B, 8, 569.304199, 432.0181579589844f, 0.10540767014026642f},
+      {"b7^1/498.267059", FragmentType::B, 7, 498.267059, 341.01593017578125f, 0.2240317314863205f},
+      {"b9^1/668.372620", FragmentType::B, 9, 668.372620, 390.0226745605469f, 0.48129919171333313f},
+      {"b6^1/427.229950", FragmentType::B, 6, 427.229950, 467.0227966308594f, 0.32008859515190125f},
+      {"y17^1/1463.760132", FragmentType::Y, 17, 1463.760132, 0.0f, 0.0f},
+      {"b5^1/356.192841", FragmentType::B, 5, 356.192841, 172.00811767578125f, -0.10410183668136597f},
+      {"y13^1/1109.569824", FragmentType::Y, 13, 1109.569824, 60.00340270996094f, 0.022481275722384453f},
+      {"y12^1/1052.548340", FragmentType::Y, 12, 1052.548340, 53.00226974487305f, 0.17406094074249268f},
+      {"b4^1/285.155731", FragmentType::B, 4, 285.155731, 274.0181579589844f, 0.3053339421749115f},
+      {"y18^1/1534.797241", FragmentType::Y, 18, 1534.797241, 0.0f, 0.0f},
+      {"y7^1/659.347107", FragmentType::Y, 7, 659.347107, 123.00689697265625f, 0.16552139818668365f},
+    };
+    std::vector<std::shared_ptr<arrow::Field>> fields;
+    std::vector<std::shared_ptr<arrow::Array>> arrays;
+    auto add = [&](const std::string& name, auto& builder, auto value)
+    {
+      status(builder.Append(value));
+      std::shared_ptr<arrow::Array> array; status(builder.Finish(&array));
+      fields.push_back(arrow::field(name, array->type())); arrays.push_back(array);
+    };
+    arrow::StringBuilder text;
+    arrow::Int64Builder integer;
+    arrow::FloatBuilder number;
+    add("Modified.Sequence", text, "PEPTIDEK");
+    add("Precursor.Charge", integer, 2);
+    add("Decoy", integer, 0);
+    add("Q.Value", number, 0.001f);
+    for (std::size_t i = 0; i < std::size(captured); ++i)
+    {
+      const std::string prefix = "Fr." + std::to_string(i);
+      add(prefix + ".Index", integer, static_cast<std::int64_t>(i));
+      add(prefix + ".Id", text, captured[i].id);
+      add(prefix + ".Quantity", number, captured[i].quant);
+      add(prefix + ".Score", number, captured[i].score);
+    }
+    auto output = arrow::io::FileOutputStream::Open(path.string());
+    if (!output.ok()) { throw std::runtime_error(output.status().ToString()); }
+    status(parquet::arrow::WriteTable(*arrow::Table::Make(arrow::schema(fields), arrays),
+      arrow::default_memory_pool(), *output, 1));
+    status((*output)->Close());
+    RefineParams real_params; real_params.write_rt = false; real_params.write_intensity = true;
+    real_params.q_global = real_params.q_protein = 1;
+    RefineStats real_stats;
+    const auto real_obs = LibraryRefiner::readObservations(path.string(), real_params, real_stats);
+    check(real_obs.size() == 1 && real_stats.intensity_bad_tokens == 0,
+          "real DIA-NN 2 fragment row loads through Parquet without bad tokens");
+    const auto& fragments = real_obs.at(LibraryRefiner::key("PEPTIDEK", 2)).frags;
+    check(fragments.size() == std::size(captured), "all 12 real fragment slots survive loading");
+    for (const auto& expected : captured)
+    {
+      const auto found = std::find_if(fragments.begin(), fragments.end(), [&](const auto& f) {
+        return f.type == expected.type && f.ordinal == expected.ordinal && f.charge == 1;
+      });
+      check(found != fragments.end() && std::abs(found->mz - expected.mz) < 1e-9 &&
+            std::abs(found->quant - expected.quant) <= 1e-6f * std::abs(expected.quant) &&
+            std::abs(found->correlation - expected.score) <= 1e-6f * std::abs(expected.score),
+            std::string("real fragment preserves identity, m/z, quantity and score: ") + expected.id);
+    }
     std::filesystem::remove(path);
   }
 }

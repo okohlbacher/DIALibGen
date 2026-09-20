@@ -77,8 +77,13 @@ complete coverage. The final release record must identify the validated commit.
 
 Unexecuted code includes platform-specific bootstrap and error paths, GPU
 provider selection and CUDA training. CPU release checks do not validate a
-CUDA source build. The DIA-NN 2.x fragment-column tests use synthetic fixtures;
-a real `--export-quant` fixture remains necessary to establish interoperability.
+CUDA source build. Alongside synthetic DIA-NN 2.x fixtures, the native Parquet
+loader test checks all 12 fragment identities, m/z, quantities and scores from
+one real DIA-NN 2.0 `--export-quant` report row, including zero quantities and a
+negative score. Its source hash and engine build are recorded in
+`test/refinement/intensity_match.cpp`; peptide/protein identifiers are not copied.
+This covers that row's token grammar and column types, not every DIA-NN version
+or export setting.
 Tests on synthetic reports prove software contracts; they do not establish
 improved proteomics performance. The qualified
 [benchmark results](benchmark.md) remain the scientific evidence.

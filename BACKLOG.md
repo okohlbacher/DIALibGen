@@ -105,9 +105,11 @@ delay on the tested candidates; they do not replace the final artifact check.
 
 ## Input and scientific limits
 
-- DIA-NN 2.x `Fr.N.Id` parsing is covered by synthetic fixtures. A real
-  `--export-quant` fixture is still needed to establish interoperability with
-  that exported grammar. Unsupported fragment layouts fail explicitly.
+- DIA-NN 2.x fragment parsing has synthetic fixtures and a native Parquet-loader
+  regression with all 12 fragment slots from one real DIA-NN 2.0
+  `--export-quant` report row. This covers the captured grammar and column types;
+  other versions and export settings remain unverified. Unsupported fragment
+  layouts fail explicitly.
 - Compact Parquet is supported for input libraries, but empirical reference
   libraries must use the long format. Compact empirical references are refused.
 - The OpenMS sequence representation supports one modification per residue;

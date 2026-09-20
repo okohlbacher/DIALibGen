@@ -199,6 +199,42 @@ describe('App', () => {
     expect(await screen.findByText('already running')).toBeTruthy()
   })
 
+  it.each(['false', 'rejected'])('reports a %s settings save before starting and permits retry', async (failure) => {
+    await renderApp({}, (b) => {
+      b.api.saveLast = failure === 'false' ? vi.fn().mockResolvedValue(false) : vi.fn().mockRejectedValue('settings read-only')
+    })
+    await startRun()
+    expect(await screen.findByText(/Could not start:.*settings/)).toBeTruthy()
+    expect(bridge.runs).toHaveLength(0)
+    const run = screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement
+    expect(run.disabled).toBe(false)
+    bridge.api.saveLast = vi.fn().mockResolvedValue(true)
+    await userEvent.click(run)
+    expect(bridge.runs).toHaveLength(1)
+  })
+
+  it.each(['false', 'rejected'])('reports a %s preset write and preserves unsaved input and existing presets', async (failure) => {
+    await renderApp({}, (b) => {
+      b.api.loadSettings = async () => ({ schemaVersion: 1, lastUsed: null, presets: { existing: { enzyme: 'Lys-C' } } })
+      b.api.savePreset = failure === 'false' ? vi.fn().mockResolvedValue(false) : vi.fn().mockRejectedValue('settings read-only')
+      b.api.deletePreset = failure === 'false' ? vi.fn().mockResolvedValue(false) : vi.fn().mockRejectedValue('settings read-only')
+    })
+    const name = screen.getByLabelText('preset name') as HTMLInputElement
+    await userEvent.type(name, 'new preset')
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText(/Could not save preset:.*settings/)).toBeTruthy()
+    expect(name.value).toBe('new preset')
+    expect(screen.queryByRole('option', { name: 'new preset' })).toBeNull()
+    await userEvent.selectOptions(screen.getByLabelText('presets'), 'existing')
+    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(await screen.findByText(/Could not delete preset:.*settings/)).toBeTruthy()
+    expect((screen.getByLabelText('presets') as HTMLSelectElement).value).toBe('existing')
+    expect(screen.getByRole('option', { name: 'existing' })).toBeTruthy()
+    bridge.api.deletePreset = vi.fn().mockResolvedValue(true)
+    await userEvent.click(screen.getByRole('button', { name: 'Delete' }))
+    expect(screen.queryByRole('option', { name: 'existing' })).toBeNull()
+  })
+
   it('cancels the live job and waits for its terminal event', async () => {
     await renderApp({}, (b) => { b.api.cancel = vi.fn().mockResolvedValue({ cancelled: true }) })
     await startRun()

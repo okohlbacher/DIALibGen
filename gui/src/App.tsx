@@ -137,7 +137,9 @@ export default function App(): JSX.Element {
     setLog([])
     setOutcome(null)
     try {
-      await window.dialibgen.saveLast({ ...values, __modelDir: modelDir })
+      if (!await window.dialibgen.saveLast({ ...values, __modelDir: modelDir })) {
+        throw new Error('could not save settings; check that the app config directory is writable')
+      }
       const r = await window.dialibgen.run({
         in: fasta,
         out,
@@ -268,6 +270,7 @@ export default function App(): JSX.Element {
             values={values}
             onApply={(v) => setValues((old) => ({ ...old, ...v }))}
             onSaved={setPresets}
+            onError={(text) => setOutcome({ ok: false, text })}
           />
 
           {outcome && (
@@ -383,12 +386,14 @@ function Presets({
   presets,
   values,
   onApply,
-  onSaved
+  onSaved,
+  onError
 }: {
   presets: Record<string, Values>
   values: Values
   onApply: (v: Values) => void
   onSaved: (p: Record<string, Values>) => void
+  onError: (message: string) => void
 }): JSX.Element {
   const [name, setName] = useState('')
   const [selected, setSelected] = useState('')
@@ -410,13 +415,12 @@ function Presets({
         </select>
         <button type="button" className="secondary slim" disabled={!selected}
                 onClick={() => void (async () => {
-                  if (await window.dialibgen.deletePreset(selected)) {
-                    const next = { ...presets }
-                    delete next[selected]
-                    onSaved(next)
-                    setSelected('')
-                  }
-                })()}>
+                  if (!await window.dialibgen.deletePreset(selected)) throw new Error('settings could not be written')
+                  const next = { ...presets }
+                  delete next[selected]
+                  onSaved(next)
+                  setSelected('')
+                })().catch((e: unknown) => onError(`Could not delete preset: ${String(e)}`))}>
           Delete
         </button>
       </div>
@@ -427,11 +431,10 @@ function Presets({
                 onClick={() => void (async () => {
                   const clean = name.trim()
                   const payload = stripPrivate(values)
-                  if (await window.dialibgen.savePreset(clean, payload)) {
-                    onSaved({ ...presets, [clean]: payload })
-                    setName('')
-                  }
-                })()}>
+                  if (!await window.dialibgen.savePreset(clean, payload)) throw new Error('settings could not be written')
+                  onSaved({ ...presets, [clean]: payload })
+                  setName('')
+                })().catch((e: unknown) => onError(`Could not save preset: ${String(e)}`))}>
           Save
         </button>
       </div>

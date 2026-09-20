@@ -623,11 +623,11 @@ mod tests {
         use std::time::Duration;
         // One end-to-end command test owns this process-wide override. Other
         // tests use explicit Resolved paths and never change the environment.
-        struct RestoreBin(Option<std::ffi::OsString>);
-        impl Drop for RestoreBin {
+        struct RestoreEnv(&'static str, Option<std::ffi::OsString>);
+        impl Drop for RestoreEnv {
             fn drop(&mut self) {
-                if let Some(value) = &self.0 { std::env::set_var("DIALIBGEN_BIN", value); }
-                else { std::env::remove_var("DIALIBGEN_BIN"); }
+                if let Some(value) = &self.1 { std::env::set_var(self.0, value); }
+                else { std::env::remove_var(self.0); }
             }
         }
         let (dir, resolved) = fake_cli(r#"
@@ -654,7 +654,8 @@ if [ -f "$work/wait" ]; then exec sleep 30; fi
 if [ -f "$work/fail-run" ]; then exit 17; fi
 printf 'library' > "$out"
 "#);
-        let _restore = RestoreBin(std::env::var_os("DIALIBGEN_BIN"));
+        let _restore = RestoreEnv("DIALIBGEN_BIN", std::env::var_os("DIALIBGEN_BIN"));
+        let _restore_models = RestoreEnv("DIALIBGEN_MODEL_DIR", std::env::var_os("DIALIBGEN_MODEL_DIR"));
         std::env::set_var("DIALIBGEN_BIN", &resolved.bin);
         let app = mock_builder().manage(RunManager::default())
             .invoke_handler(tauri::generate_handler![probe, models, default_config, run, cancel, read_config, write_config])
@@ -675,6 +676,18 @@ printf 'library' > "$out"
         assert_eq!(invoke("models", model_query.clone()).unwrap()["missing"].as_array().unwrap().len(), 3);
         for name in MODEL_FILES { std::fs::write(model_dir.join(name), "model").unwrap(); }
         assert_eq!(invoke("models", model_query).unwrap()["missing"], serde_json::json!([]));
+        std::env::set_var("DIALIBGEN_MODEL_DIR", &model_dir);
+        let automatic = invoke("models", serde_json::json!({})).unwrap();
+        assert_eq!(automatic["dir"], model_dir.display().to_string());
+        assert_eq!(automatic["missing"], serde_json::json!([]));
+        let incomplete = dir.path().join("incomplete models");
+        std::fs::create_dir(&incomplete).unwrap();
+        std::fs::write(incomplete.join(MODEL_FILES[0]), "model").unwrap();
+        // An explicit choice must report its missing files rather than silently
+        // substituting a complete directory from the environment.
+        let explicit = invoke("models", serde_json::json!({"dir":incomplete})).unwrap();
+        assert_eq!(explicit["dir"], incomplete.display().to_string());
+        assert_eq!(explicit["missing"], serde_json::json!([MODEL_FILES[1], MODEL_FILES[2]]));
         let config_path = dir.path().join("picked config.json");
         let picked = serde_json::json!({"instrument":"Lumos"});
         assert_eq!(invoke("write_config", serde_json::json!({"path":config_path,"value":picked})).unwrap(), true);

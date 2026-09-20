@@ -65,7 +65,7 @@ namespace ODIA
 #else
       const auto* first = s.data();
       const auto* last = first + s.size();
-      if (*first == '+') { ++first; }
+      if (*first == '+' && s.size() > 1 && s[1] != '-') { ++first; }
       const auto parsed = std::from_chars(first, last, v, std::chars_format::general);
       if (parsed.ec != std::errc{} || parsed.ptr != last || std::isinf(v))
 #endif
@@ -79,8 +79,7 @@ namespace ODIA
       long v = 0;
       const auto* first = s.data();
       const auto* last = s.data() + s.size();
-      while (first != last && (*first == ' ' || *first == '+')) { ++first; }
-      while (last != first && last[-1] == ' ') { --last; }
+      if (*first == '+' && s.size() > 1 && s[1] != '-') { ++first; }
       const auto parsed = std::from_chars(first, last, v);
       if (parsed.ec != std::errc{} || parsed.ptr != last)
       { throw std::runtime_error(std::string("invalid integer value in ") + column + ": " + std::string(s)); }

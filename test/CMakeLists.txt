@@ -65,10 +65,9 @@ if(TARGET DIALibGen)
   # It takes no -in and no -out: seeing the defaults is useful on its own, and
   # requiring an input file nobody reads to get them was a needless refusal.
   add_test(NAME config_write_effective
-           COMMAND DIALibGen
-                   -write_config "${CMAKE_CURRENT_BINARY_DIR}/effective.json")
-  set_tests_properties(config_write_effective PROPERTIES
-    PASS_REGULAR_EXPRESSION "effective config")
+           COMMAND ${CMAKE_COMMAND} "-DTOOL=$<TARGET_FILE:DIALibGen>" -DMODE=generate
+                   "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/effective.json"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/write_config.cmake")
 
   # An unknown config key is a typo that would otherwise silently become a
   # default, and a library built from a typo looks exactly like one built right.

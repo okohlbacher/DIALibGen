@@ -164,6 +164,20 @@ def main(binary, fasta, model_dir, workdir):
     failure = subprocess.run([binary, "-in", fasta, "-out", "protected.tsv"], capture_output=True, env=env)
     check(failure.returncode != 0 and open("protected.tsv", "rb").read() == sentinel, "generation refuses to replace an existing output")
 
+    # This stock PSI-MOD entry is K-specific but has no difference composition.
+    # OpenMS can generate it; PeptDeep must count it as unencodable. Drive the
+    # CLI's prediction-miss guard rather than merely rejecting a bad model file.
+    with open("unencodable.fasta", "w") as f:
+        f.write(">missing-composition\nPEPTIDEK\n")
+    with open("unencodable.json", "w") as f:
+        json.dump({"fixed_modifications": ["MOD:00949"], "variable_modifications": []}, f)
+    failure = subprocess.run([binary, "-mode", "generate", "-in", "unencodable.fasta",
+                              "-config", "unencodable.json", "-out", "unpredicted.tsv", "-threads", "2"],
+                             capture_output=True, text=True, env=env)
+    check(failure.returncode != 0 and "precursors have no predicted RT" in failure.stdout + failure.stderr
+          and not os.path.exists("unpredicted.tsv"),
+          "generation refuses prediction misses and leaves no output library")
+
     def decoy_fragments(path):
         t = pq.read_table(path).to_pydict()
         return [np.asarray(p, dtype=float)

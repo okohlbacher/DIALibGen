@@ -65,7 +65,8 @@ if find "$TMP/gate-models" -type f 2>/dev/null | grep -q .; then fail "models tr
    -q_global 1 -q_protein 1 -no_filter \
    -tune -tune_models "$MODELS" -tune_out_models "$TMP/tuned" \
    -filter:rt_max_minutes 30 \
-   -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 -machine:threads 2 \
+   -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 \
+   -machine:device cpu -machine:threads 2 -machine:seed 20260803 \
    > "$TMP/run.log" 2>&1 || { cat "$TMP/run.log" >&2; fail "DIALibGen -mode refine -tune exited non-zero"; }
 
 # The deliverable is a LIBRARY. This is the claim the merge added.
@@ -196,7 +197,8 @@ PYEOF2
 "$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/pure-tuned.tsv" \
    -tune_heads rt -tune_models "$MODELS" -tune_out_models "$TMP/pure-models" \
    -filter:rt_max_minutes 30 \
-   -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 -machine:threads 2 \
+   -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 \
+   -machine:device cpu -machine:threads 2 -machine:seed 20260803 \
    > "$TMP/pure.log" 2>&1 || { cat "$TMP/pure.log" >&2; fail "pure tuning exited non-zero"; }
 "$PY" - "$TMP/library.tsv" "$TMP/pure-tuned.tsv" "$TMP/report.parquet" <<'PYEOF3' || exit 1
 import csv, json, math, sys
@@ -225,5 +227,51 @@ assert p["library"]["before"] == p["library"]["after"]
 assert "ccs" not in p["tune"] and p["library"]["rt_written"] == 0
 print("ok   pure RT tuning preserves all keys, fragments, CCS and IM; changes unseen RT")
 PYEOF3
+
+# The RT head trained twice from stock with one seed on this CPU build. Compare
+# its real checkpoints and trajectory, excluding only timing and output paths.
+"$PY" - "$TMP/tuned/peptdeep_rt_dynamic.onnx" "$TMP/pure-models/peptdeep_rt_dynamic.onnx" <<'PY_REPEAT' || exit 1
+import csv, json, pathlib, sys
+paths = list(map(pathlib.Path, sys.argv[1:]))
+provenance = [json.loads(path.with_suffix(path.suffix + '.tune.json').read_text()) for path in paths]
+for p in provenance:
+    assert p['device'] == 'cpu' and p['recipe']['seed'] == 20260803
+    assert p['course']['updates'] > 0 and p['course']['param_l2_change'] > 0
+    p.pop('output')
+    p['course'].pop('train_seconds'); p['course'].pop('eval_seconds')
+assert provenance[0] == provenance[1], 'same CPU seed changed cohorts, training course or evaluation'
+trajectories = []
+for path in paths:
+    with open(str(path) + '.trajectory.tsv') as source:
+        rows = list(csv.DictReader(source, delimiter='\t'))
+    for row in rows:
+        row.pop('train_s'); row.pop('eval_s')
+    trajectories.append(rows)
+assert trajectories[0] == trajectories[1], 'same CPU seed changed the numeric epoch trajectory'
+# ONNX metadata includes timing, so compare the complete non-metadata wire
+# fields, including every initializer byte, rather than the whole-file hash.
+def without_metadata(data):
+    i = 0
+    def varint():
+        nonlocal i
+        value = shift = 0
+        while True:
+            b = data[i]; i += 1; value |= (b & 127) << shift
+            if not b & 128: return value
+            shift += 7
+    result = []
+    while i < len(data):
+        start = i; key = varint(); wire = key & 7
+        if wire == 0: varint()
+        elif wire in (1, 5): i += 8 if wire == 1 else 4
+        elif wire == 2:
+            length = varint(); i += length
+        else: raise ValueError(f'unsupported protobuf wire {wire}')
+        assert i <= len(data)
+        if key >> 3 != 14: result.append(data[start:i])
+    return b''.join(result)
+assert without_metadata(paths[0].read_bytes()) == without_metadata(paths[1].read_bytes()), 'same CPU seed changed the trained ONNX weights'
+print('ok   same CPU seed reproduces cohorts, trajectory, evaluation and trained ONNX weights')
+PY_REPEAT
 
 echo "PASSED"

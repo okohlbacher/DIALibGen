@@ -13,10 +13,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
+#include <locale>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -120,15 +121,14 @@ namespace ODIA
       return out;
     }
 
-    // strtod, not from_chars: floating-point from_chars is still missing from
-    // the libc++ some of the macOS runners ship.
+    // Classic-locale streams also work on macOS SDKs without floating from_chars.
     bool number(std::string_view t, double& v)
     {
-      if (t.empty()) { return false; }
-      const std::string z(t);
-      char* end = nullptr;
-      v = std::strtod(z.c_str(), &end);
-      return end == z.c_str() + z.size() && std::isfinite(v);
+      if (t.empty() || t.find_first_not_of("0123456789+-.eE") != std::string_view::npos) { return false; }
+      std::istringstream input{std::string(t)};
+      input.imbue(std::locale::classic());
+      input >> std::noskipws >> v;
+      return input && input.peek() == std::char_traits<char>::eof() && std::isfinite(v);
     }
 
     // Shared identity parser for DIA-NN 1.9 lists and 2.x Fr.N.Id columns.

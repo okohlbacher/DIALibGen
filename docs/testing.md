@@ -58,18 +58,19 @@ Final candidate jobs and artifact verification remain tracked in
 ## Measured coverage and limits
 
 The local Linux GCC coverage run on 20 September 2026 measured **91.3% of C++
-lines (4,208/4,610)** and **95.7% of functions (287/300)**. Raw GCC branch
-coverage was **48.1% (8,271/17,210)**, including compiler-generated exception
+lines (4,213/4,612)** and **95.7% of functions (287/300)**. Raw GCC branch
+coverage was **48.2% (8,324/17,270)**, including compiler-generated exception
 edges. The run passed all 45 CTest cases after the RT-unit, modification-join,
-capacity and numeric-parser corrections.
+capacity, numeric-parser and overwrite corrections. A second build without
+training passed all 41 applicable tests and its installed SDK consumer.
 
-The current frontend suite passed **55 tests** and measured **100% lines
-(273/273)**, **100% functions (110/110)**, **98.40% statements (309/314)** and
-**89.01% branches (235/264)** after the default-fixture, output-path and numeric
+The current frontend suite passed **59 tests** and measured **100% lines
+(277/277)**, **100% functions (113/113)**, **98.43% statements (315/320)** and
+**89.84% branches (239/266)** after the default-fixture, output-path and numeric
 input corrections. Type checking and the frontend build also passed. The native
 GUI passed **20 Rust tests** and Clippy with warnings treated as errors. Its
-earlier macOS production-library coverage was **73.29% of lines**; that number
-has not been remeasured after the output-path correction.
+macOS production-library coverage is **76.58% of lines (327/427)** after the
+output-path and automatic model-discovery regressions.
 
 These are local measurements, not final platform CI results or claims of
 complete coverage. The final release record must identify the validated commit.

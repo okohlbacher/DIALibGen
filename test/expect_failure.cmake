@@ -2,7 +2,7 @@ if(NOT DEFINED TOOL OR NOT DEFINED EXPECTED OR EXPECTED STREQUAL "")
   message(FATAL_ERROR "expect_failure requires TOOL and a nonempty EXPECTED diagnostic")
 endif()
 execute_process(COMMAND "${TOOL}" ${ARGS}
-  RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+  RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error TIMEOUT 60)
 if(NOT result MATCHES "^[1-9][0-9]*$")
   message(FATAL_ERROR "Expected a normal nonzero exit, got '${result}':\n${output}\n${error}")
 endif()

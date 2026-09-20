@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise TOPP/JSON precedence and pure-tuning defaults without model inference."""
 import json
+import itertools
 from pathlib import Path
 import subprocess
 import sys
@@ -14,10 +15,31 @@ with tempfile.TemporaryDirectory() as directory:
         r = subprocess.run([binary, *map(str, args)], capture_output=True, text=True)
         assert (r.returncode == 0) == ok, (args, r.returncode, r.stdout, r.stderr)
         return r
+    config_number = itertools.count()
     def config(*args):
-        out = root / 'effective.json'
+        out = root / f'effective-{next(config_number)}.json'
         run(*args, '-write_config', out)
         return json.loads(out.read_text())
+    for mode in ('generate', 'refine', 'tune'):
+        existing = root / f'{mode}-input.json'
+        sentinel = b'{}\n'
+        existing.write_bytes(sentinel)
+        for args in ((), ('-config', existing), ('-in', existing)):
+            result = run('-mode', mode, *args, '-write_config', existing, ok=False)
+            assert result.returncode == 5 and 'refusing to overwrite config output' in result.stdout + result.stderr
+            assert existing.read_bytes() == sentinel, 'write_config overwrote an existing input'
+        for dangling in (False, True):
+            target = root / f'{mode}-absent.json' if dangling else existing
+            link = root / f'{mode}-link-{dangling}.json'
+            try:
+                link.symlink_to(target)
+            except OSError:
+                if sys.platform == 'win32':
+                    continue  # Windows may not grant symlink privileges to the test user.
+                raise
+            result = run('-mode', mode, '-write_config', link, ok=False)
+            assert result.returncode == 5 and link.is_symlink(), 'write_config changed a symlink'
+            assert existing.read_bytes() == sentinel and (not target.exists() if dangling else True)
     fixture = Path(__file__).resolve().parents[1] / 'gui/src/testing/generation-defaults.json'
     expected, actual = json.loads(fixture.read_text()), config('-mode', 'generate')
     for key in ('rt_model', 'ms2_model', 'ccs_model'):

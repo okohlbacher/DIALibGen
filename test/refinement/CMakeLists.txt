@@ -16,8 +16,9 @@ if(TARGET DIALibGen)
     "-DTOOL=$<TARGET_FILE:DIALibGen>" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/config-contract"
     -P "${CMAKE_CURRENT_SOURCE_DIR}/config_contract.cmake")
   add_test(NAME refinement_config_write_effective
-    COMMAND DIALibGen -mode refine -write_config "${CMAKE_CURRENT_BINARY_DIR}/refine-effective.json")
-  set_tests_properties(refinement_config_write_effective PROPERTIES PASS_REGULAR_EXPRESSION "effective config")
+    COMMAND ${CMAKE_COMMAND} "-DTOOL=$<TARGET_FILE:DIALibGen>" -DMODE=refine
+      "-DOUT=${CMAKE_CURRENT_BINARY_DIR}/refine-effective.json"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/../write_config.cmake")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/refine-typo.json" "{\"q_precursour\": 0.05}\n")
   add_failure_test(refinement_config_rejects_unknown_key DIALibGen "unknown config key: q_precursour"
     -mode refine -config "${CMAKE_CURRENT_BINARY_DIR}/refine-typo.json"

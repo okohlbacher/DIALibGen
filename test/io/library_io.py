@@ -69,13 +69,30 @@ with path.open('w', newline='') as f:
 run('load', path, 'missing Modified.Sequence')
 pq.write_table(flat.drop(['Modified.Sequence']), work / 'missing-sequence.parquet')
 run('load', work / 'missing-sequence.parquet', 'missing Modified.Sequence')
-for token in ('1.5garbage', 'inf', '0x1p2', '9' * 500):
+for token in ('1.5garbage', 'inf', '0x1p2', '+-5', '++5', '--5', '-+5', ' 5', '5 ', '9' * 500):
     rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
     rows[0]['RT'] = token
     path = work / 'invalid-numeric.tsv'
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
     run('load', path, 'invalid numeric value')
+for token in ('+-2', '++2', '--2', '-+2', ' 2', '2 ', '0x2'):
+    rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
+    rows[0]['Precursor.Charge'] = token
+    path = work / 'invalid-integer.tsv'
+    with path.open('w', newline='') as f:
+        writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
+    run('load', path, 'invalid integer value')
+# Explicit single plus signs remain valid in decimal numbers and integers.
+rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
+for row in rows:
+    row['Precursor.Charge'] = '+' + row['Precursor.Charge']
+    if row['RT'] and not row['RT'].startswith('-'):
+        row['RT'] = '+' + row['RT']
+path = work / 'explicit-plus.tsv'
+with path.open('w', newline='') as f:
+    writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
+run('roundtrip', path)
 for field in ('Precursor.Id', 'Modified.Sequence', 'Protein.Group'):
     i = flat.schema.get_field_index(field)
     flat = flat.set_column(i, field, flat[field].cast(pa.large_string()))

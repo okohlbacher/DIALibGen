@@ -62,6 +62,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   }
   const std::string mode = getStringOption_("mode");
   const auto& parameters = getParam_();
+  // Inspect the raw path before TOPP's output getter can probe a dangling symlink.
+  const std::string write_config = parameters.getValue("write_config").toString();
+  if (!write_config.empty() && (fs::exists(write_config) || fs::is_symlink(write_config)))
+  { writeLogError_("refusing to overwrite config output: " + write_config); return CANNOT_WRITE_OUTPUT_FILE; }
   for (const auto& option : supplied_)
   {
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||

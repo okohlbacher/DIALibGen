@@ -25,6 +25,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <locale>
 #include <string>
 #include <vector>
 
@@ -90,6 +91,22 @@ namespace
           && f.size() == 1 && bad == 4, "an unknown series, ordinal 0, charge 9 and a non-numeric m/z are bad tokens, not b ions");
     check(parseFragmentInfo("y7^1/659.35;", "5;", "", f) && f.size() == 1 && std::isnan(f[0].correlation),
           "an absent correlation column gives NaN, not zero");
+    for (const std::string token : {"0x1p3", " 5", "5 ", "+-5", "++5", "--5", "-+5", "5,1", "nan", "inf"})
+    {
+      for (int column = 0; column < 3; ++column)
+      {
+        bad = 0;
+        check(parseFragmentInfo(column == 0 ? "y7^1/" + token : "y7^1/659.35",
+                                column == 1 ? token : "5", column == 2 ? token : "0.9", f, &bad) &&
+              f.empty() && bad == 1, "non-decimal fragment token is rejected in column " + std::to_string(column) + ": " + token);
+      }
+    }
+    struct CommaDecimal : std::numpunct<char> { char do_decimal_point() const override { return ','; } };
+    const auto original = std::locale::global(std::locale(std::locale::classic(), new CommaDecimal));
+    check(parseFragmentInfo("y7^1/+6.5935e2", "+5.0e1", "-.1", f) && f.size() == 1 &&
+          std::abs(f[0].mz - 659.35) < 1e-9 && f[0].quant == 50 && std::abs(f[0].correlation + 0.1f) < 1e-7f,
+          "decimal scientific notation uses the classic locale under a comma-decimal global locale");
+    std::locale::global(original);
   }
 
   void replaces_and_reranks()

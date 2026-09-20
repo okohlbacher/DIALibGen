@@ -1,4 +1,5 @@
 file(MAKE_DIRECTORY "${WORK}")
+file(REMOVE "${WORK}/tune.json" "${WORK}/effective.json")
 execute_process(COMMAND "${TOOL}" -mode tune -write_config "${WORK}/tune.json" RESULT_VARIABLE rc OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT rc EQUAL 0)
   message(FATAL_ERROR "tune defaults: ${output}\n${error}")

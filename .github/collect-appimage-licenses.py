@@ -203,10 +203,10 @@ def generated_cache_owner(path, appdir, candidates):
         if tool_name == 'glib-compile-schemas':
             with tempfile.TemporaryDirectory(prefix='dialibgen-schema-proof-') as temporary:
                 directory = Path(temporary)
-                for source in path.parent.iterdir():
-                    if source.name.endswith(('.gschema.xml', '.gschema.override')):
-                        shutil.copy2(source, directory / source.name)
-                subprocess.run([str(tool), str(directory)], check=True, capture_output=True, timeout=60)
+                # Compile the same complete input directory as linuxdeploy, including
+                # enum definitions; write elsewhere so the packaged cache is untouched.
+                subprocess.run([str(tool), '--targetdir=' + str(directory), str(path.parent)],
+                               check=True, capture_output=True, timeout=60)
                 generated = (directory / 'gschemas.compiled').read_bytes()
         else:
             generated = subprocess.check_output([str(tool)], timeout=60)
@@ -216,7 +216,14 @@ def generated_cache_owner(path, appdir, candidates):
                 prefix = run('/usr/bin/pkg-config', '--variable=gdk_pixbuf_moduledir', 'gdk-pixbuf-2.0') + '/'
             # Exact transformation performed by the pinned GTK deploy plugin.
             generated = generated.replace(prefix.encode(), b'')
-        if hashlib.sha256(generated).hexdigest() == digest(path):
+        variants = [generated]
+        if tool_name == 'gtk-query-immodules-3.0':
+            # GTK 3.24.41 queryimmodules.c writes contents verbatim for --update-cache,
+            # but g_print("%s\n", contents) adds one newline on stdout. The pinned
+            # plugin copies the installed cache when its lookup misses Ubuntu's t64
+            # tool directory. Reproduce both exact formats; retain every other byte.
+            variants.append(generated.removesuffix(b'\n'))
+        if any(hashlib.sha256(value).hexdigest() == digest(path) for value in variants):
             return owner, str(tool)
     return None
 

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import tarfile
@@ -110,6 +111,50 @@ class AttributionTests(unittest.TestCase):
         extra = appdir / 'unproven.cache'
         extra.write_bytes(original)
         self.assertIsNone(collector.generated_cache_owner(extra, appdir, owners))
+
+    def test_gtk_installed_cache_differs_from_stdout_by_exactly_one_newline(self):
+        appdir = self.root / 'AppDir'
+        cache = appdir / 'usr/lib/gtk-3.0/3.0.0/immodules.cache'
+        cache.parent.mkdir(parents=True)
+        tool = self.root / 'gtk-query-immodules-3.0'
+        tool.write_bytes(b'#!/bin/sh\n')
+        tool.chmod(0o700)
+        prefix = b'/usr/lib/test/gtk-3.0/3.0.0/immodules/'
+        stdout = b'# Created by the exact GTK tool\n"' + prefix + b'im-cedilla.so"\n"cedilla" "Cedilla"\n\n\n'
+        transformed = stdout.replace(prefix, b'')
+        owners = {'gtk-query-immodules-3.0': [(tool, 'libgtk-3-0t64')]}
+        with patch.object(collector.subprocess, 'check_output', return_value=stdout), \
+             patch.object(collector, 'run', return_value='/usr/lib/test'):
+            for data in (transformed, transformed[:-1], transformed[:-2], transformed + b'\n',
+                         transformed.replace(b'Created', b'Forged'), transformed.replace(b'cedilla', b'injected')):
+                cache.write_bytes(data)
+                collector.digest.cache_clear()
+                expected = ('libgtk-3-0t64', str(tool)) if data in (transformed, transformed[:-1]) else None
+                self.assertEqual(collector.generated_cache_owner(cache, appdir, owners), expected)
+
+    @unittest.skipUnless(shutil.which('glib-compile-schemas'), 'requires actual GLib schema compiler')
+    def test_real_schema_cache_with_external_enums_is_reproduced_without_changing_inputs(self):
+        appdir = self.root / 'AppDir'
+        folder = appdir / 'usr/share/glib-2.0/schemas'
+        folder.mkdir(parents=True)
+        (folder / 'org.dialibgen.Test.enums.xml').write_text(
+            '<schemalist><enum id="org.dialibgen.Test.Mode">'
+            '<value nick="first" value="0"/><value nick="second" value="1"/>'
+            '</enum></schemalist>')
+        (folder / 'org.dialibgen.Test.gschema.xml').write_text(
+            '<schemalist><schema id="org.dialibgen.Test" path="/org/dialibgen/test/">'
+            '<key name="mode" enum="org.dialibgen.Test.Mode"><default>\'second\'</default></key>'
+            '</schema></schemalist>')
+        tool = Path(shutil.which('glib-compile-schemas'))
+        subprocess.run([str(tool), '--strict', str(folder)], check=True, capture_output=True)
+        original = {path.name: path.read_bytes() for path in folder.iterdir()}
+        owners = {'glib-compile-schemas': [(tool, 'libglib2.0-bin')]}
+        cache = folder / 'gschemas.compiled'
+        self.assertEqual(collector.generated_cache_owner(cache, appdir, owners), ('libglib2.0-bin', str(tool)))
+        self.assertEqual({path.name: path.read_bytes() for path in folder.iterdir()}, original)
+        cache.write_bytes(b'tampered cache')
+        collector.digest.cache_clear()
+        self.assertIsNone(collector.generated_cache_owner(cache, appdir, owners))
 
     def test_exact_ubuntu_source_version_and_sha256_gate(self):
         source = b'original upstream source archive'

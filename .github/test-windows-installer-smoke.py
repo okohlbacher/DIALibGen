@@ -99,6 +99,16 @@ def window_check(find_window, exits=False):
 
 
 window = {'hwnd': 123, 'title': 'DIALibGen', 'width': 1180, 'height': 820}
+sent = []
+installer.post_close(window, lambda *args: sent.append(args) or True,
+                     lambda: OSError(5, 'Access is denied'))
+assert sent == [(123, 0x0010, 0, 0)]
+try:
+    installer.post_close(window, lambda *args: False, lambda: OSError(5, 'Access is denied'))
+except OSError as error:
+    assert error.errno == 5
+else:
+    raise AssertionError('accepted a failed WM_CLOSE dispatch')
 assert window_check(lambda elapsed, pid: window if pid == 42 and elapsed >= 0.25 else None) == window
 for finder, exits in ((lambda elapsed, pid: None, False),
                       (lambda elapsed, pid: window if elapsed < 0.5 else None, False),
@@ -110,4 +120,4 @@ for finder, exits in ((lambda elapsed, pid: None, False),
         pass
     else:
         raise AssertionError('accepted missing, disappearing, replaced window or exited GUI process')
-print('PASS: exact installer bytes; changed payloads refused; GUI process/window must remain present')
+print('PASS: exact installer bytes; changed payloads refused; GUI liveness and close dispatch enforced')

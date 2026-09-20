@@ -101,6 +101,38 @@ def gui_environment(gui):
     return env
 
 
+def post_close(window, post_message, win_error):
+    if not post_message(window['hwnd'], 0x0010, 0, 0):  # WM_CLOSE
+        raise win_error()
+
+
+def log_gui_processes(pid, output):
+    # Capture only this GUI and its descendants; SDK or unrelated runner
+    # processes must never appear in the diagnostic output.
+    script = f"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$all = @(Get-CimInstance Win32_Process)
+$ids = [System.Collections.Generic.HashSet[uint32]]::new()
+[void]$ids.Add({int(pid)})
+do {{
+  $children = @($all | Where-Object {{ $ids.Contains([uint32]$_.ParentProcessId) -and -not $ids.Contains([uint32]$_.ProcessId) }})
+  foreach ($child in $children) {{ [void]$ids.Add([uint32]$child.ProcessId) }}
+}} while ($children.Count -gt 0)
+$all | Where-Object {{ $ids.Contains([uint32]$_.ProcessId) }} |
+  Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine | ConvertTo-Json -Compress
+"""
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    try:
+        snapshot = subprocess.run([str(powershell), '-NoProfile', '-Command', script],
+                                  capture_output=True, encoding='utf-8', errors='replace',
+                                  timeout=5, check=True)
+        output.write(f'GUI process tree: {snapshot.stdout.strip()}\n')
+    except (OSError, subprocess.SubprocessError) as error:
+        output.write(f'GUI process snapshot failed: {error}\n')
+    output.flush()
+
+
 def exercise_gui(gui, log):
     # Native window ownership excludes another single-instance process and
     # WebView2 helper processes. This checks startup, not frontend rendering.
@@ -118,6 +150,8 @@ def exercise_gui(gui, log):
     user32.GetClientRect.restype = wintypes.BOOL
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowTextW.restype = ctypes.c_int
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.restype = ctypes.c_int
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = wintypes.BOOL
 
@@ -130,11 +164,13 @@ def exercise_gui(gui, log):
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
             if owner.value == pid and user32.IsWindowVisible(hwnd):
                 title = ctypes.create_unicode_buffer(256)
+                class_name = ctypes.create_unicode_buffer(256)
                 rect = wintypes.RECT()
                 user32.GetWindowTextW(hwnd, title, len(title))
+                user32.GetClassNameW(hwnd, class_name, len(class_name))
                 if (title.value == 'DIALibGen' and user32.GetClientRect(hwnd, ctypes.byref(rect))
                         and rect.right > rect.left and rect.bottom > rect.top):
-                    windows.append({'hwnd': hwnd, 'title': title.value,
+                    windows.append({'hwnd': hwnd, 'title': title.value, 'class': class_name.value,
                                     'width': rect.right - rect.left, 'height': rect.bottom - rect.top})
             return True
 
@@ -153,15 +189,24 @@ def exercise_gui(gui, log):
         finally:
             if process.poll() is None:
                 # Recheck ownership immediately before closing this process's window.
+                close_error = None
                 try:
                     closing = find_window(process.pid)
+                    output.write(f'main window before WM_CLOSE: {json.dumps(closing)}\n'); output.flush()
                     if closing:
-                        user32.PostMessageW(closing['hwnd'], 0x0010, 0, 0)  # WM_CLOSE
+                        post_close(closing, user32.PostMessageW, ctypes.WinError)
+                        output.write('WM_CLOSE accepted by Windows\n'); output.flush()
                 except OSError as error:
-                    output.write(f'window enumeration failed during cleanup: {error}\n')
+                    close_error = error
+                    output.write(f'window enumeration/close dispatch failed: {error}\n'); output.flush()
                 try:
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
+                    try:
+                        output.write(f'main window after 10 seconds: {json.dumps(find_window(process.pid))}\n')
+                    except OSError as error:
+                        output.write(f'window enumeration after timeout failed: {error}\n')
+                    log_gui_processes(process.pid, output)
                     output.write('GUI did not close; forcibly cleaning its process tree\n'); output.flush()
                     try:
                         subprocess.run([str(Path(os.environ['SystemRoot']) / 'System32/taskkill.exe'),
@@ -172,6 +217,8 @@ def exercise_gui(gui, log):
                             process.kill()
                         process.wait(timeout=5)
                     raise RuntimeError(f'installed GUI required forced termination; see {log}')
+                if close_error is not None:
+                    raise RuntimeError(f'installed GUI close dispatch failed; see {log}') from close_error
             output.write(f'GUI exit: {process.returncode}\n')
         if process.returncode != 0:
             raise RuntimeError(f'installed GUI exited abnormally: {process.returncode}; see {log}')

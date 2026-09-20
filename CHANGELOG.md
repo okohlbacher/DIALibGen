@@ -3,46 +3,44 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
-### Changed — breaking
-- **An unknown `instrument` is now refused instead of silently predicting for no
-  instrument at all.** The MS2 model one-hot encodes the *index* of the name, and
-  a name it did not know indexed `max_instrument_num - 1` — a slot still holding
-  its random initialisation. Every slot of the shipped checkpoint carries
-  non-zero weight, so nothing downstream could notice: the library predicted,
-  wrote and read back looking entirely normal. `"Astral"` hit that slot.
-
-  Anyone who was passing a name that "worked" this way was getting predictions
-  from an untrained slot; the error now names every accepted spelling.
+## [0.11.0] — 2026-09-20
 
 ### Added
-- **Instrument aliases**, taken from upstream's own `instrument_group`: `Astral`,
-  `Fusion`, `Eclipse`, `OrbitrapTribrid` → `Lumos`; `QE+`, `QEHF`, `QEHFX`,
-  `Exploris` → `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` → `timsTOF`; `TripleTOF`,
-  `ZenoTOF` → `SciexTOF`. Case, spaces, `-` and `_` are ignored. The resolution
-  is logged and the canonical name is what lands in the provenance.
-- **Per-instrument default `nce`**, applied only when the config names none, and
-  resolved before `-write_config` so the dumped config is the one that was used:
-  `Lumos` (and so `Astral`) 25, everything else upstream's 30. `nce_source` in
-  the recipe records whether the operator or the tool chose the number.
 
-  `timsTOF` stays at upstream's 30 although we measured 40 as better on K562
-  diaPASEF (spectral angle 0.9041 ± 0.0004 against 0.8939 ± 0.0011 over three
-  replicates, +1,028 precursors end to end): the curve falls about four times more
-  steeply above its peak than below, so a default at the measured maximum puts
-  every cooler collision-energy ramp on the steep side. The README says to set
-  `nce: 40` for a method like ours. Most of the end-to-end win is the label, not
-  the NCE — `QE`/30 → `timsTOF`/30 is +1,329 precursors and already passes
-  DIA-NN on protein groups.
-- `SciexTOF` and `ThermoTOF` warn that they carry no trained weights in the
-  shipped checkpoint. Read out of it, only `QE` and `timsTOF` have weights
-  outside the meta layer's initialisation bound; `Lumos` is the no-correction
-  baseline the other two are deltas from.
-- `test/tools/odia_instrument_dump.cpp` and two tests: the whole
-  name → canonical → slot → NCE table is pinned, and an unknown instrument in a
-  config must fail. `test/check_meta_inputs.py` now validates the alias table
-  against the C++ source the same way it already validated the index map.
+- One TOPP executable for generation, observed-value refinement and RT/CCS
+  model tuning: `-mode generate|refine|tune`.
+- Native `-generation:<key>` options for every generation setting, including
+  TOPP INI/CTD export. Explicit CLI/INI settings override JSON configuration.
+- Refinement and training from DIALibRefine, with report quality gates,
+  provenance sidecars and optional saved ONNX models. Tuned ONNX models embed
+  their provenance.
+- Whole-library tune mode preserves precursor keys and predicts unseen entries
+  without observed-value write-in. Portable training uses CPU; CUDA remains
+  available with suitable source-build dependencies.
+- Usage/migration documentation, generated parameter reference and a qualified
+  summary of the completed 0.10.1 cross-run benchmark.
+- Instrument aliases and per-instrument NCE defaults. Unknown instruments are
+  refused; the effective recipe records the selected NCE and its source.
+
+### Changed
+
+- `-threads` now follows the TOPP default of 1. Set 0 for automatic inference
+  parallelism. Training uses its separate `-machine:threads` setting.
+- The desktop app explicitly selects generation mode and matches the CLI
+  thread default. Bundled-model guidance and parameter descriptions are current.
+- User documentation replaces obsolete pre-release notes and same-run tuning
+  recommendations. Superseded Python tuning helpers are not part of the tool.
+
+### Fixed
+
+- Met excision now retains N-terminal peptides at every permitted missed-cleavage
+  count, including cases where the fully cleaved peptide is below the minimum
+  length. Cache fingerprint v4 invalidates libraries containing the old omission.
+- Update Vite and Vitest to patched versions, removing the reported development
+  server and test-server dependency vulnerabilities.
+
+See [BACKLOG.md](BACKLOG.md) for platform and first-launch validation that still
+requires release evidence.
 
 ## [0.10.1] — 2026-09-17
 

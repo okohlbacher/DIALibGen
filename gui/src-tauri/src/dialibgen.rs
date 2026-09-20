@@ -29,9 +29,7 @@ fn exe_name() -> &'static str {
     }
 }
 
-/// The three ONNX exports the tool needs. No tagged OpenMS release ships them,
-/// so the GUI has to be able to say which one is missing and let the user point
-/// at a directory holding all three.
+/// The three ONNX exports bundled with release builds.
 pub const MODEL_FILES: [&str; 3] = [
     "peptdeep_rt_dynamic.onnx",
     "peptdeep_ms2_dynamic.onnx",
@@ -93,7 +91,7 @@ pub struct RunParams {
     /// DIALIBGEN_MODEL_DIR. The tool searches its own locations when unset.
     #[serde(default)]
     model_dir: Option<String>,
-    /// 0 = all cores, which is the tool's own default.
+    /// 1 matches the TOPP default; 0 requests all available cores.
     #[serde(default)]
     threads: Option<i64>,
 }
@@ -249,7 +247,7 @@ pub fn default_config(app: AppHandle) -> Result<Value, String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("effective.json");
     let mut cmd = Command::new(&r.bin);
-    cmd.arg("-write_config").arg(&path);
+    cmd.args(["-mode", "generate", "-write_config"]).arg(&path);
     apply_env(&mut cmd, &r);
     let out = cmd.output().map_err(|e| format!("cannot run the tool: {e}"))?;
     if !path.exists() {
@@ -365,14 +363,14 @@ pub fn run(app: AppHandle, state: State<'_, RunManager>, params: RunParams) -> R
 
     let r = resolve_binary(&app);
     let mut cmd = Command::new(&r.bin);
-    cmd.arg("-in")
+    cmd.args(["-mode", "generate", "-in"])
         .arg(defang_path(params.input.trim()))
         .arg("-config")
         .arg(&config_file)
         .arg("-out")
         .arg(defang_path(params.out.trim()))
         .arg("-threads")
-        .arg(params.threads.unwrap_or(0).max(0).to_string())
+        .arg(params.threads.unwrap_or(1).max(0).to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     apply_env(&mut cmd, &r);

@@ -4,6 +4,7 @@ name: macOS first-launch measurement
 # Never run DIALibGen or assess it with spctl before the timed first invocation.
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

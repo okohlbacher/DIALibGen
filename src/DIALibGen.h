@@ -21,4 +21,5 @@ protected:
   ExitCodes refine_(bool tune_only);
   nlohmann::json generationValue_(const std::string& key, const nlohmann::json& value);
   std::set<std::string> supplied_;
+  std::set<std::string> refinement_options_;
 };

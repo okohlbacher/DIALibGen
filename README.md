@@ -1,74 +1,25 @@
 # DIALibGen
 
-Build an in-silico DIA spectral library from a FASTA: enzymatic digest →
-precursor enumeration → AlphaPeptDeep predictions of retention time, MS2
-fragment intensities and collision cross-section → Parquet or DIA-NN-dialect
-TSV.
+Generate, refine and tune DIA spectral libraries with one TOPP-compatible
+executable. DIALibGen uses OpenMS and AlphaPeptDeep in C++; it needs no Python
+runtime.
 
-C++, no Python runtime. A TOPP-compatible tool built on
-[OpenMS](https://github.com/OpenMS/OpenMS), which is consumed as an installed,
-read-only dependency and never modified.
+| Mode | Input | Result |
+|---|---|---|
+| `generate` (default) | Protein FASTA | Predicted RT, fragment intensities, CCS and optional 1/K0 |
+| `refine` | Library and one run's identification report | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
+| `tune` | Library and one run's identification report | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-> **Status: pre-release (0.2.0).** Extracted from
-> [OpenDIAlyzer](https://github.com/okohlbacher/ODIA), where it was developed.
-> The output formats and the config schema are **not yet frozen** — see
-> [Known limitations](#known-limitations) before depending on them.
+Version **0.11.0** incorporates library refinement and model training from
+DIALibRefine. See [migration and usage](docs/usage.md),
+[parameter reference](docs/parameters.md), and [changes](CHANGELOG.md).
 
-There is a [command-line tool](#usage) and a [desktop app](#desktop-app) for
-macOS, Windows and Linux. Both run the same binary and take the same config.
+## Install
 
-## Why this exists
-
-Library generation is a different job from searching, on a different cadence: a
-library is a cross-run artefact built once and reused, a search is per-run.
-
-Two things make this tool worth having:
-
-**It fills a hole in the OpenMS ecosystem.** Of the 151 tools in an OpenMS
-install, none turns a FASTA into a predicted DIA library. `Digestor` digests,
-`OpenSwathAssayGenerator` takes an *existing* transition list, `AssayGeneratorMetabo`
-does metabolites. OpenMS `develop` has `PeptDeepRTInference`/`MS2Inference`/`CCSInference`,
-but `PeptDeepInputBuilder` states plainly that *"modified peptides are
-intentionally rejected for now"* and zero-fills the modification tensor — its
-only entry points are `buildUnmodified*Batch()`. Carbamidomethylation is not
-optional in practice: getting the alkylation state wrong cost this project's own
-reference 12% of its identifications. **Modification-aware encoding is the piece
-that is genuinely not available upstream**, and it is why this tool binds ONNX
-Runtime directly rather than using OpenMS's own binding.
-
-**The library carries the recipe that produced it.** Every content-affecting
-parameter lives in one JSON file, and that JSON is embedded verbatim in the
-Parquet output alongside the FASTA hash and content hashes of all three models.
-A library states how it was built, without reference to anyone's defaults.
-
-## What it is not
-
-It is **not** more accurate than DIA-NN's predictor. Measured against a DIA-NN
-*empirical* library on a Bruker timsTOF diaPASEF run (37,193 identified
-precursors):
-
-| Axis | Where this tool stands |
-|---|---|
-| Precursor coverage | Tied — 100.00% of observed precursors. That denominator is DIA-NN's own discovery set. |
-| Precursor & fragment m/z | Tied (+4.60 µDa median, p99 0.046 mDa). |
-| Fragment intensity | Within 0.015 spectral angle, on overlapping-but-not-identical fragment sets. |
-| Fragment selection | **Behind.** Carries 86.5% of observed transitions; 2.53% of the misses are the observed base peak. Localised to doubly-charged y ions. |
-| Retention time | **Behind** — 2.04× on a linear calibration, 1.37× after a monotone fit this tool does not ship. Elution *order* is near-tied (ρ 0.9936 vs 0.9956). |
-| Ion mobility | **Behind** — 2.82% relative error against measured 1/K0, about 1.8× DIA-NN's. |
-
-Caveats a reader should apply: these are from **one instrument**, and DIA-NN is
-both the competitor and the measuring instrument — the "ground truth" library is
-DIA-NN's own output, censored by its predictions and by its detection. Treat the
-table as a statement of where this tool sits, not as a benchmark.
-
-## Installing
-
-Release builds for macOS, Windows and Linux — a CLI archive and a desktop
-installer per platform — are attached to each
-[release](https://github.com/okohlbacher/DIALibGen/releases). The CLI
-archives are **self-contained**: unpack and run `bin/DIALibGen`. The
-libraries it needs and OpenMS's own data travel with it, so there is nothing to
-install and no OpenMS to set up.
+Download the CLI archive or desktop installer for your platform from
+[Releases](https://github.com/okohlbacher/DIALibGen/releases). Keep the archive's
+`bin`, `lib` and `share` directories together. The CLI is one executable with
+bundled runtime libraries, OpenMS data and the three prediction models.
 
 ```bash
 curl -fsSLO https://github.com/okohlbacher/DIALibGen/releases/latest/download/DIALibGen-macos-arm64.tar.gz
@@ -76,260 +27,130 @@ tar xzf DIALibGen-macos-arm64.tar.gz
 ./bin/DIALibGen --help
 ```
 
-There is also a [Homebrew tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
-with a cask for the app and a cask for the CLI:
+On macOS, the [Homebrew tap](https://github.com/okohlbacher/homebrew-dialibrarygenerator)
+also provides the CLI and desktop app:
 
 ```bash
-brew install --cask okohlbacher/dialibrarygenerator/dialibgen       # desktop app
-brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli   # CLI on PATH
+brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli
+brew install --cask okohlbacher/dialibrarygenerator/dialibgen
 ```
 
-Two casks because the app already carries its own copy of the CLI, so one cask
-installing both would put the same tree on disk twice. Both require macOS 14:
-the binaries are built for 13.3 (libc++ shipped `std::to_chars` there) and
-Homebrew can only name whole releases, so the cask rounds up rather than promise
-a machine it cannot load on.
+The first launch of a signed macOS CLI can be slow while macOS validates its
+bundled libraries. Earlier releases took between about 30 seconds and five
+minutes depending on the delivery route; those measurements are not a timing
+guarantee for 0.11.0. See [remaining validation work](BACKLOG.md).
 
-> **The first run of the CLI takes about five minutes.** It is not stuck. macOS
-> checks each of the 145 bundled libraries with Apple one at a time, and a
-> `.tar.gz` cannot carry a stapled ticket that would answer for all of them at
-> once. Every later run starts in about a second. See BACKLOG.md.
-
-**Signed and notarized** since 0.9.0, with a Developer ID, so a Homebrew-installed
-copy runs without a prompt. The `.dmg` and the `.app` inside it each carry a
-stapled ticket and need no network; the CLI tarball cannot carry one — no archive
-format can — so a quarantined copy is checked with Apple once, online, on first
-run.
-
-## Building
-
-Requires an installed OpenMS, Apache Arrow/Parquet ≥ 19, ONNX Runtime and
-nlohmann/json. All four are OpenMS dependencies already, except that ONNX
-Runtime is behind OpenMS's `WITH_ONNX` option.
-
-The environment CI builds and tests in, which is the combination known to work
-on Linux x64/arm64 and macOS x64/arm64:
+## Generate a library
 
 ```bash
-micromamba create -n dialibgen -c conda-forge -c bioconda \
-  bzip2 cmake coin-or-cbc coin-or-utils cxx-compiler eigen glpk hdf5 \
-  libarrow-acero libarrow-dataset libboost-devel libcurl libparquet \
-  libsvm libzip ninja nlohmann_json numpy onnxruntime onnxruntime-cpp \
-  openms=3.5.0 pyarrow python qt6-main xerces-c zlib
-micromamba activate dialibgen
+DIALibGen -in proteins.fasta -out predicted.parquet \
+  -generation:instrument timsTOF -generation:nce 30 -threads 4
 ```
 
-On macOS add `llvm-openmp` — Apple's clang ships no OpenMP runtime, and without
-it the pragmas become no-ops and the build is slower, not broken. `python`,
-`numpy`, `pyarrow` and `onnxruntime` are for the test suite, not the tool.
+Match the digestion, modifications, charge and m/z ranges to the preparation
+and acquisition. Defaults include Trypsin/P, one missed cleavage, peptide
+lengths 7–30, charges 1–4 and fixed Carbamidomethyl (C). No decoys are added by
+default; the consuming search engine can create them.
+
+Every generation setting is available through a native TOPP option, INI or
+JSON. Boolean options take `true` or `false`; lists take separate arguments.
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/your/prefix
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-cmake --install build
+DIALibGen -in proteins.fasta -out predicted.parquet \
+  -generation:precursor_charges 2 3 \
+  -generation:variable_modifications 'Oxidation (M)' \
+  -generation:irt_rescale true
+DIALibGen -write_config generation.json
+DIALibGen -in proteins.fasta -config generation.json -out predicted.tsv
 ```
 
-The prediction and end-to-end tests need the three `.onnx` models. Without them
-those tests are not registered at all, so `ctest` reports a smaller suite that
-passes — point `-DODIA_MODEL_DIR=` at a directory holding all three to run them.
+`.parquet` preserves the effective recipe and input/model hashes in metadata.
+`.tsv` exports DIA-NN's library dialect; retain the config separately. With
+`irt_rescale=false`, predicted RT is the model's normalized output, not iRT.
 
-The install is **relocatable**: the binary finds its data tables relative to its
-own path (`<prefix>/share/DIALibGen`), so it works from a package, a
-copied tree or a macOS `.app` and not only from the tree it was built in.
+## Refine or tune a library
 
-The sources compile at C++20, but OpenMS's imported CMake target declares
-`INTERFACE_COMPILE_FEATURES cxx_std_23`, so consumers are raised to C++23
-regardless. In practice the binding constraint is your OpenMS install's ABI —
-in particular its Boost SONAMEs — not this code's language level.
-
-## Models
-
-The tool predicts with three ONNX exports of AlphaPeptDeep models:
-`peptdeep_rt_dynamic.onnx`, `peptdeep_ms2_dynamic.onnx`,
-`peptdeep_ccs_dynamic.onnx`.
-
-**Every release from 0.10.1 carries them**, in `share/DIALibGen/models` next to
-the binary — the second entry in the tool's own search order — so an installed
-copy predicts straight away with nothing set. See
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for their provenance and the
-paper to cite.
-
-A build from source has no models unless you point `-DODIA_MODEL_DIR=` at some,
-and no tagged OpenMS release ships them either: OpenMS downloads them only when
-built from `develop` with `WITH_ONNX=ON`, which defaults off. For those cases,
-and to refresh or verify a set:
+Refinement writes observed values from the reference run. It filters to
+confident identifications by default; `-write_im` also replaces mobility.
 
 ```bash
-dialibgen-fetch-models          # download, verify and install all three
-dialibgen-fetch-models --check  # verify what is there, download nothing
+DIALibGen -mode refine -in predicted.parquet -ids report.parquet \
+  -out refined.parquet -write_im -out_report residuals.tsv
 ```
 
-It checks every file against a pinned SHA256 and installs where the tool looks.
-`--dir DIR` puts them elsewhere, `--prefix DIR` targets another installation.
-Re-running it is free: files that are already correct are left alone. In a
-source checkout the same script is `scripts/fetch-models.sh`.
-
-To use models from somewhere else entirely, name the directory and it wins over
-the bundled ones:
+Tuning learns RT/CCS from the report and predicts the complete library,
+including unseen precursors. It preserves precursor keys and does not write
+observations into the output. Saved models can be reused in later generation.
 
 ```bash
-export DIALIBGEN_MODEL_DIR=/path/to/models
+DIALibGen -mode tune -in predicted.parquet -ids report.parquet \
+  -out tuned.parquet -tune_out_models tuned-models
 ```
 
-…or name them individually in the config:
+Use a report containing one run. The mode records quality gates, training
+cohorts, input hashes and residuals in provenance. Observed RT and tuned RT are
+specific to the reference run's gradient; evaluate transfer to a different
+method before using them there. See [usage and interpretation](docs/usage.md).
 
-```json
-{ "rt_model":  "/path/to/peptdeep_rt_dynamic.onnx",
-  "ms2_model": "/path/to/peptdeep_ms2_dynamic.onnx",
-  "ccs_model": "/path/to/peptdeep_ccs_dynamic.onnx" }
-```
-
-Relative model paths are resolved relative to the **config file**, so a config
-plus a model directory is portable. The full search order is: the config,
-`DIALIBGEN_MODEL_DIR`, `share/DIALibGen/models` beside the executable (the
-bundled ones), then `share/OpenMS/models`. When it finds nothing it says which
-file is missing and lists every directory it searched.
-
-## Usage
+## TOPP workflows and models
 
 ```bash
-DIALibGen -write_config effective.json   # see every default, materialised
-DIALibGen -in proteins.fasta -config my.json -out library.parquet
+DIALibGen --helphelp
+DIALibGen -write_ini DIALibGen.ini
+DIALibGen -ini DIALibGen.ini
+DIALibGen -write_ctd ctd/
 ```
 
-It is a TOPP tool, so it also speaks the workflow dialect:
+`-threads` follows the TOPP default of **1**. Set `-threads 0` to request all
+available CPU inference sessions, capped at 16 to limit memory. Training has
+its own `-machine:threads` setting. Explicit generation CLI/INI settings
+override the optional JSON config; CLI settings override INI settings.
 
-```bash
-DIALibGen -write_ini  DIALibGen.ini   # OpenMS INI
-DIALibGen -write_ctd  ./ctd/                    # KNIME/Galaxy descriptor
-```
-
-`-threads` defaults to **0 = all available cores**. `--help` shows OpenMS's own
-line for it, which says `1`, with a correction printed underneath; the tool's
-default is the one that applies.
-
-`example/proteins.fasta` and `example/default.json` are a runnable starting
-point. `-out` chooses the format by extension: `.parquet` carries the embedded
-recipe, `.tsv` is the DIA-NN dialect and **cannot** — a TSV is not reproducible
-from itself.
-
-An unknown key in the config is rejected, not defaulted: a library built from a
-typo looks exactly like one built correctly.
-
-### Configuration
-
-`-write_config` is the authoritative reference — it materialises every default.
-The keys that most often need changing:
-
-| Key | Default | Note |
-|---|---|---|
-| `enzyme` | `Trypsin/P` | Not `Trypsin`: cutting before proline regardless is what DIA-NN does, and keeping `Trypsin` cost 169,044 peptides on the human proteome. |
-| `fixed_modifications` | `["Carbamidomethyl (C)"]` | Set to `[]` for a non-alkylated preparation. This is the single setting most likely to be wrong, and being wrong is expensive. |
-| `precursor_charges` | `[1,2,3,4]` | `[2,3]` covers only 92.76% of observed precursors. |
-| `decoys` | `"none"` | Deliberate: a library is an interchange artefact and the consumer decides its own null. DIA-NN searches shipped decoys *in addition* to its own. |
-| `irt_rescale` | `false` | Off means the RT column is the model's raw 0..1 output, **not** iRT, and is not interchangeable with another tool's iRT library. Set true to export. |
-| `derive_ion_mobility` | `true` | Emits 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension. |
-| `instrument` | `"QE"` | **Set this.** The MS2 model conditions on it, and on timsTOF data naming `timsTOF` was worth +1,329 precursors — see below. |
-| `nce` | per instrument | Unset it takes the instrument's default (timsTOF 30, QE/SciexTOF/ThermoTOF 30, Lumos and so Astral 25). The recipe records `nce_source`, so a dumped config says whether you chose the number or the tool did. |
-
-#### Instrument and collision energy
-
-The MS2 model one-hot encodes the **index** of the instrument name, so the name
-is not cosmetic. It knows five — `QE`, `Lumos`, `timsTOF`, `SciexTOF`,
-`ThermoTOF` — plus every alias upstream groups onto them (`Astral`, `Fusion`,
-`Eclipse`, `Velos`, `Elite`, the Tribrids → `Lumos`; `QE+`, `QEHF`, `QEHFX`,
-`Q Exactive`, `Exploris` → `QE`; `timsTOF Pro/SCP/HT/Ultra/flex` → `timsTOF`;
-`TripleTOF`, `ZenoTOF` → `SciexTOF`). Case, spaces, `-` and `_` are ignored, a
-leading `Orbitrap` and a trailing model number are stripped, so
-`"Orbitrap Exploris 480"` and `"ZenoTOF 7600"` resolve. A name that still does
-not match is **refused** — `"Astrall"` is a typo, not an instrument.
-
-Only `QE` and `timsTOF` carry trained weights in the shipped checkpoint. Read
-straight out of it, the other three columns sit inside the meta layer's
-initialisation bound, with `Lumos` acting as the **no-correction baseline** that
-QE and timsTOF are deltas from. So naming `Lumos`, `SciexTOF` or `ThermoTOF` is
-not wrong, it simply buys nothing — `SciexTOF` and `ThermoTOF` say so at
-runtime. The reason an unknown name is refused is therefore *not* that the
-spectra would be ruinous (`"Astral"` through the unknown slot scored 0.8582
-against Lumos's 0.8586) but that the library would record an instrument setting
-that meant nothing, with nothing downstream able to tell.
-
-Measured on K562 diaPASEF (DIA-NN 2.0, three replicates, matched digests):
-
-| Setting | Precursors (1% FDR) | Protein groups |
-|---|---|---|
-| `QE` / 30 (the old default) | 117,572 | 7,878 |
-| `timsTOF` / 30 (the default now) | 118,901 | 7,971 |
-| `timsTOF` / 40 | **119,929** | **7,981** |
-| DIA-NN's own predictor | 120,287 | 7,931 |
-
-Most of that is the **label**: `QE`→`timsTOF` at NCE 30 is +1,329 precursors and
-already passes DIA-NN on protein groups; NCE 30→40 adds +1,028 more.
-
-**If you run timsTOF diaPASEF, consider `nce: 40`.** It scored better on every
-replicate — spectral angle against each run's own observed fragment areas was
-0.9041 ± 0.0004 at NCE 40 against 0.8939 ± 0.0011 at 30, ten times the replicate
-spread. It is *not* the default because that curve falls about four times more
-steeply above its peak than below it, so defaulting at the measured maximum puts
-every cooler collision-energy ramp on the steep side; timsTOF ramps energy with
-ion mobility, and we measured one ramp. The `QE` and `Lumos` numbers are
-upstream's (peptdeep and AlphaDIA respectively) and are **not** measured here —
-every row of our sweep was scored on timsTOF spectra, so it says which *label*
-suits timsTOF data, not what NCE a real QE run wants.
+Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx`. Override them with
+`DIALIBGEN_MODEL_DIR`, the generation model-path options, or `-tune_models`.
+For a source installation, `scripts/fetch-models.sh --dir models` downloads and
+verifies the pinned models. See [building](docs/building.md) and
+[third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## Desktop app
 
-`gui/` is a Tauri 2 + React front-end that runs the same binary: pick a FASTA,
-pick an output, point it at the models, press go. See
-[gui/README.md](gui/README.md).
+The [desktop app](gui/README.md) provides the generation workflow: select a
+FASTA, output and settings, then generate a library. Its form uses the
+executable's generation defaults. Refinement and tuning are available through
+the CLI.
 
-The form is generated from the tool's own `-write_config` output, so the GUI
-offers exactly the parameters the CLI has, with exactly its defaults. Settings
-reach the CLI as a config file, so a library built from the GUI carries the same
-embedded recipe as one built from the command line.
+## Evidence and limitations
 
-## Known limitations
+A completed K562 benchmark of **DIALibGen 0.10.1 / DIALibRefine 0.3.0-dev**
+found tuned DIALibGen within the registered whole-run margins of tuned DIA-NN,
+with 0.79% / 0.34% fewer precursor identifications on two exposed technical
+replicates. This is descriptive evidence, not equivalence or independent
+confirmation. The 0.11.0 digestion fix changes generated peptide space; those
+numbers do not validate unrestricted 0.11.0 outputs. Details and qualifications
+are in [the historical benchmark summary](docs/benchmark.md).
 
-Read these before treating output as authoritative:
+- Generation emits b/y fragments without neutral losses. It does not tune the
+  fragment-intensity model.
+- Refinement requires the columns needed by enabled quality gates. Empirical
+  libraries and fragment-intensity write-in have additional input contracts;
+  unsupported layouts are refused.
+- Portable release training uses CPU. CUDA training is supported by source
+  builds with compatible CUDA LibTorch and runtime libraries.
+- CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
+  INI export do not.
+- Windows releases target x64. Platform-specific validation and macOS startup
+  measurements are tracked in [BACKLOG.md](BACKLOG.md).
 
-- **The cache fingerprint does not capture everything.** It covers the digest
-  parameters, the model contents, the decoy method and the RT domain, but not
-  every field of the config. Two libraries that agree on all of those are
-  treated as interchangeable.
-- **`Fragment.Loss.Type` is always `"noloss"`.** The generator emits no neutral
-  losses, so the column is only meaningful to a consumer that writes a
-  loss-bearing library back out through this writer.
-- **No model weights are shipped**, and no tagged OpenMS release contains them.
-  The tool searches `DIALIBGEN_MODEL_DIR`, its own `share/` and
-  `share/OpenMS/models`, and names what it could not find — but you have to
-  supply the files.
-- **`-write_cwl` and `-write_json` need an OpenMS built with `ENABLE_TDL=ON`.**
-  Without it the tool refuses them and says so; `-write_ctd` works everywhere.
-- **Windows is x64 only.** There is no arm64 Windows build; bioconda has no
-  win-64 OpenMS either, so that leg builds OpenMS from source and is slower
-  than the others on a cold cache.
-- **The Windows builds are not signed.** The `.msi` and the setup `.exe` need
-  SmartScreen's "More info → Run anyway" on first download. That certificate is
-  a separate purchase and is not in place yet; macOS has been signed and
-  notarized since 0.9.0.
+## Citation and licence
 
-## Provenance
+Cite the components and methods used:
 
-Extracted from OpenDIAlyzer at commit `70a21a2` as a fresh history. The design
-rationale, the full axis-by-axis library comparisons and the measurements quoted
-above live in that repository's `doc/`.
-
-## Citing
-
-This tool is a wrapper around models and standards published by others. If you
-use it, cite them:
-
-- **AlphaPeptDeep** — Zeng *et al.*, *Nat. Commun.* **13**, 7238 (2022).
-- **iRT standards** — Escher *et al.*, *Proteomics* **12**, 1111–1121 (2012).
-- **OpenMS** — Röst *et al.*, *Nat. Methods* **13**, 741–748 (2016).
-
-## Licence
+- AlphaPeptDeep — Zeng et al., *Nature Communications* 13, 7238 (2022).
+- OpenMS — Röst et al., *Nature Methods* 13, 741–748 (2016).
+- iRT standards, when used — Escher et al., *Proteomics* 12, 1111–1121 (2012).
+- Observed-value library reconstruction — Charkow et al., *Reference-Based
+  Library Construction Improves Performance in low-input diaPASEF Workflows*,
+  bioRxiv, DOI 10.64898/2026.04.29.721088.
 
 BSD-3-Clause. See [LICENSE](LICENSE) and
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

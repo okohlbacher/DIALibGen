@@ -29,6 +29,9 @@ with tempfile.TemporaryDirectory() as directory:
     assert effective['nce'] == 25
     ini = root / 'settings.ini'
     run('-write_ini', ini)
+    # A full default INI includes every mode; untouched settings must stay usable.
+    assert config('-mode', 'refine', '-ini', ini)['filter'] is True
+    assert config('-mode', 'tune', '-ini', ini)['filter'] is False
     tree = ET.parse(ini)
     generation = next(n for n in tree.iter('NODE') if n.get('name') == 'generation')
     next(n for n in generation if n.get('name') == 'instrument').set('value', 'Lumos')
@@ -37,11 +40,28 @@ with tempfile.TemporaryDirectory() as directory:
     effective = config('-ini', ini, '-config', recipe)
     assert effective['missed_cleavages'] == 3 and effective['nce'] == 25
     assert config('-ini', ini, '-generation:missed_cleavages', 0)['missed_cleavages'] == 0
-    for bad in ['[]', '{"peptide_length":[7.5,30]}', '{"nce":101}', '{"missed_cleavages":-1}']:
+    run('-mode', 'refine', '-ini', ini, '-write_config', root / 'invalid.json', ok=False)
+    for mode in ('refine', 'tune'):
+        result = run('-mode', mode, '-generation:rt_model', 'ignored.onnx',
+                     '-write_config', root / 'invalid.json', ok=False)
+        assert 'has no effect' in result.stdout + result.stderr
+    for args in (('-tune',), ('-q_precursor', 0.5), ('-train:epochs', 1)):
+        result = run('-mode', 'generate', *args, '-write_config', root / 'invalid.json', ok=False)
+        assert 'has no effect' in result.stdout + result.stderr
+    for args in (('-q_precursor', 0.001), ('-q_global', 1), ('-min_fragments', 3), ('-empirical_library',)):
+        result = run('-mode', 'tune', *args, '-write_config', root / 'invalid.json', ok=False)
+        assert 'has no effect' in result.stdout + result.stderr
+    assert not config('-mode', 'tune', '-filter:q_value', 0.001, '-no_filter', '-no_write_rt')['filter']
+    for bad in ['[]', '{"peptide_length":[7.5,30]}', '{"nce":101}', '{"precursor_charges":[2.5]}', '{"missed_cleavages":-1}']:
         recipe.write_text(bad)
         run('-config', recipe, '-write_config', root / 'invalid.json', ok=False)
     tune = config('-mode', 'tune')
     assert not any(tune[k] for k in ('filter', 'write_rt', 'write_im', 'write_intensity'))
     recipe.write_text('{"filter":true}')
     run('-mode', 'tune', '-config', recipe, '-write_config', root / 'invalid.json', ok=False)
+    for config_key, value in [('q_precursor', 0.001), ('q_global', 1), ('min_fragments', 3), ('require_gates', False)]:
+        recipe.write_text(json.dumps({config_key: value}))
+        run('-mode', 'tune', '-config', recipe, '-write_config', root / 'invalid.json', ok=False)
+    recipe.write_text(json.dumps(tune))
+    assert config('-mode', 'tune', '-config', recipe) == tune
 print('TOPP parameters, precedence and tune isolation: PASS')

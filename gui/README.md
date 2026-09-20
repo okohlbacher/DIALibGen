@@ -1,89 +1,51 @@
-# DIALibGen desktop GUI
+# DIALibGen desktop app
 
-A cross-platform desktop front-end for the DIALibGen CLI, built with
-[Tauri 2](https://tauri.app) (Rust backend + the OS's own webview) and React.
-The CLI stays the source of truth: the GUI shells out to it, streams its
-progress, and never reimplements a single parameter.
+The desktop app generates a predicted library from a protein FASTA using the
+same `DIALibGen` executable as the command line. Release builds include the
+three AlphaPeptDeep ONNX models. Refinement and RT/CCS tuning are available
+through the [CLI](../docs/usage.md).
 
-## The one idea worth knowing
+1. Select a FASTA and an output ending in `.parquet` or `.tsv`.
+2. Match digestion, modifications and instrument settings to your experiment.
+3. Leave the model directory empty to use bundled models, or select a directory
+   containing all three ONNX files.
+4. Select the thread count and generate. One thread is the default; zero
+   requests automatic inference parallelism and uses more memory.
 
-**The form is built from the tool's own `-write_config` output.** On startup the
-backend runs `DIALibGen -write_config`, which materialises every
-default, and hands the JSON to the frontend. `src/paramLayout.ts` is an
-*overlay* on that — prose, grouping, choice lists — and infers each widget's
-type from the tool's own default value.
+Parquet carries the effective generation recipe in its metadata. Save the
+config separately when exporting TSV. Presets and last-used generation
+settings are stored locally.
 
-Two consequences, both deliberate:
+## How the form stays compatible
 
-- The GUI cannot offer a key the CLI does not have, nor default one differently.
-- A key the CLI **gains** shows up in the GUI immediately, under Advanced,
-  labelled as not yet described. A new parameter that the GUI silently hides is
-  worse than one with a missing description, and this is what stops the two
-  drifting apart without anyone noticing. There is a test for it.
+The backend calls `DIALibGen -mode generate -write_config` and builds the form
+from that mode's effective settings. Refinement and tuning parameters are not
+mixed into it. The layout adds labels, groups and choices; unknown generation
+settings appear under Advanced. Model paths and provenance-only fields are
+managed separately from editable parameters.
 
-The config reaches the CLI as a **file**, not as command-line values — which is
-how the CLI wants it, and is what lets the Parquet writer embed the recipe
-verbatim.
+## Development
 
-## Layout
-
-```
-gui/
-  src/                  React frontend
-    api.ts              the window.dialibgen bridge over Tauri invoke/events
-    paramLayout.ts      the overlay: grouping, prose, choices, type inference
-    ParamField.tsx      one widget per inferred kind
-    App.tsx             inputs, model picker, run, log
-    testing/mockBridge.ts  an in-memory window.dialibgen for the tests
-  src-tauri/            Rust backend
-    src/dialibgen.rs    resolve/probe the binary, ask it for its config, run it,
-                        stream stderr as events, cancel
-    src/settings.rs     named presets + last-used, atomic JSON in the config dir
-    tauri.conf.json     window, bundle, icons
-    resources/dialibgen/  the bundled CLI + share/ (dev: symlinks; release: real files)
-```
-
-## Models
-
-The three AlphaPeptDeep ONNX exports are **not shipped** — no tagged OpenMS
-release contains them and their redistribution licence is unestablished. The GUI
-therefore has a model-directory picker and refuses to run until all three are
-present, naming the ones it could not find. See the top-level README.
-
-## Develop
+The app uses Tauri 2, React and the platform webview. Install Node.js 22 and Rust,
+then run:
 
 ```bash
-npm install
-npm run tauri dev
-```
-
-`resolve_binary` looks for the CLI in this order: `DIALIBGEN_BIN`, the bundled
-`resources/dialibgen/bin/DIALibGen`, then `DIALibGen` on
-`PATH`. For dev, point it at a local build:
-
-```bash
+npm ci
 DIALIBGEN_BIN=/path/to/build/DIALibGen npm run tauri dev
 ```
 
-…or drop a symlink at `src-tauri/resources/dialibgen/bin/DIALibGen`.
-The directory skeleton is tracked (with `.gitkeep`) because `tauri-build`
-refuses to configure when a declared resource path is missing.
-
-## Check
+Binary lookup checks `DIALIBGEN_BIN`, the bundled
+`src-tauri/resources/dialibgen/bin/DIALibGen`, then `PATH`. A local binary must
+have access to its runtime libraries and models.
 
 ```bash
-npm run typecheck && npm test           # frontend
-cd src-tauri && cargo test && cargo clippy --all-targets -- -D warnings
+npm run typecheck
+npm test
+cd src-tauri
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-## Build
-
-```bash
-npm run tauri build              # release .app/.dmg/.msi/.deb/.AppImage
-npm run tauri build -- --debug   # faster, unsigned, for local checking
-```
-
-## Versions
-
-Every file carrying the version is checked against `project(VERSION)` at CMake
-configure time — see `cmake/version-guard.cmake` for what a bump has to touch.
+`npm run tauri build` produces the platform installer. Release packaging
+supplies the complete CLI tree as a Tauri resource. CMake's version guard
+checks that the CLI and app version files agree.

@@ -38,6 +38,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  macos-startup:
+    if: github.event_name == 'workflow_dispatch' && inputs.gui_dry_run
+    uses: ./.github/workflows/macos-startup.yml
+    permissions:
+      contents: read
+
   build:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
@@ -131,7 +137,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: libtorch-sdk
-          key: libtorch-cpu-2.10.0-linux-arm64-ce5c113d-v1
+          key: libtorch-cpu-2.14.0-linux-arm64-08894195-v1
 
       - name: Extract the ARM libtorch SDK
         if: matrix.wheel && steps.torch-cache.outputs.cache-hit != 'true'
@@ -227,6 +233,53 @@ jobs:
           ctest --test-dir build -N | grep -q "e2e" \
             || { echo "::error::the e2e test was not registered"; exit 1; }
 
+      - name: Diagnose an ARM training failure
+        if: failure() && !cancelled() && matrix.wheel
+        shell: bash -el {0}
+        run: |
+          # Diagnostics never replace or relax the failed training gates above.
+          timeout 90s bash <<'ARM_DIAG' || true
+          set +e
+          parity="$PWD/build/test/refinement/dialibgen_tune_parity"
+          ldd "$parity"
+          cat > /tmp/dialibgen-arm-lstm.cpp <<'CPP'
+          #include <torch/torch.h>
+          #include <iostream>
+          int main(int argc, char**)
+          {
+            torch::set_num_threads(1);
+            if (argc > 1) { at::globalContext().setUserEnabledMkldnn(false); }
+            torch::nn::LSTM model(torch::nn::LSTMOptions(140, 128).num_layers(2).bidirectional(true).batch_first(true));
+            auto state = std::make_tuple(torch::zeros({4, 1, 128}), torch::zeros({4, 1, 128}));
+            std::cout << "LSTM forward" << std::endl;
+            auto output = std::get<0>(model->forward(torch::randn({1, 8, 140}), state));
+            std::cout << "LSTM backward" << std::endl;
+            output.sum().backward();
+            std::cout << "LSTM passed" << std::endl;
+          }
+          CPP
+          "$CXX" -std=c++23 -O0 /tmp/dialibgen-arm-lstm.cpp \
+            -I "$TORCH_ROOT/include" -I "$TORCH_ROOT/include/torch/csrc/api/include" \
+            -L "$TORCH_ROOT/lib" -Wl,-rpath,"$TORCH_ROOT/lib" \
+            -ltorch -ltorch_cpu -lc10 -o /tmp/dialibgen-arm-lstm
+          if [ -x /tmp/dialibgen-arm-lstm ]; then
+            ldd /tmp/dialibgen-arm-lstm
+            for mode in default no-mkldnn; do
+              arg=(); [ "$mode" = default ] || arg=(no-mkldnn)
+              echo "Torch-only: $mode, conda first"
+              timeout 8s /tmp/dialibgen-arm-lstm "${arg[@]}"; echo "exit=$?"
+              echo "Torch-only: $mode, SDK first"
+              LD_LIBRARY_PATH="$TORCH_ROOT/lib:$CONDA_PREFIX/lib" timeout 8s /tmp/dialibgen-arm-lstm "${arg[@]}"; echo "exit=$?"
+              echo "ORT preloaded: $mode"
+              LD_PRELOAD="$CONDA_PREFIX/lib/libonnxruntime.so" timeout 8s /tmp/dialibgen-arm-lstm "${arg[@]}"; echo "exit=$?"
+            done
+          fi
+          if command -v gdb >/dev/null; then
+            timeout 20s gdb -batch -ex run -ex 'thread apply all bt 12' -ex 'info sharedlibrary' \
+              --args "$parity" "$PWD/models/peptdeep_rt_dynamic.onnx" "$PWD/models/peptdeep_ccs_dynamic.onnx"
+          fi
+          ARM_DIAG
+
       - uses: actions/upload-artifact@v5
         if: always()
         with:
@@ -246,6 +299,16 @@ jobs:
       # passed back explicitly -- naming them is the difference between "the
       # binary needs these" and "the binary happened to inherit these".
       # ---------------------------------------------------------------------
+      - name: Verify installed CMake libraries
+        shell: bash -el {0}
+        run: |
+          cmake -S test/consumer -B consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$PWD/stage;$CONDA_PREFIX" \
+            -DQT_HOST_PATH="$CONDA_PREFIX" -DTorch_DIR="$TORCH_DIR"
+          cmake --build consumer -j 2
+          ctest --test-dir consumer --output-on-failure
+
       - name: The installed binary stands on its own
         shell: bash -el {0}
         run: |
@@ -854,6 +917,7 @@ jobs:
         if: steps.pkg.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: |
             DIALibGen-${{ matrix.name }}.tar.gz
             dist-bundles/*

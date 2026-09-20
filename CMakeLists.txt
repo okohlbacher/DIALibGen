@@ -173,6 +173,8 @@ endif()
 
 if(DIALIBGEN_INSTALL)
   include(CMakePackageConfigHelpers)
+  install(FILES LICENSE THIRD-PARTY-NOTICES.md DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen)
+  install(DIRECTORY licenses/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen/licenses)
 
   install(TARGETS ${DIALIBGEN_TARGETS} EXPORT DIALibGenTargets
           ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -204,6 +206,8 @@ if(DIALIBGEN_INSTALL)
   endif()
   install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
   install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen)
+
+  install(DIRECTORY cmake/eigen3-range-shim DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)
 
   install(EXPORT DIALibGenTargets
           FILE DIALibGenTargets.cmake

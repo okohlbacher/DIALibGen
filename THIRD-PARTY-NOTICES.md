@@ -1,7 +1,7 @@
 # Third-party notices
 
 DIALibGen is BSD-3-Clause (see `LICENSE`). It builds against, and in
-two places derives content from, the following third-party work.
+several places derives content from, the following third-party work.
 
 ## Derived content in this repository
 
@@ -38,9 +38,9 @@ Every release carries three ONNX files in `share/DIALibGen/models`:
 `peptdeep_ccs_dynamic.onnx`. They are the weights of **AlphaPeptDeep**'s
 retention-time, fragment-intensity and collisional-cross-section models,
 exported to ONNX by the OpenMS project and mirrored at
-`archive.openms.de/openms/models`. This project converts nothing and trains
-nothing; it downloads those exact files against pinned SHA256 digests and
-installs them unmodified.
+`archive.openms.de/openms/models`. Release builds download those exact files against pinned SHA256 digests and
+install them unmodified. User-requested tuning produces separate adapted models
+with embedded training provenance and sidecars.
 
 - AlphaPeptDeep: https://github.com/MannLabs/alphapeptdeep, Apache License 2.0.
 - Zeng *et al.*, "AlphaPeptDeep: a modular deep learning framework to predict
@@ -62,6 +62,7 @@ Linked against, not vendored:
 | OpenMS | BSD-3-Clause |
 | Apache Arrow / Parquet | Apache-2.0 |
 | ONNX Runtime | MIT |
+| PyTorch / LibTorch | BSD-3-Clause; additional bundled component notices in `licenses/PyTorch-LICENSE` |
 | nlohmann/json | MIT |
 | Boost (transitively, via OpenMS headers) | BSL-1.0 |
 

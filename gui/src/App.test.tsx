@@ -81,9 +81,10 @@ describe('App', () => {
     await userEvent.type(screen.getByLabelText('output library'), '/d/lib.parquet')
     await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
     await waitFor(() => expect(bridge.runs.length).toBe(1))
-    const sent = bridge.runs[0] as { in: string; out: string; config: Record<string, unknown> }
+    const sent = bridge.runs[0] as { in: string; out: string; threads: number; config: Record<string, unknown> }
     expect(sent.in).toBe('/d/p.fasta')
     expect(sent.out).toBe('/d/lib.parquet')
+    expect(sent.threads).toBe(1)
     expect(sent.config.enzyme).toBe('Trypsin/P')
     expect(Object.keys(sent.config).some((k) => k.startsWith('__'))).toBe(false)
   })

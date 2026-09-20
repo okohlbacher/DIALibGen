@@ -45,11 +45,12 @@ const OVERLAY: Record<string, Overlay> = {
     description: 'Config format version. Written for you; a config from a newer version is refused.',
     hidden: true
   },
+  nce_source: { description: 'Recorded source of the effective collision energy.', hidden: true },
+  instrument_named: { description: 'Recorded instrument spelling before alias resolution.', hidden: true },
   enzyme: {
     group: 'core',
     description:
-      'Trypsin/P cuts after K and R regardless of a following proline, which is what DIA-NN does. ' +
-      'Plain Trypsin cost 169,044 peptides on the human proteome.',
+      'Trypsin/P cuts after K and R even when the next residue is proline.',
     choices: [
       'Trypsin/P',
       'Trypsin',
@@ -71,16 +72,14 @@ const OVERLAY: Record<string, Overlay> = {
   precursor_charges: {
     group: 'core',
     description:
-      'Charge states to enumerate. 2 and 3 alone cover 92.76% of observed precursors; a precursor the ' +
-      'library cannot express is a ceiling on identifications, not a tuning knob.'
+      'Charge states to include in the library. Match these to the acquisition method.'
   },
   precursor_mz: { group: 'core', description: 'Precursor m/z window. Match it to the instrument method.' },
   fixed_modifications: {
     group: 'core',
     label: 'fixed modifications',
     description:
-      'One OpenMS modification per line, e.g. "Carbamidomethyl (C)". EMPTY for a non-alkylated ' +
-      'preparation. This is the single setting most likely to be wrong, and being wrong is expensive.'
+      'One OpenMS modification per line, e.g. "Carbamidomethyl (C)". Leave empty for a non-alkylated preparation.'
   },
   variable_modifications: {
     group: 'core',
@@ -102,7 +101,7 @@ const OVERLAY: Record<string, Overlay> = {
   instrument: {
     group: 'core',
     description: 'Instrument the MS2 model conditions on.',
-    choices: ['QE', 'Lumos', 'timsTOF', 'SciexTOF', 'Fusion', 'Eclipse', 'Velos', 'Elite', 'OrbitrapTribrid', 'ThermoTribrid']
+    choices: ['QE', 'Lumos', 'timsTOF', 'SciexTOF', 'ThermoTOF', 'Astral', 'Fusion', 'Eclipse', 'Velos', 'Elite', 'OrbitrapTribrid', 'ThermoTribrid']
   },
   nce: { group: 'core', description: 'Normalised collision energy the MS2 model conditions on.', min: 0, max: 100 },
   irt_rescale: {
@@ -127,7 +126,7 @@ const OVERLAY: Record<string, Overlay> = {
   },
   reserved_doubly_charged: {
     group: 'advanced',
-    description: 'Slots reserved for doubly charged fragments, which the fragment selection otherwise under-picks.'
+    description: 'Reserve fragment slots for doubly charged ions. Zero ranks all fragments by predicted intensity.'
   },
   n_terminal_methionine_excision: {
     group: 'advanced',

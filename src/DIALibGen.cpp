@@ -4,6 +4,7 @@
 #include "DIALibGen.h"
 #include <OpenMS/CONCEPT/VersionInfo.h>
 #include <OpenMS/FORMAT/ParamXMLFile.h>
+#include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,26 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     }
   }
   const std::string mode = getStringOption_("mode");
+  const auto& parameters = getParam_();
+  for (const auto& option : supplied_)
+  {
+    const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
+      option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
+    const bool refinement = refinement_options_.count(option) || training;
+    bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
+    if (mode == "tune" && refinement && !training && option != "ids" && option != "out_report" &&
+        option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
+    // A generated INI contains every mode's defaults. Only reject an explicit
+    // value that would change behavior if it belonged to the selected mode.
+    if (!wrong_mode) { continue; }
+    const auto& info = findEntry_(option);
+    const auto default_value = info.type == OpenMS::ParameterInformation::FLAG ? OpenMS::ParamValue("false") : info.default_value;
+    if (parameters.getValue(option) != default_value)
+    {
+      writeLogError_("-" + option + " has no effect in -mode " + mode + "; select the matching mode or remove the option");
+      return ILLEGAL_PARAMETERS;
+    }
+  }
   return mode == "generate" ? generate_() : refine_(mode == "tune");
 }
 

@@ -47,8 +47,8 @@ assert len((out / "generated.tsv").read_text().splitlines()) > 1
 # Python creates the fixture and checks provenance; the executable receives a
 # bare environment and never calls Python.
 subprocess.run([sys.executable, str(root / "test/refinement/synth_report.py"), "-", str(out / "report.parquet"), "--precursors", "1600", "--library", str(out / "library.tsv")], check=True)
-common = ["-in", out / "library.tsv", "-ids", out / "report.parquet", "-q_global", "1", "-q_protein", "1"]
-run("refine", ["-mode", "refine", *common, "-out", out / "refined.tsv", "-write_im"])
+common = ["-in", out / "library.tsv", "-ids", out / "report.parquet"]
+run("refine", ["-mode", "refine", *common, "-q_global", "1", "-q_protein", "1", "-out", out / "refined.tsv", "-write_im"])
 assert len((out / "refined.tsv").read_text().splitlines()) > 1
 assert json.loads((out / "refined.tsv.refine.json").read_text())["tool"] == "DIALibGen"
 for head in ("rt", "ccs"):

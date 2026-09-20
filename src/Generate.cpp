@@ -198,6 +198,10 @@ namespace
     range("fragments", p.min_fragments, p.max_fragments, 1000);
     if (j.contains("precursor_charges"))
     {
+      if (!j["precursor_charges"].is_array())
+      { throw std::runtime_error("precursor_charges must be an integer list"); }
+      for (const auto& value : j["precursor_charges"])
+      { if (!value.is_number_integer()) { throw std::runtime_error("precursor_charges must be integers"); } }
       p.charges = j["precursor_charges"].get<std::vector<int>>();
       for (const int z : p.charges)
       {
@@ -373,6 +377,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       const bool automatic_nce = overrides.contains("nce") && overrides["nce"] == -1.0;
       if (automatic_nce) { overrides.erase("nce"); }
+      else if (overrides.contains("nce")) { nce_source = "TOPP"; }
+      if (overrides.contains("instrument")) { instrument_alias_of.clear(); }
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
              irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of);
       if (automatic_nce) { nce_was_set = false; }

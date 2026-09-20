@@ -147,10 +147,7 @@ namespace
 void DIALibGen::registerRefinementOptions_()
   {
     registerInputFile_("ids", "<file>", "",
-                       "Reference identifications: a DIA-NN report.parquet, or -- with -empirical_library -- "
-                       "a DIA-NN empirical library. Modification naming is canonicalised, so C(UniMod:4) "
-                       "and C(Carbamidomethyl) join; a verbatim join silently drops every cysteine precursor "
-                       "on an alkylated sample.", false);
+                       "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
     setValidFormats_("ids", {"parquet"}, false);
     registerOutputFile_("out_report", "<file>", "",
                         "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
@@ -218,8 +215,8 @@ void DIALibGen::registerRefinementOptions_()
                                                       "Default: $DIALIBGEN_MODEL_DIR or the bundled models.", false);
     registerStringOption_("tune_heads", "<which>", "both", "Which models to tune.", false);
     setValidStrings_("tune_heads", {"rt", "ccs", "both"});
-    registerStringOption_("tune_out_models", "<dir>", "", "Keep the tuned ONNX files (and their .tune.json and "
-                                                          "and .trajectory.tsv sidecars) here. Default: a scratch "
+    registerStringOption_("tune_out_models", "<dir>", "", "Keep the tuned ONNX files and their .tune.json and "
+                                                          ".trajectory.tsv sidecars here. Default: a scratch "
                                                           "directory, removed on exit -- the deliverable is the library.", false);
     registerFlag_("tune_predict_gpu", "Use the GPU for the re-prediction pass (the ONNX one, not training).");
     registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = default.", false);
@@ -262,12 +259,24 @@ void DIALibGen::registerRefinementOptions_()
 
     registerTOPPSubsection_("machine", "Fine-tuning: device");
     registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
-    registerIntOption_("machine:threads", "<n>", 4, "Torch threads on CPU (4 measured fastest on this model; more thrashes)", false);
+    registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
+    // Flat refinement options follow the existing effective-config schema;
+    // training options have their own prefixes and are recognized in main_.
+    const std::map<std::string, std::string> flags = {{"filter", "no_filter"}, {"require_gates", "empirical_library"},
+      {"write_rt", "no_write_rt"}, {"intensity_restrict", "intensity_no_restrict"}, {"intensity_rerank", "intensity_no_rerank"}};
+    const json defaults = effectiveConfig(ODIA::RefineParams{});
+    for (const auto& [key, value] : defaults.items())
+    {
+      if (key == "schema_version") { continue; }
+      const auto flag = flags.find(key);
+      refinement_options_.insert(flag == flags.end() ? key : flag->second);
+    }
+    refinement_options_.insert({"ids", "out_report"});
   }
 
 
@@ -329,6 +338,17 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     { writeLogError_("-mode tune preserves the whole library and writes predictions only; filtering or observed-value replacement requires -mode refine"); return ILLEGAL_PARAMETERS; }
     if (tune && p.rt_unit == ODIA::RefineParams::RtUnit::MinMax)
     { writeLogError_("tuning and rt_unit=minmax are incompatible: predictions use the reference run's minutes"); return ILLEGAL_PARAMETERS; }
+    if (tune_only)
+    {
+      ODIA::RefineParams defaults;
+      defaults.filter = defaults.write_rt = false;
+      const json expected = effectiveConfig(defaults), actual = effectiveConfig(p);
+      for (const auto& [key, value] : actual.items())
+      {
+        if (value != expected.at(key))
+        { writeLogError_(key + " has no effect in -mode tune; use the training options or select -mode refine"); return ILLEGAL_PARAMETERS; }
+      }
+    }
 
     const json eff = effectiveConfig(p);
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())

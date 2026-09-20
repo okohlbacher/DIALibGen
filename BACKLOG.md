@@ -1,45 +1,61 @@
-# Backlog
+# Remaining validation and scope
 
-Work that is worth doing and is not scheduled. Anything here should be
-actionable: what it is, and what it actually touches.
+The 0.11.0 integration combines the generation and refinement backlogs. This
+file distinguishes implemented changes from checks that still need evidence.
 
-## The macOS CLI is slow on its first run — measure before packaging
+## macOS first-launch measurement — pending
 
-Measured on an M-series Mac against the published v0.9.0 **tarball**: 335 s for
-the first invocation, 1 s afterwards. The unsigned v0.2.3 tarball started in
-0.4 s. It is not a hang — `sample` shows dyld parked in `Loader::mapSegments`
-validating a code signature while syspolicyd logs about one XPC round trip a
-second, once per Developer-ID-signed dylib, cached per machine afterwards.
+Older signed CLI archives showed very different first-launch times: 335 s for
+a 0.9.0 tarball and about 33 s for a 0.10.0 Homebrew cask installation. Subsequent
+launches were about one second. Those observations do not establish the
+behavior of the new bundle.
 
-**But the v0.10.0 cask install of the same kind of payload took 33 s, not 335.**
-Ten times faster, from a different delivery route, and nobody has explained why.
-That gap is the most informative thing here and it has not been chased.
+The release measurement workflow must compare archive and cask delivery on
+fresh machines that have not validated the tested code-directory hashes.
+Record OS/architecture, artifact hashes, quarantine state, first and warm
+launch times, and the delivery route. A warm retry on the same Mac is not a
+second cold measurement. Choose a packaging change only after that comparison;
+wrapping loose CLI files in a stapled container does not itself demonstrate
+that the installed files avoid individual validation.
 
-### The obvious fix does not work, and this entry used to recommend it
+Evidence to attach before closing: workflow URL and both route measurements
+for the released 0.11.0 artifact. **Pending.**
 
-Shipping the CLI in a signed, notarized, **stapled** `.dmg` or `.pkg` does *not*
-help. A stapled ticket travels with the container, not with files copied out of
-it: drag an app out of a stapled disk image and the copy has no ticket, which is
-the documented behaviour and a common packaging mistake. Our payload is worse
-than an app — it is loose files, and `stapler` cannot target a bare Mach-O at
-all, only a bundle, a `.dmg` or a `.pkg`. A `.pkg` has the same problem for its
-installed payload.
+## Portable CPU training — release CI pending
 
-So the only container whose ticket survives the copy is a **bundle**. Wrapping
-the whole tree in a `DIALibGen.app` and stapling that would keep the ticket, at
-the cost of an odd shape for a command-line tool and a wrapper to reach
-`Contents/MacOS/DIALibGen`.
+- Linux ARM64: exercise the full training path with the selected runtime. The
+  earlier conda LibTorch 2.10.0 aarch64 package crashed in LSTM execution; a
+  successful compile is insufficient evidence that the replacement works.
+- Windows x64: verify generation, refinement, tuning and relocated-bundle
+  execution with the packaged LibTorch runtime.
 
-### Do this first, before building anything
+Evidence to attach before closing: successful platform jobs and installed
+bundle smoke-test logs. **Pending.**
 
-1. From a machine that has never run the build in question (Gatekeeper caches
-   its verdict per code-directory hash, machine-wide, so a second measurement on
-   the same Mac is meaningless), time the first run of 0.10.1 via **both**
-   routes: `curl` + `tar`, and `brew install --cask`. That says whether the
-   problem is the tarball specifically, and reproduces or kills the 33 s figure.
-2. Only then decide. If the cask route is genuinely ~30 s, this is a much smaller
-   problem than the headline number suggests and may not be worth an `.app`
-   wrapper at all.
+## Integrated work
 
-Until it is measured, the README says the first run is slow and not stuck.
+- **Cross-run transfer:** measured in the completed 0.10.1 / DIALibRefine
+  0.3.0-dev K562 benchmark. Results and limitations are summarized in
+  [docs/benchmark.md](docs/benchmark.md); untouched-data confirmation remains
+  future scientific validation.
+- **Embedded tuned-model provenance:** ONNX metadata accompanies the JSON
+  training sidecars.
+- **Obsolete Python tuning helpers:** not imported into the unified product;
+  runtime training is C++/LibTorch.
+- **Documentation drift:** the native parameter reference is generated from the
+  executable and supports a `--check` gate.
+- **Met-excised missed-cleavage peptides:** restored, covered by a regression,
+  with cache fingerprint v4.
 
+## Explicit product scope
+
+Portable release archives provide CPU training. CUDA training is supported by
+source builds with compatible CUDA LibTorch and runtime libraries; distributing
+a separate CUDA/cuDNN bundle is outside this release's scope. A Python-on-GPU
+comparison is a research control, not a prerequisite for any accuracy or
+performance claim made in the current product documentation.
+
+Installed CMake package relocation passed on Linux on 20 September 2026:
+a consumer linked and called all three libraries from a moved install prefix.
+The exported targets contain no build-machine ONNX Runtime or LibTorch path.
+The same consumer check is required by the platform release workflows.

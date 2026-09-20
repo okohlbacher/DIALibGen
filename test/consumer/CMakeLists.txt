@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.21)
+project(DIALibGenConsumer LANGUAGES CXX)
+
+find_package(DIALibGen 0.11 CONFIG REQUIRED)
+add_executable(dialibgen_consumer main.cpp)
+target_link_libraries(dialibgen_consumer PRIVATE DIALibGen::odia_library)
+foreach(part IN ITEMS refine tune)
+  if(TARGET DIALibGen::odia_${part})
+    target_link_libraries(dialibgen_consumer PRIVATE DIALibGen::odia_${part})
+    string(TOUPPER "${part}" upper)
+    target_compile_definitions(dialibgen_consumer PRIVATE "HAS_${upper}")
+  endif()
+endforeach()
+
+enable_testing()
+add_test(NAME installed_consumer COMMAND dialibgen_consumer)

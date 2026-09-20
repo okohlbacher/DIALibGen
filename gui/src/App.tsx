@@ -39,7 +39,7 @@ export default function App(): JSX.Element {
   const [values, setValues] = useState<Values>({})
   const [fasta, setFasta] = useState('')
   const [out, setOut] = useState('')
-  const [threads, setThreads] = useState(0)
+  const [threads, setThreads] = useState(1)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [log, setLog] = useState<string[]>([])
   const [progress, setProgress] = useState<Progress | null>(null)
@@ -237,8 +237,8 @@ export default function App(): JSX.Element {
             </div>
             {models && models.missing.length > 0 ? (
               <p className="help bad">
-                Not found: {models.missing.join(', ')}. No tagged OpenMS release ships the PeptDeep
-                models — put all three .onnx files in one directory and point this at it.
+                Not found: {models.missing.join(', ')}. Release builds include these models.
+                For a custom installation, select a directory containing all three .onnx files.
               </p>
             ) : (
               <p className="help">{models?.dir ?? ''}</p>
@@ -249,7 +249,7 @@ export default function App(): JSX.Element {
             <label htmlFor="threads">threads</label>
             <input id="threads" type="number" min={0} value={threads}
                    onChange={(e) => setThreads(Math.max(0, Number(e.target.value) || 0))} />
-            <p className="help">0 = all available cores.</p>
+            <p className="help">1 is the default. 0 uses all available cores, with more memory.</p>
           </div>
 
           <div className="row">

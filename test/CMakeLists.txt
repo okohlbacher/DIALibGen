@@ -314,3 +314,8 @@ if(TARGET DIALibGen AND ODIA_PYTHON)
   add_test(NAME topp_parameters COMMAND ${ODIA_PYTHON}
     "${CMAKE_CURRENT_SOURCE_DIR}/topp_parameters.py" $<TARGET_FILE:DIALibGen>)
 endif()
+
+if(TARGET DIALibGen AND ODIA_PYTHON)
+  add_test(NAME parameter_docs_current COMMAND ${ODIA_PYTHON}
+    "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/update-parameters.py" $<TARGET_FILE:DIALibGen> --check)
+endif()

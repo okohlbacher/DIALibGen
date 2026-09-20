@@ -578,6 +578,18 @@ jobs:
           ctest --test-dir build -N | grep -q "e2e" \
             || { echo "::error::the e2e test was not registered"; exit 1; }
 
+      - name: Verify installed CMake libraries
+        shell: bash -el {0}
+        run: |
+          cmake -S test/consumer -B consumer -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DOpenMS_DIR="$OPENMS_DIR" \
+            -DCMAKE_PREFIX_PATH="$PWD/stage;$CONDA_LIB_PREFIX;$QT_ROOT_DIR;$GITHUB_WORKSPACE/contrib-build" \
+            -DCMAKE_MODULE_PATH="$OPENMS_MODULES" \
+            -DTorch_DIR="$PWD/libtorch-sdk/share/cmake/Torch"
+          cmake --build consumer -j 2
+          export PATH="$DLL_PATH_POSIX:$PATH"
+          ctest --test-dir consumer --output-on-failure
+
       - name: The installed binary stands on its own
         shell: bash -el {0}
         run: |
@@ -876,6 +888,7 @@ jobs:
         if: steps.pkg.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
           files: |
             DIALibGen-windows-x64.zip
             dist-bundles/*

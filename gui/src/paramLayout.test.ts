@@ -47,8 +47,8 @@ describe('buildSpecs', () => {
   })
 
   it('hides the three model paths, which the model picker owns', () => {
-    const specs = buildSpecs(SAMPLE_CONFIG)
-    for (const n of ['rt_model', 'ms2_model', 'ccs_model', 'schema_version']) {
+    const specs = buildSpecs({ ...SAMPLE_CONFIG, nce_source: 'instrument-default:QE', instrument_named: 'QE' })
+    for (const n of ['rt_model', 'ms2_model', 'ccs_model', 'schema_version', 'nce_source', 'instrument_named']) {
       expect(specs.find((s) => s.name === n)?.hidden).toBe(true)
     }
   })

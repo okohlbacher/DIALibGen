@@ -9,13 +9,15 @@ import zipfile
 
 # Official CPU index: https://download.pytorch.org/whl/cpu/torch/
 WHEELS = {
-    "linux-x64": ("manylinux_2_28_x86_64", "b7cb1ec66cefb90fd7b676eac72cfda3b8d4e4d0cacd7a531963bc2e0a9710ab"),
-    "linux-arm64": ("linux_aarch64", "ce5c113d1f55f8c1f5af05047a24e50d11d293e0cbbb5bf7a75c6c761edd6eaa"),
-    "windows-x64": ("win_amd64", "17a09465bab2aab8f0f273410297133d8d8fb6dd84dccbd252ca4a4f3a111847"),
+    "linux-x64": ("2.10.0", "manylinux_2_28_x86_64", "b7cb1ec66cefb90fd7b676eac72cfda3b8d4e4d0cacd7a531963bc2e0a9710ab"),
+    # 2.10.0 crashes in the native ARM LSTM path. Keep this SDK outside the
+    # OpenMS conda solve and require the unchanged parity and training tests.
+    "linux-arm64": ("2.14.0", "manylinux_2_28_aarch64", "08894195f84541edcbd09072e6c53b791d4cdd09f650b05473f35718a848fd7b"),
+    "windows-x64": ("2.10.0", "win_amd64", "17a09465bab2aab8f0f273410297133d8d8fb6dd84dccbd252ca4a4f3a111847"),
 }
 platform, destination = sys.argv[1:]
-wheel_platform, expected = WHEELS[platform]
-url = f"https://download.pytorch.org/whl/cpu/torch-2.10.0%2Bcpu-cp311-cp311-{wheel_platform}.whl"
+version, wheel_platform, expected = WHEELS[platform]
+url = f"https://download.pytorch.org/whl/cpu/torch-{version}%2Bcpu-cp311-cp311-{wheel_platform}.whl"
 out = pathlib.Path(destination).resolve()
 out.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryFile() as archive:
@@ -44,4 +46,4 @@ with tempfile.TemporaryFile() as archive:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(files.read(member))
 assert (out / "share/cmake/Torch/TorchConfig.cmake").is_file()
-print(f"CPU libtorch 2.10.0: {out} (SHA256 {expected})")
+print(f"CPU libtorch {version}: {out} (SHA256 {expected})")

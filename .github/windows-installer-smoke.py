@@ -194,7 +194,7 @@ def exercise_gui(gui, log):
                     closing = find_window(process.pid)
                     output.write(f'main window before WM_CLOSE: {json.dumps(closing)}\n'); output.flush()
                     if closing:
-                        post_close(closing, user32.PostMessageW, ctypes.WinError)
+                        post_close(closing, user32.PostMessageW, lambda: ctypes.WinError(ctypes.get_last_error()))
                         output.write('WM_CLOSE accepted by Windows\n'); output.flush()
                 except OSError as error:
                     close_error = error

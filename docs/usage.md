@@ -11,8 +11,8 @@ The [parameter reference](parameters.md) is generated from its TOPP INI schema.
 | Apply observed values | `DIALibGen -mode refine -in predicted.parquet -ids report.parquet -out refined.parquet` |
 | Learn RT/CCS and predict the full library | `DIALibGen -mode tune -in predicted.parquet -ids report.parquet -out tuned.parquet` |
 
-Generation is the default. The desktop app currently provides generation;
-use the command line for refinement and tuning.
+Generation is the default. The [desktop app](../gui/README.md) exposes all three
+modes, including RT/CCS fine-tuning controls and optional model export.
 
 Non-default settings belonging to a different mode are rejected. A complete
 default INI remains usable, but generation settings do not configure refinement

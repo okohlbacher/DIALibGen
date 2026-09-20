@@ -2,8 +2,10 @@
 // Only the three machine-specific model paths are normalized to empty strings
 // in generation-defaults.json. Native contract tests check this fixture for drift.
 
-import type { DialibgenApi, ModelStatus, RunResult } from '../types'
+import type { DialibgenApi, ModelStatus, RunResult, TuningOption } from '../types'
 import generationDefaults from './generation-defaults.json'
+import refinementDefaults from './refinement-defaults.json'
+import tuningOptions from './tuning-options.json'
 
 export const SAMPLE_CONFIG: Record<string, unknown> = generationDefaults
 
@@ -37,11 +39,14 @@ export function installMockBridge(opts: MockOptions = {}): MockBridge {
         : { bin: '/opt/bin/DIALibGen', source: 'bundled', ok: true, version: '0.11.0',
             detail: 'DIALibGen 0.11.0 (bundled)' },
     models: async () => opts.models ?? { dir: '/models', missing: [] },
-    defaultConfig: async () => {
+    defaultConfig: async (mode = 'generate') => {
       if (opts.configError) throw new Error(opts.configError)
-      return opts.config ?? { ...SAMPLE_CONFIG }
+      return opts.config ?? (mode === 'generate' ? { ...SAMPLE_CONFIG } : { ...refinementDefaults, ...(mode === 'tune' ? { filter: false, write_rt: false } : {}) })
     },
 
+    tuningOptions: async () => tuningOptions as TuningOption[],
+    pickLibrary: async () => '/data/library.parquet',
+    pickReport: async () => '/data/report.parquet',
     pickFasta: async () => '/data/proteins.fasta',
     pickOutput: async () => '/data/library.parquet',
     pickDirectory: async () => '/models',

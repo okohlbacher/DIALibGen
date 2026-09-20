@@ -27,13 +27,15 @@ describe the implemented changes.
   refused; the effective recipe records the selected NCE and its source.
 - Runtime dependency inventories, upstream license texts and platform-specific
   corresponding-source archives, including desktop dependencies.
+- Desktop generation, refinement and fine-tuning modes, with RT/CCS head
+  selection, native training settings, model export and mode-aware saved settings.
 
 ### Changed
 
 - `-threads` now follows the TOPP default of 1. Set 0 for automatic inference
   parallelism. Training uses its separate `-machine:threads` setting.
-- The desktop app explicitly selects generation mode and matches the CLI
-  defaults. Fractional NCE and m/z settings remain editable; thread counts must
+- The desktop app explicitly selects the requested mode and uses the CLI's
+  defaults and training schema. Fractional NCE and m/z settings remain editable; thread counts must
   be whole numbers. Existing output paths are refused before starting a child
   process.
 - User documentation replaces obsolete pre-release notes and same-run tuning

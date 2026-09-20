@@ -84,3 +84,25 @@ describe('inertBecause', () => {
     expect(inertBecause('recompute_decoy_mz', { decoys: 'reverse' })).toBeNull()
   })
 })
+
+// Values can also arrive from a JSON/settings file, so browser input constraints
+// alone do not establish the CLI contract.
+describe('parameter value validation', () => {
+  it('rejects non-finite, fractional integer, wrong-type and reversed-range values', async () => {
+    const { invalidValue } = await import('./paramLayout')
+    const base = { name: 'value', label: 'value', description: '', group: 'core' as const }
+    for (const value of [NaN, Infinity, -Infinity, null, '4', 1.5]) {
+      expect(invalidValue({ ...base, kind: 'int', min: 0 }, value)).not.toBeNull()
+    }
+    expect(invalidValue({ ...base, kind: 'double', min: 0, max: 1 }, 0.25)).toBeNull()
+    expect(invalidValue({ ...base, kind: 'double-range' }, [4, 2])).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'int-range' }, [1.5, 2])).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'int-list' }, [1, Infinity])).not.toBeNull()
+    expect(invalidValue({ ...base, name: 'precursor_charges', kind: 'int-list' }, [2, 2])).not.toBeNull()
+    expect(invalidValue({ ...base, name: 'precursor_charges', kind: 'int-list' }, [9])).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'bool' }, 'true')).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'string' }, 2)).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'string-list' }, [2])).not.toBeNull()
+    expect(invalidValue({ ...base, kind: 'string', choices: ['rt', 'ccs'] }, 'both')).not.toBeNull()
+  })
+})

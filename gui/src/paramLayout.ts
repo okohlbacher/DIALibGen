@@ -204,7 +204,8 @@ export function buildSpecs(defaults: Record<string, unknown>): ParamSpec[] {
       // rather than render an empty hint: the blank looks like a finished field.
       description: o?.description ?? 'Not yet described here — see `DIALibGen -write_config`.',
       group: o?.group ?? 'advanced',
-      choices: o?.choices,
+      choices: o?.choices && typeof defaults[name] === 'string' && !o.choices.includes(defaults[name] as string)
+        ? [...o.choices, defaults[name] as string] : o?.choices,
       min: o?.min,
       max: o?.max,
       hidden: o?.hidden ?? false
@@ -225,5 +226,83 @@ export function inertBecause(name: string, values: Record<string, unknown>): str
   if (name === 'recompute_decoy_mz' && values.decoys === 'none') {
     return 'No effect: no decoys are being generated.'
   }
+  return null
+}
+
+const REFINEMENT: Record<string, Overlay> = {
+  filter: { group: 'core', description: 'Keep only precursors identified in the reference run.' },
+  q_precursor: { group: 'core', description: 'Precursor q-value threshold; 1 disables this gate.', min: 0, max: 1 },
+  q_global: { group: 'core', description: 'Global/peptide q-value threshold; 1 disables this gate.', min: 0, max: 1 },
+  q_protein: { group: 'core', description: 'Protein q-value threshold; 1 disables this gate.', min: 0, max: 1 },
+  write_rt: { group: 'core', description: 'Replace predicted RT with observed retention time.' },
+  write_im: { group: 'core', description: 'Replace mobility with observed 1/K0 for permitted charges.' },
+  write_intensity: { group: 'core', description: 'Replace fragment intensities using DIA-NN exported fragment information.' },
+  require_gates: { description: 'Require report gate columns. Turn off only for a pre-filtered empirical library.' },
+  rt_unit: { description: 'Observed units are the reference run’s minutes. Minmax cannot be used with fine-tuning.', choices: ['observed', 'minmax'] },
+  dedup: { description: 'Which observation wins when a precursor occurs more than once.', choices: ['lowest_q', 'highest_evidence'] },
+  min_fragments: { description: 'Minimum distinct reference fragments; 0 disables the gate.', min: 0 },
+  im_min_charge: { description: 'Lowest charge receiving observed mobility.', min: 1, max: 8 },
+  im_ramp_top: { description: 'Mobility ramp top; 0 means unknown.', min: 0, max: 10 },
+  im_ramp_margin: { description: 'Censor observations this close to the mobility ramp top.', min: 0, max: 1 },
+  min_match_fraction: { description: 'Minimum fraction of passing reference precursors that must match.', min: 0, max: 1 },
+  intensity_min_correlation: { description: 'Minimum fragment correlation (1.9) or score (2.x); -1 disables the gate.', min: -1, max: 1 },
+  intensity_restrict: { description: 'Keep only trusted transitions when replacing intensities.' },
+  intensity_rerank: { description: 'Rank replaced transitions by observed intensity.' },
+  intensity_min_fragments: { description: 'Minimum transitions required to replace a precursor’s intensities.', min: 0 },
+  intensity_norm: { description: 'Observed intensity normalization.', choices: ['library_max', 'base_peak', 'sum', 'raw'] },
+  intensity_min_relative: { description: 'Drop observed fragments below this fraction of the maximum.', min: 0, max: 1 },
+  intensity_mz_tol_ppm: { description: 'Fragment m/z matching tolerance (ppm).', min: 0, max: 1000 },
+  intensity_max_mz_mismatch: { description: 'Maximum fraction of identity matches that may fail the m/z check.', min: 0, max: 1 },
+  allow_mixed_intensity: { description: 'Permit observed and predicted intensities together when library filtering is off.' }
+}
+
+export function refinementSpecs(defaults: Record<string, unknown>): ParamSpec[] {
+  return buildSpecs(defaults).map((spec) => ({ ...spec, ...REFINEMENT[spec.name],
+    kind: ['q_precursor', 'q_global', 'q_protein', 'im_ramp_top', 'im_ramp_margin', 'min_match_fraction',
+      'intensity_min_correlation', 'intensity_min_relative', 'intensity_mz_tol_ppm', 'intensity_max_mz_mismatch'].includes(spec.name)
+      ? 'double' : spec.kind }))
+}
+
+export function tuningSpecs(options: import('./types').TuningOption[]): ParamSpec[] {
+  const core = ['tune_heads', 'train:epochs', 'train:lr', 'train:batch_size', 'machine:device', 'machine:threads']
+  return options.map((option) => ({ ...option,
+    max: option.max ?? (option.kind === 'int' ? 2147483647 : undefined),
+    label: option.name === 'tune_heads' ? 'training heads' : option.name.replace(/^train:/, 'training ').replace(/[:_]/g, ' '),
+    group: core.includes(option.name) ? 'core' : 'advanced' }))
+}
+
+export function invalidValue(spec: ParamSpec, value: unknown): string | null {
+  const invalid = (reason: string) => `${spec.label}: ${reason}`
+  if (spec.name === 'nce' && value == null) return null
+  const number = (n: unknown, integer: boolean): boolean => typeof n === 'number' && Number.isFinite(n)
+    && (!integer || Number.isSafeInteger(n)) && (spec.min == null || n >= spec.min) && (spec.max == null || n <= spec.max)
+  if (spec.kind === 'int' || spec.kind === 'double') {
+    if (!number(value, spec.kind === 'int')) return invalid(`enter a finite ${spec.kind === 'int' ? 'whole number' : 'number'}${spec.min != null ? ` ≥ ${spec.min}` : ''}${spec.max != null ? ` and ≤ ${spec.max}` : ''}.`)
+  } else if (spec.kind === 'int-range' || spec.kind === 'double-range') {
+    if (!Array.isArray(value) || value.length !== 2 || !value.every((v) => number(v, spec.kind === 'int-range')) || value[0] > value[1]) return invalid('enter an ordered, finite range within the limits.')
+  } else if (spec.kind === 'int-list') {
+    if (!Array.isArray(value) || !value.every((v) => number(v, true))) return invalid('enter finite whole numbers.')
+    if (spec.name === 'precursor_charges' && (!value.length || new Set(value).size !== value.length || value.some((n) => n < 1 || n > 8))) return invalid('enter unique charges from 1 to 8.')
+  } else if (spec.kind === 'bool' && typeof value !== 'boolean') return invalid('choose true or false.')
+  else if (spec.kind === 'string' && typeof value !== 'string') return invalid('enter text.')
+  else if (spec.kind === 'string-list' && (!Array.isArray(value) || !value.every((v) => typeof v === 'string'))) return invalid('enter one value per line.')
+  if (spec.choices?.length && !spec.choices.includes(String(value))) return invalid('choose a supported value.')
+  return null
+}
+
+export function tuningError(values: Record<string, unknown>): string | null {
+  const n = (key: string) => values[key] as number
+  for (const key of ['filter:q_value', 'cohort:train_frac', 'stop:rel_tol']) {
+    if (key in values && (n(key) < 0 || n(key) > 1)) return `${key} must be between 0 and 1.`
+  }
+  for (const key of ['filter:rt_spread_max', 'filter:rt_max_minutes', 'stop:abs_tol', 'stop:max_seconds']) {
+    if (key in values && n(key) < 0) return `${key} must be nonnegative.`
+  }
+  if ('train:lr' in values && n('train:lr') <= 0) return 'Training learning rate must be positive.'
+  if (n('train:warmup') > n('train:epochs')) return 'Training warmup cannot exceed the epoch count.'
+  if (n('cohort:train_size') > 0 && n('cohort:train_frac') > 0) return 'Choose a training size or fraction, not both.'
+  if (values['cohort:full_fit'] && (n('cohort:train_size') > 0 || n('cohort:train_frac') > 0)) return 'Full fit cannot be combined with a training subsample.'
+  if (values.tune_heads !== 'rt' && n('filter:min_charge') < 2 && !values['filter:allow_z1']) return 'CCS training on charge 1 requires filter allow z1.'
+  if ('machine:device' in values && !/^(cpu|cuda(?::\d+)?)$/.test(String(values['machine:device']))) return 'Training device must be cpu, cuda or cuda:N.'
   return null
 }

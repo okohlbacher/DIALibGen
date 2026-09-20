@@ -22,15 +22,26 @@ describe('native bridge', () => {
     await api.run(params); await api.cancel(); await api.loadSettings()
     await api.saveLast(config); await api.savePreset('preset', config); await api.deletePreset('preset')
     expect(vi.mocked(invoke).mock.calls).toEqual([
-      ['probe'], ['models', { dir: null }], ['models', { dir: '/custom models' }], ['default_config'],
+      ['probe'], ['models', { dir: null }], ['models', { dir: '/custom models' }], ['default_config', { mode: 'generate' }],
       ['read_config', { path: 'some config.json' }], ['write_config', { path: 'saved.json', value: config }],
       ['run', { params }], ['cancel'], ['load_settings'], ['save_last', { values: config }],
       ['save_preset', { name: 'preset', values: config }], ['delete_preset', { name: 'preset' }]
     ])
   })
 
+  it('passes selected mode, head requirements and tuning metadata through the native bridge', async () => {
+    await window.dialibgen.defaultConfig('refine')
+    await window.dialibgen.defaultConfig('tune')
+    await window.dialibgen.models('/rt models', ['rt'])
+    await window.dialibgen.tuningOptions()
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ['default_config', { mode: 'refine' }], ['default_config', { mode: 'tune' }],
+      ['models', { dir: '/rt models', heads: ['rt'] }], ['tuning_options']
+    ])
+  })
+
   it('returns only selected single paths and treats dialog cancellation as null', async () => {
-    for (const picker of [window.dialibgen.pickFasta, window.dialibgen.pickDirectory, window.dialibgen.pickConfig]) {
+    for (const picker of [window.dialibgen.pickFasta, window.dialibgen.pickLibrary, window.dialibgen.pickReport, window.dialibgen.pickDirectory, window.dialibgen.pickConfig]) {
       vi.mocked(open).mockResolvedValueOnce('/selected').mockResolvedValueOnce(null).mockResolvedValueOnce(['/multiple'])
       expect(await picker()).toBe('/selected')
       expect(await picker()).toBeNull()

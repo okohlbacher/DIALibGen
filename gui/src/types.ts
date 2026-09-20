@@ -43,14 +43,29 @@ declare global {
   }
 }
 
+export type Mode = 'generate' | 'refine' | 'tune'
+export type ModelHead = 'rt' | 'ccs' | 'ms2'
+export interface TuningOption {
+  name: string
+  kind: 'bool' | 'int' | 'double' | 'string'
+  value: unknown
+  description: string
+  min?: number
+  max?: number
+  choices?: string[]
+}
+
 export interface DialibgenApi {
   probe: () => Promise<BinaryInfo>
-  models: (dir?: string) => Promise<ModelStatus>
+  models: (dir?: string, heads?: ModelHead[]) => Promise<ModelStatus>
   /// The tool's own `-write_config` output: every default materialised. The
   /// form is built from this, so the GUI cannot offer a key the CLI lacks nor
   /// default one differently.
-  defaultConfig: () => Promise<Record<string, unknown>>
+  defaultConfig: (mode?: Mode) => Promise<Record<string, unknown>>
+  tuningOptions: () => Promise<TuningOption[]>
 
+  pickLibrary: () => Promise<string | null>
+  pickReport: () => Promise<string | null>
   pickFasta: () => Promise<string | null>
   pickOutput: (defaultPath?: string) => Promise<string | null>
   pickDirectory: () => Promise<string | null>
@@ -61,6 +76,12 @@ export interface DialibgenApi {
   revealPath: (path: string) => Promise<boolean>
 
   run: (params: {
+    mode?: Mode
+    ids?: string
+    tune?: boolean
+    tuning?: Record<string, unknown>
+    tuneOutModels?: string
+    outReport?: string
     in: string
     out: string
     config: Record<string, unknown>

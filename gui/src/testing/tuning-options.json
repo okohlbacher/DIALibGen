@@ -1,0 +1,191 @@
+[
+  {
+    "name": "tune_heads",
+    "kind": "string",
+    "value": "both",
+    "description": "Which models to tune.",
+    "choices": [
+      "rt",
+      "ccs",
+      "both"
+    ]
+  },
+  {
+    "name": "tune_predict_gpu",
+    "kind": "bool",
+    "value": false,
+    "description": "Use the GPU for the re-prediction pass (the ONNX one, not training)."
+  },
+  {
+    "name": "tune_predict_sessions",
+    "kind": "int",
+    "value": 0,
+    "description": "ONNX Runtime sessions for the re-prediction pass; 0 = default.",
+    "min": 0.0
+  },
+  {
+    "name": "tune_keep_free_cysteine_offset",
+    "kind": "bool",
+    "value": false,
+    "description": "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by default: that offset was fitted against the STOCK model, and a model tuned on this run's own identifications has had the chance to learn the effect itself -- applying both counts it twice."
+  },
+  {
+    "name": "filter:q_value",
+    "kind": "double",
+    "value": 0.01,
+    "description": "Precursor Q.Value threshold"
+  },
+  {
+    "name": "filter:min_charge",
+    "kind": "int",
+    "value": 2,
+    "description": "CCS only: lowest precursor charge used (RT collapses all charges). z1 is censored at the mobility ramp top on timsTOF",
+    "min": 1.0,
+    "max": 8.0
+  },
+  {
+    "name": "filter:allow_z1",
+    "kind": "bool",
+    "value": false,
+    "description": "CCS: permit filter:min_charge 1 (censored observations enter training)"
+  },
+  {
+    "name": "filter:rt_spread_max",
+    "kind": "double",
+    "value": 0.2,
+    "description": "Drop a sequence whose charge states' RTs span more than this (minutes)"
+  },
+  {
+    "name": "filter:rt_max_minutes",
+    "kind": "double",
+    "value": 0.0,
+    "description": "rt_norm denominator; 0 = the run's maximum observed RT"
+  },
+  {
+    "name": "cohort:train_size",
+    "kind": "int",
+    "value": 0,
+    "description": "Training units (sequences for rt, sequence x charge for ccs); 0 = full pool",
+    "min": 0.0
+  },
+  {
+    "name": "cohort:train_frac",
+    "kind": "double",
+    "value": 0.0,
+    "description": "Alternative to train_size: fraction of the pool"
+  },
+  {
+    "name": "cohort:full_fit",
+    "kind": "bool",
+    "value": false,
+    "description": "Train on EVERY unit of the run, the test and validation cohorts included: the closest fit the data allows. val and TEST are then in-sample; judge this mode by searching a DIFFERENT run with the result, never by its own numbers"
+  },
+  {
+    "name": "cohort:no_inner_val",
+    "kind": "bool",
+    "value": false,
+    "description": "No inner validation cohort: its units rejoin the pool and checkpoints are selected on TEST, which is then no longer a held-out number"
+  },
+  {
+    "name": "train:epochs",
+    "kind": "int",
+    "value": 100,
+    "description": "Horizon of the cosine schedule (and the maximum epochs)",
+    "min": 1.0
+  },
+  {
+    "name": "train:warmup",
+    "kind": "int",
+    "value": 10,
+    "description": "Linear warmup epochs",
+    "min": 0.0
+  },
+  {
+    "name": "train:lr",
+    "kind": "double",
+    "value": 0.0001,
+    "description": "Peak learning rate (Adam)"
+  },
+  {
+    "name": "train:batch_size",
+    "kind": "int",
+    "value": 1024,
+    "description": "Batch size within a length group",
+    "min": 1.0
+  },
+  {
+    "name": "stop:eval_every",
+    "kind": "int",
+    "value": 1,
+    "description": "Validate every n epochs",
+    "min": 1.0
+  },
+  {
+    "name": "stop:min_epochs",
+    "kind": "int",
+    "value": 20,
+    "description": "Never stop before this epoch",
+    "min": 0.0
+  },
+  {
+    "name": "stop:patience",
+    "kind": "int",
+    "value": 10,
+    "description": "Stop after this many epochs without progress (never before max(min_epochs, warmup))",
+    "min": 0.0
+  },
+  {
+    "name": "stop:rel_tol",
+    "kind": "double",
+    "value": 0.005,
+    "description": "Progress = the selection metric beats the anchor by this fraction"
+  },
+  {
+    "name": "stop:abs_tol",
+    "kind": "double",
+    "value": 0.0,
+    "description": "Progress = beats the anchor by this absolute amount (0 = use rel_tol)"
+  },
+  {
+    "name": "stop:max_seconds",
+    "kind": "double",
+    "value": 0.0,
+    "description": "Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none)"
+  },
+  {
+    "name": "stop:select",
+    "kind": "string",
+    "value": "calibrated_sd",
+    "description": "Selection metric on the validation cohort",
+    "choices": [
+      "calibrated_sd",
+      "rmse"
+    ]
+  },
+  {
+    "name": "machine:device",
+    "kind": "string",
+    "value": "cpu",
+    "description": "cpu or cuda[:N]"
+  },
+  {
+    "name": "machine:threads",
+    "kind": "int",
+    "value": 4,
+    "description": "CPU threads used for training",
+    "min": 1.0
+  },
+  {
+    "name": "machine:no_cudnn",
+    "kind": "bool",
+    "value": false,
+    "description": "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower"
+  },
+  {
+    "name": "machine:seed",
+    "kind": "int",
+    "value": 20260803,
+    "description": "Seed for the training subsample and batch order",
+    "min": 0.0
+  }
+]

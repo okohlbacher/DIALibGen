@@ -22,6 +22,7 @@ pub fn run() {
             dialibgen::probe,
             dialibgen::models,
             dialibgen::default_config,
+            dialibgen::tuning_options,
             dialibgen::run,
             dialibgen::cancel,
             dialibgen::read_config,

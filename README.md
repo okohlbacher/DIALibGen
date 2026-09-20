@@ -123,11 +123,12 @@ verifies the pinned models. See [building](docs/building.md) and
 
 ## Desktop app
 
-The [desktop app](gui/README.md) provides the generation workflow: select a
-FASTA, output and settings, then generate a library. Its form uses the
-executable's generation defaults. Refinement and tuning are available through
-the CLI. The app requires an unused output path and validates thread counts
-before launch.
+The [desktop app](gui/README.md) provides generation, observed-value refinement
+and RT/CCS fine-tuning. Select the mode, input files and output, then adjust
+the settings supplied by the same executable. Fine-tuning includes training
+filters, cohorts, optimizer and stopping settings, and optional saved ONNX
+models. The app requires unused output paths and keeps each mode's settings
+separate.
 
 ## Evidence and limitations
 

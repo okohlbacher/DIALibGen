@@ -11,10 +11,7 @@ interface Props {
   inert?: string | null
 }
 
-const num = (s: string, fallback: number): number => {
-  const v = Number(s)
-  return Number.isFinite(v) ? v : fallback
-}
+const num = (s: string): number => s.trim() === '' ? Number.NaN : Number(s)
 
 // One widget per inferred kind. The tool's own defaults drive the control, so
 // the UI cannot offer a shape the CLI would reject.
@@ -47,7 +44,7 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
     const pair = Array.isArray(value) ? (value as number[]) : [0, 0]
     const set = (i: 0 | 1, s: string) => {
       const next = [pair[0], pair[1]]
-      next[i] = num(s, pair[i])
+      next[i] = num(s)
       onChange(next)
     }
     return (
@@ -55,11 +52,11 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
         {label}
         <div className="row tight">
           <input id={id} type="number" step={step} min={spec.min} max={spec.max} disabled={off}
-                 aria-label={`${spec.label} minimum`} value={String(pair[0] ?? '')}
+                 aria-label={`${spec.label} minimum`} value={Number.isFinite(pair[0]) ? String(pair[0]) : ''}
                  onChange={(e) => set(0, e.target.value)} />
           <span className="between">to</span>
           <input type="number" step={step} min={spec.min} max={spec.max} disabled={off}
-                 aria-label={`${spec.label} maximum`} value={String(pair[1] ?? '')}
+                 aria-label={`${spec.label} maximum`} value={Number.isFinite(pair[1]) ? String(pair[1]) : ''}
                  onChange={(e) => set(1, e.target.value)} />
         </div>
         {help}
@@ -80,7 +77,6 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
                      .map((s) => s.trim())
                      .filter((s) => s !== '')
                      .map(Number)
-                     .filter((n) => Number.isFinite(n))
                  )
                } />
         {help}
@@ -128,7 +124,7 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
         <input id={id} type="number" step={spec.kind === 'double' ? 'any' : 1} min={spec.min} max={spec.max}
                placeholder={spec.name === 'nce' ? 'automatic' : undefined}
                disabled={off} value={value === null || value === undefined ? '' : String(value)}
-               onChange={(e) => onChange(e.target.value === '' ? null : num(e.target.value, 0))} />
+               onChange={(e) => onChange(e.target.value === '' ? null : num(e.target.value))} />
         {help}
       </div>
     )

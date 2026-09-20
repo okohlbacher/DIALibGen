@@ -82,13 +82,16 @@ libraries from a moved install prefix. The exported CMake targets contained no
 build-machine ONNX Runtime or LibTorch path. This local result does not stand
 in for the required consumer checks on the other release platforms.
 
-The current frontend suite passed **59 tests** and measured **100% lines
-(277/277)**, **100% functions (113/113)**, **98.43% statements (315/320)** and
-**89.84% branches (239/266)** after the default-fixture, output-path and numeric
-input corrections. Type checking and the frontend build also passed. The native
-GUI passed **20 Rust tests** and Clippy with warnings treated as errors. Its
-macOS production-library coverage is **76.58% of lines (327/427)** after the
-output-path and automatic model-discovery regressions.
+The frontend suite, including desktop refinement and fine-tuning, passed
+**86 tests** and measured **100% lines (351/351)**, **100% functions (164/164)**,
+**98.34% statements (476/484)** and **93.82% branches (562/599)**. Tests cover
+mode-specific inputs and settings, all native tuning controls, selected-head
+model checks, stale asynchronous results, configuration round-trips and errors. Type checking and the frontend build also passed. The native
+GUI passed **23 macOS Rust tests** and Clippy with warnings treated as errors.
+The earlier generation-only production-library measurement was **76.58% of
+lines (327/427)**; coverage must be remeasured for the new tuning backend before
+final verification. Linux also checks isolation of the bundled CLI from the
+AppImage launcher’s library environment.
 
 These are local measurements, not final platform CI results or claims of
 complete coverage. The final release record must identify the validated commit.

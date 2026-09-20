@@ -11,6 +11,7 @@ import type {
   BinaryInfo,
   DialibgenApi,
   ModelStatus,
+  TuningOption,
   RunResult,
   RunStarted,
   Settings
@@ -40,11 +41,20 @@ function subscribe<T>(event: string, cb: (payload: T) => void): () => void {
 
 const api: DialibgenApi = {
   probe: () => invoke<BinaryInfo>('probe'),
-  models: (dir?: string) => invoke<ModelStatus>('models', { dir: dir ?? null }),
-  defaultConfig: () => invoke<Record<string, unknown>>('default_config'),
+  models: (dir, heads) => invoke<ModelStatus>('models', { dir: dir ?? null, ...(heads ? { heads } : {}) }),
+  defaultConfig: (mode) => invoke<Record<string, unknown>>('default_config', { mode: mode ?? 'generate' }),
+  tuningOptions: () => invoke<TuningOption[]>('tuning_options'),
 
   // Native dialogs live in the frontend via the dialog plugin; the backend only
   // ever receives already-chosen paths.
+  pickLibrary: async () => {
+    const r = await open({ multiple: false, filters: LIBRARY })
+    return typeof r === 'string' ? r : null
+  },
+  pickReport: async () => {
+    const r = await open({ multiple: false, filters: [{ name: 'DIA-NN report', extensions: ['parquet'] }] })
+    return typeof r === 'string' ? r : null
+  },
   pickFasta: async () => {
     const r = await open({ multiple: false, filters: FASTA })
     return typeof r === 'string' ? r : null

@@ -178,3 +178,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 
 .presets { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 14px; }
 .presets .row + .row { margin-top: 6px; }
+
+.controls > .help { margin-bottom: 14px; }
+.controls > .formats { margin-top: -8px; margin-bottom: 4px; }
+.params h3 { margin: 18px 0 12px; font-size: 13px; }

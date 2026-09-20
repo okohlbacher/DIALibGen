@@ -1,42 +1,75 @@
 # DIALibGen desktop app
 
-The desktop app generates a predicted library from a protein FASTA using the
+The desktop app generates, refines and fine-tunes spectral libraries using the
 same `DIALibGen` executable as the command line. Release builds include the
-three AlphaPeptDeep ONNX models. Refinement and RT/CCS tuning are available
-through the [CLI](../docs/usage.md).
+three AlphaPeptDeep ONNX models and CPU training.
 
-1. Select a FASTA and an output ending in `.parquet` or `.tsv`.
-2. Match digestion, modifications and instrument settings to your experiment.
-3. Leave the model directory empty to use bundled models, or select a directory
-   containing all three ONNX files.
-4. Select the thread count and generate. One thread is the default; zero
-   requests automatic inference parallelism and uses more memory.
+## Choose a workflow
 
-Parquet carries the effective generation recipe in its metadata. Save the
-config separately when exporting TSV. Presets and last-used generation
-settings are stored locally.
+| Mode | Inputs | Result |
+|---|---|---|
+| Generate | Protein FASTA | A predicted spectral library |
+| Refine | Library and one run's DIA-NN report | A library filtered and updated with accepted observations |
+| Fine-tune | Library and one run's DIA-NN report | The complete library re-predicted with adapted RT/CCS models |
 
-NCE starts blank, meaning the CLI chooses the current instrument's default
-(for example, QE 30 or Lumos 25). Entering a number makes it explicit; clear the
-field to return to automatic selection. Imported configs and saved presets
-with a numeric NCE retain that explicit value when the instrument changes.
-Precursor charges must be unique integers from 1 to 8; fragment charges are
-limited to the model's supported values, 1 and 2.
+Choose an unused output ending in `.parquet` or `.tsv`. A library input may
+use either format; identification reports use Parquet. The same report-column,
+quality-gate and RT-unit rules apply as in the [CLI](../docs/usage.md).
+
+Generation lets you set digestion, modifications, instrument and fragment
+selection. Leave NCE blank for the instrument default, such as QE 30 or Lumos
+25; a numeric value remains explicit when the instrument changes. Precursor
+charges must be unique integers from 1 to 8; fragment charges are limited to
+1 and 2. One inference thread is the default; zero requests automatic
+parallelism and uses more memory.
+
+Refinement exposes quality gates, filtering, observed RT/mobility and fragment
+intensity replacement. It can also fine-tune the models before applying those
+observations. Keeping unidentified precursors while writing observed RT
+requires successful RT tuning; keeping the original RT values is another
+option. The CLI refuses combinations that would mix RT units.
+
+## Fine-tuning
+
+1. Select Fine-tune, an input library, a single-run DIA-NN report and a new output.
+2. Choose RT, CCS or both heads. Leave the model directory blank for bundled
+   models, or choose a directory containing the selected heads' ONNX files.
+3. Set the training recipe. Controls include observation filters, protein
+   cohorts, learning rate, epochs, batch size, stopping rules, device and seed.
+   Training threads are separate from inference threads.
+4. Optionally choose a directory to retain tuned ONNX models, provenance and
+   training trajectories. Without it, models are temporary and the output
+   library is retained.
+5. Start the run and inspect its log and completion result.
+
+Fine-tune preserves the whole input library and writes predictions; choose
+Refine to filter it or replace values with observations. The training quality
+filter is separate from refinement's output-quality gates. CPU is supported
+by the portable packages; CUDA options require a compatible source build.
+
+The training controls and defaults come from the executable's TOPP parameter
+schema. Full-fit and no-inner-validation settings change which observations
+are held out, as their descriptions explain. Evaluate transfer on a separate
+run; a close fit to the training run is not evidence of improved search results.
+
+## Settings and outputs
+
+Each mode retains its own settings. Presets and saved desktop JSON include the
+selected mode and training recipe. Reopen these files in the desktop app; they
+are not the CLI's plain `-config` files. Plain CLI JSON can also be loaded for
+the selected mode, and older generation presets remain usable.
+
+Parquet includes provenance. Refinement and tuning also write a `.refine.json`
+sidecar beside the library. Retained tuned models have `.tune.json` and
+`.trajectory.tsv` sidecars. Existing outputs are refused; choose new names or
+an unused model-output directory.
 
 Cancellation stops the child process immediately. A cancelled or interrupted
-run can leave a hidden `.dialibgen-tmp-*` staging directory beside the selected
-output. After confirming that no DIALibGen process is using it, you may remove
-that directory manually. The GUI does not delete matching directories because
-another run may own them. Output replacement is atomic during normal operation;
-it does not promise durability after a power loss.
-
-## How the form stays compatible
-
-The backend calls `DIALibGen -mode generate -write_config` and builds the form
-from that mode's effective settings. Refinement and tuning parameters are not
-mixed into it. The layout adds labels, groups and choices; unknown generation
-settings appear under Advanced. Model paths and provenance-only fields are
-managed separately from editable parameters.
+run can leave a hidden `.dialibgen-tmp-*` staging directory beside an output.
+After confirming that no DIALibGen process is using it, you may remove that
+directory manually. Completed model files from an earlier head may also remain.
+The GUI does not remove unrelated files. Output replacement is atomic during
+normal operation; it does not promise durability after a power loss.
 
 ## Development
 

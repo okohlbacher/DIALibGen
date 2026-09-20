@@ -179,6 +179,8 @@ namespace ODIA
       std::size_t transitions = 0;
       std::size_t dropped_too_few_fragments = 0;
       std::size_t dropped_precursor_mz = 0;
+      std::size_t dropped_proteins = 0;
+      std::size_t dropped_ambiguous_peptides = 0;
     };
 
     static Stats generate(const std::string& fasta_file,

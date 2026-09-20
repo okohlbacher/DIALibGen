@@ -3,6 +3,7 @@
 
 #include "DIALibGen.h"
 #include <odia/DIANNLibraryFile.h>
+#include <odia/AtomicFile.h>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepEncoder.h>
@@ -205,15 +206,15 @@ namespace
       p.charges = j["precursor_charges"].get<std::vector<int>>();
       for (const int z : p.charges)
       {
-        if (z < 1 || z > 10)
-        { throw std::runtime_error("precursor_charges must each be between 1 and 10"); }
+        if (z < 1 || z > 8)
+        { throw std::runtime_error("precursor_charges must each be between 1 and 8"); }
       }
     }
     if (j.contains("max_fragment_charge"))
     {
       if (!j["max_fragment_charge"].is_number_integer() ||
-          j["max_fragment_charge"] < 1 || j["max_fragment_charge"] > 10)
-      { throw std::runtime_error("max_fragment_charge must be between 1 and 10"); }
+          j["max_fragment_charge"] < 1 || j["max_fragment_charge"] > 2)
+      { throw std::runtime_error("max_fragment_charge must be between 1 and 2"); }
       p.max_fragment_charge = j["max_fragment_charge"];
     }
     if (j.contains("fixed_modifications"))
@@ -242,14 +243,18 @@ namespace
     if (j.contains("instrument")) { instrument = j["instrument"]; }
     if (j.contains("nce"))
     {
-      if (!j["nce"].is_number() || j["nce"] < 0 || j["nce"] > 100)
-      { throw std::runtime_error("nce must be between 0 and 100"); }
+      if (!j["nce"].is_number() || j["nce"] <= 0 || j["nce"] > 100)
+      { throw std::runtime_error("nce must be greater than 0 and at most 100"); }
       nce = j["nce"]; nce_was_set = true;
     }
     if (j.contains("irt_rescale")) { irt_rescale = j["irt_rescale"]; }
     if (j.contains("recompute_decoy_mz"))
     { recompute_decoy_mz = j["recompute_decoy_mz"]; }
     if (p.charges.empty()) { throw std::runtime_error("precursor_charges must not be empty"); }
+    auto charges = p.charges;
+    std::sort(charges.begin(), charges.end());
+    if (std::adjacent_find(charges.begin(), charges.end()) != charges.end())
+    { throw std::runtime_error("precursor_charges must not contain duplicates"); }
 
     bool known = false;
     for (const char* m : kDecoyMethods) { known = known || decoys == m; }
@@ -405,20 +410,39 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                     "its initialisation). Predictions will be close to Lumos, the no-correction baseline; name "
                     "Lumos if that is what you want."); }
 
+    struct { const char* name; const char* file; std::string* path; } models[] = {
+      {"rt_model", kRtModelFile, &rt_model},
+      {"ms2_model", kMs2ModelFile, &ms2_model},
+      {"ccs_model", kCcsModelFile, &ccs_model}};
+    for (auto& m : models)
+    {
+      if (m.path->empty()) { *m.path = findModel(m.file); }
+    }
+
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
       json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                  nce, instrument, irt_rescale,
                                  recompute_decoy_mz);
       eff["nce_source"] = nce_source;
-      std::ofstream os(wc);
-      if (!os) { writeLogError_("cannot write config to " + wc); return CANNOT_WRITE_OUTPUT_FILE; }
-      os << eff.dump(2) << '\n';
+      try
+      {
+        ODIA::AtomicFile staged(wc);
+        std::ofstream os(staged.temporaryPath());
+        os << eff.dump(2) << '\n'; os.close();
+        if (!os) { throw std::runtime_error("cannot write config to " + wc); }
+        staged.commit();
+      }
+      catch (const std::exception& e) { writeLogError_(e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
       writeLogInfo_("wrote effective config to " + wc);
       return EXECUTION_OK;
     }
 
-    const std::string fasta = getStringOption_("in"), out = getStringOption_("out");
+    const std::string fasta = getStringOption_("in");
+    const std::string out = getParam_().getValue("out").toString();
+    if (!out.empty() && (fs::exists(out) || fs::is_symlink(out)))
+    { writeLogError_("refusing to overwrite output: " + out); return CANNOT_WRITE_OUTPUT_FILE; }
+    (void)getStringOption_("out");
     if (fasta.empty() || out.empty())
     { writeLogError_("-in and -out are required"); return ILLEGAL_PARAMETERS; }
     const bool parquet = out.ends_with(".parquet");
@@ -428,14 +452,6 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       return ILLEGAL_PARAMETERS;
     }
 
-    struct { const char* name; const char* file; std::string* path; } models[] = {
-      {"rt_model", kRtModelFile, &rt_model},
-      {"ms2_model", kMs2ModelFile, &ms2_model},
-      {"ccs_model", kCcsModelFile, &ccs_model}};
-    for (auto& m : models)
-    {
-      if (m.path->empty()) { *m.path = findModel(m.file); }
-    }
     json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                nce, instrument, irt_rescale,
                                recompute_decoy_mz);
@@ -464,6 +480,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
     ODIA::Library library;
+    std::string standards;
     try
     {
       const auto st = ODIA::LibraryGenerator::generate(fasta, p, library);
@@ -471,6 +488,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                     std::to_string(st.peptides) + " peptides, " +
                     std::to_string(st.precursors) + " precursors, " +
                     std::to_string(st.transitions) + " transitions");
+      if (st.dropped_proteins || st.dropped_ambiguous_peptides)
+      { writeLogWarn_("digest skipped " + std::to_string(st.dropped_proteins) +
+          " invalid proteins and " + std::to_string(st.dropped_ambiguous_peptides) +
+          " peptides with ambiguous or undefined residue masses"); }
 
       if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
             library, rt_model, true, threads, p.free_cysteine_rt_correction); miss)
@@ -482,7 +503,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       if (irt_rescale)
       {
-        std::string standards = getStringOption_("irt_standards");
+        standards = getStringOption_("irt_standards");
         if (standards.empty()) { standards = findDataFile("irt_standards.tsv"); }
         if (standards.empty())
         {
@@ -509,10 +530,15 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                       "iRT library in another tool.");
       }
 
-      ODIA::LibraryGenerator::predictFragmentIntensities(
-        library, ms2_model, p, static_cast<float>(nce), instrument, true, threads);
-      ODIA::LibraryGenerator::predictCollisionCrossSections(library, ccs_model, true, threads,
-                                                    p.derive_ion_mobility);
+      if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+            library, ms2_model, p, static_cast<float>(nce), instrument, true, threads); miss)
+      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+      writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
+      if (library.precursorCount() == 0)
+      { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
+      if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+            library, ccs_model, true, threads, p.derive_ion_mobility); miss)
+      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);
       const auto made = ODIA::LibraryGenerator::appendDecoys(library, method, &skipped,
@@ -532,8 +558,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       p, ODIA::DIANNLibraryFile::hashFile(rt_model),
       ODIA::DIANNLibraryFile::hashFile(ms2_model),
       ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
+    if (irt_rescale)
+    { fp.target_params += ";irt_standards=" + ODIA::DIANNLibraryFile::hashFile(standards); }
     fp.decoy_method = decoys;
-    fp.params = fp.target_params + ";decoy=" + fp.decoy_method;
+    fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
+                ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
 
     try
     {

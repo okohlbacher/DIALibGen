@@ -8,6 +8,7 @@ function(build name fixmod flag)
     " \"ccs_model\":\"${CCS_MODEL}\", \"decoys\":\"none\","
     " \"fixed_modifications\":[${fixmod}],"
     " \"free_cysteine_rt_correction\":${flag} }")
+  file(REMOVE "${WORKDIR}/fcys_${name}.parquet")
   execute_process(COMMAND ${TOOL} -in ${FASTA} -config ${cfg}
                           -out ${WORKDIR}/fcys_${name}.parquet
                   RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)

@@ -13,8 +13,10 @@
 #include <odia/LibraryRefiner.h>
 
 #include <arrow/api.h>
+#include <arrow/config.h>
 #include <arrow/compute/api.h>
 #include <arrow/io/file.h>
+#include <arrow/util/config.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 
@@ -149,6 +151,45 @@ namespace
     check(threw, "-write_intensity with the filter off is refused without -allow_mixed_intensity");
   }
 
+  void duplicate_keys_count_once()
+  {
+    Library lib = makeLibrary(LIB).subsetByIndex({0, 0});
+    auto obs = observe("y5^1/600.30;", "500;", "0.9;");
+    obs.emplace(LibraryRefiner::key("ABSENTPEPK", 2), Observation{});
+    RefineParams p; p.write_rt = false;
+    RefineStats st;
+    LibraryRefiner::refine(lib, obs, p, st);
+    check(st.matched == 2 && st.ids_unmatched == 1 && st.match_fraction == 0.5,
+          "matching two target rows on one key covers only one of two reference keys");
+    p.min_match_fraction = 0.75;
+    st = RefineStats{};
+    bool refused = false;
+    try { LibraryRefiner::refine(lib, obs, p, st); }
+    catch (const std::runtime_error&) { refused = true; }
+    check(refused, "duplicate targets cannot bypass minimum reference coverage");
+  }
+
+  void loss_bearing_rank_and_preservation()
+  {
+    Library lib = makeLibrary(LIB);
+    lib.transitions().loss[0] = LossType::Water;
+    const auto obs = observe("y4^1/500.25;b3^1/300.15;y6^1/700.35;", "1000;800;300;", "0.9;0.9;0.9;");
+    RefineParams p; p.write_rt = false; p.write_intensity = true;
+    RefineStats st;
+    LibraryRefiner::refine(lib, obs, p, st);
+    check(st.intensity_loss_bearing == 1 && st.intensity_rank_agreement == 1.0,
+          "rank agreement compares no-loss transitions when the original maximum carries a loss");
+    check(lib.transitions().library_intensity.front() == 1.0f,
+          "library_max normalization still uses the original spectrum maximum");
+    lib = makeLibrary(LIB); lib.transitions().loss[0] = LossType::Water;
+    p.intensity_restrict = false; st = RefineStats{};
+    std::string message;
+    try { LibraryRefiner::refine(lib, obs, p, st); }
+    catch (const std::runtime_error& e) { message = e.what(); }
+    check(message.find("neutral-loss") != std::string::npos && lib.transitionCount() == LIB.size(),
+          "no-restrict explains why a neutral-loss precursor keeps its full predicted spectrum");
+  }
+
   void report_layouts()
   {
     const auto path = std::filesystem::temp_directory_path() /
@@ -267,6 +308,16 @@ namespace
       "a missing Score is accepted only when its quality gate is explicitly disabled");
     p.intensity_min_correlation = 0;
 
+    p.write_rt = true;
+    check(refused("RT"), "requested RT replacement refuses a report without an RT column");
+    p.write_rt = false;
+    RefineStats no_rt;
+    check(LibraryRefiner::readObservations(path.string(), p, no_rt).size() == 2,
+          "filtering without RT replacement permits an absent RT column");
+    p.write_im = true;
+    check(refused("IM"), "requested mobility replacement refuses a report without an IM column");
+    p.write_im = false;
+
     write(true, "", "y5^1/601.30"); RefineStats shifted; Library shifted_lib = makeLibrary(LIB);
     const auto shifted_obs = LibraryRefiner::readObservations(path.string(), p, shifted);
     bool mz_refused = false;
@@ -287,6 +338,12 @@ namespace
 
 int main()
 {
+  if (arrow::GetBuildInfo().version_string != ARROW_VERSION_STRING)
+  {
+    std::cerr << "Arrow header/runtime mismatch: " << ARROW_VERSION_STRING << " / "
+              << arrow::GetBuildInfo().version_string << '\n';
+    return 1;
+  }
   std::cerr << "intensity_match: parser\n";
   parser();
   std::cerr << "intensity_match: replacement and reranking\n";
@@ -295,6 +352,8 @@ int main()
   no_restrict_preserves_counts();
   mz_mismatch_throws();
   mixed_provenance_refused();
+  duplicate_keys_count_once();
+  loss_bearing_rank_and_preservation();
   std::cerr << "intensity_match: report layouts\n";
   report_layouts();
   if (failures) { std::cerr << failures << " failure(s)\n"; return 1; }

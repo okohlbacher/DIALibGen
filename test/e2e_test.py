@@ -43,8 +43,8 @@ def main(binary, fasta, model_dir, workdir):
         if not ok:
             failures.append(msg)
 
-    def run(out, config=None):
-        args = [binary, "-in", fasta, "-out", out]
+    def run(out, config=None, extra=()):
+        args = [binary, "-in", fasta, "-out", out, *extra]
         if config is not None:
             name = out + ".config.json"
             with open(name, "w") as fh:
@@ -128,6 +128,42 @@ def main(binary, fasta, model_dir, workdir):
     check(meta.get("odia.params") != irt_meta.get("odia.params"),
           "a raw and an iRT library do not share a cache fingerprint")
 
+    # Tight selection removes empty assays consistently in both output formats.
+    strict = {"min_relative_intensity": 0.9, "fragments": [1, 12]}
+    run("strict.parquet", strict)
+    run("strict.tsv", strict)
+    import csv
+    with open("strict.tsv") as handle:
+        tsv_ids = {r["Precursor.Id"] for r in csv.DictReader(handle, delimiter="\t")}
+    strict_data = pq.read_table("strict.parquet").to_pydict()
+    check(tsv_ids == set(strict_data["Precursor.Id"]), "strict MS2 floor preserves identical TSV/Parquet precursor sets")
+    check(all(len(v) > 0 for v in strict_data["Product.Mz"]), "strict floor never writes empty assays")
+
+    # Cache keys include calibration data and the decoy precursor mass policy.
+    standards = "custom-irt.tsv"
+    with open(standards, "w") as f:
+        f.write("LGGNEQVTR\t-24.92\nGAGSSEPVTGLDAK\t0\nVEATFGVDESNAK\t12.39\n")
+    run("custom1.parquet", {"irt_rescale": True}, ["-irt_standards", standards])
+    with open(standards, "a") as f:
+        f.write("YILAGVENSK\t19.79\n")
+    run("custom2.parquet", {"irt_rescale": True}, ["-irt_standards", standards])
+    keys = [pq.read_schema(name).metadata[b"odia.fingerprint"] for name in ("custom1.parquet", "custom2.parquet")]
+    check(keys[0] != keys[1], "custom iRT standards affect cache key")
+    run("mass-decoy.parquet", {"decoys": "mutate", "recompute_decoy_mz": True})
+    check(pq.read_schema("mass-decoy.parquet").metadata[b"odia.fingerprint"] !=
+          pq.read_schema("mut.parquet").metadata[b"odia.fingerprint"], "decoy precursor-mass policy affects cache key")
+    for bad in ("nan", "inf", "12junk", "bad"):
+        with open(standards, "w") as f:
+            f.write(f"LGGNEQVTR\t{bad}\nGAGSSEPVTGLDAK\t0\nVEATFGVDESNAK\t12.39\n")
+        failure = subprocess.run([binary, "-in", fasta, "-out", "invalid.tsv", "-generation:irt_rescale", "true", "-irt_standards", standards], capture_output=True, text=True, env=env)
+        check(failure.returncode != 0 and "invalid iRT standard" in failure.stdout + failure.stderr,
+              f"malformed iRT standard {bad!r} rejected before calibration")
+    sentinel = b"existing output must survive\n"
+    with open("protected.tsv", "wb") as f:
+        f.write(sentinel)
+    failure = subprocess.run([binary, "-in", fasta, "-out", "protected.tsv"], capture_output=True, env=env)
+    check(failure.returncode != 0 and open("protected.tsv", "rb").read() == sentinel, "generation refuses to replace an existing output")
+
     def decoy_fragments(path):
         t = pq.read_table(path).to_pydict()
         return [np.asarray(p, dtype=float)
@@ -162,6 +198,10 @@ def main(binary, fasta, model_dir, workdir):
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         sys.exit(__doc__)
-    work = sys.argv[4] if len(sys.argv) > 4 else tempfile.mkdtemp(prefix="dialibgen-e2e.")
-    sys.exit(main(os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2]),
-                  os.path.abspath(sys.argv[3]), work))
+    parent = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else None
+    if parent: os.makedirs(parent, exist_ok=True)
+    binary, fasta, models = map(os.path.abspath, sys.argv[1:4])
+    with tempfile.TemporaryDirectory(prefix="dialibgen-e2e.", dir=parent) as work:
+        code = main(binary, fasta, models, work)
+        os.chdir(parent or tempfile.gettempdir())
+    sys.exit(code)

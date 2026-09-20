@@ -68,6 +68,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
     const bool refinement = refinement_options_.count(option) || training;
     bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
+    if (mode == "refine" && training && !getFlag_("tune")) { wrong_mode = true; }
     if (mode == "tune" && refinement && !training && option != "ids" && option != "out_report" &&
         option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
     // A generated INI contains every mode's defaults. Only reject an explicit
@@ -77,7 +78,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const auto default_value = info.type == OpenMS::ParameterInformation::FLAG ? OpenMS::ParamValue("false") : info.default_value;
     if (parameters.getValue(option) != default_value)
     {
-      writeLogError_("-" + option + " has no effect in -mode " + mode + "; select the matching mode or remove the option");
+      writeLogError_("-" + option + " has no effect in -mode " + mode +
+                     (mode == "refine" && training ? "; enable -tune or remove the training option" :
+                                                    "; select the matching mode or remove the option"));
       return ILLEGAL_PARAMETERS;
     }
   }

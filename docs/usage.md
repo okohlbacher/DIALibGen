@@ -149,8 +149,23 @@ Input libraries can be DIA-NN-dialect Parquet or TSV. Output format follows
 `-out`'s extension. Generation embeds the effective recipe and FASTA/model
 hashes in Parquet. Refinement and tuning additionally write JSON provenance
 sidecars beside their output, including input hashes and the selected mode.
+Each tuned head includes its full recipe, cohort counts, filtering, seed,
+stopping policy and evaluation even when temporary model files are discarded.
+Model digests are SHA-256; library, report and FASTA cache digests are explicitly
+labelled FNV-1a64. These cache fingerprints are not cryptographic integrity checks.
 Parquet embeds the same provenance under `odia.config_json`; plain TSV has no
 schema metadata.
+
+Existing library outputs are refused. Writers stage complete files in a private
+directory beside the destination and rename them into place only after a
+successful close. Refinement prepares its library, provenance and optional
+report before publishing the library; a system interruption can leave an orphan
+sidecar, but does not expose a half-written library.
+
+The training seed is reproducible within the same build and device setup;
+numeric results can differ across platforms, runtimes and CUDA kernels. The
+wall-clock training budget is checked at epoch boundaries and includes report
+loading and validation; final evaluation and export can exceed that budget.
 
 Keep the provenance and any training sidecars with the library. A successful
 write does not establish that a library improves a downstream search; the
@@ -169,8 +184,13 @@ write does not establish that a library improves a downstream search; the
   automatic inference parallelism or an explicit count. `-machine:threads`
   controls training separately.
 - Met excision now includes every allowed missed-cleavage peptide. Generated
-  peptide space can increase; cache fingerprint v4 prevents reuse of libraries
+  peptide space can increase; cache fingerprint v5 prevents reuse of libraries
   made with the old omission. Frozen 0.10.1 benchmark libraries are historical
   artifacts and should not be overwritten by regenerated outputs.
+- Generation accepts distinct precursor charges 1–8 and fragment charges 1–2,
+  matching the supported prediction/refinement contract. It rejects missing or
+  non-finite model predictions and removes assays with no surviving fragments.
+  Ambiguous-residue peptides are counted and skipped, while valid peptides from
+  the same protein remain eligible; a terminal FASTA `*` is accepted.
 - A source build without `DIALIBGEN_BUILD_FINETUNE` supports generation and
   observed-value refinement; requesting tune reports the missing capability.

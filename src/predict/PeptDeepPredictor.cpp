@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <exception>
 #include <filesystem>
 #include <mutex>
@@ -123,11 +124,16 @@ namespace ODIA
         // Registering the provider can succeed while creating the session with
         // it fails, so the fallback has to cover both.
         impl_->provider = Provider::CPU;
+        impl_->device = -1;
         impl_->options = Ort::SessionOptions{};
         impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
-        impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(),
-                                                        impl_->options);
+        try
+        {
+          impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
+        }
+        catch (const Ort::Exception& retry)
+        { throw std::runtime_error("cannot open model " + model_path + ": " + retry.what()); }
       }
       else
       {
@@ -236,7 +242,10 @@ namespace ODIA
         // One thread's failure must stop the others rather than let them run
         // on for the rest of a two-million-peptide proteome. The first
         // exception is kept and rethrown on the calling thread.
-        if (first_error) { return; }
+        {
+          const std::lock_guard<std::mutex> lock(first_error_mutex);
+          if (first_error) { return; }
+        }
         try
         {
           body(session, chunks[i]);
@@ -302,7 +311,7 @@ namespace ODIA
     {
       throw std::runtime_error("model output is not float32");
     }
-    if (info.GetElementCount() != group.size())
+    if (info.GetElementCount() != group.size() || info.GetShape().size() != 1)
     {
       throw std::runtime_error(
         "model returned " + std::to_string(info.GetElementCount()) + " values for " +
@@ -315,6 +324,8 @@ namespace ODIA
     {
       // Back to the caller's order: grouping reorders, and a caller that got
       // predictions silently permuted would have no way to notice.
+      if (!std::isfinite(values[i]))
+      { throw std::runtime_error("model returned a non-finite prediction for peptide index " + std::to_string(group[i])); }
       out[group[i]] = values[i];
     }
   }
@@ -339,12 +350,14 @@ namespace ODIA
     // NCE is one value for the whole call, so a bad one is not a per-peptide
     // failure and must not be reported as 2048 of them. It is also silent: the
     // model returns a plausible spectrum for any float it is given.
-    if (!std::isfinite(nce) || nce <= 0.0f || nce > 1000.0f)
+    if (!std::isfinite(nce) || nce <= 0.0f || nce > 100.0f)
     {
       throw std::invalid_argument("collision energy " + std::to_string(nce) +
                                   " is not a usable NCE");
     }
 
+    const auto canonical_instrument = PeptDeepEncoder::canonicalInstrument(instrument);
+    if (canonical_instrument.empty()) { throw std::invalid_argument("unknown instrument: " + instrument); }
     std::vector<Spectrum> out(peptides.size());
     std::mutex failure_mutex;
 
@@ -361,7 +374,7 @@ namespace ODIA
       PeptDeepEncoder::Batch batch;
       try
       {
-        batch = PeptDeepEncoder::encode(subset, subset_charges, nce, instrument);
+        batch = PeptDeepEncoder::encode(subset, subset_charges, nce, canonical_instrument);
       }
       catch (const std::exception&)
       {
@@ -377,7 +390,7 @@ namespace ODIA
           {
             const auto single = PeptDeepEncoder::encode(
               std::vector<OpenMS::AASequence>{subset[i]},
-              std::vector<int>{subset_charges[i]}, nce, instrument);
+              std::vector<int>{subset_charges[i]}, nce, canonical_instrument);
             runMS2Batch_(session, single, {group[i]}, out);
           }
           catch (const std::exception& inner)
@@ -472,9 +485,11 @@ namespace ODIA
         // Indexed by group[i], not i: the peptides were reordered into length
         // groups, and writing them back in batch order would silently permute
         // whole spectra between peptides of the same length.
-        spectrum.intensities.assign(
-          values + i * positions * Spectrum::CHANNELS,
-          values + (i + 1) * positions * Spectrum::CHANNELS);
+        const auto* first = values + i * positions * Spectrum::CHANNELS;
+        const auto* last = values + (i + 1) * positions * Spectrum::CHANNELS;
+        if (!std::all_of(first, last, [](float v) { return std::isfinite(v); }))
+        { throw std::runtime_error("MS2 model returned a non-finite spectrum for peptide index " + std::to_string(group[i])); }
+        spectrum.intensities.assign(first, last);
       }
      }
     }
@@ -671,6 +686,8 @@ namespace ODIA
     for (std::size_t i = 0; i < group.size(); ++i)
     {
       // Indexed by group[i]: the peptides were reordered into length groups.
+      if (!std::isfinite(values[i]))
+      { throw std::runtime_error("model returned a non-finite prediction for peptide index " + std::to_string(group[i])); }
       out[group[i]] = values[i];
     }
   }

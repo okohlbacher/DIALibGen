@@ -10,6 +10,7 @@
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
 #include <OpenMS/CHEMISTRY/ProteaseDigestion.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
+#include <OpenMS/CHEMISTRY/ResidueModification.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 
 #include <iostream>
@@ -187,6 +188,12 @@ namespace ODIA
                                                      const DigestParams& params,
                                                      Library& library)
   {
+    if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
+    { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
+    std::set<int> charges(params.charges.begin(), params.charges.end());
+    if (charges.empty() || *charges.begin() < 1 || *charges.rbegin() > 8 ||
+        charges.size() != params.charges.size())
+    { throw std::invalid_argument("precursor_charges must be distinct integers between 1 and 8"); }
     Stats stats;
 
     std::vector<FASTAFile::FASTAEntry> entries;
@@ -204,8 +211,10 @@ namespace ODIA
     for (const auto& entry : entries)
     {
       AASequence protein;
-      try { protein = AASequence::fromString(entry.sequence); }
-      catch (const std::exception&) { continue; }  // non-standard residues
+      std::string sequence = entry.sequence;
+      if (!sequence.empty() && sequence.back() == '*') { sequence.pop_back(); }
+      try { protein = AASequence::fromString(sequence); }
+      catch (const std::exception&) { ++stats.dropped_proteins; continue; }
 
       peptides.clear();
       digestion.digest(protein, peptides, params.min_length, params.max_length);
@@ -218,7 +227,7 @@ namespace ODIA
       {
         try
         {
-          const auto excised = AASequence::fromString(entry.sequence.substr(1));
+          const auto excised = AASequence::fromString(sequence.substr(1));
           std::vector<AASequence> more;
           digestion.digest(excised, more, params.min_length, params.max_length);
           peptides.insert(peptides.end(), more.begin(), more.end());
@@ -228,6 +237,18 @@ namespace ODIA
 
       for (const auto& pep : peptides)
       {
+        // Ambiguous residues have no unique elemental composition. Keep the
+        // other peptides from that protein; never guess a mass for X/B/Z/J.
+        const std::string residues = pep.toUnmodifiedString();
+        if (residues.find_first_of("XBZJ") != std::string::npos)
+        { ++stats.dropped_ambiguous_peptides; continue; }
+        try
+        {
+          if (!std::isfinite(pep.getMonoWeight()))
+          { ++stats.dropped_ambiguous_peptides; continue; }
+        }
+        catch (const std::exception&)
+        { ++stats.dropped_ambiguous_peptides; continue; }
         auto& proteins = peptide_to_proteins[pep.toUnmodifiedString()];
         // Compare on ';' boundaries, not by substring: a plain find() drops P1
         // when P12 is already present, which is routine with isoform accessions
@@ -269,8 +290,8 @@ namespace ODIA
       ModifiedPeptideGenerator::applyFixedModifications(fixed_map, base);
 
       forms.clear();
-      forms.push_back(base);
-      if (!params.variable_modifications.empty())
+      if (params.variable_modifications.empty()) { forms.push_back(base); }
+      else
       {
         ModifiedPeptideGenerator::applyVariableModifications(
           variable_map, base, params.max_variable_modifications, forms, true);
@@ -452,7 +473,7 @@ namespace ODIA
       const auto it = by_handle.find(precursors.modified_sequence[i]);
       const float value = it == by_handle.end() ? std::nanf("") : it->second;
       precursors.irt[i] = value;
-      if (std::isnan(value)) { ++unpredicted; }
+      if (!std::isfinite(value)) { ++unpredicted; }
     }
     // Appending nothing, but the accessor is non-const; the ordering is
     // unchanged, so restore the flag rather than forcing a needless re-sort.
@@ -464,6 +485,8 @@ namespace ODIA
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions)
   {
+    if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
+    { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
     auto& p = library.precursors();
     auto& t = library.transitions();
     const std::size_t n = library.precursorCount();
@@ -645,6 +668,10 @@ namespace ODIA
     t = std::move(built);
     p.transition_begin = std::move(begin);
     p.transition_count = std::move(count);
+    std::vector<std::size_t> retained;
+    for (std::size_t i = 0; i < n; ++i)
+    { if (p.transition_count[i] > 0) { retained.push_back(i); } }
+    if (retained.size() != n) { library = library.subsetByIndex(retained); }
     library.shrinkToFit();
     return unpredicted;
   }
@@ -665,13 +692,20 @@ namespace ODIA
     {
       if (line.empty() || line[0] == '#') { continue; }
       const auto tab = line.find('\t');
-      if (tab == std::string::npos) { continue; }
       try
       {
-        peptides.push_back(AASequence::fromString(line.substr(0, tab)));
-        known.push_back(std::stod(line.substr(tab + 1)));
+        if (tab == std::string::npos) { throw std::runtime_error("missing tab"); }
+        auto peptide = AASequence::fromString(line.substr(0, tab));
+        const auto value = line.substr(tab + 1);
+        std::size_t consumed = 0;
+        const double irt = std::stod(value, &consumed);
+        if (!std::isfinite(irt) || value.find_first_not_of(" \t\r", consumed) != std::string::npos)
+        { throw std::runtime_error("expected a finite iRT value"); }
+        peptides.push_back(std::move(peptide));
+        known.push_back(irt);
       }
-      catch (const std::exception&) { continue; }
+      catch (const std::exception& e)
+      { throw std::runtime_error("invalid iRT standard in " + standards_file + ": " + line + " (" + e.what() + ")"); }
     }
     if (peptides.size() < 3)
     {
@@ -697,7 +731,7 @@ namespace ODIA
     std::size_t n = 0;
     for (std::size_t i = 0; i < raw.size(); ++i)
     {
-      if (std::isnan(raw[i])) { continue; }   // a standard we could not encode
+      if (!std::isfinite(raw[i])) { continue; }   // a standard we could not encode
       const double x = raw[i], y = known[i];
       sx += x; sy += y; sxx += x * x; sxy += x * y;
       ++n;
@@ -722,10 +756,12 @@ namespace ODIA
     IrtCalibration c;
     c.slope = (static_cast<double>(n) * sxy - sx * sy) / denom;
     c.intercept = (sy - c.slope * sx) / static_cast<double>(n);
+    if (!std::isfinite(c.slope) || !std::isfinite(c.intercept) || c.slope <= 0)
+    { throw std::runtime_error("iRT calibration must have a finite positive slope"); }
     c.peptides = n;
     for (std::size_t i = 0; i < raw.size(); ++i)
     {
-      if (std::isnan(raw[i])) { continue; }
+      if (!std::isfinite(raw[i])) { continue; }
       c.max_abs_error = std::max(c.max_abs_error, std::abs(c.apply(raw[i]) - known[i]));
     }
     return c;
@@ -829,24 +865,19 @@ namespace ODIA
 
       const std::string sequence(library.strings().get(library.precursors().modified_sequence[i]));
 
-      // Tokenise into residues, each carrying its own modification suffix, so
-      // mutation and reversal preserve modifications instead of dropping them.
+      // Parse with OpenMS so terminal and nested modification names cannot
+      // become bogus residue tokens. Terminal modifications stay terminal.
+      AASequence target;
+      try { target = AASequence::fromString(sequence); }
+      catch (const std::exception&) { ++skipped; continue; }
       struct Token { std::string text; char residue; bool modified; };
       std::vector<Token> tokens;
-      for (std::size_t k = 0; k < sequence.size(); ++k)
+      for (Size k = 0; k < target.size(); ++k)
       {
-        if (sequence[k] == '(' || sequence[k] == '[') { continue; }  // leading N-term mod
-        Token tok{std::string(1, sequence[k]), sequence[k], false};
-        while (k + 1 < sequence.size() && (sequence[k + 1] == '(' || sequence[k + 1] == '['))
-        {
-          const char close = sequence[k + 1] == '(' ? ')' : ']';
-          std::size_t j = k + 1;
-          while (j < sequence.size() && sequence[j] != close) { tok.text.push_back(sequence[j++]); }
-          if (j < sequence.size()) { tok.text.push_back(sequence[j]); }
-          tok.modified = true;
-          k = j;
-        }
-        tokens.push_back(std::move(tok));
+        const auto& residue = target[k];
+        auto single = AASequence::fromString(residue.getOneLetterCode());
+        if (residue.isModified()) { single.setModification(0, residue.getModification()->getId()); }
+        tokens.push_back({single.toString(), residue.getOneLetterCode()[0], residue.isModified()});
       }
       if (tokens.size() < 4) { ++skipped; continue; }
 
@@ -909,14 +940,23 @@ namespace ODIA
         if (tokens.size() <= keep_n + keep_c + 1) { ++skipped; continue; }
         std::vector<Token> mid(tokens.begin() + keep_n, tokens.end() - keep_c);
 
-        std::uint64_t seed = 1469598103934665603ull;      // FNV-1a of the sequence
+        std::uint64_t seed = 14695981039346656037ull;      // FNV-1a of the sequence
         for (const char ch : sequence) { seed = (seed ^ static_cast<std::uint8_t>(ch)) * 1099511628211ull; }
         std::mt19937_64 rng(seed);
 
         std::vector<Token> best;
         for (int attempt = 0; attempt < 20; ++attempt)
         {
-          std::shuffle(mid.begin(), mid.end(), rng);
+          // Fisher-Yates with rejection sampling: std::shuffle and its
+          // distribution are not specified across standard libraries.
+          for (std::size_t k = mid.size(); k > 1; --k)
+          {
+            const std::uint64_t bound = k;
+            const std::uint64_t threshold = (std::uint64_t{0} - bound) % bound;
+            std::uint64_t draw;
+            do { draw = rng(); } while (draw < threshold);
+            std::swap(mid[k - 1], mid[draw % bound]);
+          }
           std::string candidate;
           for (const auto& tok : mid) { candidate += tok.text; }
           std::string original;
@@ -959,8 +999,16 @@ namespace ODIA
       // 0% of target ones, and a criterion that behaves differently for the two
       // classes is the anti-conservative FDR mode D7 exists to avoid.
       AASequence decoy;
-      try { decoy = AASequence::fromString(decoy_sequence); }
+      try
+      {
+        decoy = AASequence::fromString(decoy_sequence);
+        if (target.hasNTerminalModification())
+        { decoy.setNTerminalModification(target.getNTerminalModification()->getId()); }
+        if (target.hasCTerminalModification())
+        { decoy.setCTerminalModification(target.getCTerminalModification()->getId()); }
+      }
       catch (const std::exception&) { ++skipped; continue; }
+      if (decoy == target) { ++skipped; continue; }
 
       auto& p = library.precursors();
       auto& t = library.transitions();
@@ -1144,9 +1192,9 @@ namespace ODIA
       for (const auto& m : v) { j += m; j += "."; }
       return j.empty() ? std::string("none") : j;
     };
-    // v4 includes Met-excised peptides with missed cleavages, which earlier
-    // versions omitted. Do not reuse a library generated with that omission.
-    ps << "v4"
+    // v5 removes duplicate variable-modification forms and empty assays,
+    // rejects ambiguous masses, and pins shuffle across standard libraries.
+    ps << "v5"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages

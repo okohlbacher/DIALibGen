@@ -37,13 +37,12 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/version-guard.cmake)
 
 find_package(Eigen3 3.4.0...<6 QUIET CONFIG)
 if(NOT Eigen3_FOUND)
-  set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim"
-      CACHE PATH "Eigen3 package directory" FORCE)
+  set(Eigen3_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cmake/eigen3-range-shim")
   message(STATUS "Eigen3: using cmake/eigen3-range-shim "
                  "(the installed Eigen rejects OpenMS's version range)")
 endif()
 
-find_package(OpenMS REQUIRED)
+find_package(OpenMS 3.5 REQUIRED)
 message(STATUS "OpenMS: ${OpenMS_DIR}")
 
 find_package(Arrow CONFIG REQUIRED)

@@ -55,7 +55,7 @@ namespace ODIA
       static constexpr const char* PROTEIN_GROUP = "Protein.Group";
     };
 
-    /// Load a library. Dispatches on the extension: .parquet, else TSV.
+    /// Load a library. Accepts .parquet or .tsv (case insensitive).
     ///
     /// Rows are grouped into precursors by a change in Precursor.Id, so the
     /// input must keep a precursor's transitions together -- which DIA-NN does.

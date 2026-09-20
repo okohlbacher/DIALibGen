@@ -1,5 +1,30 @@
-# Accept whatever was requested, including version ranges. See Eigen3Config.cmake
-# in this directory for why this exists.
-set(PACKAGE_VERSION "3.4.0")
+# Read the actual headers; work around Eigen's range check without inventing a version.
+find_path(EIGEN3_INCLUDE_DIR signature_of_eigen3_matrix_library
+          PATH_SUFFIXES eigen3 include/eigen3)
+set(PACKAGE_VERSION_COMPATIBLE FALSE)
+if(NOT EIGEN3_INCLUDE_DIR)
+  return()
+endif()
+file(STRINGS "${EIGEN3_INCLUDE_DIR}/Eigen/src/Core/util/Macros.h" _eigen_version_lines
+     REGEX "^#define EIGEN_(WORLD|MAJOR|MINOR)_VERSION +[0-9]+")
+foreach(_component WORLD MAJOR MINOR)
+  string(REGEX MATCH "EIGEN_${_component}_VERSION +([0-9]+)" _match "${_eigen_version_lines}")
+  if(NOT _match)
+    return()
+  endif()
+  set(_eigen_${_component} "${CMAKE_MATCH_1}")
+endforeach()
+set(PACKAGE_VERSION "${_eigen_WORLD}.${_eigen_MAJOR}.${_eigen_MINOR}")
 set(PACKAGE_VERSION_COMPATIBLE TRUE)
 set(PACKAGE_VERSION_EXACT FALSE)
+if(PACKAGE_FIND_VERSION AND PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+endif()
+if(PACKAGE_FIND_VERSION_RANGE_MAX STREQUAL "EXCLUDE" AND NOT PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION_MAX)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+elseif(PACKAGE_FIND_VERSION_RANGE_MAX STREQUAL "INCLUDE" AND PACKAGE_VERSION VERSION_GREATER PACKAGE_FIND_VERSION_MAX)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+endif()
+if(PACKAGE_VERSION VERSION_EQUAL PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_EXACT TRUE)
+endif()

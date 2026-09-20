@@ -54,16 +54,12 @@ assert json.loads((out / "refined.tsv.refine.json").read_text())["tool"] == "DIA
 for head in ("rt", "ccs"):
     models = out / head
     result = run(f"tune-{head}", ["-mode", "tune", *common, "-out", out / f"tuned-{head}.tsv", "-tune_heads", head, "-tune_out_models", models,
-        "-filter:rt_max_minutes", "30", "-train:epochs", "1", "-train:warmup", "0", "-stop:min_epochs", "1", "-machine:threads", "2", "-machine:device", "cpu"], allowed=(0, 13))
+        "-filter:rt_max_minutes", "30", "-train:epochs", "20", "-train:warmup", "2", "-stop:min_epochs", "20", "-machine:threads", "2", "-machine:device", "cpu"])
     model = models / f"peptdeep_{head}_dynamic.onnx"
     provenance = json.loads(Path(str(model) + ".tune.json").read_text())
     course = provenance["course"]
-    assert course["updates"] > 0 and course["epochs_run"] == 1, f"{head}: no optimizer work"
+    assert course["updates"] > 0 and course["epochs_run"] == 20, f"{head}: no optimizer work"
     assert provenance["device"] == "cpu"
-    if result.returncode:
-        assert not course["exported"] and "no checkpoint beat the stock model" in result.stderr + result.stdout, f"{head}: unexpected failure"
-        assert not model.exists(), f"{head}: refused model nevertheless exported"
-    else:
-        assert course["exported"] and model.stat().st_size > 0, f"{head}: no tuned model"
-        assert len((out / f"tuned-{head}.tsv").read_text().splitlines()) > 1
+    assert course["exported"] and model.stat().st_size > 0, f"{head}: no tuned model"
+    assert len((out / f"tuned-{head}.tsv").read_text().splitlines()) > 1
 print("PASS: generate, refine and both CPU training heads work" + (" without the build environment" if a.bare else ""))

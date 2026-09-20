@@ -23,6 +23,23 @@ for head in rt ccs; do
   [ -s "$MODELS/peptdeep_${head}_dynamic.onnx" ] || fail "no stock model for $head in $MODELS"
 done
 
+# Missing CCS data and refinement gates must fail before spending any epochs
+# on RT or writing kept model artifacts.
+"$PY" - "$TMP/report.parquet" "$TMP/no-im.parquet" <<'PY_PREFLIGHT' || exit 1
+import sys
+import pyarrow.parquet as pq
+pq.write_table(pq.read_table(sys.argv[1]).drop(["IM"]), sys.argv[2])
+PY_PREFLIGHT
+if "$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/no-im.parquet" -out "$TMP/not-written.tsv" \
+   -tune_models "$MODELS" -tune_out_models "$TMP/preflight-models" \
+   > "$TMP/preflight.log" 2>&1; then fail "missing CCS IM was accepted"; fi
+grep -q 'IM' "$TMP/preflight.log" || { cat "$TMP/preflight.log"; fail "wrong preflight error"; }
+if find "$TMP/preflight-models" -type f 2>/dev/null | grep -q .; then fail "RT artifacts written before CCS validation"; fi
+if "$BIN" -mode refine -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/not-written.tsv" \
+   -tune -tune_models "$MODELS" -tune_out_models "$TMP/gate-models" \
+   > "$TMP/gate.log" 2>&1; then fail "missing refinement gates accepted"; fi
+if find "$TMP/gate-models" -type f 2>/dev/null | grep -q .; then fail "models trained before refinement validation"; fi
+
 # One invocation: tune both heads, re-predict, refine, write a library.
 # -q_global/-q_protein 1 disable the gates whose columns a synthetic report does
 # not carry; the precursor gate still applies.
@@ -90,8 +107,14 @@ if not c["param_l2_change"] > 0: die("parameters did not move")
 key = "calibrated_sd"
 s, t = ev["stock"]["val"][key], ev["tuned"]["val"][key]
 if not (t < s): die(f"validation {key} did not improve: stock {s:.5f} tuned {t:.5f}")
-if p["cohorts"]["test"] < 10 or p["cohorts"]["val"] < 10: die("cohorts too small: " + str(p["cohorts"]))
-print(f"ok   {head}: val {key} {s:.4f} -> {t:.4f} in {c['epochs_run']} epochs, {c['updates']} updates, TEST {ev['stock']['test'][key]:.4f} -> {ev['tuned']['test'][key]:.4f}")
+import csv, math
+trajectory = list(csv.DictReader(open(sys.argv[3] + ".trajectory.tsv"), delimiter="\t"))
+selected = [r for r in trajectory if r["val_calibrated_sd"]]
+best_row = min(selected, key=lambda r: float(r["val_calibrated_sd"]))
+if int(best_row["epoch"]) != c["best_epoch"]: die("best epoch does not match the trajectory minimum")
+if not math.isclose(float(best_row["val_calibrated_sd"]), t, rel_tol=1e-5, abs_tol=1e-6): die("exported best-checkpoint metric differs from the trajectory")
+if p["cohorts"]["test"] < 100 or p["cohorts"]["val"] < 100: die("cohorts too small: " + str(p["cohorts"]))
+print(f"ok   {head}: val {key} {s:.4f} -> {t:.4f} (best epoch {c['best_epoch']}) in {c['epochs_run']} epochs, {c['updates']} updates, TEST {ev['stock']['test'][key]:.4f} -> {ev['tuned']['test'][key]:.4f}")
 PYEOF
 done
 
@@ -111,9 +134,47 @@ for head in ("rt", "ccs"):
         die(f"{head}: re-predicted {h.get('repredicted')} precursors -- the stage ran and changed nothing")
     if not h.get("model_sha256") or h["model_sha256"] == h.get("stock_sha256"):
         die(f"{head}: the tuned model hash equals the stock one")
+    training = json.loads((pathlib.Path(sys.argv[3]) / f"peptdeep_{head}_dynamic.onnx.tune.json").read_text())
+    if h.get("training") != training: die(f"{head}: library lost the complete training recipe")
     for key, directory in (("stock_sha256", sys.argv[2]), ("model_sha256", sys.argv[3])):
         digest = hashlib.sha256((pathlib.Path(directory) / f"peptdeep_{head}_dynamic.onnx").read_bytes()).hexdigest()
         if h[key] != digest: die(f"{head}: refine {key} differs from hashlib")
 print("ok   re-predicted rt=%d ccs=%d precursors" % (t["rt"]["repredicted"], t["ccs"]["repredicted"]))
 PYEOF2
+
+# Pure tuning must preserve every precursor and fragment, including the library
+# precursors absent from the report. RT-only adaptation must preserve mobility.
+"$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/pure-tuned.tsv" \
+   -tune_heads rt -tune_models "$MODELS" -tune_out_models "$TMP/pure-models" \
+   -filter:rt_max_minutes 30 \
+   -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 -machine:threads 2 \
+   > "$TMP/pure.log" 2>&1 || { cat "$TMP/pure.log" >&2; fail "pure tuning exited non-zero"; }
+"$PY" - "$TMP/library.tsv" "$TMP/pure-tuned.tsv" "$TMP/report.parquet" <<'PYEOF3' || exit 1
+import csv, json, math, sys
+import pyarrow.parquet as pq
+
+def read(path):
+    with open(path) as source:
+        return list(csv.DictReader(source, delimiter="\t"))
+before, after = read(sys.argv[1]), read(sys.argv[2])
+assert len(before) == len(after), "pure tuning changed transition count"
+# The TSV writer uses canonical numeric formatting and omits Stripped.Sequence.
+keys = ("Precursor.Id", "Modified.Sequence", "Protein.Group", "Fragment.Type")
+numeric = ("Precursor.Charge", "Precursor.Mz", "Product.Mz", "Relative.Intensity", "Fragment.Charge", "Fragment.Series.Number", "IM", "CCS", "Decoy")
+identified = set(pq.read_table(sys.argv[3], columns=["Modified.Sequence"]).column(0).to_pylist())
+unseen_changed = 0
+for old, new in zip(before, after):
+    assert all(old[k] == new[k] for k in keys), "pure tuning changed precursor/fragment identity or order"
+    assert all(math.isclose(float(old[k]), float(new[k]), rel_tol=2e-7, abs_tol=1e-7) for k in numeric), "RT-only tuning changed fragment or mobility values"
+    assert math.isfinite(float(new["RT"]))
+    if old["Modified.Sequence"] not in identified and not math.isclose(float(old["RT"]), float(new["RT"]), abs_tol=1e-5):
+        unseen_changed += 1
+assert unseen_changed > 0, "unidentified precursors were not re-predicted"
+p = json.load(open(sys.argv[2] + ".refine.json"))
+assert p["mode"] == "tune" and p["reference"] is None
+assert p["library"]["before"] == p["library"]["after"]
+assert "ccs" not in p["tune"] and p["library"]["rt_written"] == 0
+print("ok   pure RT tuning preserves all keys, fragments, CCS and IM; changes unseen RT")
+PYEOF3
+
 echo "PASSED"

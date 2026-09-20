@@ -93,7 +93,6 @@ jobs:
             homepage "https://github.com/okohlbacher/DIALibGen"
             depends_on macos: :sonoma
             command_wrapper "DIALibGen", executable: "#{{staged_path}}/bin/DIALibGen"
-            command_wrapper "dialibgen-fetch-models", executable: "#{{staged_path}}/bin/dialibgen-fetch-models"
           end
           ''')
                       run('brew', 'install', '--cask', 'dialibgen/startup/dialibgen-candidate')

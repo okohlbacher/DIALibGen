@@ -68,7 +68,7 @@ bundle smoke-test logs. **Pending.**
 - **Documentation drift:** the native parameter reference is generated from the
   executable and supports a `--check` gate.
 - **Met-excised missed-cleavage peptides:** restored, covered by a regression,
-  with cache fingerprint v4.
+  with cache fingerprint v5.
 
 ## Explicit product scope
 

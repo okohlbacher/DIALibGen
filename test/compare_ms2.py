@@ -43,7 +43,7 @@ CASES = [
     ("PEPC(Carbamidomethyl)TIDEK", 2, 35.0, "timsTOF"),
     (".(Acetyl)PEPTIDEK", 2, 30.0, "QE"),
     ("PEPTIDER.(Amidated)", 2, 30.0, "SciexTOF"),
-    ("AVVPASLSGQDVGSFAYLTIK", 3, 28.0, "NotAnInstrument"),
+    ("AVVPASLSGQDVGSFAYLTIK", 3, 28.0, "QE"),
     # The two that reach the modloss channels at all. Oxidised methionine puts
     # 36% of the intensity there and the base peak in y_modloss_z1;
     # phosphoserine, 51%.
@@ -122,6 +122,17 @@ def check_error_paths(tool, model):
         proc = run(tool, model, nce, "QE", [("PEPTIDEK", 2)])
         if proc.returncode == 0:
             print(f"  FAIL {why} was accepted")
+            bad += 1
+
+    unknown = run(tool, model, 30.0, "NotAnInstrument", [("PEPTIDEK", 2)])
+    if unknown.returncode == 0 or "unknown instrument" not in unknown.stderr:
+        print("  FAIL unknown instrument was not rejected by the prediction API")
+        bad += 1
+    for alias, canonical in (("timsTOF Pro", "timsTOF"), ("Orbitrap Exploris 480", "QE")):
+        got = run(tool, model, 30.0, alias, [("PEPTIDEK", 2)])
+        expected = run(tool, model, 30.0, canonical, [("PEPTIDEK", 2)])
+        if got.returncode or expected.returncode or got.stdout != expected.stdout:
+            print(f"  FAIL instrument alias {alias} differs from {canonical}")
             bad += 1
 
     # One unencodable peptide must cost one peptide, not its whole chunk. The

@@ -14,6 +14,7 @@ line for THIS checkpoint, so a silent model swap is visible.
 
 usage: check_irt.py <odia_irt_calibration> <rt_model.onnx> <standards.tsv> <fixture.csv>
 """
+import math
 import subprocess
 import sys
 
@@ -60,7 +61,7 @@ for seq, (raw, _) in per_peptide.items():
     if seq not in want:
         fail(f"{seq} is not in the fixture")
         continue
-    if abs(raw - want[seq]["rt_pred_onnx"]) > 2e-6:
+    if not math.isfinite(raw) or abs(raw - want[seq]["rt_pred_onnx"]) > 2e-6:
         fail(f"{seq}: raw prediction {raw:.9f}, fixture says "
              f"{want[seq]['rt_pred_onnx']:.9f}")
 
@@ -71,7 +72,7 @@ for seq, (raw, _) in per_peptide.items():
 for seq, (_, calibrated) in per_peptide.items():
     if seq not in want:
         continue
-    if abs(calibrated - want[seq]["irt_pred_onnx"]) > 5e-4:
+    if not math.isfinite(calibrated) or abs(calibrated - want[seq]["irt_pred_onnx"]) > 5e-4:
         fail(f"{seq}: calibrated {calibrated:.6f}, fixture says "
              f"{want[seq]['irt_pred_onnx']:.6f}")
 
@@ -83,7 +84,7 @@ for name, expected, tol in (("slope", 152.235611, 1e-3),
                             ("max_abs_error", 8.756966, 1e-3)):
     if name not in got:
         fail(f"tool did not report {name}")
-    elif abs(got[name] - expected) > tol:
+    elif not math.isfinite(got[name]) or abs(got[name] - expected) > tol:
         fail(f"{name} is {got[name]}, expected {expected}")
 
 # The calibration must be monotone increasing, or it would reorder the library.

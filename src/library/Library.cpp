@@ -229,8 +229,8 @@ namespace ODIA
       if (precursors_.decoy[i]) { continue; }
       np.mz.push_back(precursors_.mz[i]);
       np.irt.push_back(precursors_.irt[i]);
-      np.im.push_back(precursors_.im[i]);
-      np.ccs.push_back(precursors_.ccs.empty()
+      np.im.push_back(i < precursors_.im.size() ? precursors_.im[i] : std::numeric_limits<float>::quiet_NaN());
+      np.ccs.push_back(i >= precursors_.ccs.size()
                          ? std::numeric_limits<float>::quiet_NaN()
                          : precursors_.ccs[i]);
       np.charge.push_back(precursors_.charge[i]);
@@ -300,8 +300,8 @@ namespace ODIA
       }
       out.precursors_.mz.push_back(precursors_.mz[i]);
       out.precursors_.irt.push_back(precursors_.irt[i]);
-      out.precursors_.im.push_back(precursors_.im[i]);
-      out.precursors_.ccs.push_back(precursors_.ccs.empty()
+      out.precursors_.im.push_back(i < precursors_.im.size() ? precursors_.im[i] : std::numeric_limits<float>::quiet_NaN());
+      out.precursors_.ccs.push_back(i >= precursors_.ccs.size()
                                       ? std::numeric_limits<float>::quiet_NaN()
                                       : precursors_.ccs[i]);
       out.precursors_.charge.push_back(precursors_.charge[i]);
@@ -369,8 +369,8 @@ namespace ODIA
       const std::uint32_t src = order[i];
       np.mz[i] = precursors_.mz[src];
       np.irt[i] = precursors_.irt[src];
-      np.im[i] = precursors_.im[src];
-      np.ccs[i] = precursors_.ccs.empty() ? std::numeric_limits<float>::quiet_NaN()
+      np.im[i] = src < precursors_.im.size() ? precursors_.im[src] : std::numeric_limits<float>::quiet_NaN();
+      np.ccs[i] = src >= precursors_.ccs.size() ? std::numeric_limits<float>::quiet_NaN()
                                           : precursors_.ccs[src];
       np.charge[i] = precursors_.charge[src];
       np.decoy[i] = precursors_.decoy[src];

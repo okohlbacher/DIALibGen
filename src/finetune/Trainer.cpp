@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Oliver Kohlbacher and the DIALibRefine authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <odia/AtomicFile.h>
 #include <odia/tune/Trainer.h>
 #include <odia/tune/PeptDeepModel.h>
 #include <odia/tune/OnnxWeights.h>
@@ -26,13 +27,9 @@
 #include <cmath>
 #include <filesystem>
 #include <functional>
-#ifdef _WIN32
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
 #include <fstream>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <set>
@@ -195,6 +192,7 @@ namespace ODIA::tune
       auto run_col = table->GetColumnByName("Run");
       auto decoy_col = table->GetColumnByName("Decoy");
       const auto decoy = decoy_col ? toDoubles(decoy_col) : std::vector<double>();
+      if (!decoy_col) { log << "WARNING: no Decoy column; all report rows are treated as targets\n"; }
       if (run_col)
       {
         const auto run = toStrings(run_col);
@@ -211,7 +209,7 @@ namespace ODIA::tune
       for (std::size_t i = 0; i < d.rows; ++i)
       {
         if (!decoy.empty() && !(decoy[i] == 0)) { ++d.rejected.decoy; continue; }          // any truthy value, NaN included
-        if (!std::isfinite(q[i]) || q[i] > p.q_value) { ++d.rejected.q; continue; }
+        if (!std::isfinite(q[i]) || q[i] < 0 || q[i] > 1 || q[i] > p.q_value) { ++d.rejected.q; continue; }
         if (!std::isfinite(z[i]) || z[i] != std::floor(z[i]) || z[i] < 1 || z[i] > 8) { ++d.rejected.charge; continue; }
         const int zi = static_cast<int>(z[i]);
         if (zi < z_min) { ++d.rejected.charge; continue; }
@@ -222,13 +220,14 @@ namespace ODIA::tune
         ++d.observations;
       }
 
+      std::map<std::string, std::set<std::string>> sequence_groups;
+      for (const auto& [key, obs] : by_key)
+      { for (const auto& o : obs) { sequence_groups[key.first].insert(o.pg); } }
       double rt_hi = 0;
       for (auto& [key, obs] : by_key)
       {
         Unit u;
-        bool conflict = false;
-        for (const auto& o : obs) { if (o.pg != obs.front().pg) { conflict = true; break; } }
-        if (conflict) { ++d.rejected.pg_conflict; continue; }
+        if (sequence_groups.at(key.first).size() != 1) { ++d.rejected.pg_conflict; continue; }
         try { u.peptide = OpenMS::AASequence::fromString(key.first); }
         catch (const std::exception&) { ++d.rejected.unparsable; continue; }
         try { (void)PeptDeepEncoder::encode(u.peptide); }
@@ -453,35 +452,67 @@ namespace ODIA::tune
       return std::sqrt(acc);
     }
 
+    void validateParams(const TuneParams& p)
+    {
+      const bool ccs = p.head == HeadKind::CCS;
+    auto range = [](const char* name, double value, double low, double high) {
+      if (!std::isfinite(value) || value < low || value > high)
+      { throw std::runtime_error(std::string(name) + " must be finite and in [" + std::to_string(low) + ", " + std::to_string(high) + "]"); }
+    };
+    range("filter:q_value", p.q_value, 0, 1);
+    range("cohort:train_frac", p.train_frac, 0, 1);
+    range("stop:rel_tol", p.rel_tol, 0, 1);
+    range("filter:rt_spread_max", p.rt_spread_max, 0, std::numeric_limits<double>::max());
+    range("filter:rt_max_minutes", p.rt_max_minutes, 0, std::numeric_limits<double>::max());
+    range("stop:abs_tol", p.abs_tol, 0, std::numeric_limits<double>::max());
+    range("stop:max_seconds", p.max_seconds, 0, std::numeric_limits<double>::max());
+    if (!std::isfinite(p.lr) || p.lr <= 0) { throw std::runtime_error("train:lr must be finite and > 0"); }
+    if (p.epochs < 1 || p.warmup < 0 || p.warmup > p.epochs)
+    { throw std::runtime_error("train:warmup must be in [0, train:epochs] and train:epochs must be positive"); }
+    if (p.batch_size < 1 || p.eval_every < 1 || p.threads < 1 || p.min_epochs < 0 || p.patience < 0)
+    { throw std::runtime_error("training batch size, evaluation interval and threads must be positive; stopping epochs must be nonnegative"); }
+    if (p.min_charge < 1 || p.min_charge > 8) { throw std::runtime_error("filter:min_charge must be in [1, 8]"); }
+    if (p.train_size && p.train_frac > 0) { throw std::runtime_error("give cohort:train_size or cohort:train_frac, not both"); }
+    if (ccs && p.min_charge < 2 && !p.allow_z1) { throw std::runtime_error("charge 1 is censored at the mobility ramp top on timsTOF; pass -filter:allow_z1 to train CCS on it anyway"); }
+      if (p.full_fit && (p.train_size || p.train_frac > 0))
+      { throw std::runtime_error("cohort:full_fit cannot be combined with a training subsample"); }
+    }
+
     void writeAtomically(const std::string& path, const std::function<void(const std::string&)>& write)
     {
-      // A unique scratch name: "<out>.part" could be the input, or a symlink to it.
-#ifdef _WIN32
-      const auto pid = ::_getpid();
-#else
-      const auto pid = ::getpid();
-#endif
-      const std::string part = path + ".tmp-" + std::to_string(static_cast<long>(pid));
-      std::error_code ec0;
-      if (std::filesystem::exists(part, ec0)) { throw std::runtime_error("scratch file already exists: " + part); }
-      write(part);
-      std::error_code ec;
-      std::filesystem::rename(part, path, ec);
-      if (ec) { throw std::runtime_error("cannot move " + part + " into place: " + ec.message()); }
+      AtomicFile staged(path);
+      write(staged.temporaryPath().string());
+      staged.commit();
     }
+  }
+
+  void validateTrainingReport(const TuneParams& p, std::ostream& log)
+  {
+    validateParams(p);
+    const auto d = loadReport(p, log);
+    std::size_t test = 0, val = 0, pool = 0;
+    for (const auto& u : d.units)
+    {
+      if (u.cohort == Unit::Test) { ++test; }
+      else if (u.cohort == Unit::Val && p.inner_val) { ++val; }
+      else { ++pool; }
+    }
+    if (!p.inner_val) { val = test; }
+    if (val < 100 || test < 100)
+    { throw std::runtime_error("validation or test cohort has fewer than 100 units (val " + std::to_string(val) + ", test " + std::to_string(test) + ")"); }
+    if (pool == 0) { throw std::runtime_error("training set is empty"); }
   }
 
   TuneResult finetune(const TuneParams& p, std::ostream& log)
   {
+    const auto started = Clock::now();
     const bool ccs = p.head == HeadKind::CCS;
     {
       std::error_code ec;
       const auto a = std::filesystem::weakly_canonical(p.model_in, ec), b = std::filesystem::weakly_canonical(p.model_out, ec);
       if (p.model_out == p.model_in || (!ec && a == b)) { throw std::runtime_error("-out must not be the stock model itself"); }
     }
-    if (p.rel_tol < 0 || p.abs_tol < 0) { throw std::runtime_error("tolerances must be >= 0"); }
-    if (p.train_frac < 0 || p.train_frac > 1) { throw std::runtime_error("train_frac must be in [0, 1]"); }
-    if (ccs && p.min_charge < 2 && !p.allow_z1) { throw std::runtime_error("charge 1 is censored at the mobility ramp top on timsTOF; pass -filter:allow_z1 to train CCS on it anyway"); }
+    validateParams(p);
     TuneResult res;
     res.model_out = p.model_out;
 
@@ -635,7 +666,7 @@ namespace ODIA::tune
 
       // A budget or horizon stop evaluates the state it stops at, so no run
       // ends without a checkpoint having been looked at.
-      const bool budget_hit = p.max_seconds > 0 && res.train_seconds >= p.max_seconds;
+      const bool budget_hit = p.max_seconds > 0 && seconds(started) >= p.max_seconds;
       const bool last = epoch + 1 == p.epochs;
       const bool evaluate = (epoch + 1) % p.eval_every == 0 || last || budget_hit;
       Metrics vm; bool is_best = false;
@@ -652,7 +683,7 @@ namespace ODIA::tune
         if (epoch + 1 >= no_stop_before && epoch + 1 - anchor_epoch >= p.patience)
         { stop = "patience (" + std::to_string(epoch + 1 - anchor_epoch) + " epochs without progress of max(" + std::to_string(p.abs_tol) + ", " + std::to_string(100 * p.rel_tol) + "% of the anchor))"; }
       }
-      if (stop.empty() && budget_hit) { stop = "max_seconds"; }
+      if (stop.empty() && p.max_seconds > 0 && seconds(started) >= p.max_seconds) { stop = "max_seconds"; }
       if (stop.empty() && last) { stop = "horizon"; }
 
       traj << epoch + 1 << '\t' << lr << '\t' << res.updates << '\t' << train_loss << '\t';
@@ -684,9 +715,10 @@ namespace ODIA::tune
     nlohmann::json prov = {
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
       {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn},
+      {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA kernels may be nondeterministic."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},
                   {"batch_size", p.batch_size}, {"epochs", p.epochs}, {"warmup", p.warmup}, {"schedule", "linear warmup then cosine, stepped per epoch"}, {"dropout", 0.1}, {"seed", p.seed}}},
-      {"stopping", {{"eval_every", p.eval_every}, {"min_epochs", p.min_epochs}, {"patience_epochs", p.patience}, {"rel_tol", p.rel_tol}, {"abs_tol", p.abs_tol}, {"max_seconds", p.max_seconds},
+      {"stopping", {{"eval_every", p.eval_every}, {"min_epochs", p.min_epochs}, {"patience_epochs", p.patience}, {"rel_tol", p.rel_tol}, {"abs_tol", p.abs_tol}, {"max_seconds", p.max_seconds}, {"budget_scope", "per-head elapsed wall time, checked at epoch boundaries; final evaluation and export may exceed it"},
                     {"select", selectName(p.select)}, {"rule", "progress = beat the anchor by max(abs_tol, rel_tol*anchor); stop after `patience` epochs without progress, never before max(min_epochs, warmup); selection starts from the stock model"}}},
       {"filter", {{"q_value", p.q_value}, {"min_charge", ccs ? p.min_charge : 1}, {"allow_z1", p.allow_z1}, {"rt_spread_max", p.rt_spread_max}, {"rt_max_minutes", d.rt_max_minutes}}},
       {"inputs", {{"report", p.report}, {"run", d.run}, {"rows", d.rows}, {"model_in", p.model_in}, {"model_in_sha256", res.model_in_sha256}}},

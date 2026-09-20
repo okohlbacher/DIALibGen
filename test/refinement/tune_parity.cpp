@@ -15,6 +15,9 @@
 ///   tune_parity <rt.onnx> <ccs.onnx>
 
 #include <odia/tune/OnnxWeights.h>
+#include <odia/AtomicFile.h>
+#include <cstring>
+#include <limits>
 #include <odia/PeptDeepEncoder.h>
 #include <odia/PeptDeepPredictor.h>
 
@@ -151,6 +154,34 @@ namespace
           "metadata-bearing model still supports byte-identical weight round-trip");
   }
 
+  void rejectsNonfinite(const std::string& path, const std::string& kind)
+  {
+    OnnxFile broken = OnnxFile::read(path);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const auto& tensor : broken.initializers)
+    {
+      if (tensor.data_type != 1) { continue; }
+      for (std::size_t i = 0; i + sizeof(nan) <= tensor.raw_length; i += sizeof(nan))
+      { std::memcpy(broken.bytes.data() + tensor.raw_offset + i, &nan, sizeof(nan)); }
+    }
+    AtomicFile temporary(std::filesystem::temp_directory_path() / "nonfinite-test.onnx");
+    broken.write(temporary.temporaryPath().string());
+    const auto peps = peptides(); // Multiple lengths ensure independent workers fail concurrently.
+    for (const int sessions : {1, 4})
+    {
+      bool refused = false;
+      try
+      {
+        PeptDeepPredictor predictor(temporary.temporaryPath().string(), false, 1, sessions);
+        if (kind == "rt") { (void)predictor.predictRT(peps); }
+        else if (kind == "ccs") { (void)predictor.predictCCS(peps, std::vector<int>(peps.size(), 2)); }
+        else { (void)predictor.predictMS2(peps, std::vector<int>(peps.size(), 2), 30, "QE"); }
+      }
+      catch (const std::exception& e) { refused = std::string(e.what()).find("non-finite") != std::string::npos; }
+      check(refused, kind + ": non-finite model output rejected with " + std::to_string(sessions) + " sessions");
+    }
+  }
+
   void parity(const std::string& path, bool ccs)
   {
     // Stage markers, flushed: where a crash happens is the whole diagnosis on
@@ -214,6 +245,9 @@ int main(int argc, char** argv)
   {
     parity(argv[1], false);
     parity(argv[2], true);
+    rejectsNonfinite(argv[1], "rt");
+    rejectsNonfinite(argv[2], "ccs");
+    rejectsNonfinite((std::filesystem::path(argv[1]).parent_path() / "peptdeep_ms2_dynamic.onnx").string(), "ms2");
   }
   catch (const std::exception& e) { std::cerr << "exception: " << e.what() << "\n"; return 1; }
   std::cout << (failures ? "FAILED" : "PASSED") << " (" << failures << " failures)\n";

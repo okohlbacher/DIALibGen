@@ -31,6 +31,14 @@ int main()
   check(canonicalModifiedSequence("PEPTIDEK") == "PEPTIDEK", "unmodified passes through");
   check(canonicalModifiedSequence("AC[Carbamidomethyl]DEK") == canonicalModifiedSequence("AC(UniMod:4)DEK"),
         "square and round bracket dialects agree");
+  check(LibraryRefiner::key(".(Acetyl)PEPTIDEK", 2) == LibraryRefiner::key("(UniMod:1)PEPTIDEK", 2),
+        "OpenMS and DIA-NN N-terminal modification spellings join");
+  check(canonicalModifiedSequence(".[Acetyl]PEPTIDEK") == "(UniMod:1)PEPTIDEK",
+        "square-bracket N-terminal modification spellings join");
+  check(canonicalModifiedSequence("PEPTIDEK.(Methyl)") == canonicalModifiedSequence("PEPTIDEK.[UniMod:34]"),
+        "C-terminal modification aliases preserve the explicit terminal site");
+  check(canonicalModifiedSequence("PEPTIDEK.(Methyl)") != canonicalModifiedSequence("PEPTIDEK(Methyl)"),
+        "a C-terminal modification must not collide with a modification of the last residue");
 
   // A bare mass shift has no accession. It must NOT collide with a named
   // modification, because a wrong collision is a silently wrong join.

@@ -4,40 +4,43 @@
 #include <odia/PeptDeepPredictor.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 int main(int argc, char** argv)
 {
-  if (argc < 3)
+  if (argc != 2)
   {
-    std::fprintf(stderr, "usage: odia_ms2_sessions <model.onnx> <library.tsv> [peptides]\n");
+    std::fprintf(stderr, "usage: odia_ms2_sessions <model.onnx>\n");
     return 2;
   }
-  const std::size_t n = argc > 3 ? std::stoul(argv[3]) : 3000;
   std::vector<OpenMS::AASequence> peptides;
   std::vector<int> charges;
-  std::ifstream in(argv[2]);
-  if (!in)
+  // One length must cross the batch boundary. Distinct sequences, interleaved
+  // lengths, modifications and charges expose lost ordering or repeated rows.
+  const std::string amino_acids = "ACDEFGHIKLMNPQRSTVWY";
+  for (std::size_t i = 0; i < ODIA::PeptDeepPredictor::MAX_BATCH_ROWS + 17; ++i)
   {
-    std::fprintf(stderr, "cannot read %s\n", argv[2]);
-    return 2;
-  }
-  std::string line, last;
-  std::getline(in, line);
-  while (std::getline(in, line) && peptides.size() < n)
-  {
-    const auto a = line.find('\t');
-    const auto b = line.find('\t', a + 1);
-    const auto c = line.find('\t', b + 1);
-    auto s = line.substr(a + 1, b - a - 1);
-    if (s == last) { continue; }
-    last = s;
-    try { peptides.push_back(OpenMS::AASequence::fromString(s)); } catch (...) { continue; }
-    charges.push_back(std::atoi(line.substr(b + 1, c - b - 1).c_str()));
+    std::string sequence = "AAAPEPTIK";
+    auto encoded = i;
+    for (std::size_t j = 0; j < 3; ++j)
+    {
+      sequence[j] = amino_acids[encoded % amino_acids.size()];
+      encoded /= amino_acids.size();
+    }
+    peptides.push_back(OpenMS::AASequence::fromString(sequence));
+    charges.push_back(2 + static_cast<int>(i % 3));
+    if (i % 64 == 0)
+    {
+      const auto length = 7 + i / 64;
+      peptides.push_back(OpenMS::AASequence::fromString(
+        "AC(Carbamidomethyl)M(Oxidation)" + std::string(length - 4, 'A') + "K"));
+      charges.push_back(2 + static_cast<int>(i % 2));
+    }
   }
 
   // ODIA_MS2_GPU asks for CUDA. Off by default so the determinism test stays
@@ -59,6 +62,26 @@ int main(int argc, char** argv)
     std::vector<ODIA::PeptDeepPredictor::Failure> f;
     const auto t0 = std::chrono::steady_clock::now();
     auto out = p.predictMS2(peptides, charges, 30.0f, "timsTOF", &f);
+    if (!f.empty() || out.size() != peptides.size())
+    {
+      throw std::runtime_error("prediction failed or lost peptides");
+    }
+    for (std::size_t i = 0; i < out.size(); ++i)
+    {
+      const auto& spectrum = out[i];
+      if (spectrum.positions != peptides[i].size() - 1 ||
+          spectrum.intensities.size() != spectrum.positions * spectrum.CHANNELS)
+      {
+        throw std::runtime_error("prediction has an incorrect spectrum shape");
+      }
+      bool nonzero = false;
+      for (const auto intensity : spectrum.intensities)
+      {
+        if (!std::isfinite(intensity)) { throw std::runtime_error("non-finite intensity"); }
+        nonzero = nonzero || intensity > 0;
+      }
+      if (!nonzero) { throw std::runtime_error("empty predicted spectrum"); }
+    }
     const double dt = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - t0).count();
     std::printf("%2d session(s) on %-4s: %6.2f s  %8.1f peptides/s  (%zu live)\n",
@@ -66,13 +89,6 @@ int main(int argc, char** argv)
                 p.sessionCount());
     return out;
   };
-
-  if (peptides.size() < 8)
-  {
-    std::fprintf(stderr, "only %zu peptides read from %s; need at least 8\n",
-                 peptides.size(), argv[2]);
-    return 2;
-  }
 
   const auto reference = run(1);
   for (const int s : {2, 8, 32})

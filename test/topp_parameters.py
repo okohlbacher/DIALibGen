@@ -32,6 +32,19 @@ with tempfile.TemporaryDirectory() as directory:
     # A full default INI includes every mode; untouched settings must stay usable.
     assert config('-mode', 'refine', '-ini', ini)['filter'] is True
     assert config('-mode', 'tune', '-ini', ini)['filter'] is False
+    recipe.write_text('{"q_precursor":0.5}')
+    assert config('-mode', 'refine', '-config', recipe)['q_precursor'] == 0.5
+    assert config('-mode', 'refine', '-ini', ini, '-config', recipe)['q_precursor'] == 0.01
+    assert config('-mode', 'refine', '-ini', ini, '-config', recipe, '-q_precursor', 0.2)['q_precursor'] == 0.2
+    recipe.write_text(json.dumps({'missed_cleavages': 2, 'instrument': 'Lumos', 'nce': 28}))
+    training_ini = root / 'training.ini'
+    training_tree = ET.parse(ini)
+    training = next(n for n in training_tree.iter('NODE') if n.get('name') == 'train')
+    next(n for n in training if n.get('name') == 'epochs').set('value', '999')
+    training_tree.write(training_ini, encoding='utf-8', xml_declaration=True)
+    result = run('-mode', 'refine', '-ini', training_ini, '-write_config', root / 'invalid.json', ok=False)
+    assert 'enable -tune' in result.stdout + result.stderr
+    assert config('-mode', 'refine', '-ini', training_ini, '-tune')['filter'] is True
     tree = ET.parse(ini)
     generation = next(n for n in tree.iter('NODE') if n.get('name') == 'generation')
     next(n for n in generation if n.get('name') == 'instrument').set('value', 'Lumos')
@@ -48,6 +61,10 @@ with tempfile.TemporaryDirectory() as directory:
     for args in (('-tune',), ('-q_precursor', 0.5), ('-train:epochs', 1)):
         result = run('-mode', 'generate', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'has no effect' in result.stdout + result.stderr
+    for args in (('-train:epochs', 999), ('-tune_heads', 'rt'), ('-machine:threads', 2), ('-filter:q_value', 0.5)):
+        result = run('-mode', 'refine', *args, '-write_config', root / 'invalid.json', ok=False)
+        assert 'enable -tune' in result.stdout + result.stderr
+        assert config('-mode', 'refine', '-tune', *args)['filter'] is True
     for args in (('-q_precursor', 0.001), ('-q_global', 1), ('-min_fragments', 3), ('-empirical_library',)):
         result = run('-mode', 'tune', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'has no effect' in result.stdout + result.stderr

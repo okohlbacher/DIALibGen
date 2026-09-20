@@ -194,9 +194,13 @@ done <<'CASES'
 {"missed_cleavages": 1.5}|missed_cleavages must be a whole number
 {"max_variable_modifications": -2}|max_variable_modifications must be a whole number
 {"reserved_doubly_charged": -1}|reserved_doubly_charged must be a whole number
-{"precursor_charges": [0, 2]}|precursor_charges must each be between 1 and 10
-{"precursor_charges": [-3]}|precursor_charges must each be between 1 and 10
-{"max_fragment_charge": 0}|max_fragment_charge must be between 1 and 10
+{"precursor_charges": [0, 2]}|precursor_charges must each be between 1 and 8
+{"precursor_charges": [-3]}|precursor_charges must each be between 1 and 8
+{"precursor_charges": [9]}|precursor_charges must each be between 1 and 8
+{"precursor_charges": [2, 2]}|precursor_charges must not contain duplicates
+{"max_fragment_charge": 3}|max_fragment_charge must be between 1 and 2
+{"max_fragment_charge": 0}|max_fragment_charge must be between 1 and 2
+{"nce": 0}|nce must be greater than 0 and at most 100
 {"min_relative_intensity": -0.5}|min_relative_intensity must be between 0 and 1
 {"min_relative_intensity": 2}|min_relative_intensity must be between 0 and 1
 {"peptide_length": [-1, 30]}|peptide_length values must be between

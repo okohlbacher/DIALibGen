@@ -38,7 +38,25 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 - Met excision now retains N-terminal peptides at every permitted missed-cleavage
   count, including cases where the fully cleaved peptide is below the minimum
-  length. Cache fingerprint v4 invalidates libraries containing the old omission.
+  length. Cache fingerprint v5 invalidates libraries containing the old omission.
+- Variable modifications no longer duplicate unmodified precursors. Duplicate
+  charges, unsupported fragment charges and non-finite model output are refused;
+  empty assays are removed consistently across output formats.
+- Decoys retain terminal modifications, reject self-identical sequences and use
+  a shuffle pinned across standard libraries. Calibration data and decoy mass
+  policy now participate in cache keys.
+- Atomic library and model writes preserve existing files on failure. Parquet
+  loads use bounded record batches; strict TSV/Parquet validation covers nulls,
+  truncated rows, fragment annotations, numeric domains and missing mobility.
+- Refinement validates the report before training, retains the full training
+  recipe in library provenance and counts unique join keys. Terminal-modification
+  aliases, min-max RT scaling and fragment-quality counters are corrected.
+- Training validates its public API controls, measures elapsed wall time and
+  rejects cross-charge protein-group conflicts before assigning held-out cohorts.
+- Windows builds prioritize the Arrow headers belonging to the linked runtime,
+  avoiding a Parquet reader ABI mismatch with OpenMS contrib headers.
+- Desktop health probes, launch/cancel races, automatic NCE, settings recovery,
+  temporary files and IPC dispatch now have regression coverage.
 - Update Vite and Vitest to patched versions, removing the reported development
   server and test-server dependency vulnerabilities.
 

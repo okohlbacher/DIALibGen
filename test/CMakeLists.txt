@@ -16,9 +16,7 @@ set(ODIA_RT_MODEL_PATH  "${ODIA_MODEL_DIR}/peptdeep_rt_dynamic.onnx"  CACHE FILE
 set(ODIA_MS2_MODEL_PATH "${ODIA_MODEL_DIR}/peptdeep_ms2_dynamic.onnx" CACHE FILEPATH "PeptDeep MS2 model")
 set(ODIA_CCS_MODEL_PATH "${ODIA_MODEL_DIR}/peptdeep_ccs_dynamic.onnx" CACHE FILEPATH "PeptDeep CCS model")
 
-set(ODIA_FIXTURE_DIR "" CACHE PATH "Optional external fixtures (diann_library_small.tsv)")
-set(ODIA_IRT_FIXTURE "$ENV{ODIA_OPENMS_SOURCE}/src/tests/class_tests/openms/data/peptdeep_irt_peptides_predicted.csv"
-    CACHE FILEPATH "OpenMS's predicted iRT standards fixture")
+set(ODIA_IRT_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/data/peptdeep_irt_peptides_predicted.csv")
 
 foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
@@ -256,11 +254,9 @@ endif()
 # Spreading MS2 batches across sessions must be bit-for-bit identical to running
 # them on one. A 4.7x speedup that quietly perturbs intensities would change
 # which fragments rank into the top twelve.
-if(EXISTS "${ODIA_MS2_MODEL_PATH}" AND ODIA_FIXTURE_DIR
-   AND EXISTS "${ODIA_FIXTURE_DIR}/diann_library_small.tsv")
+if(EXISTS "${ODIA_MS2_MODEL_PATH}")
   add_test(NAME ms2_sessions_are_deterministic
-           COMMAND odia_ms2_sessions "${ODIA_MS2_MODEL_PATH}"
-                   "${ODIA_FIXTURE_DIR}/diann_library_small.tsv" 400)
+           COMMAND odia_ms2_sessions "${ODIA_MS2_MODEL_PATH}")
 endif()
 
 # The whole pipeline, run the way a user runs it, with the result read back.
@@ -319,3 +315,5 @@ if(TARGET DIALibGen AND ODIA_PYTHON)
   add_test(NAME parameter_docs_current COMMAND ${ODIA_PYTHON}
     "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/update-parameters.py" $<TARGET_FILE:DIALibGen> --check)
 endif()
+
+add_subdirectory(io)

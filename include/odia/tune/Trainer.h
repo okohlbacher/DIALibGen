@@ -109,6 +109,9 @@ namespace ODIA::tune
   /// Run the fine-tune. Throws std::runtime_error with a reason a user can act
   /// on -- including when no checkpoint beat the stock model, in which case the
   /// provenance sidecar is written and the model is not.
+  /// Validate report filtering and held-out cohort sizes before any training.
+  void validateTrainingReport(const TuneParams& params, std::ostream& log);
+
   TuneResult finetune(const TuneParams& params, std::ostream& log);
 
   const char* headName(HeadKind h);

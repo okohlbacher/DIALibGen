@@ -7,6 +7,7 @@ foreach(m mutate shuffle pseudo_reverse reverse)
   file(WRITE "${cfg}"
     "{ \"rt_model\":\"${RT_MODEL}\", \"ms2_model\":\"${MS2_MODEL}\","
     " \"ccs_model\":\"${CCS_MODEL}\", \"decoys\":\"${m}\" }")
+  file(REMOVE "${WORKDIR}/decoy_${m}.parquet")
   execute_process(COMMAND ${GEN} -in ${FASTA} -config ${cfg}
                           -out ${WORKDIR}/decoy_${m}.parquet
                   RESULT_VARIABLE rc OUTPUT_VARIABLE o ERROR_VARIABLE e)

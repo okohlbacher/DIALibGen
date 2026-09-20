@@ -241,6 +241,9 @@ namespace ODIA
     std::size_t ids_q_invalid = 0;    ///< rows whose q-values were missing or non-numeric: REJECTED
     std::size_t ids_q_above = 0;
     std::size_t ids_charge_invalid = 0;
+    std::size_t ids_sequence_invalid = 0; ///< rows with a missing or empty modified sequence
+    std::size_t ids_fragment_invalid = 0; ///< rows with an invalid fragment identity, excluded from min_fragments
+    std::size_t ids_too_few_fragments = 0; ///< precursors rejected by min_fragments after other gates
     std::size_t ids_unmatched = 0;    ///< observed but absent from the library
     std::size_t ids_ramp_censored = 0;
     std::size_t ids_unknown_mod_tokens = 0;
@@ -267,7 +270,7 @@ namespace ODIA
     double im_resid_p95 = std::numeric_limits<double>::quiet_NaN();
     std::size_t rt_resid_n = 0, im_resid_n = 0;
 
-    /// matched / ids_passing. Reported always; enforced against min_match_fraction.
+    /// Distinct matched reference keys / ids_passing; enforced against min_match_fraction.
     double match_fraction = 0.0;
 
     // Intensity replacement. Every rejection has its own counter, so the gates'
@@ -291,7 +294,7 @@ namespace ODIA
     std::size_t intensity_row_length_mismatch = 0;    ///< the three fragment columns disagreed in length
     double intensity_mz_mismatch_fraction = 0.0;
     /// Fraction of replaced precursors whose observed base peak was already the
-    /// library's top-ranked transition. Near 1 means replacement is close to a
+    /// library's top-ranked no-loss transition. Near 1 means replacement is close to a
     /// no-op on this data -- the measurement the old refusal cited a paper for.
     double intensity_rank_agreement = std::numeric_limits<double>::quiet_NaN();
     double intensity_transitions_before = std::numeric_limits<double>::quiet_NaN();   ///< mean, replaced precursors

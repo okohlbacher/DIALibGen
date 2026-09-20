@@ -20,7 +20,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-write_im` | bool | `false` |  | Also overwrite 1/K0 with the observed value for charges >= -im_min_charge; off by default. |
 | `-write_intensity` | bool | `false` |  | Replace predicted fragment intensities with the reference run's observed ones. Needs Fragment.Info/Fragment.Quant.Raw (1.9) or Fr.N.Id/Quantity (2.x), exported with --report-lib-info or --export-quant respectively. Every match is cross-checked on fragment m/z, and a run that replaces nothing is an error. |
 | `-intensity_min_correlation` | double | `0.0` |  | Require fragment quality greater than this: correlation in DIA-NN 1.9, Score in DIA-NN 2.x. -1 disables the quality gate. |
-| `-intensity_no_restrict` | bool | `false` |  | Replace a precursor only when EVERY one of its transitions is trusted, else keep its predictions whole. Transition counts then cannot change, so a benchmark difference is attributable to the values alone. |
+| `-intensity_no_restrict` | bool | `false` |  | Replace a precursor only when EVERY one of its transitions is trusted, else keep its predictions whole. Neutral-loss transitions cannot match report fragments, so precursors carrying them keep their predictions. Transition counts cannot change. |
 | `-intensity_no_rerank` | bool | `false` |  | Keep a replaced precursor's transitions in their original order. |
 | `-intensity_min_fragments` | int | `3` | 0: | A replaced precursor keeps at least this many transitions or keeps its predictions whole. |
 | `-intensity_norm` | string | `library_max` | library_max,base_peak,sum,raw | How an observed area becomes a library intensity. library_max scales to the maximum that precursor already held, which preserves the file's own convention -- base peak = 1 is not an invariant of these libraries. |
@@ -93,7 +93,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-stop:patience` | int | `10` | 0: | Stop after this many epochs without progress (never before max(min_epochs, warmup)) |
 | `-stop:rel_tol` | double | `5.0e-03` |  | Progress = the selection metric beats the anchor by this fraction |
 | `-stop:abs_tol` | double | `0.0` |  | Progress = beats the anchor by this absolute amount (0 = use rel_tol) |
-| `-stop:max_seconds` | double | `0.0` |  | Wall-clock budget per head (0 = none) |
+| `-stop:max_seconds` | double | `0.0` |  | Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none) |
 | `-stop:select` | string | `calibrated_sd` | calibrated_sd,rmse | Selection metric on the validation cohort |
 | `-machine:device` | string | `cpu` |  | cpu or cuda[:N] |
 | `-machine:threads` | int | `4` | 1: | CPU threads used for training |

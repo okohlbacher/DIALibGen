@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/DIANNLibraryFile.h>
+#include <odia/AtomicFile.h>
+#include <memory>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/LibraryRefiner.h>
@@ -165,8 +167,8 @@ void DIALibGen::registerRefinementOptions_()
     registerDoubleOption_("intensity_min_correlation", "<r>", 0.0, "Require fragment quality greater than this: "
                           "correlation in DIA-NN 1.9, Score in DIA-NN 2.x. -1 disables the quality gate.", false);
     registerFlag_("intensity_no_restrict", "Replace a precursor only when EVERY one of its transitions is trusted, else keep "
-                                           "its predictions whole. Transition counts then cannot change, so a benchmark "
-                                           "difference is attributable to the values alone.");
+                                           "its predictions whole. Neutral-loss transitions cannot match report fragments, so "
+                                           "precursors carrying them keep their predictions. Transition counts cannot change.");
     registerFlag_("intensity_no_rerank", "Keep a replaced precursor's transitions in their original order.");
     registerIntOption_("intensity_min_fragments", "<n>", 3, "A replaced precursor keeps at least this many transitions or "
                        "keeps its predictions whole.", false);
@@ -253,7 +255,7 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("stop:patience", "<n>", 10, "Stop after this many epochs without progress (never before max(min_epochs, warmup))", false);
     registerDoubleOption_("stop:rel_tol", "<f>", 0.005, "Progress = the selection metric beats the anchor by this fraction", false);
     registerDoubleOption_("stop:abs_tol", "<f>", 0.0, "Progress = beats the anchor by this absolute amount (0 = use rel_tol)", false);
-    registerDoubleOption_("stop:max_seconds", "<s>", 0.0, "Wall-clock budget per head (0 = none)", false);
+    registerDoubleOption_("stop:max_seconds", "<s>", 0.0, "Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none)", false);
     registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false);
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
@@ -353,14 +355,23 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     const json eff = effectiveConfig(p);
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
-      std::ofstream o(wc);
-      o << eff.dump(2) << '\n';
-      if (!o) { writeLogError_("cannot write " + wc); return CANNOT_WRITE_OUTPUT_FILE; }
+      try
+      {
+        ODIA::AtomicFile staged(wc);
+        std::ofstream o(staged.temporaryPath());
+        o << eff.dump(2) << '\n'; o.close();
+        if (!o) { throw std::runtime_error("cannot write " + wc); }
+        staged.commit();
+      }
+      catch (const std::exception& e) { writeLogError_(e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
       writeLogInfo_("wrote effective config to " + wc);
       return EXECUTION_OK;
     }
 
-    const std::string in = getStringOption_("in"), ids = getStringOption_("ids"), out = getStringOption_("out");
+    const std::string in = getStringOption_("in"), ids = getStringOption_("ids");
+    // TOPP's writable-file probe follows and then removes dangling symlinks.
+    // Inspect destinations before any output-file getter can run that probe.
+    const std::string out = getParam_().getValue("out").toString();
     if (in.empty() || ids.empty() || out.empty())
     { writeLogError_("-in, -ids and -out are required"); return ILLEGAL_PARAMETERS; }
 #ifndef DIALIBGEN_WITH_FINETUNE
@@ -369,7 +380,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 #endif
     if (!out.ends_with(".parquet") && !out.ends_with(".tsv"))
     { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
-    const std::string report = getStringOption_("out_report");
+    const std::string report = getParam_().getValue("out_report").toString();
     std::set<std::filesystem::path> destinations;
     for (const auto& file : {out, out + ".refine.json", report})
     {
@@ -379,6 +390,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       if (!destinations.insert(std::filesystem::weakly_canonical(file)).second)
       { writeLogError_("output paths must be distinct: " + file); return ILLEGAL_PARAMETERS; }
     }
+    (void)getStringOption_("out");
+    (void)getStringOption_("out_report");
 
     ODIA::Library library;
     ODIA::RefineStats st;
@@ -388,6 +401,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       ODIA::DIANNLibraryFile::load(in, library);
       writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
                     std::to_string(library.transitionCount()) + " transitions");
+      ODIA::LibraryRefiner::ObsMap obs;
+      if (!tune_only) { obs = ODIA::LibraryRefiner::readObservations(ids, p, st); }
 
 #ifdef DIALIBGEN_WITH_FINETUNE
       if (tune)
@@ -462,19 +477,34 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
         if (tp.train_size && tp.train_frac > 0)
         { throw std::runtime_error("give cohort:train_size or cohort:train_frac, not both"); }
+        // Validate every requested head before the first expensive training run.
+        for (const bool ccs : {false, true})
+        {
+          if (ccs ? !want_ccs : !want_rt) { continue; }
+          const char* file = ccs ? "peptdeep_ccs_dynamic.onnx" : "peptdeep_rt_dynamic.onnx";
+          tp.head = ccs ? ODIA::tune::HeadKind::CCS : ODIA::tune::HeadKind::RT;
+          tp.model_in = (fs::path(models) / file).string();
+          tp.model_out = (work / file).string();
+          if (!fs::exists(tp.model_in)) { throw std::runtime_error("no " + std::string(file) + " in " + models); }
+          ODIA::tune::validateTrainingReport(tp, std::cout);
+        }
 
         auto run_head = [&](ODIA::tune::HeadKind head, const char* file)
         {
           tp.head = head;
           tp.model_in = (fs::path(models) / file).string();
           tp.model_out = (work / file).string();
-          if (!fs::exists(tp.model_in))
-          { throw std::runtime_error("no " + std::string(file) + " in " + models); }
           // finetune throws when nothing beat the stock model, the same way it
           // throws on a corrupt report -- TuneResult carries no "exported" flag
           // to tell them apart, so a head that does not improve aborts the run
           // rather than silently refining with stock predictions.
           return ODIA::tune::finetune(tp, std::cout);
+        };
+        auto training_provenance = [](const ODIA::tune::TuneResult& result) {
+          const std::string path = result.model_out + ".tune.json";
+          std::ifstream input(path);
+          if (!input) { throw std::runtime_error("cannot read training provenance: " + path); }
+          return json::parse(input);
         };
 
         const bool free_cys = getFlag_("tune_keep_free_cysteine_offset");
@@ -500,6 +530,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           tune_prov["rt"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
                              {"epochs_run", r.epochs_run}, {"rt_max_minutes", r.rt_max_minutes},
                              {"model_sha256", r.model_out_sha256}, {"stock_sha256", r.model_in_sha256},
+                             {"training", training_provenance(r)},
                              {"repredicted", n}, {"unpredicted", unpredicted}};
           writeLogInfo_("re-predicted RT for " + std::to_string(n) + " of " + std::to_string(library.precursorCount()) +
                         " precursors, in the run's minutes" +
@@ -520,6 +551,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           tune_prov["ccs"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
                               {"epochs_run", r.epochs_run},
                               {"model_sha256", r.model_out_sha256}, {"stock_sha256", r.model_in_sha256},
+                              {"training", training_provenance(r)},
                               {"repredicted", n}, {"unpredicted", unpredicted}};
           writeLogInfo_("re-predicted CCS and 1/K0 for " + std::to_string(n) + " of " +
                         std::to_string(library.precursorCount()) + " precursors" +
@@ -537,12 +569,14 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       }
       else
       {
-      const auto obs = ODIA::LibraryRefiner::readObservations(ids, p, st);
       writeLogInfo_("reference" + (st.run.empty() ? std::string() : " (run " + st.run + ")") + ": " +
                     std::to_string(st.ids_rows) + " rows, " + std::to_string(st.ids_precursors) + " precursors, " +
                     std::to_string(st.ids_passing) + " passing the gates; rejected: " +
                     std::to_string(st.ids_decoy) + " decoy, " + std::to_string(st.ids_q_invalid) + " invalid q, " +
-                    std::to_string(st.ids_q_above) + " above threshold, " + std::to_string(st.ids_charge_invalid) + " bad charge");
+                    std::to_string(st.ids_q_above) + " above threshold, " + std::to_string(st.ids_charge_invalid) + " bad charge, " +
+                    std::to_string(st.ids_sequence_invalid) + " empty sequence; " + std::to_string(st.ids_fragment_invalid) +
+                    " invalid fragment identities ignored; " + std::to_string(st.ids_too_few_fragments) +
+                    " precursors below min_fragments");
       for (const auto& g : st.gates_bypassed)
       { writeLogWarn_("gate " + g + " BYPASSED: the reference has no such column (-empirical_library); recorded in provenance"); }
       if (st.ids_unknown_mod_tokens)
@@ -560,7 +594,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     {
     std::ostringstream m;
     m.setf(std::ios::fixed); m.precision(1);
-    m << "matched " << st.matched << " of " << st.ids_passing << " reference precursors ("
+    m << "matched " << st.ids_passing - st.ids_unmatched << " of " << st.ids_passing << " reference precursors ("
       << 100.0 * st.match_fraction << "%); " << st.ids_unmatched << " observed but absent from the library";
     writeLogInfo_(m.str());
     auto resid = [&](const char* axis, std::size_t n, double mean, double sd, double p95, int prec)
@@ -587,7 +621,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       r << "replaced fragment intensities on " << st.intensity_replaced_precursors << " of " << st.intensity_candidate_precursors
         << " candidate precursors (" << st.intensity_kept_predicted << " kept their predictions); transitions per replaced precursor "
         << st.intensity_transitions_before << " -> " << st.intensity_transitions_after
-        << "; observed base peak was already the library's top transition in " << 100.0 * st.intensity_rank_agreement << "%";
+        << "; observed base peak was already the library's top no-loss transition in " << 100.0 * st.intensity_rank_agreement << "%";
       writeLogInfo_(r.str());
       writeLogInfo_("fragment fates over " + std::to_string(st.intensity_candidate_transitions) + " candidate transitions: " +
                     std::to_string(st.intensity_matched_transitions) + " matched (" + std::to_string(st.intensity_gated_zero_quant) +
@@ -615,14 +649,16 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json prov = {
       {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
       {"config", eff},
-      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_sha", ODIA::DIANNLibraryFile::hashFile(in)},
-                  {"reference", std::filesystem::absolute(ids).string()}, {"reference_sha", ODIA::DIANNLibraryFile::hashFile(ids)},
+      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_fnv1a64", ODIA::DIANNLibraryFile::hashFile(in)},
+                  {"reference", std::filesystem::absolute(ids).string()}, {"reference_fnv1a64", ODIA::DIANNLibraryFile::hashFile(ids)},
                   {"reference_run", st.run}}},
       {"gates_bypassed", st.gates_bypassed},
       {"tune", tune_prov},
       {"reference", {{"rows", st.ids_rows}, {"precursors", st.ids_precursors}, {"passing", st.ids_passing},
                      {"decoy", st.ids_decoy}, {"q_invalid", st.ids_q_invalid}, {"q_above", st.ids_q_above},
                      {"charge_invalid", st.ids_charge_invalid}, {"unknown_mod_tokens", st.ids_unknown_mod_tokens},
+                     {"sequence_invalid", st.ids_sequence_invalid}, {"fragment_invalid", st.ids_fragment_invalid},
+                     {"too_few_fragments", st.ids_too_few_fragments},
                      {"ramp_censored", st.ids_ramp_censored}, {"unmatched", st.ids_unmatched}}},
       {"library", {{"before", st.library_before}, {"after", st.library_after}, {"matched_targets", st.matched},
                    {"decoys_kept", st.decoys_kept}, {"match_fraction", st.match_fraction},
@@ -663,30 +699,40 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
     try
     {
+      ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
       if (out.ends_with(".parquet"))
-      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, ODIA::DIANNLibraryFile::Fingerprint{}, prov.dump()); }
+      { ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{}, prov.dump()); }
       else if (out.ends_with(".tsv"))
-      { ODIA::DIANNLibraryFile::storeTSV(out, library); }
+      { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library); }
       else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
-      std::ofstream side(out + ".refine.json");
-      side << prov.dump(2) << '\n';
-      if (!side) { writeLogError_("cannot write " + out + ".refine.json"); return CANNOT_WRITE_OUTPUT_FILE; }
+      std::ofstream side(sidecar.temporaryPath());
+      side << prov.dump(2) << '\n'; side.close();
+      if (!side) { throw std::runtime_error("cannot write " + out + ".refine.json"); }
+
+      std::unique_ptr<ODIA::AtomicFile> staged_report;
+      if (!report.empty())
+      {
+        staged_report = std::make_unique<ODIA::AtomicFile>(report);
+        std::ofstream o(staged_report->temporaryPath());
+        o << "metric\tvalue\n";
+        for (const auto& [k, v] : prov["reference"].items()) { o << "ids_" << k << '\t' << v << '\n'; }
+        for (const auto& [k, v] : prov["library"].items()) { o << "library_" << k << '\t' << v << '\n'; }
+        o.setf(std::ios::fixed); o.precision(6);
+        o << "rt_resid_n\t" << st.rt_resid_n << "\nrt_resid_mean\t" << st.rt_resid_mean << "\nrt_resid_sd\t" << st.rt_resid_sd
+          << "\nrt_resid_p95\t" << st.rt_resid_p95 << "\nim_resid_n\t" << st.im_resid_n << "\nim_resid_mean\t" << st.im_resid_mean
+          << "\nim_resid_sd\t" << st.im_resid_sd << "\nim_resid_p95\t" << st.im_resid_p95 << '\n';
+        o.close();
+        if (!o) { throw std::runtime_error("cannot write " + report); }
+      }
+      // Prepare every file before publishing any. Commit the library last so
+      // its appearance means the corresponding provenance is already present.
+      sidecar.commit();
+      if (staged_report) { staged_report->commit(); }
+      output.commit();
       writeLogInfo_("wrote " + out + " and " + out + ".refine.json");
+      if (staged_report) { writeLogInfo_("wrote report to " + report); }
     }
     catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
 
-    if (const std::string rep = getStringOption_("out_report"); !rep.empty())
-    {
-      std::ofstream o(rep);
-      o << "metric\tvalue\n";
-      for (const auto& [k, v] : prov["reference"].items()) { o << "ids_" << k << '\t' << v << '\n'; }
-      for (const auto& [k, v] : prov["library"].items()) { o << "library_" << k << '\t' << v << '\n'; }
-      o.setf(std::ios::fixed); o.precision(6);
-      o << "rt_resid_n\t" << st.rt_resid_n << "\nrt_resid_mean\t" << st.rt_resid_mean << "\nrt_resid_sd\t" << st.rt_resid_sd
-        << "\nrt_resid_p95\t" << st.rt_resid_p95 << "\nim_resid_n\t" << st.im_resid_n << "\nim_resid_mean\t" << st.im_resid_mean
-        << "\nim_resid_sd\t" << st.im_resid_sd << "\nim_resid_p95\t" << st.im_resid_p95 << '\n';
-      if (!o) { writeLogError_("cannot write " + rep); return CANNOT_WRITE_OUTPUT_FILE; }
-      writeLogInfo_("wrote report to " + rep);
-    }
     return EXECUTION_OK;
   }

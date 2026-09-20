@@ -162,6 +162,8 @@ namespace ODIA
 
   std::string canonicalModifiedSequence(std::string_view seq, std::size_t* unknown)
   {
+    // OpenMS marks N-terminal modifications with a leading dot; DIA-NN does not.
+    if (seq.size() > 1 && seq[0] == '.' && (seq[1] == '(' || seq[1] == '[')) { seq.remove_prefix(1); }
     std::string out;
     out.reserve(seq.size());
     for (std::size_t i = 0; i < seq.size();)
@@ -303,6 +305,10 @@ namespace ODIA
 
     if (!seq_c || !charge_c)
     { throw std::runtime_error("reference has no Modified.Sequence / Precursor.Charge column; it is not a DIA-NN report or library"); }
+    if (p.write_rt && !rt_c)
+    { throw std::runtime_error("reference has no RT column but RT replacement is enabled; use -no_write_rt for filtering only"); }
+    if (p.write_im && !im_c)
+    { throw std::runtime_error("reference has no IM column but -write_im is enabled"); }
 
     // The gate contract (review M8). A gate is enabled when its threshold is
     // below 1. In report mode every enabled gate's column must exist; in
@@ -383,8 +389,7 @@ namespace ODIA
 
     ObsMap out;
     out.reserve(static_cast<std::size_t>(rows) / 4 + 16);
-    std::unordered_map<std::string, std::set<std::tuple<std::string, int, int>>> frag_ids;
-    std::unordered_map<std::string, std::uint32_t> first_seen;
+    std::unordered_map<std::string, std::set<std::tuple<FragmentType, int, int>>> frag_ids;
     std::set<std::string> distinct;
 
     for (std::int64_t r = 0; r < rows; ++r)
@@ -397,6 +402,7 @@ namespace ODIA
       }
       const double zf = charge[i];
       if (!finite(zf) || zf < 1.0 || zf > 8.0 || zf != std::floor(zf)) { ++stats.ids_charge_invalid; continue; }
+      if (seq[i].empty()) { ++stats.ids_sequence_invalid; continue; }
       const int z = static_cast<int>(zf);
       std::size_t unknown = 0;
       const std::string k = canonicalModifiedSequence(seq[i], &unknown) + "/" + std::to_string(z);
@@ -404,12 +410,19 @@ namespace ODIA
       distinct.insert(k);
 
       // Gates. A missing or non-numeric q is not "passes"; it is rejected (M5/M8).
-      if (use_q)   { if (!finite(qv[i]))  { ++stats.ids_q_invalid; continue; } if (qv[i]  > p.q_precursor) { ++stats.ids_q_above; continue; } }
-      if (use_gq)  { if (!finite(gq[i]))  { ++stats.ids_q_invalid; continue; } if (gq[i]  > p.q_global)    { ++stats.ids_q_above; continue; } }
-      if (use_pgq) { if (!finite(pgq[i])) { ++stats.ids_q_invalid; continue; } if (pgq[i] > p.q_protein)   { ++stats.ids_q_above; continue; } }
+      if (use_q)   { if (!finite(qv[i]) || qv[i] < 0 || qv[i] > 1)   { ++stats.ids_q_invalid; continue; } if (qv[i]  > p.q_precursor) { ++stats.ids_q_above; continue; } }
+      if (use_gq)  { if (!finite(gq[i]) || gq[i] < 0 || gq[i] > 1)   { ++stats.ids_q_invalid; continue; } if (gq[i]  > p.q_global)    { ++stats.ids_q_above; continue; } }
+      if (use_pgq) { if (!finite(pgq[i]) || pgq[i] < 0 || pgq[i] > 1) { ++stats.ids_q_invalid; continue; } if (pgq[i] > p.q_protein)   { ++stats.ids_q_above; continue; } }
 
-      if (have_fragments && finite(fs[i]) && finite(fz[i]))
-      { frag_ids[k].insert(std::make_tuple(ft[i], static_cast<int>(fs[i]), static_cast<int>(fz[i]))); }
+      if (have_fragments)
+      {
+        const auto type = parseFragmentType(ft[i]);
+        if (ft[i].size() != 1 || type == FragmentType::Unknown ||
+            !finite(fs[i]) || fs[i] != std::floor(fs[i]) || fs[i] < 1 || fs[i] > 255 ||
+            !finite(fz[i]) || fz[i] != std::floor(fz[i]) || fz[i] < 1 || fz[i] > 127)
+        { ++stats.ids_fragment_invalid; }
+        else { frag_ids[k].insert(std::make_tuple(type, static_cast<int>(fs[i]), static_cast<int>(fz[i]))); }
+      }
 
       Observation o;
       if (need_frags && fragment_columns.empty())
@@ -439,7 +452,7 @@ namespace ODIA
       o.evidence = static_cast<float>(finite(ev[i]) ? ev[i] : 0.0);
 
       auto it = out.find(k);
-      if (it == out.end()) { out.emplace(k, o); first_seen[k] = static_cast<std::uint32_t>(r); continue; }
+      if (it == out.end()) { out.emplace(k, o); continue; }
 
       // Deterministic: strict improvement on the ranking quantity wins; ties keep
       // the first observation seen. Abundance is never a criterion (M9).
@@ -460,7 +473,7 @@ namespace ODIA
     if (p.min_fragments > 0)
     {
       for (auto it = out.begin(); it != out.end();)
-      { if (it->second.fragments < p.min_fragments) { it = out.erase(it); } else { ++it; } }
+      { if (it->second.fragments < p.min_fragments) { ++stats.ids_too_few_fragments; it = out.erase(it); } else { ++it; } }
     }
 
     // Censoring against the INSTRUMENT limit the caller declared, never the data's maximum (M11).
@@ -543,6 +556,7 @@ namespace ODIA
         const std::uint32_t b = pre.transition_begin[i], c = pre.transition_count[i];
         stats.intensity_candidate_transitions += c;
         float lib_max = 0.0f;
+        float lib_rank_max = 0.0f;
         std::uint32_t lib_top = 0;
         std::unordered_set<std::uint32_t> in_library;
         std::vector<Kept> kept;
@@ -555,7 +569,7 @@ namespace ODIA
           const unsigned z = t.charge[j] == 0 ? 1u : static_cast<unsigned>(std::abs(static_cast<int>(t.charge[j])));
           const std::uint32_t id = ident(t.type[j], t.ordinal[j], z);
           in_library.insert(id);
-          if (t.library_intensity[j] == lib_max) { lib_top = id; }
+          if (t.library_intensity[j] >= lib_rank_max) { lib_rank_max = t.library_intensity[j]; lib_top = id; }
           const auto f = seen.find(id);
           if (f == seen.end()) { ++stats.intensity_unmatched_in_library; continue; }
           // Identity agreeing is not enough. A shifted ordinal convention, a
@@ -650,8 +664,9 @@ namespace ODIA
                                  " ppm -- -in is probably not the library this run was searched against, or the fragment "
                                  "numbering differs. Refused; raise -intensity_max_mz_mismatch to survey it instead."); }
       if (stats.intensity_replaced_precursors == 0)
-      { throw std::runtime_error("-write_intensity replaced no precursor. That is a join or parse failure, not a run in "
-                                 "which nothing was observed, and the output would be identical to the control arm."); }
+      { throw std::runtime_error("-write_intensity replaced no precursor: check the fragment join and quality gates. "
+                                 "With -intensity_no_restrict every transition must be trusted; neutral-loss transitions "
+                                 "cannot match a report fragment and make that precursor keep its predictions."); }
       stats.intensity_rank_agreement = static_cast<double>(rank_agree) / static_cast<double>(stats.intensity_replaced_precursors);
       stats.intensity_transitions_before = static_cast<double>(n_before) / static_cast<double>(stats.intensity_replaced_precursors);
       stats.intensity_transitions_after = static_cast<double>(n_after) / static_cast<double>(stats.intensity_replaced_precursors);
@@ -746,12 +761,12 @@ namespace ODIA
     }
 
     stats.ids_unmatched = obs.size() - used.size();
-    stats.match_fraction = obs.empty() ? 0.0 : static_cast<double>(stats.matched) / static_cast<double>(obs.size());
+    stats.match_fraction = obs.empty() ? 0.0 : static_cast<double>(used.size()) / static_cast<double>(obs.size());
     if (stats.matched == 0)
     { throw std::runtime_error("no reference precursor matched the library. That is a join failure -- check that both "
                                "sides use the same alkylation state and modification naming -- not an empty run."); }
     if (p.min_match_fraction > 0.0 && stats.match_fraction < p.min_match_fraction)
-    { throw std::runtime_error("only " + std::to_string(stats.matched) + " of " + std::to_string(obs.size()) +
+    { throw std::runtime_error("only " + std::to_string(used.size()) + " of " + std::to_string(obs.size()) +
                                " reference precursors matched, below the required fraction"); }
 
     // Residuals BEFORE the write; after it they are zero by construction.
@@ -773,7 +788,9 @@ namespace ODIA
       for (std::size_t i : matched_idx)
       {
         const float r = obs.at(key(library.strings().get(pre.modified_sequence[i]), static_cast<int>(pre.charge[i]))).rt;
-        if (std::isfinite(r)) { lo = std::min(lo, static_cast<double>(r)); hi = std::max(hi, static_cast<double>(r)); }
+        if (!std::isfinite(r))
+        { throw std::runtime_error("rt_unit=minmax: missing observed RT would leave predictions and rescaled observations on different scales"); }
+        lo = std::min(lo, static_cast<double>(r)); hi = std::max(hi, static_cast<double>(r));
       }
       if (!(std::isfinite(lo) && std::isfinite(hi) && hi > lo))
       { throw std::runtime_error("rt_unit=minmax: the matched observations have no finite range to rescale"); }

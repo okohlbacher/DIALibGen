@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
+#include <odia/DIANNLibraryFile.h>
+#include <OpenMS/CHEMISTRY/AASequence.h>
+#include <cmath>
 
 #include <fstream>
 #include <iostream>
@@ -71,6 +74,75 @@ int main(int argc, char** argv)
           throw std::runtime_error("digest does not match the expected unique peptides");
         }
       }
+    }
+    // OpenMS appends the base form itself when keep_unmodified=true.
+    std::ofstream(argv[1]) << ">oxidation\nMPEPTIDEK\n";
+    params.n_terminal_methionine_excision = false;
+    params.missed_cleavages = 0;
+    params.variable_modifications = {"Oxidation (M)"};
+    for (const std::size_t maximum : {0u, 1u, 2u})
+    {
+      params.max_variable_modifications = maximum;
+      ODIA::Library library;
+      ODIA::LibraryGenerator::generate(argv[1], params, library);
+      if (library.precursorCount() != (maximum == 0 ? 1u : 2u))
+      { throw std::runtime_error("variable modifications duplicated or lost the base form"); }
+      const std::string tsv = std::string(argv[1]) + ".tsv";
+      ODIA::DIANNLibraryFile::storeTSV(tsv, library);
+      ODIA::Library roundtrip;
+      ODIA::DIANNLibraryFile::loadTSV(tsv, roundtrip);
+      if (roundtrip.precursorCount() != library.precursorCount() ||
+          roundtrip.transitionCount() != library.transitionCount())
+      { throw std::runtime_error("variable modification TSV roundtrip changed assays"); }
+    }
+    params.variable_modifications.clear();
+    std::ofstream(argv[1]) << ">ambiguous\nPEPTIDEXKPEPTIDER\n"
+                             ">terminal_stop\nACDEFGK*\n"
+                             ">selenium\nACDEUGK\n";
+    ODIA::Library unusual;
+    const auto unusual_stats = ODIA::LibraryGenerator::generate(argv[1], params, unusual);
+    std::set<std::string> expected_unusual{"PEPTIDER", "ACDEFGK", "ACDEUGK"}, actual_unusual;
+    for (const auto handle : unusual.precursors().modified_sequence)
+    { actual_unusual.emplace(unusual.strings().get(handle)); }
+    if (actual_unusual != expected_unusual || unusual_stats.dropped_ambiguous_peptides != 1)
+    { throw std::runtime_error("ambiguous peptide affected unrelated valid peptides or terminal stop handling"); }
+    for (const auto method : {ODIA::DecoyMethod::Reverse, ODIA::DecoyMethod::PseudoReverse})
+    {
+      std::ofstream(argv[1]) << ">palindrome\nAPEPEPA\n";
+      ODIA::Library palindrome;
+      ODIA::LibraryGenerator::generate(argv[1], params, palindrome);
+      std::size_t skipped = 0;
+      if (ODIA::LibraryGenerator::appendDecoys(palindrome, method, &skipped) != 0 || skipped != 1)
+      { throw std::runtime_error("palindromic target was emitted as its own decoy"); }
+    }
+    std::ofstream(argv[1]) << ">shuffle\nACDEFGHK\n";
+    ODIA::Library shuffled;
+    ODIA::LibraryGenerator::generate(argv[1], params, shuffled);
+    if (ODIA::LibraryGenerator::appendDecoys(shuffled, ODIA::DecoyMethod::Shuffle) != 1)
+    { throw std::runtime_error("shuffle produced no decoy"); }
+    const auto expected_shuffle = OpenMS::AASequence::fromString("AGHDCFEK");
+    const auto& sp = shuffled.precursors();
+    const auto& st = shuffled.transitions();
+    for (std::size_t j = sp.transition_begin[1]; j < sp.transition_begin[1] + sp.transition_count[1]; ++j)
+    {
+      const auto ion = st.type[j] == ODIA::FragmentType::B ? OpenMS::Residue::BIon : OpenMS::Residue::YIon;
+      const auto part = st.type[j] == ODIA::FragmentType::B ? expected_shuffle.getPrefix(st.ordinal[j]) : expected_shuffle.getSuffix(st.ordinal[j]);
+      if (st.product_mz[j] != ODIA::toFixed(part.getMZ(st.charge[j], ion)))
+      { throw std::runtime_error("shuffle differs from the pinned cross-platform decoy AGHDCFEK"); }
+    }
+    std::vector<ODIA::MzFixed> terminal_masses;
+    for (const auto* sequence : {".(Acetyl)ACDEFGHK", "(UniMod:1)ACDEFGHK"})
+    {
+      ODIA::Library terminal;
+      ODIA::LibraryGenerator::generate(argv[1], params, terminal);
+      terminal.precursors().modified_sequence[0] = terminal.strings().intern(sequence);
+      if (ODIA::LibraryGenerator::appendDecoys(terminal, ODIA::DecoyMethod::PseudoReverse) != 1)
+      { throw std::runtime_error("terminal modification prevented decoy generation"); }
+      const auto begin = terminal.precursors().transition_begin[1];
+      std::vector<ODIA::MzFixed> masses(terminal.transitions().product_mz.begin() + begin, terminal.transitions().product_mz.end());
+      if (!terminal_masses.empty() && masses != terminal_masses)
+      { throw std::runtime_error("terminal modification spelling changed decoy masses"); }
+      terminal_masses = std::move(masses);
     }
     std::cout << "Met excision includes all missed-cleavage peptides and preserves protein mapping\n";
   }

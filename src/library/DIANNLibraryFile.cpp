@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/DIANNLibraryFile.h>
+#include <odia/AtomicFile.h>
 #include <odia/TextWriter.h>
 
 #include <arrow/api.h>
@@ -16,6 +17,8 @@
 #include <arrow/table.h>
 
 #include <charconv>
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <cmath>
 #include <fstream>
@@ -30,29 +33,40 @@ namespace ODIA
 {
   namespace
   {
-    double toDouble(std::string_view s)
+    bool isParquet(const std::string& filename)
+    {
+      auto extension = std::filesystem::path(filename).extension().string();
+      std::transform(extension.begin(), extension.end(), extension.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      if (extension == ".parquet") { return true; }
+      if (extension == ".tsv") { return false; }
+      throw std::runtime_error("unsupported library extension (expected .tsv or .parquet): " + filename);
+    }
+
+    double toDouble(std::string_view s, const char* column)
     {
       double v = 0.0;
       if (s.empty()) { return std::nan(""); }
-      // from_chars for floating point is not universally available with the
-      // required precision across libstdc++ versions in this project's range,
-      // so parse through strtod on a NUL-terminated copy of the field.
-      char buf[64];
-      const std::size_t n = std::min(s.size(), sizeof(buf) - 1);
-      std::memcpy(buf, s.data(), n);
-      buf[n] = '\0';
-      char* end = nullptr;
-      v = std::strtod(buf, &end);
-      return end == buf ? std::nan("") : v;
+      const auto* first = s.data();
+      const auto* last = first + s.size();
+      if (*first == '+') { ++first; }
+      const auto parsed = std::from_chars(first, last, v, std::chars_format::general);
+      if (parsed.ec != std::errc{} || parsed.ptr != last || std::isinf(v))
+      { throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s)); }
+      return v;
     }
 
-    long toLong(std::string_view s)
+    long toLong(std::string_view s, const char* column)
     {
+      if (s.empty()) { return 0; }
       long v = 0;
       const auto* first = s.data();
       const auto* last = s.data() + s.size();
       while (first != last && (*first == ' ' || *first == '+')) { ++first; }
-      if (std::from_chars(first, last, v).ec != std::errc{}) { return 0; }
+      while (last != first && last[-1] == ' ') { --last; }
+      const auto parsed = std::from_chars(first, last, v);
+      if (parsed.ec != std::errc{} || parsed.ptr != last)
+      { throw std::runtime_error(std::string("invalid integer value in ") + column + ": " + std::string(s)); }
       return v;
     }
 
@@ -96,6 +110,8 @@ namespace ODIA
 
       void append(const Row& r)
       {
+        if (r.precursor_charge < 1 || r.precursor_charge > 255)
+        { throw std::runtime_error("invalid precursor charge: expected an integer between 1 and 255"); }
         if (!have_current_ || r.precursor_id != current_id_ || (r.decoy != 0) != current_decoy_)
         {
           closeCurrent();
@@ -216,7 +232,7 @@ namespace ODIA
 
   void DIANNLibraryFile::load(const std::string& filename, Library& library)
   {
-    if (filename.ends_with(".parquet")) { loadParquet(filename, library); }
+    if (isParquet(filename)) { loadParquet(filename, library); }
     else { loadTSV(filename, library); }
     // A library that carries only one of the two mobility quantities gets the
     // other derived, so a consumer never has to know which the producer chose.
@@ -239,6 +255,7 @@ namespace ODIA
     std::string header;
     if (!std::getline(in, header)) { throw std::runtime_error("empty library: " + filename); }
     if (!header.empty() && header.back() == '\r') { header.pop_back(); }
+    if (header.starts_with("\xEF\xBB\xBF")) { header.erase(0, 3); }
 
     std::unordered_map<std::string, int> index;
     {
@@ -248,7 +265,9 @@ namespace ODIA
       {
         const std::size_t tab = header.find('\t', pos);
         const std::size_t end = tab == std::string::npos ? header.size() : tab;
-        index.emplace(header.substr(pos, end - pos), i++);
+        const auto name = header.substr(pos, end - pos);
+        if (!index.emplace(name, i++).second)
+        { throw std::runtime_error("duplicate TSV column: " + name); }
         if (tab == std::string::npos) { break; }
         pos = tab + 1;
       }
@@ -284,10 +303,12 @@ namespace ODIA
     Builder builder(library);
     std::string line;
     std::vector<std::string_view> f;
+    std::size_t line_number = 1;
     while (std::getline(in, line))
     {
+      ++line_number;
+      if (!line.empty() && line.back() == '\r') { line.pop_back(); }
       if (line.empty()) { continue; }
-      if (line.back() == '\r') { line.pop_back(); }
 
       f.clear();
       std::size_t pos = 0;
@@ -299,6 +320,8 @@ namespace ODIA
         if (tab == std::string::npos) { break; }
         pos = tab + 1;
       }
+      if (f.size() != index.size())
+      { throw std::runtime_error("TSV row width differs from header at line " + std::to_string(line_number)); }
 
       auto get = [&](int i) -> std::string_view {
         return (i >= 0 && static_cast<std::size_t>(i) < f.size()) ? f[i] : std::string_view{};
@@ -308,20 +331,21 @@ namespace ODIA
       r.precursor_id = get(c_id);
       r.modified_sequence = get(c_seq);
       r.protein_group = get(c_pg);
-      r.precursor_mz = toDouble(get(c_pmz));
-      r.product_mz = toDouble(get(c_qmz));
-      r.rt = toDouble(get(c_rt));
-      r.im = toDouble(get(c_im));
-      r.ccs = toDouble(get(c_ccs));
-      r.intensity = toDouble(get(c_int));
-      r.precursor_charge = toLong(get(c_z));
-      r.fragment_charge = toLong(get(c_fz));
-      r.ordinal = toLong(get(c_ord));
-      r.decoy = toLong(get(c_dec));
+      r.precursor_mz = toDouble(get(c_pmz), Columns::PRECURSOR_MZ);
+      r.product_mz = toDouble(get(c_qmz), Columns::PRODUCT_MZ);
+      r.rt = toDouble(get(c_rt), Columns::RT);
+      r.im = toDouble(get(c_im), Columns::IM);
+      r.ccs = toDouble(get(c_ccs), Columns::CCS);
+      r.intensity = toDouble(get(c_int), Columns::RELATIVE_INTENSITY);
+      r.precursor_charge = toLong(get(c_z), "precursor charge");
+      r.fragment_charge = toLong(get(c_fz), "fragment charge");
+      r.ordinal = toLong(get(c_ord), Columns::FRAGMENT_SERIES_NUMBER);
+      r.decoy = toLong(get(c_dec), Columns::DECOY);
       r.fragment_type = get(c_ft);
       r.loss_type = get(c_lt);
       builder.append(r);
     }
+    if (in.bad()) { throw std::runtime_error("error reading library: " + filename); }
     builder.finish();
     if (builder.outOfRange())
     {
@@ -347,144 +371,141 @@ namespace ODIA
     if (!reader_result.ok()) { throw std::runtime_error("not a Parquet file: " + filename); }
     std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
 
-    std::shared_ptr<arrow::Table> table;
-    if (!reader->ReadTable(&table).ok())
-    {
-      throw std::runtime_error("cannot read Parquet table: " + filename);
-    }
-
-    // COMPACT layout? Product.Mz being a list means one row per PRECURSOR with
-    // the transitions nested, rather than one row per transition. Detected from
-    // the schema rather than from a version field, so a file is readable on its
-    // own terms.
-    {
-      const int qi = table->schema()->GetFieldIndex(Columns::PRODUCT_MZ);
-      if (qi >= 0 && table->schema()->field(qi)->type()->id() == arrow::Type::LIST)
-      {
-        loadParquetCompact(table, library);
-        return;
-      }
-    }
-
-    // Combine chunks up front. A library at proteome scale exceeds the 2 GB
-    // limit of a 32-bit-offset StringArray, so string columns arrive chunked;
-    // resolving (global row) -> (chunk, index) per access is the alternative,
-    // and is what the extractor will do for the far larger spectrum tables.
-    // Here the fixture is small enough that one combine is simpler and safe.
-    {
-      auto combined = table->CombineChunks(arrow::default_memory_pool());
-      if (!combined.ok()) { throw std::runtime_error("cannot combine Parquet chunks: " + filename); }
-      table = *combined;
-    }
-
-    // Decode dictionary and large_string columns rather than rejecting them.
-    // Parquet writes repeated strings dictionary-encoded by default -- which is
-    // the very property that makes this path cheap -- and any library over 2 GB
-    // of characters needs large_string. Casting straight to StringArray yields
-    // nullptr for both, after which the reader blamed the file for "missing
-    // Precursor.Id" when the column was present all along.
-    std::vector<std::shared_ptr<arrow::Array>> keep_alive;
-    auto str = [&](const char* n) -> std::shared_ptr<arrow::StringArray> {
-      const int i = table->schema()->GetFieldIndex(n);
-      if (i < 0) { return nullptr; }
-      std::shared_ptr<arrow::Array> a = table->column(i)->chunk(0);
-      if (a->type_id() != arrow::Type::STRING)
-      {
-        auto casted = arrow::compute::Cast(arrow::Datum(a), arrow::utf8());
-        if (!casted.ok()) { return nullptr; }
-        a = casted->make_array();
-        keep_alive.push_back(a);
-      }
-      return std::dynamic_pointer_cast<arrow::StringArray>(a);
-    };
-    auto num = [&](const char* n) -> std::shared_ptr<arrow::Array> {
-      const int i = table->schema()->GetFieldIndex(n);
-      return i < 0 ? nullptr : table->column(i)->chunk(0);
-    };
-    auto at = [](const std::shared_ptr<arrow::Array>& a, int64_t i) -> double {
-      if (!a || a->IsNull(i)) { return 0.0; }
-      switch (a->type_id())
-      {
-        case arrow::Type::DOUBLE: return static_cast<const arrow::DoubleArray&>(*a).Value(i);
-        case arrow::Type::FLOAT:  return static_cast<const arrow::FloatArray&>(*a).Value(i);
-        case arrow::Type::INT64:  return static_cast<double>(static_cast<const arrow::Int64Array&>(*a).Value(i));
-        case arrow::Type::INT32:  return static_cast<double>(static_cast<const arrow::Int32Array&>(*a).Value(i));
-        case arrow::Type::INT16:  return static_cast<double>(static_cast<const arrow::Int16Array&>(*a).Value(i));
-        case arrow::Type::INT8:   return static_cast<double>(static_cast<const arrow::Int8Array&>(*a).Value(i));
-        case arrow::Type::UINT64: return static_cast<double>(static_cast<const arrow::UInt64Array&>(*a).Value(i));
-        case arrow::Type::UINT32: return static_cast<double>(static_cast<const arrow::UInt32Array&>(*a).Value(i));
-        case arrow::Type::UINT16: return static_cast<double>(static_cast<const arrow::UInt16Array&>(*a).Value(i));
-        case arrow::Type::UINT8:  return static_cast<double>(static_cast<const arrow::UInt8Array&>(*a).Value(i));
-        // Decoy is naturally a bool, and that is what pandas and polars write.
-        // Falling through to 0.0 here silently made every decoy a target.
-        case arrow::Type::BOOL:   return static_cast<const arrow::BooleanArray&>(*a).Value(i) ? 1.0 : 0.0;
-        default: return std::nan("");
-      }
-    };
-    auto sv = [](const std::shared_ptr<arrow::StringArray>& a, int64_t i) -> std::string_view {
-      if (!a || a->IsNull(i)) { return {}; }
-      return a->GetView(i);
-    };
-
-    const auto a_id = str(Columns::PRECURSOR_ID);
-    const auto a_seq = str(Columns::MODIFIED_SEQUENCE);
-    const auto a_pg = str(Columns::PROTEIN_GROUP);
-    const auto a_ft = str(Columns::FRAGMENT_TYPE);
-    const auto a_lt = str(Columns::FRAGMENT_LOSS_TYPE);
-    const auto a_pmz = num(Columns::PRECURSOR_MZ);
-    const auto a_qmz = num(Columns::PRODUCT_MZ);
-    const auto a_rt = num(Columns::RT);
-    const auto a_im = num(Columns::IM);
-    const auto a_ccs = num(Columns::CCS);
-    const auto a_int = num(Columns::RELATIVE_INTENSITY);
-    const auto a_z = num(Columns::PRECURSOR_CHARGE);
-    const auto a_fz = num(Columns::FRAGMENT_CHARGE);
-    const auto a_ord = num(Columns::FRAGMENT_SERIES_NUMBER);
-    const auto a_dec = num(Columns::DECOY);
-
-    if (!a_id || !a_pmz || !a_qmz)
-    {
-      throw std::runtime_error("not a DIA-NN library (missing Precursor.Id / Precursor.Mz / "
-                               "Product.Mz): " + filename);
-    }
-
-    const int64_t rows = table->num_rows();
-    library.reserve(static_cast<std::size_t>(rows) / 8, static_cast<std::size_t>(rows));
-    library.strings().reserve(static_cast<std::size_t>(rows) / 8,
-                              static_cast<std::size_t>(rows) * 4);
-
+    // Bound decoded input memory independently of the full spectral library.
+    // The Builder spans batches so a precursor split at a boundary stays intact.
+    reader->set_batch_size(65536);
+    std::shared_ptr<arrow::RecordBatchReader> batches;
+    if (!reader->GetRecordBatchReader(&batches).ok())
+    { throw std::runtime_error("cannot read Parquet batches: " + filename); }
     Builder builder(library);
-    for (int64_t i = 0; i < rows; ++i)
+    for (;;)
     {
-      Row r;
-      r.precursor_id = sv(a_id, i);
-      r.modified_sequence = sv(a_seq, i);
-      r.protein_group = sv(a_pg, i);
-      r.fragment_type = sv(a_ft, i);
-      r.loss_type = sv(a_lt, i);
-      r.precursor_mz = at(a_pmz, i);
-      r.product_mz = at(a_qmz, i);
-      r.rt = at(a_rt, i);
-      r.im = at(a_im, i);
-      r.ccs = at(a_ccs, i);
-      r.intensity = at(a_int, i);
-      // at() yields NaN for a type it cannot decode or a null cell; casting
-      // that to long is undefined behaviour, which is exactly what the toFixed
-      // guard was added to eliminate two functions away.
-      // NaN was guarded; +-inf and any |v| >= 2^63 still reached the cast and
-      // UBSan flagged them. On x86-64 they yield INT64_MIN, which narrows to
-      // charge 0 -- a wrong value rather than a crash.
-      auto as_long = [](double v) -> long {
-        if (!std::isfinite(v)) { return 0L; }
-        if (v <= static_cast<double>(std::numeric_limits<long>::min())) { return 0L; }
-        if (v >= static_cast<double>(std::numeric_limits<long>::max())) { return 0L; }
-        return static_cast<long>(v);
+      std::shared_ptr<arrow::RecordBatch> batch;
+      if (!batches->ReadNext(&batch).ok())
+      { throw std::runtime_error("cannot read Parquet batch: " + filename); }
+      if (!batch) { break; }
+      if (batch->num_rows() == 0) { continue; }
+      auto result = arrow::Table::FromRecordBatches({batch});
+      if (!result.ok()) { throw std::runtime_error("cannot materialize Parquet batch: " + filename); }
+      auto table = *result;
+
+      // COMPACT layout? Product.Mz being a list means one row per PRECURSOR with
+      // the transitions nested, rather than one row per transition. Detected from
+      // the schema rather than from a version field, so a file is readable on its
+      // own terms.
+      {
+        const int qi = table->schema()->GetFieldIndex(Columns::PRODUCT_MZ);
+        if (qi >= 0 && table->schema()->field(qi)->type()->id() == arrow::Type::LIST)
+        {
+          loadParquetCompact(table, library);
+          continue;
+        }
+      }
+
+      // Decode dictionary and large_string columns rather than rejecting them.
+      // Parquet writes repeated strings dictionary-encoded by default -- which is
+      // the very property that makes this path cheap -- and any library over 2 GB
+      // of characters needs large_string. Casting straight to StringArray yields
+      // nullptr for both, after which the reader blamed the file for "missing
+      // Precursor.Id" when the column was present all along.
+      std::vector<std::shared_ptr<arrow::Array>> keep_alive;
+      auto str = [&](const char* n) -> std::shared_ptr<arrow::StringArray> {
+        const int i = table->schema()->GetFieldIndex(n);
+        if (i < 0) { return nullptr; }
+        std::shared_ptr<arrow::Array> a = table->column(i)->chunk(0);
+        if (a->type_id() != arrow::Type::STRING)
+        {
+          auto casted = arrow::compute::Cast(arrow::Datum(a), arrow::utf8());
+          if (!casted.ok()) { throw std::runtime_error(std::string("cannot decode Parquet string column ") + n + ": " + casted.status().ToString()); }
+          a = casted->make_array();
+          keep_alive.push_back(a);
+        }
+        return std::dynamic_pointer_cast<arrow::StringArray>(a);
       };
-      r.precursor_charge = as_long(at(a_z, i));
-      r.fragment_charge = as_long(at(a_fz, i));
-      r.ordinal = as_long(at(a_ord, i));
-      r.decoy = as_long(at(a_dec, i));
-      builder.append(r);
+      auto num = [&](const char* n) -> std::shared_ptr<arrow::Array> {
+        const int i = table->schema()->GetFieldIndex(n);
+        return i < 0 ? nullptr : table->column(i)->chunk(0);
+      };
+      auto at = [](const std::shared_ptr<arrow::Array>& a, int64_t i) -> double {
+        if (!a || a->IsNull(i)) { return std::numeric_limits<double>::quiet_NaN(); }
+        switch (a->type_id())
+        {
+          case arrow::Type::DOUBLE: return static_cast<const arrow::DoubleArray&>(*a).Value(i);
+          case arrow::Type::FLOAT:  return static_cast<const arrow::FloatArray&>(*a).Value(i);
+          case arrow::Type::INT64:  return static_cast<double>(static_cast<const arrow::Int64Array&>(*a).Value(i));
+          case arrow::Type::INT32:  return static_cast<double>(static_cast<const arrow::Int32Array&>(*a).Value(i));
+          case arrow::Type::INT16:  return static_cast<double>(static_cast<const arrow::Int16Array&>(*a).Value(i));
+          case arrow::Type::INT8:   return static_cast<double>(static_cast<const arrow::Int8Array&>(*a).Value(i));
+          case arrow::Type::UINT64: return static_cast<double>(static_cast<const arrow::UInt64Array&>(*a).Value(i));
+          case arrow::Type::UINT32: return static_cast<double>(static_cast<const arrow::UInt32Array&>(*a).Value(i));
+          case arrow::Type::UINT16: return static_cast<double>(static_cast<const arrow::UInt16Array&>(*a).Value(i));
+          case arrow::Type::UINT8:  return static_cast<double>(static_cast<const arrow::UInt8Array&>(*a).Value(i));
+          // Decoy is naturally a bool, and that is what pandas and polars write.
+          // Falling through to 0.0 here silently made every decoy a target.
+          case arrow::Type::BOOL:   return static_cast<const arrow::BooleanArray&>(*a).Value(i) ? 1.0 : 0.0;
+          default: return std::nan("");
+        }
+      };
+      auto sv = [](const std::shared_ptr<arrow::StringArray>& a, int64_t i) -> std::string_view {
+        if (!a || a->IsNull(i)) { return {}; }
+        return a->GetView(i);
+      };
+
+      const auto a_id = str(Columns::PRECURSOR_ID);
+      const auto a_seq = str(Columns::MODIFIED_SEQUENCE);
+      const auto a_pg = str(Columns::PROTEIN_GROUP);
+      const auto a_ft = str(Columns::FRAGMENT_TYPE);
+      const auto a_lt = str(Columns::FRAGMENT_LOSS_TYPE);
+      const auto a_pmz = num(Columns::PRECURSOR_MZ);
+      const auto a_qmz = num(Columns::PRODUCT_MZ);
+      const auto a_rt = num(Columns::RT);
+      const auto a_im = num(Columns::IM);
+      const auto a_ccs = num(Columns::CCS);
+      const auto a_int = num(Columns::RELATIVE_INTENSITY);
+      const auto a_z = num(Columns::PRECURSOR_CHARGE);
+      const auto a_fz = num(Columns::FRAGMENT_CHARGE);
+      const auto a_ord = num(Columns::FRAGMENT_SERIES_NUMBER);
+      const auto a_dec = num(Columns::DECOY);
+
+      if (!a_id || !a_pmz || !a_qmz)
+      {
+        throw std::runtime_error("not a DIA-NN library (missing Precursor.Id / Precursor.Mz / "
+                                 "Product.Mz): " + filename);
+      }
+
+      const int64_t rows = table->num_rows();
+      for (int64_t i = 0; i < rows; ++i)
+      {
+        Row r;
+        r.precursor_id = sv(a_id, i);
+        r.modified_sequence = sv(a_seq, i);
+        r.protein_group = sv(a_pg, i);
+        r.fragment_type = sv(a_ft, i);
+        r.loss_type = sv(a_lt, i);
+        r.precursor_mz = at(a_pmz, i);
+        r.product_mz = at(a_qmz, i);
+        r.rt = at(a_rt, i);
+        r.im = at(a_im, i);
+        r.ccs = at(a_ccs, i);
+        r.intensity = at(a_int, i);
+        // at() yields NaN for a type it cannot decode or a null cell; casting
+        // that to long is undefined behaviour, which is exactly what the toFixed
+        // guard was added to eliminate two functions away.
+        // NaN was guarded; +-inf and any |v| >= 2^63 still reached the cast and
+        // UBSan flagged them. On x86-64 they yield INT64_MIN, which narrows to
+        // charge 0 -- a wrong value rather than a crash.
+        auto as_long = [](double v) -> long {
+          if (!std::isfinite(v) || v != std::floor(v)) { return 0L; }
+          if (v <= static_cast<double>(std::numeric_limits<long>::min())) { return 0L; }
+          if (v >= static_cast<double>(std::numeric_limits<long>::max())) { return 0L; }
+          return static_cast<long>(v);
+        };
+        r.precursor_charge = as_long(at(a_z, i));
+        r.fragment_charge = as_long(at(a_fz, i));
+        r.ordinal = as_long(at(a_ord, i));
+        r.decoy = as_long(at(a_dec, i));
+        builder.append(r);
+      }
     }
     builder.finish();
     if (builder.outOfRange())
@@ -512,7 +533,7 @@ namespace ODIA
   /// previous ofstream form.
   void DIANNLibraryFile::store(const std::string& filename, const Library& library)
   {
-    if (filename.ends_with(".parquet")) { storeParquet(filename, library); }
+    if (isParquet(filename)) { storeParquet(filename, library); }
     else { storeTSV(filename, library); }
   }
 
@@ -524,7 +545,7 @@ namespace ODIA
     if (path.empty()) { return "bundled"; }
     std::ifstream in(path, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot read model: " + path); }
-    std::uint64_t h = 1469598103934665603ull;
+    std::uint64_t h = 14695981039346656037ull;
     std::vector<char> buf(1 << 20);
     while (in)
     {
@@ -533,6 +554,7 @@ namespace ODIA
       for (std::streamsize i = 0; i < got; ++i)
       { h ^= static_cast<unsigned char>(buf[std::size_t(i)]); h *= 1099511628211ull; }
     }
+    if (in.bad()) { throw std::runtime_error("error reading model: " + path); }
     std::ostringstream hex;
     hex << std::hex << std::setw(16) << std::setfill('0') << h;
     return hex.str();
@@ -548,7 +570,7 @@ namespace ODIA
     // to /scratch must hit the cache, and an edited one that happens to keep
     // its size and timestamp must miss it. Not cryptographic -- this guards
     // against accident, not against an adversary editing a FASTA to collide.
-    std::uint64_t h = 1469598103934665603ull;
+    std::uint64_t h = 14695981039346656037ull;
     std::uint64_t bytes = 0;
     std::vector<char> buf(1 << 20);
     while (in)
@@ -562,6 +584,7 @@ namespace ODIA
       }
       bytes += std::uint64_t(got);
     }
+    if (in.bad()) { throw std::runtime_error("error reading FASTA: " + fasta); }
     std::ostringstream hex;
     hex << std::hex << std::setw(16) << std::setfill('0') << h;
     Fingerprint fp;
@@ -617,7 +640,7 @@ namespace ODIA
       if (a->type_id() != arrow::Type::STRING)
       {
         auto casted = arrow::compute::Cast(arrow::Datum(a), arrow::utf8());
-        if (!casted.ok()) { return nullptr; }
+        if (!casted.ok()) { throw std::runtime_error(std::string("cannot decode Parquet string column ") + n + ": " + casted.status().ToString()); }
         a = casted->make_array();
         keep_alive.push_back(a);
       }
@@ -630,6 +653,8 @@ namespace ODIA
         case arrow::Type::DOUBLE: return static_cast<const arrow::DoubleArray&>(*a).Value(i);
         case arrow::Type::FLOAT:  return static_cast<const arrow::FloatArray&>(*a).Value(i);
         case arrow::Type::UINT8:  return static_cast<const arrow::UInt8Array&>(*a).Value(i);
+        case arrow::Type::BOOL:   return static_cast<const arrow::BooleanArray&>(*a).Value(i) ? 1.0 : 0.0;
+        case arrow::Type::INT64:  return static_cast<double>(static_cast<const arrow::Int64Array&>(*a).Value(i));
         case arrow::Type::INT32:  return static_cast<const arrow::Int32Array&>(*a).Value(i);
         default: return std::numeric_limits<double>::quiet_NaN();
       }
@@ -653,14 +678,49 @@ namespace ODIA
     const auto l_ft  = lst(Columns::FRAGMENT_TYPE);
     const auto l_fz  = lst(Columns::FRAGMENT_CHARGE);
     const auto l_ord = lst(Columns::FRAGMENT_SERIES_NUMBER);
-    if (!a_seq || !l_qmz || !l_int)
+    const auto l_loss = lst(Columns::FRAGMENT_LOSS_TYPE);
+    if (!a_seq || !a_z || !a_pmz || !l_qmz || !l_int)
     { throw std::runtime_error("compact Parquet library is missing required columns"); }
+
+    // Validate nested input before typed access: each precursor owns a separate
+    // list in every column, and malformed lengths must never index another row.
+    auto requireList = [&](const char* name, const std::shared_ptr<arrow::ListArray>& a,
+                           arrow::Type::type type) {
+      if (!a)
+      {
+        if (col(name)) { throw std::runtime_error(std::string("compact column is not a list: ") + name); }
+        return;
+      }
+      if (a->values()->type_id() != type)
+      { throw std::runtime_error(std::string("unsupported compact list element type: ") + name); }
+      if (a->null_count() || a->values()->null_count())
+      { throw std::runtime_error(std::string("null compact list or element: ") + name); }
+      for (int64_t i = 0; i < table->num_rows(); ++i)
+      {
+        if (a->value_length(i) != l_qmz->value_length(i))
+        { throw std::runtime_error("compact transition list lengths disagree"); }
+      }
+    };
+    requireList(Columns::PRODUCT_MZ, l_qmz, arrow::Type::DOUBLE);
+    requireList(Columns::RELATIVE_INTENSITY, l_int, arrow::Type::FLOAT);
+    requireList(Columns::FRAGMENT_TYPE, l_ft, arrow::Type::UINT8);
+    requireList(Columns::FRAGMENT_CHARGE, l_fz, arrow::Type::UINT8);
+    requireList(Columns::FRAGMENT_SERIES_NUMBER, l_ord, arrow::Type::UINT8);
+    requireList(Columns::FRAGMENT_LOSS_TYPE, l_loss, arrow::Type::UINT8);
+    if (a_seq->null_count()) { throw std::runtime_error("null compact modified sequence"); }
+    for (int64_t i = 0; i < table->num_rows(); ++i)
+    {
+      const double charge = num(a_z, i);
+      if (!std::isfinite(charge) || charge != std::floor(charge) || charge < 1 || charge > 255)
+      { throw std::runtime_error("invalid compact precursor charge"); }
+    }
 
     const auto v_qmz = std::static_pointer_cast<arrow::DoubleArray>(l_qmz->values());
     const auto v_int = std::static_pointer_cast<arrow::FloatArray>(l_int->values());
     const auto v_ft  = l_ft ? std::static_pointer_cast<arrow::UInt8Array>(l_ft->values()) : nullptr;
     const auto v_fz  = l_fz ? std::static_pointer_cast<arrow::UInt8Array>(l_fz->values()) : nullptr;
     const auto v_ord = l_ord ? std::static_pointer_cast<arrow::UInt8Array>(l_ord->values()) : nullptr;
+    const auto v_loss = l_loss ? std::static_pointer_cast<arrow::UInt8Array>(l_loss->values()) : nullptr;
 
     auto& p = library.precursors();
     auto& t = library.transitions();
@@ -676,10 +736,10 @@ namespace ODIA
       const double ccs = num(a_ccs, i);
       p.ccs.push_back(ccs > 0.0 ? static_cast<float>(ccs) : std::nanf(""));
       p.charge.push_back(static_cast<std::uint8_t>(num(a_z, i)));
-      p.decoy.push_back(num(a_dec, i) != 0.0 ? std::uint8_t{1} : std::uint8_t{0});
+      p.decoy.push_back(a_dec && !a_dec->IsNull(i) && num(a_dec, i) != 0.0 ? std::uint8_t{1} : std::uint8_t{0});
       p.modified_sequence.push_back(library.strings().intern(
         std::string_view(seq.data(), seq.size())));
-      const auto pg = a_pg ? a_pg->GetView(i) : std::string_view{};
+      const auto pg = a_pg && !a_pg->IsNull(i) ? a_pg->GetView(i) : std::string_view{};
       p.protein_group.push_back(library.strings().intern(
         std::string_view(pg.data(), pg.size())));
 
@@ -688,22 +748,27 @@ namespace ODIA
       for (int64_t k = b; k < e; ++k)
       {
         t.product_mz.push_back(toFixed(v_qmz->Value(k)));
-        t.library_intensity.push_back(v_int->Value(k));
-        t.type.push_back(v_ft ? static_cast<FragmentType>(v_ft->Value(k))
-                              : FragmentType::Unknown);
-        t.charge.push_back(v_fz ? static_cast<std::int8_t>(v_fz->Value(k)) : std::int8_t{1});
-        t.ordinal.push_back(v_ord ? static_cast<std::uint8_t>(v_ord->Value(k))
-                                  : std::uint8_t{0});
-        // The compact layout drops the loss COLUMN because it is "noloss" on
-        // every row here -- but the ARRAY still has to be filled. Leaving it
-        // empty while product_mz holds 672 entries made sortByPrecursorMz index
-        // transitions_.loss[s] out of bounds and segfault after the library had
-        // already loaded and reported itself correctly, which is why this
-        // looked like a write failure rather than a read one.
-        t.loss.push_back(LossType::None);
+        const auto offset = k - b;
+        t.library_intensity.push_back(v_int->Value(l_int->value_offset(i) + offset));
+        const auto type = v_ft ? v_ft->Value(l_ft->value_offset(i) + offset) : std::uint8_t{0};
+        const auto charge = v_fz ? v_fz->Value(l_fz->value_offset(i) + offset) : std::uint8_t{1};
+        const auto ordinal = v_ord ? v_ord->Value(l_ord->value_offset(i) + offset) : std::uint8_t{0};
+        if (type > static_cast<std::uint8_t>(FragmentType::Precursor))
+        { throw std::runtime_error("invalid compact fragment type"); }
+        if (charge < 1 || charge > 127) { throw std::runtime_error("invalid compact fragment charge"); }
+        if (v_ord && (ordinal < 1 || ordinal >= residueCount(seq)))
+        { throw std::runtime_error("invalid compact fragment ordinal"); }
+        t.type.push_back(static_cast<FragmentType>(type));
+        t.charge.push_back(static_cast<std::int8_t>(charge));
+        t.ordinal.push_back(ordinal);
+        const auto loss = v_loss ? v_loss->Value(l_loss->value_offset(i) + offset) : std::uint8_t{0};
+        if (loss > static_cast<std::uint8_t>(LossType::Other)) { throw std::runtime_error("invalid compact fragment loss"); }
+        // Older compact-v1 files omitted the all-noloss column.
+        t.loss.push_back(static_cast<LossType>(loss));
       }
       p.transition_count.push_back(static_cast<std::uint32_t>(e - b));
     }
+    library.markUnsorted();
   }
 
   void DIANNLibraryFile::storeParquetCompact(const std::string& filename,
@@ -733,8 +798,9 @@ namespace ODIA
     auto ft_v  = std::make_shared<arrow::UInt8Builder>(pool);
     auto fz_v  = std::make_shared<arrow::UInt8Builder>(pool);
     auto ord_v = std::make_shared<arrow::UInt8Builder>(pool);
+    auto loss_v = std::make_shared<arrow::UInt8Builder>(pool);
     arrow::ListBuilder b_qmz(pool, qmz_v), b_int(pool, int_v),
-                       b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v);
+                       b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
 
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -758,7 +824,7 @@ namespace ODIA
       ok(b_pmz.Append(fromFixed(p.mz[i])));
 
       ok(b_qmz.Append()); ok(b_int.Append()); ok(b_ft.Append());
-      ok(b_fz.Append()); ok(b_ord.Append());
+      ok(b_fz.Append()); ok(b_ord.Append()); ok(b_loss.Append());
       const std::uint32_t begin = p.transition_begin[i];
       for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
       {
@@ -770,16 +836,17 @@ namespace ODIA
         ok(ft_v->Append(static_cast<std::uint8_t>(t.type[j])));
         ok(fz_v->Append(static_cast<std::uint8_t>(t.charge[j])));
         ok(ord_v->Append(static_cast<std::uint8_t>(t.ordinal[j])));
+        ok(loss_v->Append(static_cast<std::uint8_t>(t.loss[j])));
       }
     }
 
     std::shared_ptr<arrow::Array> a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im,
-                                  a_ccs, a_pmz, a_qmz, a_int, a_ft, a_fz, a_ord;
+                                  a_ccs, a_pmz, a_qmz, a_int, a_ft, a_fz, a_ord, a_loss;
     ok(b_id.Finish(&a_id));   ok(b_seq.Finish(&a_seq)); ok(b_pg.Finish(&a_pg));
     ok(b_z.Finish(&a_z));     ok(b_dec.Finish(&a_dec)); ok(b_rt.Finish(&a_rt));
     ok(b_im.Finish(&a_im));   ok(b_ccs.Finish(&a_ccs)); ok(b_pmz.Finish(&a_pmz));
     ok(b_qmz.Finish(&a_qmz)); ok(b_int.Finish(&a_int)); ok(b_ft.Finish(&a_ft));
-    ok(b_fz.Finish(&a_fz));   ok(b_ord.Finish(&a_ord));
+    ok(b_fz.Finish(&a_fz));   ok(b_ord.Finish(&a_ord)); ok(b_loss.Finish(&a_loss));
 
     auto schema = arrow::schema({
       arrow::field(Columns::PRECURSOR_ID, a_id->type()),
@@ -796,11 +863,12 @@ namespace ODIA
       arrow::field(Columns::FRAGMENT_TYPE, arrow::list(arrow::uint8())),
       arrow::field(Columns::FRAGMENT_CHARGE, arrow::list(arrow::uint8())),
       arrow::field(Columns::FRAGMENT_SERIES_NUMBER, arrow::list(arrow::uint8())),
+      arrow::field(Columns::FRAGMENT_LOSS_TYPE, arrow::list(arrow::uint8())),
     });
     std::vector<std::string> md_keys{
       "odia.fingerprint", "odia.target_fingerprint", "odia.layout",
       "odia.decoy_semantics", "odia.decoy_method",
-      "odia.fasta_sha", "odia.fasta_bytes", "odia.params"};
+      "odia.fasta_fnv1a64", "odia.fasta_bytes", "odia.params"};
     schema = schema->WithMetadata(arrow::key_value_metadata(
       md_keys,
       // decoy_semantics is stated because a consumer CANNOT infer it and one
@@ -824,9 +892,10 @@ namespace ODIA
 
     auto table = arrow::Table::Make(schema,
       {a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im, a_ccs, a_pmz,
-       a_qmz, a_int, a_ft, a_fz, a_ord});
+       a_qmz, a_int, a_ft, a_fz, a_ord, a_loss});
 
-    auto outfile = arrow::io::FileOutputStream::Open(filename);
+    AtomicFile output(filename);
+    auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
     if (!outfile.ok()) { throw std::runtime_error("cannot write library: " + filename); }
     auto props = parquet::WriterProperties::Builder()
                    .compression(parquet::Compression::ZSTD)
@@ -836,6 +905,8 @@ namespace ODIA
     const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, 1 << 20,
                                                props, arrow_props);
     if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    ok((*outfile)->Close());
+    output.commit();
   }
 
   void DIANNLibraryFile::storeParquet(const std::string& filename, const Library& library)
@@ -932,7 +1003,7 @@ namespace ODIA
         ok(b_ft.Append(std::string(toString(t.type[j]))));
         ok(b_fz.Append(static_cast<std::uint8_t>(t.charge[j])));
         ok(b_ord.Append(static_cast<std::uint8_t>(t.ordinal[j])));
-        ok(b_lt.Append(std::string("noloss")));
+        ok(b_lt.Append(std::string(toString(t.loss[j]))));
       }
     }
 
@@ -966,14 +1037,15 @@ namespace ODIA
       // Human-readable siblings alongside the compared key, so a library found
       // on disk months later can be explained without running anything.
       schema = schema->WithMetadata(arrow::key_value_metadata(
-        {"odia.fingerprint", "odia.fasta_sha", "odia.fasta_bytes", "odia.params"},
+        {"odia.fingerprint", "odia.fasta_fnv1a64", "odia.fasta_bytes", "odia.params"},
         {fp.key(), fp.fasta_hash, std::to_string(fp.fasta_bytes), fp.params}));
     }
     auto table = arrow::Table::Make(schema,
       {a_id, a_seq, a_z, a_dec, a_rt, a_im, a_ccs, a_pmz, a_qmz, a_int,
        a_ft, a_fz, a_ord, a_lt, a_pg});
 
-    auto outfile = arrow::io::FileOutputStream::Open(filename);
+    AtomicFile output(filename);
+    auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
     if (!outfile.ok()) { throw std::runtime_error("cannot write library: " + filename); }
     // Dictionary encoding is the whole point: the sequence and protein group
     // repeat once per transition, twelve times per precursor.
@@ -989,11 +1061,14 @@ namespace ODIA
     const auto st = parquet::arrow::WriteTable(*table, arrow::default_memory_pool(),
                                                *outfile, 1 << 20, props, arrow_props);
     if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    ok((*outfile)->Close());
+    output.commit();
   }
 
   void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library)
   {
-    TextWriter out(filename);
+    AtomicFile output(filename);
+    TextWriter out(output.temporaryPath().string());
 
     for (const char* column : {Columns::PRECURSOR_ID, Columns::MODIFIED_SEQUENCE,
                                Columns::PRECURSOR_CHARGE, Columns::DECOY,
@@ -1016,7 +1091,10 @@ namespace ODIA
       const auto seq = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
       const int z = p.charge[i];
-      const bool has_im = !std::isnan(p.im[i]);
+      if (seq.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos ||
+          pg.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos)
+      { throw std::runtime_error("TSV sequence or protein group contains a tab, newline or NUL"); }
+      const bool has_im = i < p.im.size() && !std::isnan(p.im[i]);
       const bool has_ccs = i < p.ccs.size() && !std::isnan(p.ccs[i]);
       const std::uint32_t begin = p.transition_begin[i];
       for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
@@ -1035,11 +1113,12 @@ namespace ODIA
         // anything that reads the library back.
         if (!std::isnan(p.irt[i])) { out.number(p.irt[i], 9); }
         out.put('\t');
-        if (has_im) { out.number(p.im[i], 9); } else { out.integer(0); }
+        if (has_im) { out.number(p.im[i], 9); }
         out.put('\t');
         out.number(fromFixed(p.mz[i]), 10); out.put('\t');
         out.number(fromFixed(t.product_mz[j]), 10); out.put('\t');
-        out.number(t.library_intensity[j], 9); out.put('\t');
+        if (!std::isnan(t.library_intensity[j])) { out.number(t.library_intensity[j], 9); }
+        out.put('\t');
         out.put(toString(t.type[j])); out.put('\t');
         out.integer(t.charge[j]); out.put('\t');
         out.integer(t.ordinal[j]); out.put('\t');
@@ -1055,6 +1134,7 @@ namespace ODIA
     // A file checked only at open reports success on a full disk, an exceeded
     // quota or a broken mount, leaving a truncated library behind.
     out.close();
+    output.commit();
   }
 
 } // namespace ODIA

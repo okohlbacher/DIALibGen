@@ -33,7 +33,7 @@ jobs:
           find squashfs-root -path '*apprun-hooks*' -type f -exec cp {} diagnostics/ \;
           for library in libglib-2.0.so.0 libgobject-2.0.so.0 libgio-2.0.so.0; do
             sha256sum "squashfs-root/usr/lib/$library" "/usr/lib/x86_64-linux-gnu/$library"
-            readelf -n "squashfs-root/usr/lib/$library" | grep 'Build ID'
+            readelf -n "squashfs-root/usr/lib/$library"
           done | tee diagnostics/glib-origins.log
           mv squashfs-root/usr/bin/dialibgen-gui squashfs-root/usr/bin/dialibgen-gui.real
           cat > squashfs-root/usr/bin/dialibgen-gui <<'PY'

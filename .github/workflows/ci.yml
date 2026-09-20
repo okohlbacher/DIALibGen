@@ -29,6 +29,10 @@ on:
         description: 'Build the desktop app without cutting a tag'
         type: boolean
         default: false
+      cli_dry_run:
+        description: 'Package and verify the CLI without building desktop installers or cutting a tag'
+        type: boolean
+        default: false
 
 concurrency:
   # A dispatch gets its OWN group. Sharing one with the branch means the next
@@ -47,7 +51,7 @@ jobs:
 
   macos-candidate-startup:
     needs: build
-    if: always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.gui_dry_run))
+    if: always() && !cancelled() && (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && (inputs.gui_dry_run || inputs.cli_dry_run)))
     uses: ./.github/workflows/macos-startup.yml
     with:
       candidate_run_id: ${{ format('{0}', github.run_id) }}
@@ -408,8 +412,7 @@ jobs:
 
       # ---------------------------------------------------------------------
       # Release. Everything below runs on a v* tag, or on a dispatch with
-      # gui_dry_run -- which is the only way any of it gets exercised before a
-      # tag depends on it.
+      # cli_dry_run/gui_dry_run to exercise packaging before a tag depends on it.
       # ---------------------------------------------------------------------
       - name: Decide whether to package
         id: pkg
@@ -422,15 +425,16 @@ jobs:
           # would have uploaded to the real one.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
-            if [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+            echo "gui=${{ inputs.gui_dry_run }}" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.cli_dry_run }}" = "true" ] || [ "${{ inputs.gui_dry_run }}" = "true" ]; then
               echo "package=true" >> "$GITHUB_OUTPUT"
             else
               echo "package=false" >> "$GITHUB_OUTPUT"
             fi
           elif [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
-            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
+            printf '%s\n' package=true release=true gui=true >> "$GITHUB_OUTPUT"
           else
-            echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+            printf '%s\n' package=false release=false gui=false >> "$GITHUB_OUTPUT"
           fi
 
       # ---------------------------------------------------------------------
@@ -781,7 +785,7 @@ jobs:
       # and icu. Nothing in this step wants conda: it copies an already-built
       # tree and runs node and cargo.
       - name: Build the desktop app
-        if: steps.pkg.outputs.package == 'true'
+        if: steps.pkg.outputs.gui == 'true'
         # Tauri notarizes the .app inside this step, so it inherits Apple's queue
         # and was the only long step here with no bound at all -- a stuck
         # submission would have held a runner for the job's six-hour default.
@@ -840,7 +844,7 @@ jobs:
       # depend on Tauri's naming rather than on ours. A cask pins a digest to a
       # URL, so a name that moves is a cask that 404s.
       - name: Collect the desktop bundles
-        if: steps.pkg.outputs.package == 'true'
+        if: steps.pkg.outputs.gui == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -863,7 +867,7 @@ jobs:
       # Gatekeeper checks it online -- which is the difference between a
       # download that works on a train and one that does not.
       - name: Notarize and staple the disk image
-        if: steps.sign.outputs.notarize == 'true'
+        if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
         timeout-minutes: 60
         shell: bash
         env:
@@ -886,7 +890,7 @@ jobs:
       # intact; spctl says the system would actually open it, and only the
       # second is the question a cask install turns on.
       - name: The signed artefacts are what they claim to be
-        if: steps.sign.outputs.notarize == 'true'
+        if: steps.pkg.outputs.gui == 'true' && steps.sign.outputs.notarize == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -996,6 +1000,7 @@ jobs:
   # on all three OSes in a couple of minutes and catch the frontend regressions
   # the C++ matrix never would.
   gui:
+    if: github.event_name != 'workflow_dispatch' || !inputs.cli_dry_run || inputs.gui_dry_run
     name: gui-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:

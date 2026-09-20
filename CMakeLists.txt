@@ -117,6 +117,7 @@ add_library(odia_library STATIC
   src/predict/PeptDeepPredictor.cpp
 )
 add_library(DIALibGen::odia_library ALIAS odia_library)
+target_compile_features(odia_library PUBLIC cxx_std_23)
 
 target_include_directories(odia_library PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -164,6 +165,11 @@ if(DIALIBGEN_BUILD_TOOL)
   if(DIALIBGEN_BUILD_FINETUNE)
     target_link_libraries(DIALibGen PRIVATE odia_tune)
     target_compile_definitions(DIALibGen PRIVATE DIALIBGEN_WITH_FINETUNE)
+    # CMake omits in-tree SDKs from INSTALL_RPATH_USE_LINK_PATH. A source
+    # install still needs Torch; portable packages later replace this RPATH.
+    if(UNIX)
+      set_property(TARGET DIALibGen APPEND PROPERTY INSTALL_RPATH "$<TARGET_FILE_DIR:torch>")
+    endif()
   endif()
   target_compile_definitions(DIALibGen PRIVATE
     ODIA_DATA_DIR="${DIALIBGEN_DATA_DIR}"

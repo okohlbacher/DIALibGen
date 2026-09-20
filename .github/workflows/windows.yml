@@ -40,6 +40,10 @@ on:
         description: 'Build the desktop app without cutting a tag'
         type: boolean
         default: false
+      cli_dry_run:
+        description: 'Package and verify the CLI without building desktop installers or cutting a tag'
+        type: boolean
+        default: false
 
 concurrency:
   # A dispatch gets its OWN group. Sharing one with the branch means the next
@@ -661,15 +665,16 @@ jobs:
           # would have uploaded to the real one.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "release=false" >> "$GITHUB_OUTPUT"
-            if [ "${{ inputs.gui_dry_run }}" = "true" ]; then
+            echo "gui=${{ inputs.gui_dry_run }}" >> "$GITHUB_OUTPUT"
+            if [ "${{ inputs.cli_dry_run }}" = "true" ] || [ "${{ inputs.gui_dry_run }}" = "true" ]; then
               echo "package=true" >> "$GITHUB_OUTPUT"
             else
               echo "package=false" >> "$GITHUB_OUTPUT"
             fi
           elif [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
-            echo "package=true" >> "$GITHUB_OUTPUT"; echo "release=true" >> "$GITHUB_OUTPUT"
+            printf '%s\n' package=true release=true gui=true >> "$GITHUB_OUTPUT"
           else
-            echo "package=false" >> "$GITHUB_OUTPUT"; echo "release=false" >> "$GITHUB_OUTPUT"
+            printf '%s\n' package=false release=false gui=false >> "$GITHUB_OUTPUT"
           fi
 
       - name: Stage a portable bundle
@@ -813,7 +818,7 @@ jobs:
       # the build: doing it afterwards yields an app whose resources are the
       # empty skeleton, and every check that reads the source tree still passes.
       - uses: actions/setup-node@v5
-        if: steps.pkg.outputs.package == 'true'
+        if: steps.pkg.outputs.gui == 'true'
         with:
           node-version: '22'
           cache: npm
@@ -827,7 +832,7 @@ jobs:
       # own directory, which is exactly why every step above passes under bash
       # and this one cannot.
       - name: Build the desktop app
-        if: steps.pkg.outputs.package == 'true'
+        if: steps.pkg.outputs.gui == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -855,7 +860,7 @@ jobs:
           npm run tauri build
 
       - name: Collect the installer
-        if: steps.pkg.outputs.package == 'true'
+        if: steps.pkg.outputs.gui == 'true'
         shell: bash
         run: |
           set -euo pipefail

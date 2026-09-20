@@ -81,7 +81,7 @@ jobs:
                       run('tar', 'xzf', 'candidate.tar.gz', '-C', str(installed))
                       binary = installed / 'bin/DIALibGen'
                   else:
-                      run('brew', 'tap-new', 'dialibgen/startup')
+                      run('brew', 'tap-new', '--no-git', 'dialibgen/startup')
                       tap = pathlib.Path(subprocess.check_output(['brew', '--repository', 'dialibgen/startup'], text=True).strip())
                       (tap / 'Casks').mkdir(exist_ok=True)
                       (tap / 'Casks/dialibgen-candidate.rb').write_text(f'''cask "dialibgen-candidate" do
@@ -153,14 +153,18 @@ jobs:
           records = []
           for number in (1, 2):
               started = time.perf_counter()
-              run = subprocess.run([os.environ['MEASURE_BINARY'], '--help'], capture_output=True, timeout=900)
+              try:
+                  run = subprocess.run([os.environ['MEASURE_BINARY'], '--help'], capture_output=True, timeout=900)
+                  output, code = run.stdout + run.stderr, run.returncode
+              except subprocess.TimeoutExpired as error:
+                  output, code = (error.stdout or b'') + (error.stderr or b''), 124
               elapsed = time.perf_counter() - started
-              (out / f'launch-{number}.log').write_bytes(run.stdout + run.stderr)
-              records.append({'route': os.environ['ROUTE'], 'invocation': number, 'seconds': elapsed, 'exit_code': run.returncode})
+              (out / f'launch-{number}.log').write_bytes(output)
+              records.append({'route': os.environ['ROUTE'], 'invocation': number, 'seconds': elapsed, 'exit_code': code})
               (out / 'timings.json').write_text(json.dumps(records, indent=2) + '\n')
               print(records[-1], flush=True)
-              if run.returncode:
-                  raise SystemExit(run.returncode)
+              if code:
+                  raise SystemExit(code)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('| Route | Invocation | Seconds |\n|---|---:|---:|\n')
               for r in records:

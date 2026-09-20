@@ -712,16 +712,17 @@ jobs:
               APPLE_TEAM_ID="$MACOS_TEAM_ID"
           fi
           # Linux ships only DEB and AppImage; do not build an unused RPM.
-          bundle_args=()
-          if [ "$RUNNER_OS" = "Linux" ]; then bundle_args=(--bundles "deb,appimage"); fi
+          # Positional arguments allow an empty list under macOS Bash 3.2 + nounset.
+          set --
+          if [ "$RUNNER_OS" = "Linux" ]; then set -- --bundles "deb,appimage"; fi
           # Keep verbose bundler diagnostics. Retry once after detaching transient DMG mounts.
-          npm run tauri build -- "${bundle_args[@]}" || {
+          npm run tauri build -- "$@" || {
             echo "::warning::tauri build failed -- retrying once, verbosely"
             if [ "$RUNNER_OS" = "macOS" ]; then
               hdiutil info | awk '/\/Volumes\/DIALibGen/{print $1}' \
                 | xargs -r -n1 hdiutil detach -force 2>/dev/null || true
             fi
-            npm run tauri build -- --verbose "${bundle_args[@]}"
+            npm run tauri build -- --verbose "$@"
           }
 
       - name: Collect desktop corresponding sources

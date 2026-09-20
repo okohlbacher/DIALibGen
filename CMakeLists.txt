@@ -171,6 +171,10 @@ if(DIALIBGEN_BUILD_TOOL)
   add_executable(DIALibGen src/DIALibGen.cpp src/Generate.cpp src/Refine.cpp)
   target_link_libraries(DIALibGen PRIVATE
     odia_refine nlohmann_json::nlohmann_json)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
+    # Retain ELF identity when AppImage packaging rewrites RPATHs.
+    target_link_options(DIALibGen PRIVATE "-Wl,--build-id=sha1")
+  endif()
   if(DIALIBGEN_BUILD_FINETUNE)
     target_link_libraries(DIALibGen PRIVATE odia_tune)
     target_compile_definitions(DIALibGen PRIVATE DIALIBGEN_WITH_FINETUNE)

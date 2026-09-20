@@ -570,6 +570,8 @@ jobs:
             done
             # shellcheck disable=SC2016
             patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibGen
+            readelf -n stage/bin/DIALibGen | grep -qE 'Build ID: [0-9a-f]{40}' \
+              || { echo "::error::Linux CLI lacks its GNU build ID after relocation"; exit 1; }
             # shellcheck disable=SC2016
             for so in stage/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so"; done
           fi
@@ -666,6 +668,8 @@ jobs:
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
           export PATH
           if [ "$RUNNER_OS" = "Linux" ]; then
+            # GTK/WebKit and their deploy tools must use the matching Ubuntu libraries.
+            unset LD_LIBRARY_PATH
             sudo apt-get update
             # AppImage packaging requires xdg-utils and file on both Linux architectures.
             sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
@@ -734,6 +738,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          unset LD_LIBRARY_PATH
+          PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
+          export PATH
           python3 .github/test-appimage-licenses.py
           python3 .github/test-appimage-helpers.py
           APPDIR="$PWD/gui/src-tauri/target/release/bundle/appimage/DIALibGen.AppDir"
@@ -768,6 +775,10 @@ jobs:
             --providers corresponding-sources/appimage-helper-providers.json \
             --sources corresponding-sources \
             --source-asset "DIALibGen-sources-${{ matrix.name }}.tar.gz"
+          # Verify the CLI after linuxdeploy has changed its binary and library RPATHs.
+          "$MAMBA_ROOT_PREFIX/envs/dialibgen/bin/python" .github/release-smoke.py \
+            "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
+            --bare --output smoke-appimage
 
       # Notarize and staple the DMG separately from the app it contains.
       - name: Notarize and staple the disk image
@@ -856,6 +867,39 @@ jobs:
             smoke-installed/**/*.tune.json
             smoke-portable/*.log
             smoke-portable/**/*.tune.json
+            smoke-appimage/*.log
+            smoke-appimage/**/*.tune.json
+
+      - name: Preserve failed Linux bundle diagnostics
+        if: failure() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packaging-diagnostics
+          dpkg-query -W > packaging-diagnostics/installed-packages.txt
+          candidates=corresponding-sources/appimage/candidate-paths.txt
+          if [ -s "$candidates" ]; then
+            tar -czf packaging-diagnostics/attribution-originals.tar.gz -T "$candidates"
+          fi
+          if [ -f stage/bin/DIALibGen ]; then
+            cp stage/bin/DIALibGen packaging-diagnostics/DIALibGen-before-bundling
+          fi
+          if [ -f gui/src-tauri/target/release/dialibgen-gui ]; then
+            cp gui/src-tauri/target/release/dialibgen-gui packaging-diagnostics/dialibgen-gui
+          fi
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: failure() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        with:
+          name: packaging-diagnostics-${{ matrix.name }}
+          compression-level: 0
+          retention-days: 7
+          path: |
+            packaging-diagnostics/
+            corresponding-sources/appimage/*.json
+            corresponding-sources/appimage/*.txt
+            corresponding-sources/appimage-helper-providers.json
+            gui/src-tauri/target/release/bundle/appimage/*.AppImage
 
       # Remove the temporary keychain even after an earlier failure.
       - name: Delete the signing keychain

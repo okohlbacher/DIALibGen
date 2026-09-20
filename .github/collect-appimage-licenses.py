@@ -297,6 +297,36 @@ def verify_bundled_notices(notices, records):
     return bundled
 
 
+def write_failure_diagnostics(output, unknown, appdir, baseline, candidates):
+    originals = set()
+
+    def describe(path):
+        result = {'path': str(path), 'resolved_path': str(path.resolve())}
+        if path.is_file():
+            result.update(sha256=digest(path), build_id=build_id(path))
+            if is_elf(path):
+                for flag, key in (('-n', 'elf_notes'), ('-d', 'elf_dynamic')):
+                    inspected = subprocess.run(['readelf', flag, str(path)], text=True, capture_output=True)
+                    result[key] = {'exit': inspected.returncode, 'stdout': inspected.stdout, 'stderr': inspected.stderr}
+        return result
+
+    records = []
+    for record in unknown:
+        path = appdir / record['path']
+        matched = []
+        for original, owner in [*((p, 'DIALibGen CLI baseline') for p in baseline[path.name]),
+                                *candidates[path.name]]:
+            matched.append({**describe(original), 'owner': owner})
+            if original.is_file():
+                originals.add(str(original.resolve()))
+        records.append({**describe(path), 'candidates': matched})
+    report = {'complete': False, 'unknown': records,
+              'tools': {name: shutil.which(name) for name in ('readelf', 'patchelf', 'strip', 'glib-compile-schemas')},
+              'environment': {name: os.environ.get(name) for name in ('PATH', 'LD_LIBRARY_PATH', 'PKG_CONFIG_PATH')}}
+    (output / 'attribution-failure.json').write_text(json.dumps(report, indent=2) + '\n')
+    (output / 'candidate-paths.txt').write_text(''.join(path + '\n' for path in sorted(originals)))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--appdir', type=Path, required=True)
@@ -365,6 +395,7 @@ def main():
                     unknown.append(record)
         records.append(record)
     if unknown:
+        write_failure_diagnostics(output, unknown, appdir, baseline, candidates)
         raise RuntimeError('unattributed AppImage files: ' + ', '.join(item['path'] for item in unknown))
     providers = [provider for provider in providers
                  if provider['name'] in used_providers or provider.get('appimage_runtime')]

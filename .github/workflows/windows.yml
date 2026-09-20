@@ -513,6 +513,8 @@ jobs:
           # Restore runtime dependency paths explicitly in the empty-environment check.
           PATH_KEEP="$DLL_PATH_POSIX:$(cygpath -S):/usr/bin:/bin"
           export PATH_KEEP
+          # The descriptor test inherits PATH rather than standalone_test's PATH_KEEP.
+          export PATH="$DLL_PATH_POSIX:$PATH"
           bash test/standalone_test.sh "$BIN" \
             "$(sed -n 's/^  VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)" \
             example/proteins.fasta

@@ -11,6 +11,7 @@ import tarfile
 import sys
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location('collector', Path(__file__).with_name('collect-appimage-licenses.py'))
 collector = importlib.util.module_from_spec(spec)
@@ -244,6 +245,29 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual((gui / 'src-tauri/resources/third-party-licenses/appimage/providers/runtime/LICENSE').read_bytes(),
                          notice.read_bytes())
         self.assertFalse((self.root / 'sources/appimage/inventory.json').exists())
+
+    def test_failed_attribution_preserves_original_and_modified_elf_evidence(self):
+        appdir = self.root / 'AppDir'
+        appdir.mkdir()
+        bundled = appdir / 'library.so'
+        original = self.root / 'library.so'
+        bundled.write_bytes(b'\x7fELFchanged payload')
+        original.write_bytes(b'\x7fELForiginal payload')
+        output = self.root / 'diagnostics'
+        output.mkdir()
+        baseline = collector.defaultdict(list)
+        candidates = collector.defaultdict(list, {'library.so': [(original, 'installed-package')]})
+        result = SimpleNamespace(returncode=0, stdout='ELF metadata', stderr='note warning')
+        with patch.object(collector, 'build_id', return_value=None), \
+             patch.object(collector.subprocess, 'run', return_value=result):
+            collector.write_failure_diagnostics(output, [{'path': 'library.so'}], appdir, baseline, candidates)
+        report = json.loads((output / 'attribution-failure.json').read_text())
+        self.assertFalse(report['complete'])
+        unknown = report['unknown'][0]
+        self.assertNotEqual(unknown['sha256'], unknown['candidates'][0]['sha256'])
+        self.assertEqual(unknown['candidates'][0]['owner'], 'installed-package')
+        self.assertEqual(unknown['elf_notes']['stderr'], 'note warning')
+        self.assertEqual((output / 'candidate-paths.txt').read_text(), str(original.resolve()) + '\n')
 
 
 if __name__ == '__main__':

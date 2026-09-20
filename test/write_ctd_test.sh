@@ -24,8 +24,10 @@ BIN="$1"
 PY=""
 for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
 if [ -z "$PY" ]; then echo "SKIP: no python3/python for XML checks" >&2; exit 77; fi
-if ! "$BIN" --help >/dev/null 2>&1; then
-  echo "SKIP: binary cannot initialize (OpenMS share data unreachable?)" >&2
+help_output=$("$BIN" --help 2>&1); help_rc=$?
+if [ "$help_rc" -ne 0 ]; then
+  printf '%s\n' "$help_output" >&2
+  echo "SKIP: binary cannot initialize (exit $help_rc; check runtime libraries and OpenMS data)" >&2
   exit 77
 fi
 

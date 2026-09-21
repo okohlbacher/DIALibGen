@@ -17,7 +17,13 @@
 //     interference trace per fragment and one at its precursor m/z, each at
 //     its own random time near the precursor's expected RT. Absent targets
 //     and decoys therefore have peak groups too -- badly co-eluting ones --
-//     as on a real run, and the two classes see the same process;
+//     as on a real run, and the two classes see the same process. That is
+//     exchangeable BY CONSTRUCTION: a decoy built weaker than a null target
+//     (fragments where no target fragment can be, say) still gets its own
+//     traces here, so the unplanted-FDP checks cannot detect decoy
+//     construction asymmetries -- identify_decoy_symmetry and the null-pair
+//     balance do. A background drawn from a shared pool of peptide-like ions
+//     would; it is not built yet;
 //   * uniform random noise peaks in every spectrum.
 //
 // Everything is a function of the Spec and its seed: the random numbers come
@@ -28,7 +34,7 @@
 #include "synthetic_library.h"
 
 #include <odia/Library.h>
-#include <odia/LibraryGenerator.h>
+#include <odia/search/SearchDecoys.h>
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/ISOTOPEDISTRIBUTION/CoarseIsotopePatternGenerator.h>
@@ -45,6 +51,7 @@
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace synthrun
@@ -238,9 +245,12 @@ namespace synthrun
 
     // Background for targets and their shuffle decoys alike: one independent
     // trace per fragment and one at the precursor m/z, near the expected RT.
+    // The decoys are the search's own (appendSearchDecoys).
     ODIA::Library all;
     buildLibrary(spec, all);
-    ODIA::LibraryGenerator::appendDecoys(all, ODIA::DecoyMethod::Shuffle, nullptr, 3, false);
+    ODIA::search::DecoyRules rules;
+    std::tie(rules.fragment_min, rules.fragment_max) = ODIA::search::targetFragmentRange(all);
+    (void)ODIA::search::appendSearchDecoys(all, rules);
     const auto& ap = all.precursors();
     const auto& at = all.transitions();
     for (std::size_t i = 0; i < all.precursorCount(); ++i)

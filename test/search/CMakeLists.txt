@@ -45,7 +45,7 @@ set_tests_properties(identify_extraction PROPERTIES TIMEOUT 900 ENVIRONMENT "OMP
 
 # The same fixture as files, for the command-line tests.
 add_executable(identify_synth_run synth_run.cpp)
-target_link_libraries(identify_synth_run PRIVATE odia_library)
+target_link_libraries(identify_synth_run PRIVATE odia_search)
 
 if(TARGET DIALibGen AND ODIA_PYTHON)
   add_test(NAME identify_e2e_refine

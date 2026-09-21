@@ -276,6 +276,8 @@ namespace ODIA::search
          " duplicate keys; " + std::to_string(st.library_decoys_ignored) + " library decoys not searched (" +
          seconds(timing["candidates"].get<double>()) + ")");
     if (st.windows == 0) { warning("the run reported no isolation windows; candidates were not checked against them"); }
+    if (evidence && params_.subset != 0)
+    { warning("search:subset " + std::to_string(params_.subset) + " applies to search:candidates random only and was ignored"); }
     if (st.pairs == 0)
     {
       throw SearchAbort("search: no target-decoy pair to search (" + std::to_string(st.eligible) + " eligible targets, " +

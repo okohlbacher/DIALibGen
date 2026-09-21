@@ -208,13 +208,14 @@ inline bool choleskySolve(std::vector<double> a, const std::vector<double>& b,
 
 /// Semi-supervised LDA with cross-validation and target-decoy q-values.
 ///
-/// @p x is row-major, labels.size() rows by @p m columns; non-finite cells are missing.
+/// @p x is row-major, labels.size() rows by @p m columns; non-finite cells are missing. It is
+/// taken by value and standardised in place: std::move a large matrix in.
 /// labels[i] is 1 (target) or 0 (decoy); every row of a group must carry the same label.
 /// group[i] is the precursor id shared by that precursor's candidate peak groups.
 /// pair[i] is the id a target precursor shares with its decoy, supplied by the caller; every row
 /// of a group must carry the same pair id. A precursor without a partner has a pair id of its own.
 /// Throws std::invalid_argument on inconsistent sizes, or a group with mixed labels or pair ids.
-inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_t m,
+inline LdaResult scoreSemiSupervisedLDA(std::vector<double> x, std::size_t m,
                                         const std::vector<int>& labels,
                                         const std::vector<std::int64_t>& group,
                                         const std::vector<std::int64_t>& pair,
@@ -267,13 +268,15 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
     sd[j] = count[j] > 1.0 ? std::sqrt(sum_squared_deviation[j] / (count[j] - 1.0)) : 0.0;
     if (!(sd[j] > std::numeric_limits<double>::epsilon()) || !std::isfinite(sd[j])) { sd[j] = 1.0; }
   }
-  std::vector<double> z(n * m, 0.0);
+  // Standardised in place: x is taken by value, so a caller that moves its matrix in pays for
+  // one copy of it, not two.
+  std::vector<double>& z = x;
   for (std::size_t i = 0; i < n; ++i)
   {
     for (std::size_t j = 0; j < m; ++j)
     {
-      const double v = x[i * m + j];
-      z[i * m + j] = std::isfinite(v) ? (v - mean[j]) / sd[j] : 0.0;
+      double& v = z[i * m + j];
+      v = std::isfinite(v) ? (v - mean[j]) / sd[j] : 0.0;
     }
   }
   const auto zrow = [&](std::size_t row) { return z.data() + row * m; };

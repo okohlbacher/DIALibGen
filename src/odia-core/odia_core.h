@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace odia::core
@@ -265,7 +266,7 @@ inline ScoredResult scoreAndControl(const ScoreTable& table, const Options& opti
   }
 
   // Throws on a precursor with mixed labels or pair ids.
-  const LdaResult lda = scoreSemiSupervisedLDA(x, m, label, group, pair, options.lda);
+  const LdaResult lda = scoreSemiSupervisedLDA(std::move(x), m, label, group, pair, options.lda);
   diag.n_folds = lda.n_folds;
   diag.iterations_trained = lda.n_iterations_trained;
   diag.iterations_skipped = lda.n_iterations_skipped;

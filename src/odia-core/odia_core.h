@@ -46,8 +46,9 @@ struct Options
   /// The classifier: 3 folds by pair, 3 iterations, train FDR 0.15 then 0.05, ridge 1e-6,
   /// pi0 off, top decoys only, label-blind fold rescaling. See LdaParams.
   LdaParams lda;
-  /// Precursor-level q over the pair winners; Ratio is (D_win+1)/N_dec_win / (T_win/N_tar_win).
-  QEstimator estimator = QEstimator::Ratio;
+  /// Precursor-level q over the pair winners: Count is (D_win+1)/T_win, the design's estimator;
+  /// Ratio, (D_win+1)/N_dec_win / (T_win/N_tar_win), is conservative by N_tar_win/N_dec_win.
+  QEstimator estimator = QEstimator::Count;
   /// The cut the diagnostic counts are taken at.
   double report_q = 0.01;
   /// Sub-scores the fit must not see at all, by exact column name. For a discriminant that
@@ -338,9 +339,10 @@ struct EntityResult
 /// target's protein group string): the target entity and the decoy entity of one key are then a
 /// structural pair. `picked` = true collapses each such pair to its winner first, ties to the
 /// decoy (picked protein-group FDR); entities that lose get q = PEP = 1. `picked` = false ranks
-/// every entity (the pooled context estimator, as for peptides).
+/// every entity (the pooled context estimator, as for peptides). The three-argument form uses
+/// QEstimator::Count for a picked list and QEstimator::Ratio for a pooled one.
 inline EntityResult entityQValues(const ScoredResult& result, const std::vector<std::string>& key_of_group,
-                                  bool picked, QEstimator estimator = QEstimator::Ratio)
+                                  bool picked, QEstimator estimator)
 {
   if (key_of_group.size() != result.groups.size())
   {
@@ -386,6 +388,12 @@ inline EntityResult entityQValues(const ScoredResult& result, const std::vector<
     out.group_pep[g] = e.pep;
   }
   return out;
+}
+
+inline EntityResult entityQValues(const ScoredResult& result, const std::vector<std::string>& key_of_group,
+                                  bool picked)
+{
+  return entityQValues(result, key_of_group, picked, picked ? QEstimator::Count : QEstimator::Ratio);
 }
 
 } // namespace odia::core

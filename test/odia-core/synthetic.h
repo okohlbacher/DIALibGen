@@ -9,6 +9,7 @@
 #ifndef ODIA_CORE_TEST_SYNTHETIC_H
 #define ODIA_CORE_TEST_SYNTHETIC_H
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <random>
@@ -16,6 +17,23 @@
 
 namespace synth
 {
+
+/// Random numbers that are the same on every platform. std::mt19937's output is fixed by the
+/// standard; std::normal_distribution and std::uniform_real_distribution are not (libstdc++ and
+/// libc++ draw different numbers from the same engine), which made the same test see different
+/// data on Linux and macOS.
+struct Rng
+{
+  std::mt19937 engine;
+  explicit Rng(unsigned seed) : engine(seed) {}
+  double uniform() { return (static_cast<double>(engine()) + 0.5) / 4294967296.0; }   // (0, 1)
+  double normal()                                                                      // Box-Muller
+  {
+    const double u1 = uniform();
+    const double u2 = uniform();
+    return std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2);
+  }
+};
 
 struct Spec
 {
@@ -45,15 +63,13 @@ struct Data
 
 inline Data make(const Spec& spec)
 {
-  std::mt19937 rng(spec.seed);
-  std::normal_distribution<double> noise(0.0, 1.0);
-  std::uniform_real_distribution<double> u(0.0, 1.0);
+  Rng rng(spec.seed);
   Data d;
   d.m = static_cast<std::size_t>(spec.m);
   d.group_true.assign(static_cast<std::size_t>(2 * spec.pairs), 0);
   for (int p = 0; p < spec.pairs; ++p)
   {
-    const bool hit = spec.true_frac > 0.0 && u(rng) < spec.true_frac;
+    const bool hit = spec.true_frac > 0.0 && rng.uniform() < spec.true_frac;
     d.n_true += hit ? 1 : 0;
     for (int member = 0; member < 2; ++member)
     {
@@ -64,7 +80,7 @@ inline Data make(const Spec& spec)
       {
         for (int j = 0; j < spec.m; ++j)
         {
-          double v = noise(rng);
+          double v = rng.normal();
           if (target && hit && k == 0)
           {
             for (const int inf : spec.informative) { if (inf == j) { v += spec.mu; } }

@@ -23,7 +23,7 @@
         "src/odia_fdr.h",
         "src/odia_lda.h"
       ],
-      "sha256": "a2601978f58ec00e02963173f17b4ba04fe85347c1fe6f219581012b403ec9ee"
+      "sha256": "77cc2f3723bb072328c465233a67ab21eb4538b74fbf81fdfddc85e94a1fe88c"
     },
     {
       "path": "src/odia-core/odia_lda.h",
@@ -44,7 +44,7 @@
       "from": [
         "src/opendialyzer.cpp"
       ],
-      "sha256": "f74a9fc218226bf69c14539aeb8f7d54edf8a655941f005d9330860d8d29dba2"
+      "sha256": "e27faa28b7cc3f178a69b94ab1a5482825d123b2dc30e53cf6daed396493651e"
     },
     {
       "path": "test/odia-core/odia_lda_test.cpp",
@@ -83,6 +83,7 @@
     "Fix 4, concatenated competition: concatenatedCompetition(pair, label, score, estimator) collapses every pair to its better member (ties to the decoy), computes q over the winners and gives losers q = PEP = 1; pooledQValues keeps ODIA's pooled estimator as a diagnostic. assignQValues takes a QEstimator: Ratio (ODIA's, default: ((D+1)/N_dec)/(T/N_tar), on winners (D_win+1)/N_dec_win / (T_win/N_tar_win)) or Count ((D+1)/T); PEP uses the same scale. A list with no decoys now gets q = (D+1)/T instead of ODIA's q = 0. Tests: test/odia-core/odia_competition_test.cpp; odia_fdr_test T4/T5 use pair ids (T4 adds a DECOY_-named entity that must NOT pair).",
     "Score-row container: odia_scored.h keeps the idea of ODIA's ScoreRows (one row-major block, width fixed before the first row, bytes(), clear()) as ScoreTable, with float values (ODIA: double) and per-row group, pair, is_decoy and feature_id (ODIA: interned PeptideRef string, feature id, experimental RT). FeatureRows, TransitionRows, PrecursorRows and ColumnSet (the parquet-writer side) are not ported.",
     "Pipeline entry point, new: odia_core.h scoreAndControl(ScoreTable, Options) canonicalises rows by (group, feature_id) -- ODIA's OswRows::canonicalize (opendialyzer.cpp:1546-1588) sorted by (group, apex RT, feature id); here the feature id alone breaks ties and a duplicate throws -- drops all-missing and constant columns label-blind and by name (dropUninformativeColumns_, opendialyzer.cpp:1756-1790), imputes missing cells at the column mean (the LDA's z = 0), runs the LDA, takes the best row per precursor, applies concatenatedCompetition and reports pooled-vs-paired diagnostics. entityQValues rolls precursors up to peptide (pooled) or protein-group (picked) level, the roll-up opendialyzer.cpp:2277-2330 did with tagged keys. Test: test/odia-core/odia_score_and_control_test.cpp.",
-    "Fix 3, excluded features: Options::exclude_features removes named sub-scores (exact name) from the whole fit -- seed, iterations and held-out scoring -- for a discriminant that must not see e.g. var_norm_rt_score or var_im_delta_score (ODIA excluded VAR_NORM_RT_SCORE from anchor selection by string match, opendialyzer.cpp:1822, and had a seed-only mask for its network, odia_lda.h:106-109). Diagnostics report features_excluded and exclusions_unmatched separately from features_dropped. Test: test/odia-core/odia_exclude_features_test.cpp."
+    "Fix 3, excluded features: Options::exclude_features removes named sub-scores (exact name) from the whole fit -- seed, iterations and held-out scoring -- for a discriminant that must not see e.g. var_norm_rt_score or var_im_delta_score (ODIA excluded VAR_NORM_RT_SCORE from anchor selection by string match, opendialyzer.cpp:1822, and had a seed-only mask for its network, odia_lda.h:106-109). Diagnostics report features_excluded and exclusions_unmatched separately from features_dropped. Test: test/odia-core/odia_exclude_features_test.cpp.",
+    "Estimator on competed lists: concatenatedCompetition and Options::estimator default to QEstimator::Count, q = (D_win+1)/T_win, the estimator docs/design/built-in-identification.md specifies; ODIA's Ratio form applied to winners, (D_win+1)/N_dec_win / (T_win/N_tar_win), stays selectable. Ratio on winners is Count scaled by N_tar_win/N_dec_win (measured 3.5 with 60 % true pairs: 4,116 against 11,253 IDs at realised FDP 0.12 % and 0.46 %). entityQValues(result, keys, picked) uses Count for a picked list and Ratio for a pooled one. Test: odia_competition_test C7."
   ]
 }

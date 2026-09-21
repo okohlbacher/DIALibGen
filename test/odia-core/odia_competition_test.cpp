@@ -10,6 +10,8 @@
 //   C5 a winner list without decoys gets q = 1/T, not 0 (ODIA's Ratio estimator gave 0).
 //   C6 the pooled estimator is kept, and differs from the concatenated one when decoys are lit
 //      up by their own targets.
+//   C7 on winners, Count ((D+1)/T, the default) controls the realised FDP; Ratio is honest too
+//      but conservative by N_tar_win/N_dec_win.
 
 #include "synthetic.h"
 
@@ -114,16 +116,15 @@ int main()
   // plus noise. Pooled, those decoys fill the null tail and push every q up; competing, each
   // loses to the target that lit it.
   {
-    std::mt19937 rng(5);
-    std::normal_distribution<double> nd(0.0, 1.0);
+    synth::Rng rng(5);
     std::vector<std::int64_t> pair;
     std::vector<int> label;
     std::vector<double> score;
     for (int p = 0; p < 4000; ++p)
     {
       const bool hit = p < 1500;
-      const double t = (hit ? 5.0 : 0.0) + nd(rng);
-      const double d = hit ? 0.5 * t + 0.5 * nd(rng) : nd(rng);
+      const double t = (hit ? 5.0 : 0.0) + rng.normal();
+      const double d = hit ? 0.5 * t + 0.5 * rng.normal() : rng.normal();
       pair.push_back(p); label.push_back(1); score.push_back(t);
       pair.push_back(p); label.push_back(0); score.push_back(d);
     }
@@ -141,6 +142,45 @@ int main()
     check(ids_c > ids_p, "C6 competition removes decoys lit by their own targets from the null");
     check(ids_c > 0 && static_cast<double>(false_c) <= 0.02 * static_cast<double>(ids_c),
           "C6 and stays honest: at most 2 % of its IDs are null targets");
+  }
+
+  // ---- C7: the two estimators on winners, against the truth ----------------------------------------
+  // 60 % of the pairs carry a true target. Count, (D_win+1)/T_win, must control the realised
+  // false-discovery proportion; Ratio multiplies it by N_tar_win/N_dec_win (about 4 here), so it
+  // is also honest but identifies fewer. Averaged over ten seeds so neither verdict rests on one.
+  {
+    std::size_t ids_count = 0, ids_ratio = 0, null_count = 0, null_ratio = 0;
+    double scale = 0.0;
+    for (unsigned seed = 1; seed <= 10; ++seed)
+    {
+      synth::Rng rng(seed);
+      std::vector<std::int64_t> pair;
+      std::vector<int> label;
+      std::vector<double> score;
+      std::vector<char> hit;
+      for (int p = 0; p < 5000; ++p)
+      {
+        const bool h = rng.uniform() < 0.6;
+        pair.push_back(p); label.push_back(1); score.push_back((h ? 2.5 : 0.0) + rng.normal()); hit.push_back(h);
+        pair.push_back(p); label.push_back(0); score.push_back(rng.normal()); hit.push_back(0);
+      }
+      const auto c = odia::core::concatenatedCompetition(pair, label, score, QEstimator::Count);
+      const auto r = odia::core::concatenatedCompetition(pair, label, score, QEstimator::Ratio);
+      scale += static_cast<double>(c.target_winners) / static_cast<double>(c.decoy_winners) / 10.0;
+      for (std::size_t i = 0; i < label.size(); i += 2)
+      {
+        if (c.winner[i] && c.qvalue[i] <= 0.01) { ++ids_count; if (!hit[i]) { ++null_count; } }
+        if (r.winner[i] && r.qvalue[i] <= 0.01) { ++ids_ratio; if (!hit[i]) { ++null_ratio; } }
+      }
+    }
+    const double fdp_count = static_cast<double>(null_count) / static_cast<double>(ids_count);
+    const double fdp_ratio = ids_ratio ? static_cast<double>(null_ratio) / static_cast<double>(ids_ratio) : 0.0;
+    std::fprintf(stderr, "[C7] 10 x 5000 pairs, N_tar_win/N_dec_win %.2f: Count %zu IDs, FDP %.4f; "
+                         "Ratio %zu IDs, FDP %.4f\n",
+                 scale, ids_count, fdp_count, ids_ratio, fdp_ratio);
+    check(fdp_count <= 0.012, "C7 Count keeps the realised FDP at about 1 %");
+    check(fdp_ratio <= fdp_count, "C7 Ratio is more conservative than Count");
+    check(ids_count > ids_ratio, "C7 Count identifies more than Ratio");
   }
 
   return synth::finish("odia_competition_test");

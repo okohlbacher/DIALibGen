@@ -33,8 +33,7 @@ namespace
 // true hits' signal row -- the kind of score a calibration fit must not select anchors by.
 ScoreTable withRtColumn(const synth::Data& d, unsigned rt_seed, double rt_shift)
 {
-  std::mt19937 rng(rt_seed);
-  std::normal_distribution<double> noise(0.0, 1.0);
+  synth::Rng rng(rt_seed);
   ScoreTable t;
   std::vector<std::string> names;
   for (std::size_t j = 0; j < d.m; ++j) { names.push_back("var_s" + std::to_string(j)); }
@@ -45,7 +44,7 @@ ScoreTable withRtColumn(const synth::Data& d, unsigned rt_seed, double rt_shift)
     std::vector<double> row(d.x.begin() + static_cast<std::ptrdiff_t>(i * d.m),
                             d.x.begin() + static_cast<std::ptrdiff_t>((i + 1) * d.m));
     const bool signal_row = d.group_true[static_cast<std::size_t>(d.group[i])] && d.feature[i] % 1000 == 3;
-    row.push_back(noise(rng) + (signal_row ? rt_shift : 0.0));
+    row.push_back(rng.normal() + (signal_row ? rt_shift : 0.0));
     t.append(d.group[i], d.pair[i], d.label[i] == 0, d.feature[i], row.data());
   }
   return t;

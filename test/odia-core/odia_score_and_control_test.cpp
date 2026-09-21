@@ -197,12 +197,11 @@ int main()
   // ---- S7 missing cells ------------------------------------------------------------------------
   {
     ScoreTable holes = table;
-    std::mt19937 rng(3);
-    std::uniform_real_distribution<double> u(0.0, 1.0);
+    synth::Rng rng(3);
     std::size_t made = 0;
     for (auto& v : holes.values)
     {
-      if (u(rng) < 0.05) { v = std::numeric_limits<float>::quiet_NaN(); ++made; }
+      if (rng.uniform() < 0.05) { v = std::numeric_limits<float>::quiet_NaN(); ++made; }
     }
     const auto r = odia::core::scoreAndControl(holes);
     const Ids ids = count(d, r);

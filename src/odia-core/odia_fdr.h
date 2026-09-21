@@ -92,10 +92,15 @@ inline void isotonicNonDecreasing(std::vector<RankedGroup>& ranked)
 /// the targets and decoys at or above t and N_tar, N_dec those in the whole list.
 enum class QEstimator
 {
-  /// pi0 * ((D + 1) / N_dec) / (T / N_tar): ODIA's estimator. On a list of pair WINNERS this is
-  /// (D_win + 1) / N_dec_win divided by T_win / N_tar_win.
+  /// pi0 * ((D + 1) / N_dec) / (T / N_tar): ODIA's estimator, right for a POOLED list, where the
+  /// decoys sample the null of all N_tar targets. On a list of pair WINNERS it is
+  /// (D_win + 1) / N_dec_win divided by T_win / N_tar_win, which is Count scaled up by
+  /// N_tar_win / N_dec_win: valid but conservative by that factor, (1 + p) / (1 - p) when a
+  /// share p of the pairs carries a true target (about 4 at p = 0.6).
   Ratio,
-  /// pi0 * (D + 1) / T: the classic target-decoy-competition count.
+  /// pi0 * (D + 1) / T: target-decoy competition. After competition a null pair is equally
+  /// likely to be won by either member, so the decoy winners above a cut estimate the false
+  /// target winners above it. The default for competed lists.
   Count
 };
 
@@ -291,8 +296,8 @@ struct Competition
 
 /// CONCATENATED target-decoy competition: every pair collapses to its better-scoring member
 /// (ties to the decoy), and q-values are computed over the winners alone by @p estimator,
-/// monotonised. With the default, q at a threshold is (D_win + 1) / N_dec_win divided by
-/// T_win / N_tar_win. pi0 is 1.
+/// monotonised. With the default, q at a threshold is (D_win + 1) / T_win; QEstimator::Ratio
+/// gives (D_win + 1) / N_dec_win divided by T_win / N_tar_win. pi0 is 1.
 ///
 /// Why compete: a decoy shares its target's isolation window, retention time and much of its
 /// fragment evidence, so a decoy lit up by its PRESENT target would otherwise enter the null
@@ -304,7 +309,7 @@ struct Competition
 inline Competition concatenatedCompetition(const std::vector<std::int64_t>& pair,
                                            const std::vector<int>& label,
                                            const std::vector<double>& score,
-                                           QEstimator estimator = QEstimator::Ratio)
+                                           QEstimator estimator = QEstimator::Count)
 {
   const std::size_t n = pair.size();
   if (label.size() != n || score.size() != n)
@@ -495,7 +500,7 @@ inline void assignQValues(std::vector<Entity>& entities, bool use_pi0,
 /// Each complete target/decoy pair collapses to ONE entry, the member with the better score
 /// (ties to the DECOY); entities with a negative pair id or no partner pass through unchanged.
 /// The output keeps input order (a pair appears where its winner stood). The caller then runs
-/// assignQValues() on the result. A pair id carried by two targets or two decoys throws
+/// assignQValues(..., QEstimator::Count) on the result -- a competed list. A pair id carried by two targets or two decoys throws
 /// std::invalid_argument. @p n_paired receives the number of complete pairs.
 inline std::vector<Entity> pickedCompetition(const std::vector<Entity>& entities,
                                              std::size_t* n_paired = nullptr)

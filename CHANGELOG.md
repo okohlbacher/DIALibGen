@@ -3,6 +3,18 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- README restructured: overview with a figure of the phases, a usage section
+  with modes, examples, an instrument table and input/output formats.
+- Documented how to use libraries with DIA-NN 2 (TSV, `--fasta --reannotate
+  --met-excision`, one `--f` per run) and with OpenSWATH (column mapping through
+  `scripts/to_openswath.py`), and what was and was not checked.
+- Corrected: DIA-NN 2 does not read DIALibGen's Parquet output.
+- New backlog, including the planned one-step mode.
+
 ## [0.11.0] — 2026-09-20
 
 See the [validation record](docs/testing.md#release-verification) for tested

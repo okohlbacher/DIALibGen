@@ -140,6 +140,33 @@ Tests on synthetic reports prove software contracts; they do not establish
 improved proteomics performance. The qualified
 [benchmark results](benchmark.md) remain the scientific evidence.
 
+## Manual interoperability checks
+
+The README's statements about DIA-NN and OpenSWATH rest on manual checks made
+on 21 September 2026, not on the automated suite. They used DIA-NN 2.0, OpenMS
+3.5 (`TargetedFileConverter`, `OpenSwathDecoyGenerator`), a 600-protein human
+FASTA and one timsTOF diaPASEF run. Generation and the format checks ran with a
+0.11.0 build that includes the final hardening changes; `tune` and `refine` ran
+with an earlier 0.11.0 build, because the later one on that machine had no
+training stage. A released archive was not used.
+
+- DIA-NN 2.0 loads the TSV (47,810 precursors, "0 protein groups") and refuses
+  the Parquet. With `--fasta --reannotate --met-excision` every identified
+  precursor carried a protein group; without `--met-excision` the Met-excised
+  N-terminal peptides did not.
+- A report without protein annotation is rejected by `tune` and `refine`. With
+  annotation, `tune` completed on 524 identifications and preserved all 47,810
+  precursors; `refine` and `refine -tune -no_filter` completed only with the
+  protein and global gates disabled, because a library this small gives DIA-NN
+  no protein group below 1 %.
+- The column mapping of `scripts/to_openswath.py`, followed by
+  `TargetedFileConverter` and `OpenSwathDecoyGenerator`, kept all precursors and
+  transitions, with fixed Carbamidomethyl (C) and variable Oxidation (M).
+
+Not checked: a search with `OpenSwathWorkflow`, a search with DIA-NN's
+separately reannotated library, DIA-NN versions other than 2.0, and whether an
+adapted library improves identifications on this or any other data.
+
 ## macOS startup
 
 Older signed CLI archives showed very different first-launch times: 335 s for

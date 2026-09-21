@@ -1,0 +1,279 @@
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
+// SPDX-License-Identifier: BSD-3-Clause
+
+#include <odia/search/Identifier.h>
+
+#include <nlohmann/json.hpp>
+
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+
+namespace ODIA::search
+{
+  namespace
+  {
+    using json = nlohmann::json;
+    using Clock = std::chrono::steady_clock;
+
+    double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
+
+    std::string seconds(double s)
+    {
+      std::ostringstream o;
+      o.setf(std::ios::fixed);
+      o.precision(1);
+      o << s << " s";
+      return o.str();
+    }
+
+    json num(double v) { return std::isfinite(v) ? json(v) : json(nullptr); }
+
+    json object(const std::string& text) { return text.empty() ? json::object() : json::parse(text); }
+
+    json selectionJson(const SelectionStats& s)
+    {
+      return {{"library_precursors", s.library_precursors}, {"library_decoys_ignored", s.library_decoys_ignored},
+              {"targets", s.targets}, {"ineligible_mz", s.ineligible_mz}, {"ineligible_charge", s.ineligible_charge},
+              {"ineligible_rt", s.ineligible_rt}, {"ineligible_fragments", s.ineligible_fragments},
+              {"duplicate_key", s.duplicate_key}, {"eligible", s.eligible}, {"drawn", s.drawn},
+              {"no_decoy", s.no_decoy}, {"capped", s.capped}, {"pairs", s.pairs}};
+    }
+
+    json scoringJson(const ScoringOutcome& o)
+    {
+      const auto& d = o.scored.diagnostics;
+      json j = {
+        {"peak_groups", d.rows}, {"target_precursors", d.target_groups}, {"decoy_precursors", d.decoy_groups},
+        {"pairs_complete", d.pairs_complete}, {"targets_unpaired", d.targets_unpaired}, {"decoys_unpaired", d.decoys_unpaired},
+        {"features_used", d.features_used}, {"features_dropped", d.features_dropped},
+        {"features_excluded", d.features_excluded}, {"exclusions_unmatched", d.exclusions_unmatched},
+        {"cells_imputed", d.cells_imputed}, {"folds", d.n_folds}, {"iterations_trained", d.iterations_trained},
+        {"iterations_skipped", d.iterations_skipped}, {"folds_unscaled", d.folds_unscaled},
+        {"target_winners", d.target_winners}, {"decoy_winners", d.decoy_winners},
+        {"estimator", "concatenated pair competition, q = (D + 1) / T"}};
+      return j;
+    }
+
+    json identificationsJson(const ScoringOutcome& o)
+    {
+      const auto& d = o.scored.diagnostics;
+      return {{"q", SearchParams::identification_q}, {"precursors", d.targets_at_q}, {"decoy_precursors", d.decoys_at_q},
+              {"pooled_precursors", d.pooled_targets_at_q}, {"pooled_vs_paired", num(d.pooled_vs_paired)},
+              {"peptides", o.peptides_at_q}, {"peptide_pairs", o.peptide_pairs},
+              {"protein_groups", o.proteins_at_q}, {"protein_group_pairs", o.protein_pairs}};
+    }
+
+    json entrapmentJson(const ScoringOutcome& o)
+    {
+      if (!o.entrapment) { return nullptr; }
+      const auto& e = o.entrapment_estimate;
+      return {{"estimator", "combined"}, {"valid", e.valid}, {"identified", e.n_reported}, {"entrapment", e.n_entrapment},
+              {"shared_left_out", o.entrapment_shared}, {"db_target", e.db_target}, {"db_entrapment", e.db_entrapment},
+              {"ratio", num(e.ratio)}, {"fdp", num(e.fdp)}};
+    }
+
+    json selftestJson(const ScoringOutcome& o)
+    {
+      if (!o.selftest) { return nullptr; }
+      return {{"label_swap_ids", o.selftest_label_swap_ids}, {"random_label_ids", o.selftest_random_label_ids},
+              {"limit", o.selftest_limit}};
+    }
+  }
+
+  Identifier::Identifier(SearchParams params, Log info, Log warn)
+    : params_(std::move(params)), info_(std::move(info)), warn_(std::move(warn))
+  {
+  }
+
+  Identifier::~Identifier() = default;
+
+  void Identifier::info(const std::string& message) const
+  {
+    if (info_) { info_(message); } else { std::cout << message << std::endl; }
+  }
+
+  void Identifier::warn(const std::string& message) const
+  {
+    if (warn_) { warn_(message); } else { std::cerr << "Warning: " << message << std::endl; }
+  }
+
+  std::vector<ReportRow> Identifier::reportRows(const SearchSet& set, const PeakGroups& groups,
+                                                const ScoringOutcome& outcome, const SearchParams& params)
+  {
+    const auto& p = set.library.precursors();
+    const auto& result = outcome.scored.groups;
+    std::vector<ReportRow> rows;
+    for (std::size_t g = 0; g < result.size(); ++g)
+    {
+      const auto& gr = result[g];
+      if (!gr.winner || gr.qvalue > params.report_max_q) { continue; }
+      const auto i = static_cast<std::size_t>(gr.group);
+      const std::size_t r = gr.best_row;
+      ReportRow row;
+      row.precursor_id = set.precursorId(i);
+      row.modified_sequence = std::string(set.modifiedSequence(i));
+      row.charge = set.charge(i);
+      row.precursor_mz = fromFixed(p.mz[i]);
+      row.protein_group = std::string(set.proteinGroup(i));
+      row.decoy = set.isDecoy(i);
+      row.rt = groups.apex_rt[r] / 60.0;
+      row.rt_start = groups.rt_start[r] / 60.0;
+      row.rt_stop = groups.rt_stop[r] / 60.0;
+      row.irt = p.irt[i];
+      row.im = groups.im[r];
+      row.q = gr.qvalue;
+      row.global_q = outcome.peptide_q[g];
+      row.pg_q = outcome.protein_q[g];
+      row.pep = gr.pep;
+      row.evidence = gr.score;
+      rows.push_back(std::move(row));
+    }
+    return rows;
+  }
+
+  IdentificationResult Identifier::identify(const Library& library, const std::string& run_path,
+                                            const std::string& out_ids, const std::string& tool_version)
+  {
+    params_.validate();
+    if (std::filesystem::exists(out_ids) || std::filesystem::is_symlink(out_ids))
+    { throw std::runtime_error("refusing to overwrite existing output: " + out_ids); }
+    const auto started = Clock::now();
+    json timing = json::object();
+    json warnings = json::array();
+    auto warning = [&](const std::string& message) { warn("search: " + message); warnings.push_back(message); };
+
+    // 1. Candidates and their in-memory decoys.
+    auto t = Clock::now();
+    const SearchSet set = CandidateSelector::select(library, params_);
+    timing["candidates"] = since(t);
+    const auto& st = set.stats;
+    info("search candidates: " + std::to_string(st.pairs) + " target-decoy pairs (" + searchDecoyName(params_.decoys) +
+         " decoys, seed " + std::to_string(params_.seed) + ") from " + std::to_string(st.eligible) + " eligible of " +
+         std::to_string(st.targets) + " library targets; drawn " + std::to_string(st.drawn) + ", no decoy " +
+         std::to_string(st.no_decoy) + ", capped " + std::to_string(st.capped) + "; ineligible: " +
+         std::to_string(st.ineligible_mz) + " m/z, " + std::to_string(st.ineligible_charge) + " charge, " +
+         std::to_string(st.ineligible_rt) + " RT, " + std::to_string(st.ineligible_fragments) + " < " +
+         std::to_string(SearchParams::min_assay_fragments) + " fragments, " + std::to_string(st.duplicate_key) +
+         " duplicate keys; " + std::to_string(st.library_decoys_ignored) + " library decoys not searched (" +
+         seconds(timing["candidates"].get<double>()) + ")");
+    if (st.pairs == 0)
+    { throw SearchAbort("search: no target-decoy pair to search (" + std::to_string(st.eligible) + " eligible targets, " +
+                        std::to_string(st.no_decoy) + " without a decoy)"); }
+
+    // 2-4. The run. The scratch directory of a cache-mode load goes when this
+    //      scope ends, whether extraction succeeded or not.
+    RunData run;
+    struct Scratch
+    {
+      std::filesystem::path path;
+      ~Scratch() { if (!path.empty()) { std::error_code ec; std::filesystem::remove_all(path, ec); } }
+    } scratch;
+    PeakGroups groups;
+    Calibration calibration;
+    json run_json, calibration_json;
+    {
+      t = Clock::now();
+      run = loadRun(run_path);
+      scratch.path = run.scratch;
+      if (run.name.empty()) { run.name = std::filesystem::path(run_path).stem().string(); }
+      if (run.path.empty()) { run.path = run_path; }
+      timing["load"] = since(t);
+      std::size_t ms1 = 0, ms2 = 0;
+      for (const auto& m : run.maps) { (m.ms1 ? ms1 : ms2)++; }
+      run_json = {{"name", run.name}, {"ion_mobility", run.ion_mobility}, {"read_mode", run.read_mode},
+                  {"ms1_maps", ms1}, {"ms2_windows", ms2}, {"loader", object(run.provenance_json)}};
+      info("search run: " + run.name + ", " + std::to_string(ms2) + " isolation windows, " + std::to_string(ms1) + " MS1 maps, " +
+           (run.ion_mobility ? "diaPASEF (ion mobility)" : "no ion mobility") + ", read " +
+           (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
+
+      t = Clock::now();
+      calibration = calibrate(library, set, run);
+      timing["calibrate"] = since(t);
+      calibration_json = {{"seeds", calibration.seeds}, {"points", calibration.points}, {"rsq", num(calibration.rsq)},
+                          {"coverage", num(calibration.coverage)}, {"bootstrap", calibration.bootstrap},
+                          {"rt_window_s", num(calibration.rt_window)}, {"mz_ppm", num(calibration.mz_ppm)},
+                          {"ms1_mz_ppm", num(calibration.ms1_mz_ppm)}, {"im_window", num(calibration.im_window)},
+                          {"detail", object(calibration.provenance_json)}};
+      info("search calibration: " + std::to_string(calibration.points) + " points from " + std::to_string(calibration.seeds) +
+           " seeds, r^2 " + (std::isfinite(calibration.rsq) ? std::to_string(calibration.rsq) : std::string("n/a")) +
+           ", windows RT " + std::to_string(calibration.rt_window) + " s, m/z " + std::to_string(calibration.mz_ppm) +
+           " ppm, 1/K0 " + std::to_string(calibration.im_window) + (calibration.bootstrap ? " (BOOTSTRAP)" : "") + " (" +
+           seconds(timing["calibrate"].get<double>()) + ")");
+      if (calibration.bootstrap) { warning("the RT calibration FAILED and search:allow_bootstrap replaced it with a linear map"); }
+
+      t = Clock::now();
+      extract(set, run, calibration, groups);
+      timing["extract"] = since(t);
+    }
+    run.maps.clear();
+    run.meta.reset();
+
+    groups.validate(set);
+    checkExtraction(set, groups, params_);
+    info("search extraction: " + std::to_string(groups.rows()) + " peak groups for " + std::to_string(set.size()) +
+         " precursors, " + std::to_string(groups.scores.width()) + " sub-scores (" + seconds(timing["extract"].get<double>()) + ")");
+
+    // 5. Classifier, competition, roll-ups, guards.
+    t = Clock::now();
+    const ScoringOutcome outcome = scorePeakGroups(set, groups, params_);
+    timing["score"] = since(t);
+    const auto& d = outcome.scored.diagnostics;
+    for (const auto& w : outcome.warnings) { warning(w); }
+    info("search scoring: " + std::to_string(d.targets_at_q) + " target precursors at q <= 0.01 (" +
+         std::to_string(d.decoys_at_q) + " decoys; pooled estimate " + std::to_string(d.pooled_targets_at_q) + "), " +
+         std::to_string(outcome.peptides_at_q) + " peptides, " + std::to_string(outcome.proteins_at_q) + " protein groups; " +
+         std::to_string(d.features_used.size()) + " sub-scores, " + std::to_string(d.iterations_trained) +
+         " iterations trained (" + seconds(timing["score"].get<double>()) + ")");
+    if (outcome.selftest)
+    {
+      info("search self-check: label swap " + std::to_string(outcome.selftest_label_swap_ids) + ", random pair labels " +
+           std::to_string(outcome.selftest_random_label_ids) + " identifications (limit " + std::to_string(outcome.selftest_limit) + ")");
+    }
+    checkGuards(outcome, params_);
+
+    // 6. The report.
+    t = Clock::now();
+    const std::vector<ReportRow> rows = reportRows(set, groups, outcome, params_);
+    IdentificationResult result;
+    result.report = out_ids;
+    result.run_name = run.name;
+    result.identified = d.targets_at_q;
+    result.report_rows = rows.size();
+    for (const auto& r : rows) { (r.decoy ? result.report_decoys : result.report_targets)++; }
+
+    json search = {
+      {"experimental", true},
+      {"settings", json::parse(params_.toJson())},
+      {"candidates", selectionJson(st)},
+      {"run", run_json},
+      {"calibration", calibration_json},
+      {"scoring", scoringJson(outcome)},
+      {"identifications", identificationsJson(outcome)},
+      {"entrapment", entrapmentJson(outcome)},
+      {"selftest", selftestJson(outcome)}};
+    // The report carries everything that is a function of the inputs and
+    // settings, and nothing that is not (timings, threads, paths of this machine).
+    const json embedded = {{"tool", "DIALibGen"}, {"tool_version", tool_version},
+                           {"producer", "DIALibGen built-in identification (-run); DIA-NN column names as a compatibility "
+                                        "dialect, not a DIA-NN result"},
+                           {"search", search}};
+    ReportWriter::write(out_ids, run.name, rows, {{"odia.identifier", embedded.dump()}});
+    timing["report"] = since(t);
+    timing["total"] = since(started);
+    info("search report: " + std::to_string(rows.size()) + " precursors (" + std::to_string(result.report_targets) + " targets, " +
+         std::to_string(result.report_decoys) + " decoys) at q <= " + std::to_string(params_.report_max_q) + " written to " +
+         out_ids + " (" + seconds(timing["total"].get<double>()) + " in total)");
+
+    search["report"] = {{"path", std::filesystem::absolute(out_ids).string()}, {"rows", rows.size()},
+                        {"targets", result.report_targets}, {"decoys", result.report_decoys}, {"max_q", params_.report_max_q}};
+    search["warnings"] = warnings;
+    search["resources"] = {{"threads", params_.threads}, {"seconds", timing}};
+    result.provenance_json = search.dump();
+    return result;
+  }
+}

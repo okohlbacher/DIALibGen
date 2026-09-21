@@ -16,3 +16,9 @@ if(TARGET odia_tune)
 endif()
 add_test(NAME identify_report_roundtrip
          COMMAND identify_report_roundtrip "${CMAKE_CURRENT_BINARY_DIR}/report-roundtrip")
+
+add_executable(identify_pipeline_synthetic identify_pipeline_synthetic.cpp)
+target_link_libraries(identify_pipeline_synthetic PRIVATE odia_search nlohmann_json::nlohmann_json)
+add_test(NAME identify_pipeline_synthetic
+         COMMAND identify_pipeline_synthetic "${CMAKE_CURRENT_BINARY_DIR}/pipeline-synthetic")
+set_tests_properties(identify_pipeline_synthetic PROPERTIES TIMEOUT 600)

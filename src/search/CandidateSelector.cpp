@@ -92,30 +92,29 @@ namespace ODIA::search
     return false;
   }
 
-  SearchSet CandidateSelector::select(const Library& library, const SearchParams& params,
-                                      const std::vector<IsolationWindow>& windows)
+  DecoyRules CandidateSelector::decoyRules(const Library& library, const SearchParams& params)
   {
-    params.validate();
-    SearchSet out;
-    SelectionStats& st = out.stats;
-    const auto& pre = library.precursors();
-    const std::size_t library_size = library.precursorCount();
-    st.library_precursors = library_size;
-    out.rt_scale = rtScale(library);
     // Decoy fragments must stay where target fragments can be: the input
     // library's target fragment range, read from targets only.
     DecoyRules rules;
     rules.method = params.decoys;
     rules.min_fragments = SearchParams::min_assay_fragments;
     std::tie(rules.fragment_min, rules.fragment_max) = targetFragmentRange(library);
-    st.fragment_mz_min = fromFixed(rules.fragment_min);
-    st.fragment_mz_max = fromFixed(rules.fragment_max);
+    return rules;
+  }
 
-    // 1. Eligible targets. Every exclusion is a property of the target alone,
-    //    which its decoy would share, so it removes whole pairs. The window
-    //    check reads the precursor m/z, which a decoy inherits: a pair outside
-    //    every isolation window could never be extracted, and would only use
-    //    up search:max_pairs.
+  std::vector<std::pair<std::uint64_t, std::size_t>> CandidateSelector::eligible(const Library& library, const SearchParams& params,
+                                                                                const std::vector<IsolationWindow>& windows,
+                                                                                SelectionStats& st)
+  {
+    const auto& pre = library.precursors();
+    const std::size_t library_size = library.precursorCount();
+    st.library_precursors = library_size;
+
+    // Every exclusion is a property of the target alone, which its decoy
+    // would share, so it removes whole pairs. The window check reads the
+    // precursor m/z, which a decoy inherits: a pair outside every isolation
+    // window could never be extracted, and would only use up search:max_pairs.
     st.windows = windows.size();
     std::vector<std::pair<std::uint64_t, std::size_t>> by_identity;
     for (std::size_t i = 0; i < library_size; ++i)
@@ -149,15 +148,39 @@ namespace ODIA::search
     }
     std::vector<std::pair<std::uint64_t, std::size_t>>().swap(by_identity);
     st.eligible = draws.size();
+    return draws;
+  }
 
-    // 2. The draw: the `subset` lowest keys. Ties (never observed; 64-bit keys)
-    //    fall back to the key itself, which is unique after step 1.
+  bool CandidateSelector::drawLess(const Library& library, const std::pair<std::uint64_t, std::size_t>& a,
+                                   const std::pair<std::uint64_t, std::size_t>& b)
+  {
+    // Ties (never observed; 64-bit keys) fall back to the key itself, which
+    // is unique among eligible targets.
+    if (a.first != b.first) { return a.first < b.first; }
+    const auto& pre = library.precursors();
+    const auto sa = library.strings().get(pre.modified_sequence[a.second]);
+    const auto sb = library.strings().get(pre.modified_sequence[b.second]);
+    if (sa != sb) { return sa < sb; }
+    return pre.charge[a.second] < pre.charge[b.second];
+  }
+
+  SearchSet CandidateSelector::select(const Library& library, const SearchParams& params,
+                                      const std::vector<IsolationWindow>& windows)
+  {
+    params.validate();
+    SearchSet out;
+    SelectionStats& st = out.stats;
+    out.rt_scale = rtScale(library);
+    const DecoyRules rules = decoyRules(library, params);
+    st.fragment_mz_min = fromFixed(rules.fragment_min);
+    st.fragment_mz_max = fromFixed(rules.fragment_max);
+
+    // 1. Eligible targets.
+    std::vector<std::pair<std::uint64_t, std::size_t>> draws = eligible(library, params, windows, st);
+
+    // 2. The draw: the `subset` lowest keys.
     auto less = [&](const std::pair<std::uint64_t, std::size_t>& a, const std::pair<std::uint64_t, std::size_t>& b) {
-      if (a.first != b.first) { return a.first < b.first; }
-      const auto sa = library.strings().get(pre.modified_sequence[a.second]);
-      const auto sb = library.strings().get(pre.modified_sequence[b.second]);
-      if (sa != sb) { return sa < sb; }
-      return pre.charge[a.second] < pre.charge[b.second];
+      return drawLess(library, a, b);
     };
     if (params.subset != 0 && params.subset < draws.size())
     {
@@ -167,14 +190,42 @@ namespace ODIA::search
     std::sort(draws.begin(), draws.end(), less);
     st.drawn = draws.size();
 
-    // 3. Decoys, in draw order, for as many drawn targets as search:max_pairs
-    //    needs -- the result is the same as building every decoy and keeping
-    //    the lowest max_pairs pairs, without building the ones the cap drops.
-    //    Built on a library holding exactly those targets. Its strings are
-    //    re-interned, so equal sequences now share one handle even if the
-    //    input's did not; a duplicate the input's handles hid is caught here
-    //    and excluded like the others.
-    const std::size_t cap = params.max_pairs != 0 ? params.max_pairs : std::numeric_limits<std::size_t>::max();
+    assemble(library, rules, draws, params.max_pairs != 0 ? params.max_pairs : std::numeric_limits<std::size_t>::max(), out);
+    return out;
+  }
+
+  SearchSet CandidateSelector::fromTargets(const Library& library, const SearchParams& params,
+                                           std::vector<std::pair<std::uint64_t, std::size_t>> chosen, const SelectionStats& stats)
+  {
+    params.validate();
+    SearchSet out;
+    out.stats = stats;
+    out.rt_scale = rtScale(library);
+    const DecoyRules rules = decoyRules(library, params);
+    out.stats.fragment_mz_min = fromFixed(rules.fragment_min);
+    out.stats.fragment_mz_max = fromFixed(rules.fragment_max);
+    std::sort(chosen.begin(), chosen.end(), [&](const auto& a, const auto& b) { return drawLess(library, a, b); });
+    out.stats.drawn = chosen.size();
+    const std::size_t n = chosen.size();
+    assemble(library, rules, chosen, std::numeric_limits<std::size_t>::max(), out);
+    if (out.stats.pairs != n)
+    {
+      throw std::logic_error("search: " + std::to_string(n - out.stats.pairs) + " of " + std::to_string(n) +
+                             " targets chosen with a decoy lost it when the search set was built");
+    }
+    return out;
+  }
+
+  void CandidateSelector::assemble(const Library& library, const DecoyRules& rules,
+                                   std::vector<std::pair<std::uint64_t, std::size_t>>& draws, std::size_t cap, SearchSet& out)
+  {
+    SelectionStats& st = out.stats;
+    const auto& pre = library.precursors();
+    // 3. Decoys, in draw order, for as many drawn targets as the cap needs --
+    //    the result is the same as building every decoy and keeping the
+    //    lowest `cap` pairs, without building the ones the cap drops. Built
+    //    on a library holding exactly those targets; a duplicate key the
+    //    input's string handles hid is caught here and excluded like the others.
     std::size_t n = std::min(draws.size(), cap == std::numeric_limits<std::size_t>::max() ? draws.size() : cap + cap / 50 + 16);
     Library sub;
     std::vector<std::size_t> decoy_of;
@@ -278,6 +329,5 @@ namespace ODIA::search
       out.source[k] = out.source[k + pair_target.size()] = draws[pair_target[k]].second;
       out.draw[k] = draws[pair_target[k]].first;
     }
-    return out;
   }
 }

@@ -3,23 +3,28 @@
 
 /// Which precursors one search looks at, and their in-memory decoys.
 ///
-/// M1 selection is a deterministic, PAIRED, label-blind random subset: every
-/// eligible target is ranked by a hash of the key its decoy will share
-/// ("<modified sequence>/<charge>"), salted by search:seed, and the lowest
-/// search:subset keys are drawn. Decoys are then built for the drawn targets
-/// only, in memory, with appendSearchDecoys (SearchDecoys.h) on a subset
-/// library; decoys already present in the library file are never searched. A
-/// target whose decoy cannot be built leaves the search together with its
-/// would-be decoy, so what is searched is always whole pairs.
+/// Two selections share everything but the choice itself:
+///   * search:candidates random (select): a deterministic, PAIRED, label-blind
+///     random subset: every eligible target is ranked by a hash of the key
+///     its decoy will share ("<modified sequence>/<charge>"), salted by
+///     search:seed, and the lowest search:subset keys are drawn;
+///   * search:candidates evidence (EvidencePrefilter.h, the default): pairs
+///     chosen by fragment evidence in the run, handed to fromTargets.
+/// Decoys are built for the chosen targets only, in memory, with
+/// appendSearchDecoys (SearchDecoys.h) on a subset library; decoys already
+/// present in the library file are never searched. A target whose decoy
+/// cannot be built leaves the search together with its would-be decoy, so
+/// what is searched is always whole pairs.
 ///
-/// The only thing read from the run is its isolation windows: a target whose
-/// precursor m/z lies in none of them can never be extracted, and its decoy
-/// shares that m/z, so it is ineligible before the draw and the cap. Nothing
-/// reads a label to decide what is kept: the draw key is identical for a
-/// target and its decoy.
+/// Eligibility reads the run's isolation windows: a target whose precursor
+/// m/z lies in none of them can never be extracted, and its decoy shares that
+/// m/z, so it is ineligible before any choice and the cap. Nothing reads a
+/// label to decide what is kept: the draw key is identical for a target and
+/// its decoy.
 #pragma once
 
 #include <odia/Library.h>
+#include <odia/search/SearchDecoys.h>
 #include <odia/search/SearchParams.h>
 
 #include <cstddef>
@@ -80,10 +85,20 @@ namespace ODIA::search
     double upper = 0.0;
   };
 
+  /// A calibration seed proposed by the evidence prefilter: an input-library
+  /// target with fragment evidence of its OWN (seeds are targets; calibration
+  /// decides no identification), and where that evidence was best.
+  struct SeedHint
+  {
+    std::size_t index = 0;       ///< input library index
+    double rt_s = 0.0;           ///< run time of the target's best prefilter spectrum, seconds
+    int depth = 0;               ///< the target's co-occurrence depth there
+    std::uint32_t spectra = 0;   ///< the target's spectra at search:prefilter_depth or more
+  };
+
   /// The precursors of one search: targets at [0, pairs()), their decoys at
   /// [pairs(), 2 * pairs()); target k and decoy pairs() + k form pair k. Both
-  /// blocks are in the same order, by target precursor m/z and then draw key,
-  /// so a chunk of pairs is an m/z-contiguous slice of the run's windows.
+  /// blocks are in the same order, by target precursor m/z and then draw key.
   ///
   /// Decoys carry their target's modified sequence, charge, protein group,
   /// precursor m/z, RT, 1/K0, fragment slots and intensities
@@ -96,6 +111,12 @@ namespace ODIA::search
     std::vector<std::uint64_t> draw;   ///< per pair: its draw key
     RtScale rt_scale;
     SelectionStats stats;
+    /// Calibration seeds from the evidence prefilter, best first; empty for
+    /// search:candidates random (the calibration then samples seeds itself).
+    std::vector<SeedHint> seeds;
+    /// The evidence prefilter's record (a JSON object) for the provenance;
+    /// empty for search:candidates random.
+    std::string prefilter_json;
 
     std::size_t size() const { return source.size(); }
     std::size_t pairs() const { return source.size() / 2; }
@@ -122,15 +143,46 @@ namespace ODIA::search
     /// std::invalid_argument when it is empty or a single point.
     static RtScale rtScale(const Library& library);
 
-    /// Select pairs and build their decoys. Deterministic in (library content,
-    /// params, windows); independent of the library's row order. With
-    /// @p windows (the run's MS2 isolation windows), a target whose precursor
-    /// m/z lies in none of them is ineligible; empty = no window check.
-    /// Throws std::invalid_argument on settings the selector cannot honour.
+    /// The decoy rules of a search on @p library: search:decoys, the assay
+    /// fragment minimum, and the input library's TARGET fragment m/z range.
+    static DecoyRules decoyRules(const Library& library, const SearchParams& params);
+
+    /// Eligible targets as (draw key, input library index), in no particular
+    /// order, with the exclusions counted into @p stats (library_precursors,
+    /// targets, ineligible_*, windows, duplicate_key, eligible). With
+    /// @p windows, a target whose precursor m/z lies in none of them is
+    /// ineligible; empty = no window check.
+    static std::vector<std::pair<std::uint64_t, std::size_t>> eligible(const Library& library, const SearchParams& params,
+                                                                       const std::vector<IsolationWindow>& windows,
+                                                                       SelectionStats& stats);
+
+    /// The draw order: by key, ties by (modified sequence, charge).
+    static bool drawLess(const Library& library, const std::pair<std::uint64_t, std::size_t>& a,
+                         const std::pair<std::uint64_t, std::size_t>& b);
+
+    /// search:candidates random: select pairs and build their decoys.
+    /// Deterministic in (library content, params, windows); independent of the
+    /// library's row order. Throws std::invalid_argument on settings the
+    /// selector cannot honour.
     static SearchSet select(const Library& library, const SearchParams& params,
                             const std::vector<IsolationWindow>& windows = {});
 
+    /// The search set of targets chosen elsewhere (the evidence prefilter),
+    /// as (draw key, input library index), each known to get a decoy; @p stats
+    /// carries the counts of the choice (drawn, pairs and the decoy counts are
+    /// set here). No cap is applied. Throws std::logic_error when a chosen
+    /// target gets no decoy after all.
+    static SearchSet fromTargets(const Library& library, const SearchParams& params,
+                                 std::vector<std::pair<std::uint64_t, std::size_t>> chosen, const SelectionStats& stats);
+
     /// Whether @p mz lies strictly inside one of @p windows.
     static bool inWindow(double mz, const std::vector<IsolationWindow>& windows);
+
+  private:
+    /// Decoys for @p draws (in draw order) up to @p cap pairs, whole pairs
+    /// only, then the set in m/z order. Fills out.library, source, draw and
+    /// the decoy and cap counts of out.stats.
+    static void assemble(const Library& library, const DecoyRules& rules,
+                         std::vector<std::pair<std::uint64_t, std::size_t>>& draws, std::size_t cap, SearchSet& out);
   };
 }

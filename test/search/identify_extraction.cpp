@@ -211,7 +211,23 @@ int main(int argc, char** argv)
         static_cast<double>(decoys_with) <= 1.25 * static_cast<double>(targets_with));
   for (const float v : a.im) { CHECK(std::isnan(v)); }
   CHECK(std::find(a.scores.feature_names.begin(), a.scores.feature_names.end(), "var_norm_rt_score") != a.scores.feature_names.end());
-  CHECK(std::find(a.scores.feature_names.begin(), a.scores.feature_names.end(), "var_ms1_xcorr_shape") != a.scores.feature_names.end());
+  // Every configured sub-score is actually FILLED on a run with MS1: a column
+  // stock OpenSWATH never computes for this setup would be dropped silently
+  // and its evidence would be missing (the MS1-MS2 co-elution scores were).
+  {
+    const std::size_t width = a.scores.width();
+    std::size_t ms1_columns = 0;
+    for (std::size_t c = 0; c < width; ++c)
+    {
+      std::size_t finite = 0;
+      for (std::size_t r = 0; r < a.rows(); ++r) { finite += std::isfinite(a.scores.values[r * width + c]) ? 1 : 0; }
+      const std::string& name = a.scores.feature_names[c];
+      ms1_columns += name.rfind("var_ms1_", 0) == 0 ? 1 : 0;
+      if (finite == 0) { std::cout << "  never filled: " << name << "\n"; }
+      CHECK(finite > 0);
+    }
+    CHECK(ms1_columns == 6);
+  }
 
   // ---- 2. neither repetition nor chunking changes a single value ---------------------
   {

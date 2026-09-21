@@ -280,6 +280,13 @@ namespace ODIA::search
     /// scores (the library_* and xcorr_* families each carry near-duplicates),
     /// plus the MS1 scores with search:ms1. The RT deviation score is
     /// var_norm_rt_score, the one search:rt_im_scores false removes.
+    ///
+    /// MS1-MS2 co-elution: stock 3.5.0 computes var_ms1_xcorr_coelution,
+    /// var_ms1_xcorr_shape and var_ms1_mi_score only from TWO or more precursor
+    /// isotope traces (OpenSwathScoring, `precursor_ids.size() > 1`), and this
+    /// search extracts the monoisotopic trace only (ms1_isotope_traces), so
+    /// those three were NaN on every run. The *_contrast variants correlate
+    /// that one MS1 trace with the fragment traces and are always computed.
     std::vector<std::string> scoreColumns(bool ms1)
     {
       std::vector<std::string> c = {
@@ -290,7 +297,7 @@ namespace ODIA::search
       if (ms1)
       {
         for (const char* s : {"var_ms1_ppm_diff", "var_ms1_isotope_correlation", "var_ms1_isotope_overlap",
-                              "var_ms1_xcorr_coelution", "var_ms1_xcorr_shape", "var_ms1_mi_score"})
+                              "var_ms1_xcorr_coelution_contrast", "var_ms1_xcorr_shape_contrast", "var_ms1_mi_contrast_score"})
         { c.emplace_back(s); }
       }
       return c;

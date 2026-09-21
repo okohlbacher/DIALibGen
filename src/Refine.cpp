@@ -280,13 +280,24 @@ void DIALibGen::registerRefinementOptions_()
 
     registerTOPPSubsection_("search", "Built-in identification with -run (EXPERIMENTAL): candidates, decoys, extraction, "
                                       "calibration and the run-level guards. See docs/design/built-in-identification.md");
-    registerStringOption_("search:candidates", "<rule>", "random", "Candidate selection: random = a deterministic, label-blind "
-                          "random subset of target-decoy pairs", false);
-    setValidStrings_("search:candidates", {"random"});
-    registerIntOption_("search:subset", "<n>", 0, "Targets drawn from the library before the cap (0 = every eligible target)", false);
+    registerStringOption_("search:candidates", "<rule>", "evidence", "Candidate selection: evidence = target-decoy pairs of which "
+                          "the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for "
+                          "both); random = a deterministic, label-blind random subset of pairs (search:subset)", false);
+    setValidStrings_("search:candidates", {"evidence", "random"});
+    registerIntOption_("search:subset", "<n>", 0, "search:candidates random: targets drawn from the library before the cap "
+                       "(0 = every eligible target)", false);
     registerIntOption_("search:max_pairs", "<n>", 200000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no "
-                       "cap). Identifications scale with the share of the library present in the run, so a whole-proteome "
-                       "library may need more pairs for tuning's 100-unit cohorts", false);
+                       "cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge "
+                       "and keeps the pairs with the most evidence", false);
+    registerIntOption_("search:prefilter_depth", "<n>", 5, "search:candidates evidence: keep a pair when its target or its decoy "
+                       "has this many of its 6 most intense predicted fragments among one MS2 spectrum's top peaks", false);
+    setMinInt_("search:prefilter_depth", 1); setMaxInt_("search:prefilter_depth", 6);
+    registerIntOption_("search:prefilter_top_peaks", "<n>", 1000, "search:candidates evidence: the most intense peaks of each MS2 "
+                       "spectrum the prefilter matches", false);
+    setMinInt_("search:prefilter_top_peaks", 1);
+    registerDoubleOption_("search:prefilter_ppm", "<ppm>", 10.0, "search:candidates evidence: fragment match tolerance, ppm either "
+                          "side", false);
+    setMinFloat_("search:prefilter_ppm", 0.1); setMaxFloat_("search:prefilter_ppm", 100.0);
     registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
                           "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
     setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
@@ -331,8 +342,8 @@ void DIALibGen::registerRefinementOptions_()
     setValidStrings_("search:selftest", {"true", "false"});
     registerIntOption_("search:batch_size", "<n>", 500, "Advanced: precursors per extraction batch within one isolation window", false);
     registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together. "
-                       "Chunks are m/z-contiguous and OpenSWATH parallelises over isolation windows, so a small chunk leaves "
-                       "threads idle; it bounds extraction memory only, not the calibration's", false);
+                       "Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over "
+                       "isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's", false);
     for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
     setMinInt_("search:batch_size", 1);
     setMinInt_("search:chunk", 2);
@@ -361,6 +372,9 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.candidates = getStringOption_("search:candidates");
     s.subset = count("search:subset");
     s.max_pairs = count("search:max_pairs");
+    s.prefilter_depth = getIntOption_("search:prefilter_depth");
+    s.prefilter_top_peaks = count("search:prefilter_top_peaks");
+    s.prefilter_ppm = getDoubleOption_("search:prefilter_ppm");
     s.decoys = ODIA::search::parseSearchDecoyMethod(getStringOption_("search:decoys"));
     s.seed = static_cast<std::uint64_t>(count("search:seed"));
     s.passes = getIntOption_("search:passes");

@@ -43,6 +43,18 @@ add_test(NAME identify_extraction
 # OpenMP would otherwise take every core of the machine (and spin on them).
 set_tests_properties(identify_extraction PROPERTIES TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=4")
 
+# The evidence prefilter and the chunking on the same kind of synthetic run.
+add_executable(identify_prefilter identify_prefilter.cpp)
+target_link_libraries(identify_prefilter PRIVATE odia_search)
+add_test(NAME identify_prefilter
+         COMMAND identify_prefilter "${CMAKE_CURRENT_BINARY_DIR}/prefilter")
+set_tests_properties(identify_prefilter PROPERTIES TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=4")
+
+# A measurement tool for the prefilter's settings on a real library and run
+# (docs/design/built-in-identification.md, M3); built, not a test.
+add_executable(identify_prefilter_probe identify_prefilter_probe.cpp)
+target_link_libraries(identify_prefilter_probe PRIVATE odia_search nlohmann_json::nlohmann_json)
+
 # The same fixture as files, for the command-line tests.
 add_executable(identify_synth_run synth_run.cpp)
 target_link_libraries(identify_synth_run PRIVATE odia_search)

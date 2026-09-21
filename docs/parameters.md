@@ -101,9 +101,12 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:threads` | int | `4` | 1: | CPU threads used for training |
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
-| `-search:candidates` | string | `random` | random | Candidate selection: random = a deterministic, label-blind random subset of target-decoy pairs |
-| `-search:subset` | int | `0` | 0: | Targets drawn from the library before the cap (0 = every eligible target) |
-| `-search:max_pairs` | int | `200000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap). Identifications scale with the share of the library present in the run, so a whole-proteome library may need more pairs for tuning's 100-unit cohorts |
+| `-search:candidates` | string | `evidence` | evidence,random | Candidate selection: evidence = target-decoy pairs of which the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for both); random = a deterministic, label-blind random subset of pairs (search:subset) |
+| `-search:subset` | int | `0` | 0: | search:candidates random: targets drawn from the library before the cap (0 = every eligible target) |
+| `-search:max_pairs` | int | `200000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge and keeps the pairs with the most evidence |
+| `-search:prefilter_depth` | int | `5` | 1:6 | search:candidates evidence: keep a pair when its target or its decoy has this many of its 6 most intense predicted fragments among one MS2 spectrum's top peaks |
+| `-search:prefilter_top_peaks` | int | `1000` | 1: | search:candidates evidence: the most intense peaks of each MS2 spectrum the prefilter matches |
+| `-search:prefilter_ppm` | double | `10.0` | 0.1:100.0 | search:candidates evidence: fragment match tolerance, ppm either side |
 | `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse | How the search's in-memory decoys are built from the selected targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output |
 | `-search:seed` | int | `42` | 0: | Salt of the candidate draw: changes which pairs are searched, not how |
 | `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
@@ -123,4 +126,4 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:entrapment_tag` | string | (empty) |  | Protein-group prefix of entrapment proteins: log and record the combined entrapment FDP estimate. A validation aid |
 | `-search:selftest` | string | `true` | true,false | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not decoys that are built weaker than null targets |
 | `-search:batch_size` | int | `500` | 1: | Advanced: precursors per extraction batch within one isolation window |
-| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Chunks are m/z-contiguous and OpenSWATH parallelises over isolation windows, so a small chunk leaves threads idle; it bounds extraction memory only, not the calibration's |
+| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's |

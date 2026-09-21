@@ -65,7 +65,13 @@ namespace ODIA::search
   {
     auto fail = [](const std::string& what) { throw std::invalid_argument(what); };
     auto finite = [](double v) { return std::isfinite(v); };
-    if (candidates != "random") { fail("search:candidates must be random in this version, not '" + candidates + "'"); }
+    if (candidates != "evidence" && candidates != "random")
+    { fail("search:candidates must be evidence or random, not '" + candidates + "'"); }
+    if (prefilter_depth < 1 || prefilter_depth > static_cast<int>(prefilter_fragments))
+    { fail("search:prefilter_depth must be in [1, " + std::to_string(prefilter_fragments) + "]"); }
+    if (prefilter_top_peaks == 0) { fail("search:prefilter_top_peaks must be at least 1"); }
+    if (!finite(prefilter_ppm) || prefilter_ppm <= 0 || prefilter_ppm > 100)
+    { fail("search:prefilter_ppm must be in (0, 100]"); }
     if (decoys != DecoyMethod::Shuffle && decoys != DecoyMethod::PseudoReverse)
     { fail(std::string("search:decoys ") + searchDecoyName(decoys) + " is not offered; use shuffle or pseudo_reverse"); }
     if (passes != 1) { fail("search:passes must be 1 in this version, not " + std::to_string(passes)); }
@@ -91,6 +97,11 @@ namespace ODIA::search
       {"candidates", candidates},
       {"subset", subset},
       {"max_pairs", max_pairs},
+      {"prefilter_depth", prefilter_depth},
+      {"prefilter_top_peaks", prefilter_top_peaks},
+      {"prefilter_ppm", prefilter_ppm},
+      {"prefilter_fragments", prefilter_fragments},
+      {"calibration_seeds", calibration_seeds},
       {"decoys", searchDecoyName(decoys)},
       {"seed", seed},
       {"passes", passes},

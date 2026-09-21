@@ -39,20 +39,34 @@ namespace ODIA::search
   struct SearchParams
   {
     // ---- candidates ----------------------------------------------------------
-    /// Candidate selection. Only "random" exists in this version: a
-    /// deterministic, paired, label-blind random subset of the library's targets.
-    std::string candidates = "random";
+    /// Candidate selection:
+    ///   * "evidence" (default): target-decoy pairs with fragment evidence in
+    ///     the run (EvidencePrefilter.h): a pair is kept when its target OR its
+    ///     decoy has prefilter_depth of its top predicted fragments among the
+    ///     prefilter_top_peaks most intense peaks of one MS2 spectrum, within
+    ///     prefilter_ppm -- the same rule for both classes -- and the kept
+    ///     pairs are capped to max_pairs label-blind;
+    ///   * "random": a deterministic, paired, label-blind random subset of the
+    ///     library's targets (subset), capped to max_pairs.
+    std::string candidates = "evidence";
     /// Targets drawn by the random selection before the cap; 0 = every
-    /// eligible target.
+    /// eligible target. Random selection only.
     std::size_t subset = 0;
     /// Cap on target-decoy pairs after selection; 0 = no cap. Search time is
     /// linear in pairs, identifications in the share of the library present
     /// in the run. Measured on a 6.4 GB Orbitrap Astral run with a library of
-    /// which DIA-NN identified 2.9 % (8 threads): 40,000 pairs gave 1,045
-    /// identifications (tuning's validation cohort 93 units, below its floor
-    /// of 100), 100,000 gave 2,804 (250) in 9 min, 200,000 gave 5,821 (454)
-    /// in 20 min at 4.5 GB peak.
+    /// which DIA-NN identified 2.9 % (8 threads, random selection): 40,000
+    /// pairs gave 1,045 identifications (tuning's validation cohort 93 units,
+    /// below its floor of 100), 100,000 gave 2,804 (250) in 9 min, 200,000
+    /// gave 5,821 (454) in 20 min at 4.5 GB peak.
     std::size_t max_pairs = 200000;
+    /// Evidence prefilter: the co-occurrence depth a pair member must reach
+    /// (distinct fragments of its top prefilter_fragments seen in one spectrum).
+    int prefilter_depth = 5;
+    /// Evidence prefilter: the most intense peaks of each MS2 spectrum it reads.
+    std::size_t prefilter_top_peaks = 1000;
+    /// Evidence prefilter: fragment match tolerance, ppm either side.
+    double prefilter_ppm = 10.0;
     /// How the in-memory search decoys are built (decoys already in the library
     /// file are ignored by the search and left untouched).
     DecoyMethod decoys = DecoyMethod::Shuffle;
@@ -135,6 +149,17 @@ namespace ODIA::search
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
     /// a process-wide lock, and more threads only spin (see RunStages.cpp).
     static constexpr int openswath_max_threads = 8;
+    /// Evidence prefilter: the predicted fragments indexed per precursor, the
+    /// most intense by library intensity (a decoy uses its target's slots).
+    static constexpr std::size_t prefilter_fragments = 6;
+    /// Evidence-seeded calibration: at most this many seeds, spread over the
+    /// library RT range in calibration_seed_bins bins.
+    static constexpr std::size_t calibration_seeds = 2000;
+    static constexpr std::size_t calibration_seed_bins = 100;
+    /// A candidate set whose decoy:target count ratio leaves this band is a
+    /// broken selection (pairs are kept whole, so it is exactly 1).
+    static constexpr double candidate_ratio_low = 0.8;
+    static constexpr double candidate_ratio_high = 1.25;
 
     /// Throws std::invalid_argument naming the first bad setting.
     void validate() const;

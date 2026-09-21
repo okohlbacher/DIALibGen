@@ -3,6 +3,8 @@
 
 #include <odia/search/Identifier.h>
 
+#include <odia/search/EvidencePrefilter.h>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -242,12 +244,18 @@ namespace ODIA::search
 
     // 2. Candidates and their in-memory decoys.
     t = Clock::now();
-    const SearchSet set = CandidateSelector::select(library, params_, windows);
+    const bool evidence = params_.candidates == "evidence";
+    std::string prefilter_seconds;
+    const SearchSet set = evidence ? EvidencePrefilter::select(library, params_, windows, run.maps,
+                                                               [this](const std::string& m) { info(m); }, &prefilter_seconds)
+                                   : CandidateSelector::select(library, params_, windows);
     timing["candidates"] = since(t);
+    if (!prefilter_seconds.empty()) { timing["prefilter"] = json::parse(prefilter_seconds); }
     const auto& st = set.stats;
     info("search candidates: " + std::to_string(st.pairs) + " target-decoy pairs (" + searchDecoyName(params_.decoys) +
-         " decoys, seed " + std::to_string(params_.seed) + ") from " + std::to_string(st.eligible) + " eligible of " +
-         std::to_string(st.targets) + " library targets; drawn " + std::to_string(st.drawn) + ", no decoy " +
+         " decoys, " + (evidence ? "chosen by fragment evidence" : "drawn with seed " + std::to_string(params_.seed)) +
+         ") from " + std::to_string(st.eligible) + " eligible of " + std::to_string(st.targets) + " library targets; " +
+         (evidence ? "kept by the prefilter " : "drawn ") + std::to_string(st.drawn) + ", no decoy " +
          std::to_string(st.no_decoy) + " (" + std::to_string(st.decoy_unshufflable) + " unshufflable, " +
          std::to_string(st.decoy_out_of_range) + " fragments out of range, " + std::to_string(st.decoy_copy) +
          " fragment copies, " + std::to_string(st.decoy_unparsable + st.decoy_too_few_fragments) + " other), capped " +
@@ -260,9 +268,13 @@ namespace ODIA::search
          seconds(timing["candidates"].get<double>()) + ")");
     if (st.windows == 0) { warning("the run reported no isolation windows; candidates were not checked against them"); }
     if (st.pairs == 0)
-    { throw SearchAbort("search: no target-decoy pair to search (" + std::to_string(st.eligible) + " eligible targets, " +
+    {
+      throw SearchAbort("search: no target-decoy pair to search (" + std::to_string(st.eligible) + " eligible targets, " +
                         std::to_string(st.ineligible_window) + " outside every isolation window, " +
-                        std::to_string(st.no_decoy) + " without a decoy)"); }
+                        std::to_string(st.no_decoy) + " without a decoy" +
+                        (evidence ? ", none with fragment evidence at search:prefilter_depth " + std::to_string(params_.prefilter_depth)
+                                  : std::string()) + ")");
+    }
 
     // 3-4. Calibration and extraction.
     {
@@ -324,10 +336,13 @@ namespace ODIA::search
     result.report_rows = rows.size();
     for (const auto& r : rows) { (r.decoy ? result.report_decoys : result.report_targets)++; }
 
+    json candidates = selectionJson(st);
+    candidates["method"] = params_.candidates;
+    candidates["prefilter"] = set.prefilter_json.empty() ? json(nullptr) : json::parse(set.prefilter_json);
     json search = {
       {"experimental", true},
       {"settings", json::parse(params_.toJson(false))},
-      {"candidates", selectionJson(st)},
+      {"candidates", candidates},
       {"run", run_json},
       {"calibration", calibration_json},
       {"scoring", scoringJson(outcome)},

@@ -166,6 +166,7 @@ add_library(odia_search STATIC
   src/search/SearchParams.cpp
   src/search/CandidateSelector.cpp
   src/search/SearchDecoys.cpp
+  src/search/EvidencePrefilter.cpp
   src/search/AssayBuilder.cpp
   src/search/Scoring.cpp
   src/search/ReportWriter.cpp

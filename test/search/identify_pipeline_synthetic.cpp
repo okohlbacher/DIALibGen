@@ -160,6 +160,9 @@ namespace
   SearchParams params(int threads = 1)
   {
     SearchParams p;
+    // The synthetic run has no spectra for the evidence prefilter to read:
+    // this test exercises everything after the choice, on a random one.
+    p.candidates = "random";
     p.subset = 1000;
     p.max_pairs = 0;
     p.min_ids = 100;

@@ -28,7 +28,8 @@
 //          Fisher LDA w = Sw^-1 (mu_pos - mu_neg), Sw the pooled within-class covariance,
 //          solved by Cholesky with a ridge on the diagonal.
 //      Apply the fold's final w to its held-out rows, then rescale the fold's scores so that
-//      folds are commensurable before they are pooled.
+//      folds are commensurable before they are pooled: median and MAD of the best score of
+//      every held-out group, targets and decoys alike, so the transform is label-blind.
 //   4. q-values on the best d-score per group (odia_fdr.h), broadcast to the group's rows.
 //   Deterministic given `seed`; folds are trained in parallel and never share state, so the
 //   result does not depend on the thread count.
@@ -68,7 +69,8 @@ struct LdaParams
   unsigned seed = 42;               ///< fold assignment only (foldOfPair)
   bool use_pi0 = false;             ///< Storey pi0. false = honest/conservative; true inflates IDs
   bool top_decoys_only = true;      ///< negatives = each decoy group's BEST row, not all rows
-  bool normalize_folds = true;      ///< rescale each fold's held-out scores before pooling
+  bool normalize_folds = true;      ///< rescale each fold's held-out scores (median/MAD, label-
+                                    ///< blind) before pooling
   int threads = 0;                  ///< fold-level threads; 0 = OpenMP default. Result-neutral.
 };
 
@@ -80,6 +82,11 @@ struct LdaResult
   std::vector<double> pep;      ///< per input row: local FDR (posterior error probability)
   std::vector<int> fold;        ///< per input row: the cross-validation fold that scored it
   int n_folds = 0;              ///< folds actually used (n_folds clamped to [2, groups])
+  /// Per fold: the location and scale its held-out scores were rescaled by (0 and 1 when the
+  /// fold was left unscaled), and how many folds were left unscaled for want of a spread.
+  std::vector<double> fold_location;
+  std::vector<double> fold_scale;
+  int folds_unscaled = 0;
   /// Semi-supervised iterations that FITTED a discriminant, and those that did not (too few
   /// confident positives, a failed solve, or a fold with no training groups; a failed seed fit
   /// also counts as skipped). If trained == 0 the scores come from the single-feature seed, not
@@ -104,6 +111,43 @@ inline int foldOfPair(std::int64_t pair, unsigned seed, int folds)
   };
   const std::uint64_t h = mix(static_cast<std::uint64_t>(pair) ^ mix(static_cast<std::uint64_t>(seed)));
   return static_cast<int>(h % static_cast<std::uint64_t>(folds < 1 ? 1 : folds));
+}
+
+/// Label-blind location and scale of a set of scores: the median and 1.4826 x the median
+/// absolute deviation (the normal-consistent MAD). `valid` is false for fewer than two values or
+/// no spread, in which case nothing should be rescaled.
+struct RobustScale
+{
+  double location = 0.0;
+  double scale = 1.0;
+  bool valid = false;
+};
+
+inline RobustScale robustScale(std::vector<double> values)
+{
+  RobustScale out;
+  const std::size_t n = values.size();
+  if (n < 2) { return out; }
+  const auto median = [n](std::vector<double>& v) {
+    const std::size_t mid = n / 2;
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid), v.end());
+    const double upper = v[mid];
+    if (n % 2 == 1) { return upper; }
+    const double lower = *std::max_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(mid));
+    return 0.5 * (lower + upper);
+  };
+  const double location = median(values);
+  for (double& v : values) { v = std::abs(v - location); }
+  const double scale = 1.4826 * median(values);
+  if (!std::isfinite(location) || !std::isfinite(scale) ||
+      !(scale > std::numeric_limits<double>::epsilon()))
+  {
+    return out;
+  }
+  out.location = location;
+  out.scale = scale;
+  out.valid = true;
+  return out;
 }
 
 namespace detail
@@ -297,10 +341,12 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
   // writes result.dscore only for the rows of groups assigned to f. Nothing else is shared except
   // the two counters, which are reduced, so the result does not depend on completion order or on
   // the number of threads. Inside a fold everything runs serially in a fixed order.
-  int n_trained = 0, n_skipped = 0;
+  result.fold_location.assign(static_cast<std::size_t>(folds), 0.0);
+  result.fold_scale.assign(static_cast<std::size_t>(folds), 1.0);
+  int n_trained = 0, n_skipped = 0, n_unscaled = 0;
 #ifdef _OPENMP
   const int team = params.threads > 0 ? params.threads : omp_get_max_threads();
-#pragma omp parallel for schedule(dynamic, 1) num_threads(team) reduction(+ : n_trained, n_skipped)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(team) reduction(+ : n_trained, n_skipped, n_unscaled)
 #endif
   for (int fold = 0; fold < folds; ++fold)
   {
@@ -313,6 +359,7 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
     if (train_groups.empty())
     {
       n_skipped += 1 + std::max(0, params.n_iter);   // held-out rows keep d-score 0
+      if (params.normalize_folds) { ++n_unscaled; }
       continue;
     }
 
@@ -541,47 +588,52 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
     }
 
     // Every fold has its own weight vector, defined only up to scale and offset, so raw scores are
-    // not comparable across folds. Rescale this fold's held-out scores to its decoy null (mean 0,
-    // sd 1 over the decoys' best rows) before the folds are pooled into one ranking.
+    // not comparable across folds. Rescale this fold's held-out scores by the median and MAD of
+    // the best-per-group score over ALL of its groups, targets and decoys alike.
+    //
+    // ODIA standardised each fold to the mean and sd of its DECOYS' best scores. Those statistics
+    // are computed from the labels of the very rows the null is then built from: with few decoys
+    // in a fold, two decoys are forced to +/-1/sqrt(2) while an exchangeable null target is not,
+    // so target and decoy stop being exchangeable -- the assumption target-decoy FDR rests on.
+    // This transform never looks at a label. Both members of a pair share the fold (above), so
+    // the rescale is also the same monotone map for both and cannot change which member wins.
     if (params.normalize_folds)
     {
-      double sum = 0.0, sum_sq = 0.0;
-      std::size_t decoy_n = 0;
+      std::vector<double> best_scores;
       for (std::size_t g = 0; g < group_count; ++g)
       {
-        if (group_fold[g] != fold || group_label[g] == 1) { continue; }
+        if (group_fold[g] != fold) { continue; }
         double best = result.dscore[members[first[g]]];
         for (std::size_t k = first[g] + 1; k < first[g + 1]; ++k)
         {
           best = std::max(best, result.dscore[members[k]]);
         }
-        sum += best;
-        sum_sq += best * best;
-        ++decoy_n;
+        best_scores.push_back(best);
       }
-      if (decoy_n >= 2)
+      const RobustScale rs = robustScale(std::move(best_scores));
+      if (rs.valid)
       {
-        const double mu = sum / static_cast<double>(decoy_n);
-        const double var = std::max(0.0, (sum_sq - sum * mu) / static_cast<double>(decoy_n - 1));
-        const double sigma = std::sqrt(var);
-        // A degenerate null carries no scale information; those scores stay unscaled.
-        if (sigma > std::numeric_limits<double>::epsilon() && std::isfinite(sigma))
+        for (std::size_t g = 0; g < group_count; ++g)
         {
-          for (std::size_t g = 0; g < group_count; ++g)
+          if (group_fold[g] != fold) { continue; }
+          for (std::size_t k = first[g]; k < first[g + 1]; ++k)
           {
-            if (group_fold[g] != fold) { continue; }
-            for (std::size_t k = first[g]; k < first[g + 1]; ++k)
-            {
-              result.dscore[members[k]] = (result.dscore[members[k]] - mu) / sigma;
-            }
+            result.dscore[members[k]] = (result.dscore[members[k]] - rs.location) / rs.scale;
           }
         }
+        result.fold_location[static_cast<std::size_t>(fold)] = rs.location;
+        result.fold_scale[static_cast<std::size_t>(fold)] = rs.scale;
+      }
+      else
+      {
+        ++n_unscaled;   // no spread carries no scale information; the scores stay as they are
       }
     }
   }
 
   result.n_iterations_trained = n_trained;
   result.n_iterations_skipped = n_skipped;
+  result.folds_unscaled = n_unscaled;
 
   std::vector<RankedGroup> final_ranked;
   final_ranked.reserve(group_count);

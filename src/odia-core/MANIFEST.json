@@ -33,6 +33,20 @@
       "sha256": "da3c5794754ef5c71ed60662619410f3fe2e98ccf8a69ecafeb2489ef9d982e8"
     },
     {
+      "path": "src/odia-core/odia_scored.h",
+      "from": [
+        "src/odia_scored.h"
+      ],
+      "sha256": "7897864ee14a89c0936472be342735c58db24b1156cdc5dcd36265ca567276bb"
+    },
+    {
+      "path": "src/odia-core/odia_core.h",
+      "from": [
+        "src/opendialyzer.cpp"
+      ],
+      "sha256": "2b0bae7395b0b02f873830e899256ba7bdfbef6a1a966be38e8452b7689bb062"
+    },
+    {
       "path": "test/odia-core/odia_lda_test.cpp",
       "from": [
         "src/odia_lda_test.cpp"
@@ -66,6 +80,8 @@
     "Fix 1, pair-aware folds: scoreSemiSupervisedLDA takes a per-row pair id (shared by a target and its decoy, supplied by the caller) and assigns fold = foldOfPair(pair, seed, folds), a SplitMix64 hash, to every group of the pair. Replaces the independent seeded shuffles of target and decoy groups (odia_lda.h:439-468), which put a target and its own decoy in different folds and depended on the standard library's std::shuffle. A group whose rows carry different pair ids throws. LdaResult gains per-row fold and n_folds; a fold with no training groups is counted as skipped. Test: test/odia-core/odia_pair_folds_test.cpp.",
     "Fix 2, label-blind fold rescaling: each fold's held-out scores are rescaled by the median and 1.4826 x MAD of the best score of ALL its groups (robustScale), replacing the mean and sd of its decoys' best scores (odia_lda.h:924-959), a label-dependent transform of the test set that broke target-decoy exchangeability. LdaResult gains fold_location, fold_scale and folds_unscaled. Test: test/odia-core/odia_fold_rescale_test.cpp.",
     "Fix 4, structural pairing: pairs are identified by an integer pair id supplied by the caller, never by a string prefix. decoyPartnerId and the decoy_tag parameter of pickedCompetition (odia_fdr.h:122-129, which assumed 'DECOY_' + target id) are removed; Entity gains `pair`; pickedCompetition pairs entities by it (ties to the decoy, output in input order) and throws on a pair id with two targets or two decoys. rollUp keys entities by (key, label), so a decoy never merges into a target of the same key (ODIA tagged decoy keys to prevent that), and gives the target and decoy entity of one key a shared pair id; an overload takes explicit per-member pair ids. rollUp throws on size mismatch (was: empty result).",
-    "Fix 4, concatenated competition: concatenatedCompetition(pair, label, score, estimator) collapses every pair to its better member (ties to the decoy), computes q over the winners and gives losers q = PEP = 1; pooledQValues keeps ODIA's pooled estimator as a diagnostic. assignQValues takes a QEstimator: Ratio (ODIA's, default: ((D+1)/N_dec)/(T/N_tar), on winners (D_win+1)/N_dec_win / (T_win/N_tar_win)) or Count ((D+1)/T); PEP uses the same scale. A list with no decoys now gets q = (D+1)/T instead of ODIA's q = 0. Tests: test/odia-core/odia_competition_test.cpp; odia_fdr_test T4/T5 use pair ids (T4 adds a DECOY_-named entity that must NOT pair)."
+    "Fix 4, concatenated competition: concatenatedCompetition(pair, label, score, estimator) collapses every pair to its better member (ties to the decoy), computes q over the winners and gives losers q = PEP = 1; pooledQValues keeps ODIA's pooled estimator as a diagnostic. assignQValues takes a QEstimator: Ratio (ODIA's, default: ((D+1)/N_dec)/(T/N_tar), on winners (D_win+1)/N_dec_win / (T_win/N_tar_win)) or Count ((D+1)/T); PEP uses the same scale. A list with no decoys now gets q = (D+1)/T instead of ODIA's q = 0. Tests: test/odia-core/odia_competition_test.cpp; odia_fdr_test T4/T5 use pair ids (T4 adds a DECOY_-named entity that must NOT pair).",
+    "Score-row container: odia_scored.h keeps the idea of ODIA's ScoreRows (one row-major block, width fixed before the first row, bytes(), clear()) as ScoreTable, with float values (ODIA: double) and per-row group, pair, is_decoy and feature_id (ODIA: interned PeptideRef string, feature id, experimental RT). FeatureRows, TransitionRows, PrecursorRows and ColumnSet (the parquet-writer side) are not ported.",
+    "Pipeline entry point, new: odia_core.h scoreAndControl(ScoreTable, Options) canonicalises rows by (group, feature_id) -- ODIA's OswRows::canonicalize (opendialyzer.cpp:1546-1588) sorted by (group, apex RT, feature id); here the feature id alone breaks ties and a duplicate throws -- drops all-missing and constant columns label-blind and by name (dropUninformativeColumns_, opendialyzer.cpp:1756-1790), imputes missing cells at the column mean (the LDA's z = 0), runs the LDA, takes the best row per precursor, applies concatenatedCompetition and reports pooled-vs-paired diagnostics. entityQValues rolls precursors up to peptide (pooled) or protein-group (picked) level, the roll-up opendialyzer.cpp:2277-2330 did with tagged keys. Test: test/odia-core/odia_score_and_control_test.cpp."
   ]
 }

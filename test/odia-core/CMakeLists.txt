@@ -12,7 +12,8 @@ set(ODIA_CORE_TESTS
   odia_fdr_test
   odia_pair_folds_test
   odia_fold_rescale_test
-  odia_competition_test)
+  odia_competition_test
+  odia_score_and_control_test)
 
 foreach(t IN LISTS ODIA_CORE_TESTS)
   add_executable(odia_core_${t} ${t}.cpp)

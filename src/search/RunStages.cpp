@@ -1048,6 +1048,13 @@ namespace ODIA::search
           }
         }
         catch (const std::exception& e) { nonlinear["reason"] = std::string("fit failed: ") + e.what(); }
+        // The span search logs one info line per fit; the log stream prints a
+        // "<line> occurred N times" note when its repeat cache empties. Empty
+        // it now, while std::cout is still silenced.
+        {
+          QuietStreams quiet;
+          OpenMS::OpenMS_Log_info.rdbuf()->clearCache();
+        }
       }
       else { nonlinear["reason"] = params().rt_window > 0 ? "search:rt_window is set" : "too few points"; }
       detail["nonlinear"] = nonlinear;

@@ -14,8 +14,9 @@
 //   per-precursor quantity, so it is computed on the best-scoring row per group.
 //   1. z-standardise each feature column over all rows; a missing (non-finite) cell becomes 0,
 //      i.e. it is imputed at the column mean.
-//   2. k-fold cross-validation BY GROUP, so a row is never scored by a model trained on its own
-//      precursor.
+//   2. k-fold cross-validation BY PAIR: fold = hash(pair id, seed) % k for every group of the
+//      pair, so a row is never scored by a model trained on its own precursor or on its own
+//      target-decoy partner, and the assignment never looks at a label or at row order.
 //   3. Per fold, train on the other folds:
 //        - seed: the single most target/decoy-separating feature (max |Welch t|) ranks each
 //          group; an LDA of the best target rows against the best decoy rows then gives a real
@@ -42,7 +43,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -65,7 +65,7 @@ struct LdaParams
                                     ///< to fit anything (pyProphet uses 0.15 for the same reason)
   double train_fdr = 0.05;          ///< FDR for later iterations, once a real discriminant exists
   double ridge = 1e-6;              ///< diagonal regularisation of the within-class covariance
-  unsigned seed = 42;               ///< fold assignment only
+  unsigned seed = 42;               ///< fold assignment only (foldOfPair)
   bool use_pi0 = false;             ///< Storey pi0. false = honest/conservative; true inflates IDs
   bool top_decoys_only = true;      ///< negatives = each decoy group's BEST row, not all rows
   bool normalize_folds = true;      ///< rescale each fold's held-out scores before pooling
@@ -78,12 +78,33 @@ struct LdaResult
   std::vector<double> qvalue;   ///< per input row: its group's q-value (pooled estimator)
   std::vector<double> pvalue;   ///< per input row: tail probability under the decoy null
   std::vector<double> pep;      ///< per input row: local FDR (posterior error probability)
+  std::vector<int> fold;        ///< per input row: the cross-validation fold that scored it
+  int n_folds = 0;              ///< folds actually used (n_folds clamped to [2, groups])
   /// Semi-supervised iterations that FITTED a discriminant, and those that did not (too few
-  /// confident positives, or a failed solve; a failed seed fit also counts as skipped). If
-  /// trained == 0 the scores come from the single-feature seed, not from a learned model.
+  /// confident positives, a failed solve, or a fold with no training groups; a failed seed fit
+  /// also counts as skipped). If trained == 0 the scores come from the single-feature seed, not
+  /// from a learned model.
   int n_iterations_trained = 0;
   int n_iterations_skipped = 0;
 };
+
+/// The fold of a target-decoy pair: a hash of the pair id and the seed, reduced modulo @p folds.
+///
+/// A function of the pair alone, so both members of a pair always land in one fold, the
+/// assignment cannot see a label, and a pair keeps its fold when other pairs join or leave the
+/// candidate set (chunking, subsetting). Fold sizes are balanced in expectation, not exactly.
+/// SplitMix64 finaliser: the same value on every platform, unlike std::shuffle.
+inline int foldOfPair(std::int64_t pair, unsigned seed, int folds)
+{
+  const auto mix = [](std::uint64_t v) {
+    v += 0x9e3779b97f4a7c15ULL;
+    v = (v ^ (v >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    v = (v ^ (v >> 27)) * 0x94d049bb133111ebULL;
+    return v ^ (v >> 31);
+  };
+  const std::uint64_t h = mix(static_cast<std::uint64_t>(pair) ^ mix(static_cast<std::uint64_t>(seed)));
+  return static_cast<int>(h % static_cast<std::uint64_t>(folds < 1 ? 1 : folds));
+}
 
 namespace detail
 {
@@ -146,17 +167,21 @@ inline bool choleskySolve(std::vector<double> a, const std::vector<double>& b,
 /// @p x is row-major, labels.size() rows by @p m columns; non-finite cells are missing.
 /// labels[i] is 1 (target) or 0 (decoy); every row of a group must carry the same label.
 /// group[i] is the precursor id shared by that precursor's candidate peak groups.
-/// Throws std::invalid_argument on inconsistent sizes or a group with mixed labels.
+/// pair[i] is the id a target precursor shares with its decoy, supplied by the caller; every row
+/// of a group must carry the same pair id. A precursor without a partner has a pair id of its own.
+/// Throws std::invalid_argument on inconsistent sizes, or a group with mixed labels or pair ids.
 inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_t m,
                                         const std::vector<int>& labels,
                                         const std::vector<std::int64_t>& group,
+                                        const std::vector<std::int64_t>& pair,
                                         const LdaParams& params = LdaParams())
 {
   const std::size_t n = labels.size();
-  if (group.size() != n || x.size() != n * m)
+  if (group.size() != n || pair.size() != n || x.size() != n * m)
   {
     throw std::invalid_argument("odia::core::scoreSemiSupervisedLDA: " + std::to_string(n) +
-                                " labels, " + std::to_string(group.size()) + " group ids and " +
+                                " labels, " + std::to_string(group.size()) + " group ids, " +
+                                std::to_string(pair.size()) + " pair ids and " +
                                 std::to_string(x.size()) + " cells for " + std::to_string(m) +
                                 " columns do not describe one table");
   }
@@ -165,6 +190,7 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
   result.qvalue.assign(n, 1.0);
   result.pvalue.assign(n, 1.0);
   result.pep.assign(n, 1.0);
+  result.fold.assign(n, 0);
   if (n == 0 || m == 0) { return result; }
 
   // Global z-standardisation is unsupervised. Missing cells become 0 = the column mean.
@@ -214,6 +240,7 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
   std::vector<std::size_t> group_of_row(n);
   std::vector<int> group_label;
   std::vector<std::int64_t> group_id;
+  std::vector<std::int64_t> group_pair;
   for (std::size_t i = 0; i < n; ++i)
   {
     const auto inserted = group_lookup.emplace(group[i], group_id.size());
@@ -222,11 +249,19 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
     {
       group_label.push_back(label);
       group_id.push_back(group[i]);
+      group_pair.push_back(pair[i]);
     }
     else if (group_label[inserted.first->second] != label)
     {
       throw std::invalid_argument("odia::core::scoreSemiSupervisedLDA: group " +
                                   std::to_string(group[i]) + " mixes target and decoy rows");
+    }
+    else if (group_pair[inserted.first->second] != pair[i])
+    {
+      throw std::invalid_argument("odia::core::scoreSemiSupervisedLDA: group " +
+                                  std::to_string(group[i]) + " has rows in pairs " +
+                                  std::to_string(group_pair[inserted.first->second]) + " and " +
+                                  std::to_string(pair[i]));
     }
     group_of_row[i] = inserted.first->second;
   }
@@ -246,29 +281,17 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
   if (folds < 2) { folds = 2; }
   if (folds > static_cast<int>(group_count)) { folds = static_cast<int>(group_count); }
 
-  // Fold assignment: targets and decoys each ordered by precursor id (not by row position, so
-  // the assignment is a function of the data), shuffled by the seeded RNG and dealt round-robin.
-  std::vector<std::size_t> target_groups;
-  std::vector<std::size_t> decoy_groups;
+  // Fold assignment by PAIR. ODIA shuffled target groups and decoy groups independently, so a
+  // target and its own decoy usually fell into different folds: the partner of a held-out target
+  // then trained the model that scored it. It also used std::shuffle, whose output differs
+  // between standard libraries. A hash of the pair id has neither problem.
+  std::vector<int> group_fold(group_count, 0);
   for (std::size_t g = 0; g < group_count; ++g)
   {
-    (group_label[g] == 1 ? target_groups : decoy_groups).push_back(g);
+    group_fold[g] = foldOfPair(group_pair[g], params.seed, folds);
   }
-  const auto by_id = [&](std::size_t a, std::size_t b) { return group_id[a] < group_id[b]; };
-  std::sort(target_groups.begin(), target_groups.end(), by_id);
-  std::sort(decoy_groups.begin(), decoy_groups.end(), by_id);
-  std::mt19937 rng(params.seed);
-  std::shuffle(target_groups.begin(), target_groups.end(), rng);
-  std::shuffle(decoy_groups.begin(), decoy_groups.end(), rng);
-  std::vector<int> group_fold(group_count, 0);
-  for (std::size_t i = 0; i < target_groups.size(); ++i)
-  {
-    group_fold[target_groups[i]] = static_cast<int>(i % static_cast<std::size_t>(folds));
-  }
-  for (std::size_t i = 0; i < decoy_groups.size(); ++i)
-  {
-    group_fold[decoy_groups[i]] = static_cast<int>(i % static_cast<std::size_t>(folds));
-  }
+  for (std::size_t i = 0; i < n; ++i) { result.fold[i] = group_fold[group_of_row[i]]; }
+  result.n_folds = folds;
 
   // Folds are independent BY CONSTRUCTION: fold f trains on the groups not assigned to f and
   // writes result.dscore only for the rows of groups assigned to f. Nothing else is shared except
@@ -287,7 +310,11 @@ inline LdaResult scoreSemiSupervisedLDA(const std::vector<double>& x, std::size_
     {
       if (group_fold[g] != fold) { train_groups.push_back(g); }
     }
-    if (train_groups.empty()) { continue; }
+    if (train_groups.empty())
+    {
+      n_skipped += 1 + std::max(0, params.n_iter);   // held-out rows keep d-score 0
+      continue;
+    }
 
     std::vector<double> w(m, 0.0);
     const auto score_row = [&](std::size_t row) { return detail::dot(w.data(), zrow(row), m); };

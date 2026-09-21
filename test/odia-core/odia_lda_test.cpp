@@ -35,11 +35,13 @@ int main()
   std::vector<double> feats;       // row-major, M columns
   std::vector<int> labels;
   std::vector<std::int64_t> group;
+  std::vector<std::int64_t> pair;   // target i and decoy i form pair i
   std::vector<char> prec_is_true;
   std::int64_t gid = 0;
 
   auto add_prec = [&](bool is_target, bool is_true) {
     const std::int64_t id = gid++;
+    const std::int64_t pair_id = is_target ? id : id - n_target_prec;
     prec_is_true.push_back(is_true ? 1 : 0);
     for (int g = 0; g < groups_per_prec; ++g)
     {
@@ -49,6 +51,7 @@ int main()
       feats.insert(feats.end(), x.begin(), x.end());
       labels.push_back(is_target ? 1 : 0);
       group.push_back(id);
+      pair.push_back(pair_id);
     }
   };
 
@@ -59,7 +62,7 @@ int main()
   const std::size_t rows = labels.size();
 
   odia::core::LdaParams p;  // defaults
-  const odia::core::LdaResult s = odia::core::scoreSemiSupervisedLDA(feats, M, labels, group, p);
+  const odia::core::LdaResult s = odia::core::scoreSemiSupervisedLDA(feats, M, labels, group, pair, p);
 
   // ---- row order must not change the result ----
   // Fold assignment once used a group's first-occurrence POSITION, and row order is whatever the
@@ -72,7 +75,7 @@ int main()
 
     std::vector<double> f2(feats.size());
     std::vector<int> l2(rows);
-    std::vector<std::int64_t> g2(rows);
+    std::vector<std::int64_t> g2(rows), p2(rows);
     for (std::size_t i = 0; i < perm.size(); ++i)
     {
       std::copy(feats.begin() + static_cast<std::ptrdiff_t>(perm[i] * M),
@@ -80,8 +83,9 @@ int main()
                 f2.begin() + static_cast<std::ptrdiff_t>(i * M));
       l2[i] = labels[perm[i]];
       g2[i] = group[perm[i]];
+      p2[i] = pair[perm[i]];
     }
-    const odia::core::LdaResult s2 = odia::core::scoreSemiSupervisedLDA(f2, M, l2, g2, p);
+    const odia::core::LdaResult s2 = odia::core::scoreSemiSupervisedLDA(f2, M, l2, g2, p2, p);
     double worst = 0.0;
     for (std::size_t i = 0; i < perm.size(); ++i)
     {

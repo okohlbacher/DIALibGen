@@ -25,6 +25,7 @@ struct Data
   int M = 0;
   std::vector<int> lab;
   std::vector<std::int64_t> g;
+  std::vector<std::int64_t> pair;   // target i and decoy i form pair i
   std::vector<char> is_true;
   int n_true = 0;
 };
@@ -51,6 +52,7 @@ Data make(unsigned seed, int M, int ntg, int ndec, int gpp, double true_frac, do
       d.f.insert(d.f.end(), x.begin(), x.end());
       d.lab.push_back(tgt ? 1 : 0);
       d.g.push_back(id);
+      d.pair.push_back(tgt ? id : id - ntg);
     }
   };
   for (int i = 0; i < ntg; ++i) { const bool tr = (mu > 0.0) && (u(rng) < true_frac); d.n_true += tr; add(true, tr); }
@@ -60,7 +62,7 @@ Data make(unsigned seed, int M, int ntg, int ndec, int gpp, double true_frac, do
 
 odia::core::LdaResult score(const Data& d)
 {
-  return odia::core::scoreSemiSupervisedLDA(d.f, static_cast<std::size_t>(d.M), d.lab, d.g);
+  return odia::core::scoreSemiSupervisedLDA(d.f, static_cast<std::size_t>(d.M), d.lab, d.g, d.pair);
 }
 
 // best d-score row per precursor group -> its q, label, d

@@ -30,21 +30,21 @@
       "from": [
         "src/odia_lda.h"
       ],
-      "sha256": "2bcd1e7ccd2a1bfc717e2cba0159784c6e22f975331c41e66da34e512eb36c86"
+      "sha256": "0c22f5485bb9358ec71f8b232ec973d575005dbf4d02bec0d7277b5bf11a6afe"
     },
     {
       "path": "test/odia-core/odia_lda_test.cpp",
       "from": [
         "src/odia_lda_test.cpp"
       ],
-      "sha256": "c232a289ec976dc01088e95e6d63d32a5e0ef3db242566ec278b69f796cace0d"
+      "sha256": "dbeb973e58107b84f9592e58c42303a5b3b034bea360534f5a86d282a215a975"
     },
     {
       "path": "test/odia-core/odia_lda_adversarial_test.cpp",
       "from": [
         "src/odia_lda_adversarial_test.cpp"
       ],
-      "sha256": "2a3068edca6975bcdf59ad3661c8f603136603837204cd66321173d92afcc50e"
+      "sha256": "fd8a62a677effb3bf3084a4b9fe0e55c0b9343e181193b090f8ff18e0ce87bb2"
     },
     {
       "path": "test/odia-core/odia_fdr_test.cpp",
@@ -62,6 +62,7 @@
     "Invalid input throws std::invalid_argument (sizes that do not describe one table; a group whose rows mix target and decoy labels) instead of returning an all-default result.",
     "LdaParams::threads sets the fold-loop team size; results do not depend on it.",
     "Tests: odia_lda_test drops the GBT canonicalisation block and gains a trained-iterations check; all three call the odia::core API.",
-    "PEP defect fixed: ODIA made the sliding-window PEP monotone with a running MAX swept from the low-score end, an upper envelope of everything below an item, so every PEP was 1.0. Replaced by weighted pool-adjacent-violators (isotonicNonDecreasing), equal scores pooled into one block. odia_fdr_test gains T7; odia_lda_test's PEP checks move from rows to groups (a runner-up row carries its group's PEP, so the row-level ordering check was wrong and passed only because PEP was constant) and require some groups at PEP < 0.05."
+    "PEP defect fixed: ODIA made the sliding-window PEP monotone with a running MAX swept from the low-score end, an upper envelope of everything below an item, so every PEP was 1.0. Replaced by weighted pool-adjacent-violators (isotonicNonDecreasing), equal scores pooled into one block. odia_fdr_test gains T7; odia_lda_test's PEP checks move from rows to groups (a runner-up row carries its group's PEP, so the row-level ordering check was wrong and passed only because PEP was constant) and require some groups at PEP < 0.05.",
+    "Fix 1, pair-aware folds: scoreSemiSupervisedLDA takes a per-row pair id (shared by a target and its decoy, supplied by the caller) and assigns fold = foldOfPair(pair, seed, folds), a SplitMix64 hash, to every group of the pair. Replaces the independent seeded shuffles of target and decoy groups (odia_lda.h:439-468), which put a target and its own decoy in different folds and depended on the standard library's std::shuffle. A group whose rows carry different pair ids throws. LdaResult gains per-row fold and n_folds; a fold with no training groups is counted as skipped. Test: test/odia-core/odia_pair_folds_test.cpp."
   ]
 }

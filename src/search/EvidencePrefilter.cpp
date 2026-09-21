@@ -3,6 +3,7 @@
 
 #include <odia/search/EvidencePrefilter.h>
 
+#include <odia/search/Scoring.h>
 #include <odia/search/SearchDecoys.h>
 
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/DataStructures.h>
@@ -604,6 +605,16 @@ namespace ODIA::search
     set.stats.capped = sel.capped;
     checkRatio(set.pairs(), set.size() - set.pairs());
     set.seeds = seeds(library, universe, evidence, params, set.rt_scale);
+    if (!params.entrapment_tag.empty())
+    {
+      set.entrapment_db_universe = true;
+      for (const auto& [draw, i] : universe.targets)
+      {
+        const Entrapment c = entrapmentClass(library.strings().get(library.precursors().protein_group[i]), params.entrapment_tag);
+        if (c == Entrapment::Real) { ++set.entrapment_db_real; }
+        else if (c == Entrapment::Trap) { ++set.entrapment_db_trap; }
+      }
+    }
 
     auto ratio = [](std::size_t a, std::size_t b) { return b > 0 ? json(static_cast<double>(a) / static_cast<double>(b)) : json(nullptr); };
     std::size_t seed_bins = 0;

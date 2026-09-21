@@ -56,21 +56,21 @@ namespace ODIA::search
       return (z >> 63) != 0;
     }
 
-    enum class Entrapment { Real, Trap, Shared };
-    Entrapment entrapmentClass(std::string_view group, const std::string& tag)
+  }
+
+  Entrapment entrapmentClass(std::string_view group, const std::string& tag)
+  {
+    bool any_trap = false, any_real = false;
+    std::size_t start = 0;
+    while (start <= group.size())
     {
-      bool any_trap = false, any_real = false;
-      std::size_t start = 0;
-      while (start <= group.size())
-      {
-        const std::size_t end = std::min(group.find(';', start), group.size());
-        const std::string_view member = group.substr(start, end - start);
-        if (!member.empty()) { (member.substr(0, tag.size()) == tag ? any_trap : any_real) = true; }
-        start = end + 1;
-      }
-      if (any_trap && any_real) { return Entrapment::Shared; }
-      return any_trap ? Entrapment::Trap : Entrapment::Real;
+      const std::size_t end = std::min(group.find(';', start), group.size());
+      const std::string_view member = group.substr(start, end - start);
+      if (!member.empty()) { (member.substr(0, tag.size()) == tag ? any_trap : any_real) = true; }
+      start = end + 1;
     }
+    if (any_trap && any_real) { return Entrapment::Shared; }
+    return any_trap ? Entrapment::Trap : Entrapment::Real;
   }
 
   std::size_t PeakGroups::add(const SearchSet& set, std::size_t precursor, std::int64_t feature_id, const float* values,
@@ -193,11 +193,28 @@ namespace ODIA::search
     {
       out.entrapment = true;
       std::size_t db_real = 0, db_trap = 0, reported = 0, trapped = 0;
-      for (std::size_t k = 0; k < set.pairs(); ++k)
+      if (set.entrapment_db_universe)
       {
-        const auto c = entrapmentClass(set.proteinGroup(k), params.entrapment_tag);
-        if (c == Entrapment::Real) { ++db_real; }
-        else if (c == Entrapment::Trap) { ++db_trap; }
+        // Evidence candidates: the prefilter keeps present targets far more
+        // often than absent ones, so the searched set's ratio of entrapment
+        // to real targets is not the rate at which entrapment and null
+        // targets were offered (an Astral-sized depth-6 search: 0.08 searched
+        // against 1.00 in the library, a 12-fold overestimate). Null targets
+        // and entrapment pass the prefilter by the same rule; the ratio
+        // before it is the one that holds.
+        db_real = set.entrapment_db_real;
+        db_trap = set.entrapment_db_trap;
+        out.entrapment_db_basis = "eligible pairs before the evidence prefilter";
+      }
+      else
+      {
+        for (std::size_t k = 0; k < set.pairs(); ++k)
+        {
+          const auto c = entrapmentClass(set.proteinGroup(k), params.entrapment_tag);
+          if (c == Entrapment::Real) { ++db_real; }
+          else if (c == Entrapment::Trap) { ++db_trap; }
+        }
+        out.entrapment_db_basis = "searched pairs";
       }
       for (const auto& gr : result)
       {

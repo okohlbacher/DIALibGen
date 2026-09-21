@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -81,6 +82,7 @@ namespace ODIA::search
 
     bool entrapment = false;             ///< search:entrapment_tag was set
     odia::core::EntrapmentEstimate entrapment_estimate;
+    std::string entrapment_db_basis;     ///< where the estimator's database ratio was counted
     std::size_t entrapment_shared = 0;   ///< identified targets whose group mixes tagged and untagged proteins (left out)
 
     /// Null-pair balance: winners of complete pairs in the lowest
@@ -117,4 +119,9 @@ namespace ODIA::search
 
   /// Identified target precursors (winners at q <= 0.01).
   std::size_t identifications(const ScoringOutcome& outcome);
+
+  /// A protein group's entrapment class: Trap when every member starts with
+  /// @p tag, Real when none does, Shared otherwise.
+  enum class Entrapment { Real, Trap, Shared };
+  Entrapment entrapmentClass(std::string_view group, const std::string& tag);
 }

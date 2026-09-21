@@ -377,6 +377,20 @@ int main(int argc, char** argv)
     { CHECK(s1.seeds[k].index == s4.seeds[k].index && s1.seeds[k].rt_s == s4.seeds[k].rt_s); }
     std::cout << "threads 1 vs 4: " << s1.pairs() << " pairs, " << s1.seeds.size() << " seeds, identical\n";
     CHECK(s1.pairs() > 0);
+    // The entrapment estimate's database ratio comes from the pairs BEFORE the
+    // prefilter, which keeps present targets preferentially.
+    CHECK(!s1.entrapment_db_universe);
+    SearchParams tagged = params;
+    tagged.entrapment_tag = "SYNPROT_1";
+    const SearchSet st = EvidencePrefilter::select(fx.library, tagged, windows, run.maps, nullptr);
+    std::size_t trap = 0;
+    for (const auto& t : universe.targets)
+    { trap += std::string(fx.library.strings().get(fx.library.precursors().protein_group[t.second])).rfind("SYNPROT_1", 0) == 0; }
+    std::cout << "entrapment base: " << st.entrapment_db_trap << " tagged and " << st.entrapment_db_real << " untagged of "
+              << universe.size() << " pairs before the prefilter (" << st.pairs() << " searched)\n";
+    CHECK(st.entrapment_db_universe && st.entrapment_db_trap == trap && trap > 0);
+    CHECK(st.entrapment_db_real + st.entrapment_db_trap == universe.size());
+    CHECK(st.source == s1.source);   // the tag changes nothing that is searched
     // Every searched pair is whole, and inside a window.
     for (std::size_t k = 0; k < s1.pairs(); ++k)
     {

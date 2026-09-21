@@ -117,6 +117,13 @@ namespace ODIA::search
     /// The evidence prefilter's record (a JSON object) for the provenance;
     /// empty for search:candidates random.
     std::string prefilter_json;
+    /// With search:entrapment_tag and evidence candidates: the real and the
+    /// entrapment targets among the eligible pairs BEFORE the prefilter, the
+    /// database ratio of the combined entrapment estimate (the searched set's
+    /// is biased: the prefilter keeps present targets preferentially).
+    bool entrapment_db_universe = false;
+    std::size_t entrapment_db_real = 0;
+    std::size_t entrapment_db_trap = 0;
 
     std::size_t size() const { return source.size(); }
     std::size_t pairs() const { return source.size() / 2; }

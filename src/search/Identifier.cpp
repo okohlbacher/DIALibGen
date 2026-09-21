@@ -95,7 +95,8 @@ namespace ODIA::search
       if (!o.entrapment) { return nullptr; }
       const auto& e = o.entrapment_estimate;
       return {{"estimator", "combined"}, {"valid", e.valid}, {"identified", e.n_reported}, {"entrapment", e.n_entrapment},
-              {"shared_left_out", o.entrapment_shared}, {"db_target", e.db_target}, {"db_entrapment", e.db_entrapment},
+              {"shared_left_out", o.entrapment_shared}, {"db_basis", o.entrapment_db_basis},
+              {"db_target", e.db_target}, {"db_entrapment", e.db_entrapment},
               {"ratio", num(e.ratio)}, {"fdp", num(e.fdp)}};
     }
 

@@ -176,9 +176,11 @@ namespace
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   }
 
-  /// identify() must throw SearchAbort mentioning @p expected, write no report
-  /// and leave no scratch directory behind.
-  void expectAbort(const ODIA::Library& lib, SearchParams p, Plan plan, const fs::path& out, const std::string& expected)
+  /// identify() must throw SearchAbort mentioning @p expected and leave no
+  /// scratch directory behind. It writes no report -- except for
+  /// search:min_ids (@p report), whose report is kept for inspection.
+  void expectAbort(const ODIA::Library& lib, SearchParams p, Plan plan, const fs::path& out, const std::string& expected,
+                   bool report = false)
   {
     SyntheticRun run(std::move(p), plan);
     std::string message;
@@ -187,7 +189,7 @@ namespace
     catch (const std::exception& e) { message = std::string("NOT A GUARD: ") + e.what(); }
     std::cout << "abort (" << expected << "): " << message << "\n";
     CHECK(message.find(expected) != std::string::npos);
-    CHECK(!fs::exists(out));
+    CHECK(fs::exists(out) == report);
     CHECK(!run.scratch.empty() && !fs::exists(run.scratch));
   }
 }
@@ -339,9 +341,34 @@ int main(int argc, char** argv)
 
   // ---- 4. every guard aborts with counts, writes nothing, cleans up ----------------
   {
+    // Too few identifications: the report is written first, so the run can be
+    // inspected, and the message says so; its metadata records the abort.
     SearchParams p = params(1);
     p.min_ids = 100000;
-    expectAbort(lib, p, Plan(), dir / "min_ids.parquet", "fewer than search:min_ids");
+    const fs::path out = dir / "min_ids.parquet";
+    expectAbort(lib, p, Plan(), out, "fewer than search:min_ids", true);
+    SyntheticRun again(p, Plan());
+    std::string message;
+    try { (void)again.identify(lib, "synthetic.mzML", (dir / "min_ids2.parquet").string(), "test"); }
+    catch (const SearchAbort& e) { message = e.what(); }
+    CHECK(message.find("was written for inspection") != std::string::npos);
+    CHECK(message.find("min_ids2.parquet") != std::string::npos);
+    ODIA::RefineParams rp;
+    ODIA::RefineStats rs;
+    const auto obs = ODIA::LibraryRefiner::readObservations(out.string(), rp, rs);
+    std::cout << "min_ids report: " << rs.ids_rows << " rows, " << rs.ids_passing << " pass the gates\n";
+    CHECK(rs.ids_rows > 0 && !obs.empty());
+    CHECK(bytes(out).find("search:min_ids") != std::string::npos);
+  }
+  {
+    // A search another guard stops is not kept, even when it also has too few
+    // identifications: those guards fire first.
+    Plan easy;
+    easy.present_percent = 90;
+    easy.signal = 4.0f;
+    SearchParams p = params(1);
+    p.min_ids = 100000;
+    expectAbort(lib, p, easy, dir / "fraction_and_min_ids.parquet", "search:max_target_fraction");
   }
   {
     Plan broken;

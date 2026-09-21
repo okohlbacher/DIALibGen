@@ -111,8 +111,9 @@ namespace ODIA::search
   /// The run-level guards after scoring. Each throws SearchAbort with its counts:
   /// no discriminant learned (iterations_trained == 0); more than
   /// max_target_fraction of the scored targets identified; fewer than min_ids
-  /// identified; a failed self-check.
-  void checkGuards(const ScoringOutcome& outcome, const SearchParams& params);
+  /// identified (only with @p min_ids: Identifier writes the report of such a
+  /// search for inspection first, then applies it); a failed self-check.
+  void checkGuards(const ScoringOutcome& outcome, const SearchParams& params, bool min_ids = true);
 
   /// Identified target precursors (winners at q <= 0.01).
   std::size_t identifications(const ScoringOutcome& outcome);

@@ -284,7 +284,7 @@ namespace ODIA::search
 
   std::size_t identifications(const ScoringOutcome& outcome) { return outcome.scored.diagnostics.targets_at_q; }
 
-  void checkGuards(const ScoringOutcome& outcome, const SearchParams& params)
+  void checkGuards(const ScoringOutcome& outcome, const SearchParams& params, bool min_ids)
   {
     const auto& d = outcome.scored.diagnostics;
     const std::string counts = std::to_string(d.target_groups) + " target and " + std::to_string(d.decoy_groups) +
@@ -303,7 +303,7 @@ namespace ODIA::search
                         "search:max_target_fraction " + fixed(params.max_target_fraction, 2) + " allows (" +
                         std::to_string(d.decoys_at_q) + " decoys pass); decoys this weak make the FDR estimate meaningless");
     }
-    if (ids < params.min_ids)
+    if (min_ids && ids < params.min_ids)
     {
       throw SearchAbort("search: " + std::to_string(ids) + " target precursors pass q <= 0.01 (" + std::to_string(d.decoys_at_q) +
                         " decoys; " + counts + "), fewer than search:min_ids " + std::to_string(params.min_ids) +

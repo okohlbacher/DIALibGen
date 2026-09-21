@@ -36,6 +36,15 @@ namespace ODIA::search
 
     json num(double v) { return std::isfinite(v) ? json(v) : json(nullptr); }
 
+    std::string fixed2(double v)
+    {
+      std::ostringstream o;
+      o.setf(std::ios::fixed);
+      o.precision(2);
+      o << v;
+      return o.str();
+    }
+
     json object(const std::string& text) { return text.empty() ? json::object() : json::parse(text); }
 
     json selectionJson(const SelectionStats& s)
@@ -324,7 +333,11 @@ namespace ODIA::search
       info("search self-check: label swap " + std::to_string(outcome.selftest_label_swap_ids) + ", random pair labels " +
            std::to_string(outcome.selftest_random_label_ids) + " identifications (limit " + std::to_string(outcome.selftest_limit) + ")");
     }
-    checkGuards(outcome, params_);
+    // Every guard but search:min_ids aborts here, before a report exists: a
+    // search they stop is not one to keep. Too few identifications is an
+    // honest result, and its report is written for inspection first.
+    checkGuards(outcome, params_, false);
+    const bool too_few = d.targets_at_q < params_.min_ids;
 
     // 6. The report.
     t = Clock::now();
@@ -349,6 +362,10 @@ namespace ODIA::search
       {"identifications", identificationsJson(outcome)},
       {"entrapment", entrapmentJson(outcome)},
       {"selftest", selftestJson(outcome)}};
+    if (too_few)
+    {
+      search["aborted"] = {{"guard", "search:min_ids"}, {"min_ids", params_.min_ids}, {"identified", d.targets_at_q}};
+    }
     // The report carries everything that is a function of the inputs and
     // settings, and nothing that is not (timings, threads, chunking, paths of
     // this machine): the same search at any -threads or search:chunk writes
@@ -358,6 +375,19 @@ namespace ODIA::search
                                         "dialect, not a DIA-NN result"},
                            {"search", search}};
     ReportWriter::write(out_ids, run.name, rows, {{"odia.identifier", embedded.dump()}});
+    if (too_few)
+    {
+      // The guard fires only now, with the report on disk for inspection. This
+      // invocation never uses it as -ids; the same command is refused while
+      // it exists.
+      try { checkGuards(outcome, params_, true); }
+      catch (const SearchAbort& e)
+      {
+        throw SearchAbort(std::string(e.what()) + ". The report " + out_ids + " was written for inspection (" +
+                          std::to_string(result.report_targets) + " targets and " + std::to_string(result.report_decoys) +
+                          " decoys at q <= " + fixed2(params_.report_max_q) + "); remove it before running the same command again");
+      }
+    }
     search["settings"] = json::parse(params_.toJson(true));
     timing["report"] = since(t);
     timing["total"] = since(started);

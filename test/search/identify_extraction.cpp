@@ -12,6 +12,8 @@
 //   * the peak-group table does not depend on search:chunk;
 //   * cache mode loads into a scratch directory under search:cache_dir and
 //     recovers the same planted precursors;
+//   * a run stock OpenMS cannot parse fails with the reason OpenMS logged
+//     (stock MzMLFile rethrows parse errors without it);
 //   * search:candidates evidence: the prefilter's seeds calibrate the run,
 //     their prefilter RT agrees with the calibration points, and extraction
 //     of the evidence set recovers the planted precursors it holds, with the
@@ -28,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <numeric>
 #include <string>
@@ -297,7 +300,46 @@ int main(int argc, char** argv)
     CHECK(threw);
   }
 
-  // ---- 6. search:candidates evidence: seeds, calibration, extraction ------------------
+  // ---- 6. a run OpenMS cannot parse: its reason reaches the message -------------------
+  {
+    // mzML 1.1 requires defaultDataProcessingRef on <spectrumList>; a converter
+    // that leaves it out makes stock OpenMS 3.5.0 refuse the file.
+    std::ifstream in(mzml, std::ios::binary);
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::size_t removed = 0;
+    for (std::size_t at = text.find(" defaultDataProcessingRef=\""); at != std::string::npos;
+         at = text.find(" defaultDataProcessingRef=\"", at))
+    {
+      const std::size_t end = text.find('"', at + 27);
+      text.erase(at, end + 1 - at);
+      ++removed;
+    }
+    CHECK(removed >= 1);
+    const std::string broken = (dir / "broken.mzML").string();
+    std::ofstream(broken, std::ios::binary) << text;
+    for (const ReadMode mode : {ReadMode::Normal, ReadMode::Cache})
+    {
+      SearchParams p = params();
+      p.readoptions = mode;
+      p.cache_dir = (dir / "broken-cache").string();
+      Stages reader(p);
+      std::string message;
+      try { (void)reader.loadRun(broken); } catch (const std::exception& e) { message = e.what(); }
+      std::cout << "unparsable run (" << toString(mode) << "): " << message << "\n";
+      CHECK(message.find("Required attribute 'defaultDataProcessingRef' not present") != std::string::npos);
+      CHECK(message.find("cannot read the run") != std::string::npos);
+      CHECK(message.find('\x1b') == std::string::npos);   // no terminal colour codes
+      if (mode == ReadMode::Cache)
+      {
+        // Nothing left behind in the cache directory.
+        std::size_t left = 0;
+        for (const auto& e : fs::directory_iterator(p.cache_dir)) { (void)e; ++left; }
+        CHECK(left == 0);
+      }
+    }
+  }
+
+  // ---- 7. search:candidates evidence: seeds, calibration, extraction ------------------
   {
     SearchParams p = params();
     CHECK(p.candidates == "evidence");   // the default

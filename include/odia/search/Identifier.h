@@ -29,6 +29,7 @@
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/SwathMap.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -53,6 +54,8 @@ namespace ODIA::search
     bool ion_mobility = false;
     /// What the loader actually used ("normal" or "cache").
     std::string read_mode;
+    /// Bytes the cache files took after loading (0 in memory).
+    std::uintmax_t cache_bytes = 0;
     /// A directory the loader created for cache files. identify() removes it
     /// (recursively) once extraction is over, also when a later stage throws,
     /// and always after the maps (which hold its files open) are released.

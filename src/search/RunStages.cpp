@@ -43,6 +43,7 @@
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathWorkflow.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/SwathMapMassCorrection.h>
 #include <OpenMS/CONCEPT/Exception.h>
+#include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/CONCEPT/ProgressLogger.h>
 #include <OpenMS/DATASTRUCTURES/Param.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
@@ -60,6 +61,7 @@
 #endif
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -90,6 +92,10 @@ namespace ODIA::search
     /// search:readoptions auto holds a run in memory up to this size and caches
     /// it per window on disk above it (bytes of the mzML file).
     constexpr std::uintmax_t cache_above_bytes = 3000000000ull;
+    /// The range the log quotes for the cache's size, as a multiple of the
+    /// mzML: 1.45x measured on an Orbitrap Astral run, 2.56x on diaPASEF.
+    constexpr double cache_ratio_low = 1.5;
+    constexpr double cache_ratio_high = 2.6;
     /// Fragment and precursor m/z extraction width (full, ppm) when nothing
     /// narrower is known; the calibration's estimate may only narrow it.
     constexpr double default_mz_ppm = 20.0;
@@ -169,6 +175,84 @@ namespace ODIA::search
       Quiet out{std::cout};
       Quiet err{std::cerr};
     };
+
+    /// What stock OpenMS says about an error while a call runs: its fatal and
+    /// error log streams, copied into @p to. Needed because stock 3.5.0 logs
+    /// the REASON a file cannot be parsed ("Required attribute
+    /// 'defaultDataProcessingRef' not present!") and then MzMLFile rethrows a
+    /// ParseError that names only where it was thrown (XMLHandler.cpp@108).
+    class OpenMSErrors
+    {
+    public:
+      explicit OpenMSErrors(std::ostream& to) : to_(to)
+      {
+        // A log stream passes a line on only once while it is in the stream's
+        // cache of recent messages; empty that cache, or the same error on a
+        // second read in this process would not be seen.
+        OpenMS::OpenMS_Log_fatal.rdbuf()->clearCache();
+        OpenMS::OpenMS_Log_error.rdbuf()->clearCache();
+        OpenMS::OpenMS_Log_fatal.insert(to_);
+        OpenMS::OpenMS_Log_error.insert(to_);
+      }
+      ~OpenMSErrors()
+      {
+        OpenMS::OpenMS_Log_fatal.flush();
+        OpenMS::OpenMS_Log_error.flush();
+        OpenMS::OpenMS_Log_fatal.remove(to_);
+        OpenMS::OpenMS_Log_error.remove(to_);
+      }
+      OpenMSErrors(const OpenMSErrors&) = delete;
+      OpenMSErrors& operator=(const OpenMSErrors&) = delete;
+
+    private:
+      std::ostream& to_;
+    };
+
+    /// The lines OpenMS logged, without terminal colour codes and the
+    /// "<source file>(<line>): " prefix OPENMS_LOG_FATAL_ERROR puts in front,
+    /// de-duplicated, at most a few.
+    std::string openmsReason(const std::string& logged)
+    {
+      std::string plain;
+      for (std::size_t k = 0; k < logged.size(); ++k)
+      {
+        if (logged[k] == '\x1b' && k + 1 < logged.size() && logged[k + 1] == '[')
+        {
+          std::size_t e = k + 2;
+          while (e < logged.size() && !std::isalpha(static_cast<unsigned char>(logged[e]))) { ++e; }
+          k = e;   // skip "ESC [ ... <letter>"
+          continue;
+        }
+        plain.push_back(logged[k]);
+      }
+      std::vector<std::string> lines;
+      std::istringstream in(plain);
+      std::string line;
+      while (std::getline(in, line))
+      {
+        if (!line.empty() && line.back() == '\r') { line.pop_back(); }
+        const std::size_t cut = line.find("): ");
+        if (cut != std::string::npos && line.find_first_of("/\\") < cut) { line = line.substr(cut + 3); }
+        if (line.empty() || std::find(lines.begin(), lines.end(), line) != lines.end()) { continue; }
+        lines.push_back(line);
+      }
+      std::string out;
+      for (std::size_t k = 0; k < lines.size() && k < 4; ++k) { out += (k ? "; " : "") + lines[k]; }
+      return out;
+    }
+
+    /// Bytes of the regular files below @p dir.
+    std::uintmax_t directoryBytes(const fs::path& dir)
+    {
+      std::uintmax_t bytes = 0;
+      std::error_code ec;
+      for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+      {
+        std::error_code size_ec;
+        if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
+      }
+      return bytes;
+    }
 
     /// The OpenMP team for one stock OpenSWATH call, restored afterwards. Stock
     /// 3.5.0 scores every feature through MetaInfo::setValue/getValue, which
@@ -503,23 +587,52 @@ namespace ODIA::search
       // SwathFile treats tmp as a directory only when it ends in '/', on every platform.
       tmp = run.scratch.generic_string() + "/";
     }
-    // Said before the read, which can take minutes: where the cache goes, so
-    // a killed process leaves a directory the user can find.
+    // Said before the read, which can take minutes: where the cache goes and
+    // how large it gets, so a killed process leaves a directory the user can
+    // find, on a disk that had room for it. The cache holds every peak
+    // uncompressed: measured 1.45x the mzML on an Orbitrap Astral run and
+    // 2.56x on a diaPASEF run (whose 1/K0 array is cached too).
+    auto gb = [](double b) { return fixed(b / 1e9, 1); };
     info("search run: reading " + path + " (" + std::to_string(bytes / 1000000) + " MB) " +
-         (cache ? "into per-window cache files in " + run.scratch.string() + " (about the size of the run; removed after "
-                  "extraction)"
+         (cache ? "into per-window cache files in " + run.scratch.string() + " (typically " + fixed(cache_ratio_low, 1) +
+                  " to " + fixed(cache_ratio_high, 1) + " times the run, here " + gb(cache_ratio_low * static_cast<double>(bytes)) +
+                  " to " + gb(cache_ratio_high * static_cast<double>(bytes)) + " GB; removed after extraction)"
                 : std::string("into memory")));
+    std::ostringstream said;
     try
     {
       OpenMS::SwathFile file;
       file.setLogType(OpenMS::ProgressLogger::NONE);
       QuietStreams quiet;
+      OpenMSErrors capture(said);
       run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode);
+    }
+    catch (const std::exception& e)
+    {
+      if (!run.scratch.empty()) { fs::remove_all(run.scratch, ec); }
+      // Stock MzMLFile rethrows parse errors without their reason, which went
+      // to the log stream captured above: say both.
+      const std::string reason = openmsReason(said.str());
+      std::string message = "search: OpenMS cannot read the run " + path + ": " + (reason.empty() ? std::string(e.what()) : reason);
+      if (!reason.empty()) { message += " [" + std::string(e.what()) + "]"; }
+      if (reason.find("defaultDataProcessingRef") != std::string::npos)
+      {
+        message += " -- the file is not valid mzML 1.1: <spectrumList> and <chromatogramList> must name a "
+                   "defaultDataProcessingRef that a <dataProcessing> in <dataProcessingList> defines (some converters, "
+                   "mzpeak-convert 0.12.5 among them, leave them out); add them, or convert with a tool that writes them";
+      }
+      throw std::runtime_error(message);
     }
     catch (...)
     {
       if (!run.scratch.empty()) { fs::remove_all(run.scratch, ec); }
       throw;
+    }
+    if (!run.scratch.empty())
+    {
+      run.cache_bytes = directoryBytes(run.scratch);
+      info("search run: the cache takes " + gb(static_cast<double>(run.cache_bytes)) + " GB, " +
+           fixed(static_cast<double>(run.cache_bytes) / static_cast<double>(std::max<std::uintmax_t>(1, bytes)), 2) + " times the run");
     }
 
     try
@@ -563,6 +676,7 @@ namespace ODIA::search
       { warn("search: the isolation windows carry 1/K0 limits but the spectra no per-peak 1/K0 array; the run is searched by m/z and RT only"); }
       const json loader = {
         {"bytes", bytes}, {"read_mode", run.read_mode}, {"auto_cache_above_bytes", cache_above_bytes},
+        {"cache_bytes", run.cache_bytes},
         {"ms2_windows", ms2}, {"ms1_maps", ms1}, {"ms2_spectra", spectra_ms2},
         {"rt_range_s", {num(first), num(last)}},
         {"im_limits", with_limits}, {"im_limits_swapped", swapped}, {"im_per_peak_array", array},

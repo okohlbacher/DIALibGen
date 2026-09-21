@@ -123,17 +123,30 @@ namespace ODIA::search
     return exp;
   }
 
-  std::vector<std::vector<std::size_t>> AssayBuilder::chunks(const SearchSet& set, std::size_t precursors)
+  std::vector<std::vector<std::size_t>> AssayBuilder::chunks(const SearchSet& set, std::size_t precursors, std::size_t batch)
   {
-    const std::size_t per_chunk = std::max<std::size_t>(1, precursors / 2);   // pairs per chunk
-    std::vector<std::vector<std::size_t>> out;
-    for (std::size_t a = 0; a < set.pairs(); a += per_chunk)
+    const std::size_t pairs = set.pairs();
+    const std::size_t chunk_pairs = std::max<std::size_t>(1, precursors / 2);
+    // A piece fills one OpenSWATH batch (batch compounds = batch / 2 pairs),
+    // so dealing pieces out adds few partial batches per window.
+    const std::size_t piece = std::max<std::size_t>(1, std::min(chunk_pairs, batch / 2));
+    const std::size_t pieces = (pairs + piece - 1) / piece;
+    const std::size_t per_chunk = std::max<std::size_t>(1, chunk_pairs / piece);
+    const std::size_t n = (pieces + per_chunk - 1) / per_chunk;
+    std::vector<std::vector<std::size_t>> pair_lists(n);
+    for (std::size_t j = 0; j < pieces; ++j)
     {
-      const std::size_t b = std::min(set.pairs(), a + per_chunk);
+      auto& list = pair_lists[j % n];
+      for (std::size_t k = j * piece; k < std::min(pairs, (j + 1) * piece); ++k) { list.push_back(k); }
+    }
+    std::vector<std::vector<std::size_t>> out;
+    out.reserve(n);
+    for (const auto& list : pair_lists)
+    {
       std::vector<std::size_t> chunk;
-      chunk.reserve(2 * (b - a));
-      for (std::size_t k = a; k < b; ++k) { chunk.push_back(k); }
-      for (std::size_t k = a; k < b; ++k) { chunk.push_back(set.pairs() + k); }
+      chunk.reserve(2 * list.size());
+      chunk.insert(chunk.end(), list.begin(), list.end());
+      for (const std::size_t k : list) { chunk.push_back(pairs + k); }
       out.push_back(std::move(chunk));
     }
     return out;

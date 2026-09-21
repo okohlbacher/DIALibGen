@@ -58,9 +58,14 @@ namespace ODIA::search
                             const AssayOptions& options = AssayOptions());
 
     /// Split the set into chunks of at most @p precursors precursors (at least
-    /// one pair each), every pair in the same chunk as its partner: chunk c
-    /// holds the targets of pairs [a, b) followed by their decoys.
-    static std::vector<std::vector<std::size_t>> chunks(const SearchSet& set, std::size_t precursors);
+    /// one pair each), every pair in the same chunk as its partner, each chunk
+    /// spread over the whole m/z range: the pairs, in m/z order, are cut into
+    /// pieces of @p batch precursors (one OpenSWATH batch; smaller when the
+    /// chunk is) dealt out round-robin, so a chunk holds pieces of many
+    /// isolation windows and OpenSWATH, which parallelises over windows, has
+    /// work for its threads. Chunk c holds the targets of its pairs in
+    /// ascending pair order, followed by their decoys in the same order.
+    static std::vector<std::vector<std::size_t>> chunks(const SearchSet& set, std::size_t precursors, std::size_t batch = 500);
 
     /// Target assays straight from @p library (the unmodified input), for the
     /// calibration seeds: the same layout as build() -- empty sequence, id

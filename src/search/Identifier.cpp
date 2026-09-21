@@ -208,7 +208,8 @@ namespace ODIA::search
       info("search calibration: " + std::to_string(calibration.points) + " points from " + std::to_string(calibration.seeds) +
            " seeds, r^2 " + (std::isfinite(calibration.rsq) ? std::to_string(calibration.rsq) : std::string("n/a")) +
            ", windows RT " + std::to_string(calibration.rt_window) + " s, m/z " + std::to_string(calibration.mz_ppm) +
-           " ppm, 1/K0 " + std::to_string(calibration.im_window) + (calibration.bootstrap ? " (BOOTSTRAP)" : "") + " (" +
+           " ppm, 1/K0 " + (calibration.im_window > 0 ? std::to_string(calibration.im_window) : std::string("off")) +
+           (calibration.bootstrap ? " (BOOTSTRAP)" : "") + " (" +
            seconds(timing["calibrate"].get<double>()) + ")");
       if (calibration.bootstrap) { warning("the RT calibration FAILED and search:allow_bootstrap replaced it with a linear map"); }
 

@@ -303,15 +303,16 @@ void DIALibGen::registerRefinementOptions_()
                           "classifier; false is an ablation for tuning, which exists to correct those deviations", false);
     setValidStrings_("search:rt_im_scores", {"true", "false"});
     registerDoubleOption_("search:calibration_min_rsq", "<r2>", 0.70, "Least r^2 of the RT calibration on the seed assays", false);
-    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays the RT calibration must find", false);
+    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays found in the run that "
+                          "the RT outlier removal must keep", false);
     for (const char* name : {"search:calibration_min_rsq", "search:calibration_min_coverage"})
     { setMinFloat_(name, 0.0); setMaxFloat_(name, 1.0); }
     registerFlag_("search:allow_bootstrap", "When the RT calibration fails, map the library RT range linearly onto the run "
                                             "instead of aborting. A test hook, recorded in the provenance");
     registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = per-window "
-                          "cache files, auto = decided from the run", false);
+                          "cache files, auto = cache for runs above 3 GB", false);
     setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
-    registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the system temporary directory); "
+    registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the directory of -out_ids); "
                           "they are removed after the search", false);
     registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
     registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "

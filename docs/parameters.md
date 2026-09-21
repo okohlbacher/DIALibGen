@@ -113,10 +113,10 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:ms1` | string | `true` | true,false | Extract MS1 traces and use the MS1 sub-scores |
 | `-search:rt_im_scores` | string | `true` | true,false | Let the RT and 1/K0 deviation sub-scores into the classifier; false is an ablation for tuning, which exists to correct those deviations |
 | `-search:calibration_min_rsq` | double | `0.7` | 0.0:1.0 | Least r^2 of the RT calibration on the seed assays |
-| `-search:calibration_min_coverage` | double | `0.3` | 0.0:1.0 | Least fraction of the seed assays the RT calibration must find |
+| `-search:calibration_min_coverage` | double | `0.3` | 0.0:1.0 | Least fraction of the seed assays found in the run that the RT outlier removal must keep |
 | `-search:allow_bootstrap` | bool | `false` |  | When the RT calibration fails, map the library RT range linearly onto the run instead of aborting. A test hook, recorded in the provenance |
-| `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = decided from the run |
-| `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the system temporary directory); they are removed after the search |
+| `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = cache for runs above 3 GB |
+| `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the directory of -out_ids); they are removed after the search |
 | `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
 | `-search:max_target_fraction` | double | `0.5` | 0.0:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
 | `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |

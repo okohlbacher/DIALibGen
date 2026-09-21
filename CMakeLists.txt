@@ -165,7 +165,8 @@ set_target_properties(odia_refine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(odia_search STATIC
   src/search/SearchParams.cpp
   src/search/CandidateSelector.cpp
-  src/search/AssayBuilder.cpp)
+  src/search/AssayBuilder.cpp
+  src/search/ReportWriter.cpp)
 target_link_libraries(odia_search PUBLIC odia_refine odia_core PRIVATE nlohmann_json::nlohmann_json)
 set_target_properties(odia_search PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(DIALIBGEN_TARGETS odia_library odia_refine)

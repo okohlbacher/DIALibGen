@@ -24,6 +24,7 @@
 #include <odia/search/SearchParams.h>
 
 #include <OpenMS/ANALYSIS/MAPMATCHING/TransformationDescription.h>
+#include <OpenMS/METADATA/ExperimentalSettings.h>
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/SwathMap.h>
 
 #include <cstddef>
@@ -33,11 +34,6 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-namespace OpenMS
-{
-  class ExperimentalSettings;
-}
 
 namespace ODIA::search
 {

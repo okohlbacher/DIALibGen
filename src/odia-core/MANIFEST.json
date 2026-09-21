@@ -3,7 +3,6 @@
   "origin": {
     "project": "OpenDIAlyzer",
     "remote": "https://github.com/okohlbacher/OpenDIAlyzer.git",
-    "path": "/Users/kohlbach/Claude/mzPeak/OpenDIAlyzer",
     "commit": "8e7cba7704b6454902e088ccd312452912ffa09d",
     "license": "BSD-3-Clause"
   },

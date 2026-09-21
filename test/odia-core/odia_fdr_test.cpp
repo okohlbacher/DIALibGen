@@ -8,8 +8,10 @@
 //   T1 rollUp takes the MAX member score and inherits the entity label.
 //   T2 entity q-values: a clean separation gives ~all targets at q <= 0.01 and no decoys.
 //   T3 rolling many null precursors up to an entity must not produce entity-level IDs.
-//   T4 picked competition collapses each pair to one entry, keeps the winner, ties -> DECOY.
-//   T5 picked competition removes the protein-SIZE bias.
+//   T4 picked competition collapses each pair to one entry, keeps the winner, ties -> DECOY;
+//      pairs are the entities that share a pair id, whatever their names say.
+//   T5 picked competition removes the protein-SIZE bias; a decoy carrying its target's key
+//      stays a separate entity and pairs with it.
 //   T6 the entrapment estimator reproduces (1+1/r)*n_ent/n and refuses degenerate inputs.
 //   T7 PEP is a local error rate: near 0 for clear hits, near 1 for the null, monotone.
 
@@ -19,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -91,32 +94,40 @@ int main()
           "T3 entity score is a max-of-n extreme value, not a precursor score");
   }
 
-  // ---- T4: picked competition -------------------------------------------------------
+  // ---- T4: picked competition, paired by pair id, never by name ----------------------
   {
     std::vector<Entity> e = {
-      {"A", 1, 5.0}, {"DECOY_A", 0, 3.0},     // target wins
-      {"B", 1, 1.0}, {"DECOY_B", 0, 4.0},     // decoy wins
-      {"C", 1, 2.0}, {"DECOY_C", 0, 2.0},     // tie -> decoy
-      {"E", 1, 7.0},                          // unpaired target
-      {"DECOY_F", 0, 6.0},                    // unpaired decoy (no target F)
+      {"A", 1, 5.0, 0}, {"DECOY_A", 0, 3.0, 0},     // target wins
+      {"B", 1, 1.0, 1}, {"B_rev", 0, 4.0, 1},       // decoy wins; its name follows no convention
+      {"C", 1, 2.0, 2}, {"C", 0, 2.0, 2},           // tie -> decoy
+      {"E", 1, 7.0, 3},                             // target whose decoy is absent
+      {"DECOY_F", 0, 6.0, 4},                       // decoy whose target is absent
+      {"G", 1, 8.0, -1}, {"DECOY_G", 0, 9.0, -1},   // names suggest a pair, ids say none
     };
     std::size_t paired = 0;
-    auto p = odia::core::pickedCompetition(e, "DECOY_", &paired);
+    auto p = odia::core::pickedCompetition(e, &paired);
     check(paired == 3, "T4 three pairs found");
-    check(p.size() == 5, "T4 pairs collapse to one entry each, singletons survive");
+    check(p.size() == 7, "T4 pairs collapse to one entry each, singletons survive");
     int n_target = 0, n_decoy = 0;
-    bool a_target = false, b_decoy = false, c_decoy = false;
+    bool a_target = false, b_decoy = false, c_decoy = false, g_both = true;
     for (const auto& x : p)
     {
       (x.label == 1 ? n_target : n_decoy)++;
       if (x.id == "A" && x.label == 1) { a_target = true; }
-      if (x.id == "DECOY_B" && x.label == 0) { b_decoy = true; }
-      if (x.id == "DECOY_C" && x.label == 0) { c_decoy = true; }
+      if (x.id == "B_rev" && x.label == 0) { b_decoy = true; }
+      if (x.id == "C" && x.label == 0) { c_decoy = true; }
     }
+    g_both = std::count_if(p.begin(), p.end(), [](const Entity& x) { return x.id == "G" || x.id == "DECOY_G"; }) == 2;
     check(a_target, "T4 higher-scoring target wins its pair");
     check(b_decoy, "T4 higher-scoring decoy wins its pair");
     check(c_decoy, "T4 ties resolve to the decoy (conservative)");
-    check(n_target == 2 && n_decoy == 3, "T4 winner labels counted correctly");
+    check(g_both, "T4 a DECOY_ prefix does not make a pair");
+    check(n_target == 3 && n_decoy == 4, "T4 winner labels counted correctly");
+
+    bool threw = false;
+    try { odia::core::pickedCompetition({{"X", 1, 1.0, 9}, {"Y", 1, 2.0, 9}}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    check(threw, "T4 two targets in one pair are refused");
   }
 
   // ---- T5: picked removes the protein-SIZE bias --------------------------------------
@@ -132,8 +143,10 @@ int main()
       const int size = 1 + (i % 50) * 4;           // 1..197 peptides
       for (int k = 0; k < size; ++k)
       { key.push_back("P" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(1); }
+      // The decoy protein carries its target's key; the label keeps them apart and the shared
+      // key pairs them.
       for (int k = 0; k < size; ++k)
-      { key.push_back("DECOY_P" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(0); }
+      { key.push_back("P" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(0); }
     }
     auto e = odia::core::rollUp(key, sc, lab);
 
@@ -153,7 +166,8 @@ int main()
           "T5 plain ranking is size-biased (large proteins crowd the top)");
 
     std::size_t paired = 0;
-    auto p = odia::core::pickedCompetition(e, "DECOY_", &paired);
+    auto p = odia::core::pickedCompetition(e, &paired);
+    check(e.size() == static_cast<std::size_t>(2 * n_prot), "T5 target and decoy of one key stay apart");
     check(paired == static_cast<std::size_t>(n_prot), "T5 every protein paired");
     check(p.size() == static_cast<std::size_t>(n_prot), "T5 picked halves the entity count");
     std::size_t won_by_target = 0;

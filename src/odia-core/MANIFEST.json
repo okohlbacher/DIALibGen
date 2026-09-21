@@ -23,7 +23,7 @@
         "src/odia_fdr.h",
         "src/odia_lda.h"
       ],
-      "sha256": "88ee09e98684d6066eeab55713cb29d7140c57214ef4433ff10c771666ba5679"
+      "sha256": "a2601978f58ec00e02963173f17b4ba04fe85347c1fe6f219581012b403ec9ee"
     },
     {
       "path": "src/odia-core/odia_lda.h",
@@ -51,7 +51,7 @@
       "from": [
         "src/odia_fdr_test.cpp"
       ],
-      "sha256": "956d6215233711bac55a27476b5ea54278b44fb6af345bd08ea516d35e1b745b"
+      "sha256": "bfac5c2523a7f83570fdb5a14a5c54c804264ae3ad5cafc9457b20a410c0df1d"
     }
   ],
   "changes": [
@@ -64,6 +64,8 @@
     "Tests: odia_lda_test drops the GBT canonicalisation block and gains a trained-iterations check; all three call the odia::core API.",
     "PEP defect fixed: ODIA made the sliding-window PEP monotone with a running MAX swept from the low-score end, an upper envelope of everything below an item, so every PEP was 1.0. Replaced by weighted pool-adjacent-violators (isotonicNonDecreasing), equal scores pooled into one block. odia_fdr_test gains T7; odia_lda_test's PEP checks move from rows to groups (a runner-up row carries its group's PEP, so the row-level ordering check was wrong and passed only because PEP was constant) and require some groups at PEP < 0.05.",
     "Fix 1, pair-aware folds: scoreSemiSupervisedLDA takes a per-row pair id (shared by a target and its decoy, supplied by the caller) and assigns fold = foldOfPair(pair, seed, folds), a SplitMix64 hash, to every group of the pair. Replaces the independent seeded shuffles of target and decoy groups (odia_lda.h:439-468), which put a target and its own decoy in different folds and depended on the standard library's std::shuffle. A group whose rows carry different pair ids throws. LdaResult gains per-row fold and n_folds; a fold with no training groups is counted as skipped. Test: test/odia-core/odia_pair_folds_test.cpp.",
-    "Fix 2, label-blind fold rescaling: each fold's held-out scores are rescaled by the median and 1.4826 x MAD of the best score of ALL its groups (robustScale), replacing the mean and sd of its decoys' best scores (odia_lda.h:924-959), a label-dependent transform of the test set that broke target-decoy exchangeability. LdaResult gains fold_location, fold_scale and folds_unscaled. Test: test/odia-core/odia_fold_rescale_test.cpp."
+    "Fix 2, label-blind fold rescaling: each fold's held-out scores are rescaled by the median and 1.4826 x MAD of the best score of ALL its groups (robustScale), replacing the mean and sd of its decoys' best scores (odia_lda.h:924-959), a label-dependent transform of the test set that broke target-decoy exchangeability. LdaResult gains fold_location, fold_scale and folds_unscaled. Test: test/odia-core/odia_fold_rescale_test.cpp.",
+    "Fix 4, structural pairing: pairs are identified by an integer pair id supplied by the caller, never by a string prefix. decoyPartnerId and the decoy_tag parameter of pickedCompetition (odia_fdr.h:122-129, which assumed 'DECOY_' + target id) are removed; Entity gains `pair`; pickedCompetition pairs entities by it (ties to the decoy, output in input order) and throws on a pair id with two targets or two decoys. rollUp keys entities by (key, label), so a decoy never merges into a target of the same key (ODIA tagged decoy keys to prevent that), and gives the target and decoy entity of one key a shared pair id; an overload takes explicit per-member pair ids. rollUp throws on size mismatch (was: empty result).",
+    "Fix 4, concatenated competition: concatenatedCompetition(pair, label, score, estimator) collapses every pair to its better member (ties to the decoy), computes q over the winners and gives losers q = PEP = 1; pooledQValues keeps ODIA's pooled estimator as a diagnostic. assignQValues takes a QEstimator: Ratio (ODIA's, default: ((D+1)/N_dec)/(T/N_tar), on winners (D_win+1)/N_dec_win / (T_win/N_tar_win)) or Count ((D+1)/T); PEP uses the same scale. A list with no decoys now gets q = (D+1)/T instead of ODIA's q = 0. Tests: test/odia-core/odia_competition_test.cpp; odia_fdr_test T4/T5 use pair ids (T4 adds a DECOY_-named entity that must NOT pair)."
   ]
 }

@@ -67,7 +67,8 @@ namespace ODIA::search
     /// Score the RT and 1/K0 deviation sub-scores. false removes them from the
     /// fit (an ablation switch for tuning, whose purpose is to correct them).
     bool rt_im_scores = true;
-    /// Transitions per extraction batch inside one OpenSWATH call.
+    /// Precursors per extraction batch within one isolation window, inside one
+    /// OpenSWATH call (OpenSwathWorkflow's batchSize counts compounds).
     std::size_t batch_size = 500;
     /// Precursors per OpenSWATH extraction call; target-decoy pairs stay together.
     std::size_t chunk = 20000;

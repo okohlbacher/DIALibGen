@@ -48,8 +48,19 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
         assert expected in log, (expected, args, log)
         return log
 
+    def refused_tune(expected, *args):
+        """A tuning command: a build without libtorch refuses tuning itself first."""
+        log = run(*args, ok=False)
+        assert expected in log or 'no fine-tuning stage' in log, (expected, args, log)
+        return log
+
     def fresh(suffix='.tsv'):
         return root / f'out-{next(counter)}{suffix}'
+
+    # Tuning needs the stock RT model; the early checks only look for the file.
+    models = root / 'models'
+    models.mkdir()
+    (models / 'peptdeep_rt_dynamic.onnx').write_bytes(b'not read: the search fails first\n')
 
     # -ids XOR -run
     refused('exactly one of -ids and -run', '-mode', 'refine', '-in', library, '-ids', ids, '-run', mzml, '-out', fresh())
@@ -65,9 +76,49 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     refused('-min_fragments is not available with -run', '-mode', 'refine', '-in', library, '-run', mzml,
             '-out', fresh(), '-min_fragments', 3)
     refused("'mutate'", '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:decoys', 'mutate')
+    # Reversal moves the tryptic C-terminus: decoys separable by construction.
+    refused("'reverse'", '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:decoys', 'reverse')
     run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:report_max_q', 0.001, ok=False)
+    run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:max_target_fraction', 0, ok=False)
     refused('-out_ids must end in .parquet', '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
             '-out_ids', root / 'ids.tsv')
+    # The search reports no 1/K0 yet: -write_im would write nothing.
+    refused('-write_im is not available with -run', '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
+            '-write_im')
+
+    # Refused BEFORE the search, not after it: a head that needs 1/K0 ...
+    for mode, extra in (('tune', []), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter'])):
+        log = refused_tune('needs observed 1/K0 values, which the built-in search (-run) does not measure yet; use -tune_heads rt',
+                           '-mode', mode, *extra, '-in', library, '-run', mzml, '-out', fresh(), '-tune_models', models)
+        assert 'search run' not in log and 'search candidates' not in log, log
+    # ... a training recipe that cannot run, and absent models.
+    refused_tune('train:warmup must be in [0, train:epochs]', '-mode', 'tune', '-tune_heads', 'rt', '-in', library,
+                 '-run', mzml, '-out', fresh(), '-tune_models', models, '-train:epochs', 3)
+    refused_tune('no peptdeep_rt_dynamic.onnx in', '-mode', 'tune', '-tune_heads', 'rt', '-in', library,
+                 '-run', mzml, '-out', fresh(), '-tune_models', root)
+    # A library without protein groups.
+    nopg = root / 'library-nopg.tsv'
+    with library.open() as source, nopg.open('w', newline='') as output:
+        rows = list(csv.reader(source, delimiter='\t'))
+        column = rows[0].index('Protein.Group')
+        writer = csv.writer(output, delimiter='\t')
+        writer.writerow(rows[0])
+        for row in rows[1:]:
+            row[column] = ''
+            writer.writerow(row)
+    log = refused('has a Protein.Group', '-mode', 'refine', '-in', nopg, '-run', mzml, '-out', fresh())
+    assert 'search run' not in log, log
+    refused_tune('has a Protein.Group', '-mode', 'tune', '-tune_heads', 'rt', '-in', nopg, '-run', mzml, '-out', fresh(),
+                 '-tune_models', models)
+
+    # A directory as the run (a Bruker .d above all) is refused with a message,
+    # not a crash in TOPP's file-type probe.
+    bruker = root / 'sample.d'
+    bruker.mkdir()
+    for mode in ('refine', 'tune'):
+        refused('Bruker .d directory, which this version cannot read; convert it', '-mode', mode, '-in', library,
+                '-run', bruker, '-out', fresh())
+    refused('is a directory', '-mode', 'refine', '-in', library, '-ids', bruker, '-out', fresh())
 
     # -out_ids is never overwritten: explicit or default, and distinct from -out.
     sentinel = b'existing report\n'
@@ -75,7 +126,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
         out = fresh()
         target = root / f'existing-{next(counter)}.parquet' if explicit else Path(str(out) + '.ids.parquet')
         target.write_bytes(sentinel)
-        args = ['-mode', 'tune', '-in', library, '-run', mzml, '-out', out] + (['-out_ids', target] if explicit else [])
+        args = ['-mode', 'refine', '-in', library, '-run', mzml, '-out', out] + (['-out_ids', target] if explicit else [])
         refused('refusing to overwrite existing output', *args)
         assert target.read_bytes() == sentinel and not out.exists()
     out = fresh('.parquet')
@@ -120,7 +171,8 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     # reads it (the run comes first: its isolation windows decide which
     # candidates can be searched). This "run" is not one, so the search fails
     # -- and leaves neither -out_ids nor -out behind.
-    for mode, extra in (('tune', []), ('refine', ['-tune', '-no_filter']), ('refine', [])):
+    tuning = ['-tune_heads', 'rt', '-tune_models', models]
+    for mode, extra in (('tune', tuning), ('refine', ['-tune', '-no_filter'] + tuning), ('refine', [])):
         out = fresh()
         report = root / f'report-{next(counter)}.parquet'
         log = run('-mode', mode, *extra, '-in', library, '-run', mzml, '-out', out, '-out_ids', report,
@@ -130,6 +182,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
         assert 'has no effect' not in log and 'exactly one' not in log, log
         assert 'search run: reading ' + str(mzml) in log, log
         assert 'EXPERIMENTAL' in log, log
+        assert 'was kept' not in log, log   # no report was written, so none is announced
         assert not report.exists() and not out.exists() and not Path(str(out) + '.refine.json').exists()
         leftovers = [p.name for p in root.iterdir() if p.name.startswith('.dialibgen-tmp-')]
         assert not leftovers, leftovers

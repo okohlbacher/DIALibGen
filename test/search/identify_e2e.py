@@ -100,8 +100,42 @@ try:
             fail('the refined library is empty')
         if prov['reference']['passing'] < 0.8 * len(truth):
             fail('refine used %d passing precursors of the report' % prov['reference']['passing'])
+        # The report's peptide and protein q-values use the same paired
+        # competition as its precursor q: refine's default gates keep the
+        # identifications the search counted.
+        if prov['reference']['passing'] < 0.95 * ident['precursors']:
+            fail('refine passed %d of the %d identified precursors' % (prov['reference']['passing'], ident['precursors']))
         print('refine: %d passing report precursors, %d library precursors after' % (prov['reference']['passing'],
                                                                                         prov['library']['after']))
+
+        # A failure after the search keeps the report and says how to reuse it.
+        d = root / 'kept'
+        d.mkdir()
+        kept = d / 'ids.parquet'
+        log = run(tool, '-mode', 'refine', '-in', library, '-run', mzml, '-out', d / 'out.tsv', '-out_ids', kept,
+                  '-q_precursor', 1e-9, ok=False)
+        if not kept.is_file() or 'was kept; rerun with -ids ' + str(kept) not in log:
+            print(log, file=sys.stderr)
+            fail('a failure after the search must keep the report and say so')
+        run(tool, '-mode', 'refine', '-in', library, '-ids', kept, '-out', d / 'reused.tsv')
+        print('ok   a failed refine keeps its identification report, and -ids reuses it')
+
+        # The refined Parquet library embeds no timings or thread counts: the
+        # same -run command writes the same bytes at any -threads.
+        d = root / 'parquet'
+        d.mkdir()
+        parquets = []
+        for threads in (1, 4):   # the same paths both times: the provenance names them
+            run(tool, '-mode', 'refine', '-in', library, '-run', mzml, '-out', d / 'out.parquet', '-out_ids', d / 'ids.parquet',
+                '-threads', threads)
+            kept_as = d / ('out-%d.parquet' % threads)
+            (d / 'out.parquet').rename(kept_as)
+            parquets.append(kept_as)
+            for f in ('ids.parquet', 'out.parquet.refine.json'):
+                (d / f).unlink()
+        if not filecmp.cmp(parquets[0], parquets[1], shallow=False):
+            fail('the refined Parquet library differs between -threads 1 and 4')
+        print('ok   refined Parquet library byte-identical at -threads 1 and 4')
 
         # Determinism: threads and chunking change nothing in the report.
         _, ids4, _, _ = search('t4', threads=4)

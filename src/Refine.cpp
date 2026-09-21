@@ -317,7 +317,7 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
     registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "
                           "precursors passes q <= 0.01: no honest decoy set looks like that", false);
-    setMinFloat_("search:max_target_fraction", 0.0); setMaxFloat_("search:max_target_fraction", 1.0);
+    setMinFloat_("search:max_target_fraction", 0.01); setMaxFloat_("search:max_target_fraction", 1.0);
     registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors, targets and decoys, up to this precursor q-value "
                           "go into -out_ids", false);
     setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
@@ -327,7 +327,7 @@ void DIALibGen::registerRefinementOptions_()
                           "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
                           "decoys that are built weaker than null targets", false);
     setValidStrings_("search:selftest", {"true", "false"});
-    registerIntOption_("search:batch_size", "<n>", 500, "Advanced: transitions per extraction batch", false);
+    registerIntOption_("search:batch_size", "<n>", 500, "Advanced: precursors per extraction batch within one isolation window", false);
     registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together", false);
     for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
     setMinInt_("search:batch_size", 1);
@@ -471,6 +471,25 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       return EXECUTION_OK;
     }
 
+    // A directory given as an input file -- a Bruker .d above all -- crashes
+    // TOPP's file-type probe in getStringOption_ (an uncaught
+    // std::ios_base::failure). Refuse it before any getter can run that probe.
+    for (const std::string name : {"run", "ids"})
+    {
+      const std::string raw = getParam_().getValue(name).toString();
+      std::error_code ec;
+      if (raw.empty() || !std::filesystem::is_directory(raw, ec)) { continue; }
+      std::string stem = raw;
+      while (stem.size() > 1 && (stem.back() == '/' || stem.back() == '\\')) { stem.pop_back(); }
+      const bool bruker = stem.size() > 2 && (stem.ends_with(".d") || stem.ends_with(".D"));
+      if (name == "run" && bruker)
+      {
+        writeLogError_("-run " + raw + " is a Bruker .d directory, which this version cannot read; convert it to a "
+                       "frame-merged mzML with a per-peak 1/K0 array (mzpeak-convert --to mzml) and pass that");
+      }
+      else { writeLogError_("-" + name + " " + raw + " is a directory; it takes a file" + (name == "run" ? " (mzML)" : " (report.parquet)")); }
+      return ILLEGAL_PARAMETERS;
+    }
     const std::string in = getStringOption_("in");
     std::string ids = getStringOption_("ids");
     const std::string run = getStringOption_("run");
@@ -499,6 +518,34 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogError_("-empirical_library does not apply to -run: the built-in report carries every gate column"); return ILLEGAL_PARAMETERS; }
       if (p.min_fragments > 0)
       { writeLogError_("-min_fragments is not available with -run yet: the built-in report carries no fragment identities"); return ILLEGAL_PARAMETERS; }
+      if (p.write_im)
+      { writeLogError_("-write_im is not available with -run yet: the built-in search does not measure 1/K0, so nothing would be written"); return ILLEGAL_PARAMETERS; }
+      // Everything that would fail AFTER the search (minutes on a full run)
+      // is checked before it.
+      if (tune)
+      {
+        const std::string heads = getStringOption_("tune_heads");
+        if (heads != "rt")
+        {
+          writeLogError_("-tune_heads " + heads + " needs observed 1/K0 values, which the built-in search (-run) does not "
+                         "measure yet; use -tune_heads rt");
+          return ILLEGAL_PARAMETERS;
+        }
+        const int epochs = getIntOption_("train:epochs"), warmup = getIntOption_("train:warmup");
+        if (epochs < 1 || warmup < 0 || warmup > epochs)
+        { writeLogError_("train:warmup must be in [0, train:epochs]"); return ILLEGAL_PARAMETERS; }
+        if (getIntOption_("cohort:train_size") > 0 && getDoubleOption_("cohort:train_frac") > 0)
+        { writeLogError_("give cohort:train_size or cohort:train_frac, not both"); return ILLEGAL_PARAMETERS; }
+#ifdef DIALIBGEN_WITH_FINETUNE
+        std::string models = getStringOption_("tune_models");
+        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
+        if (models.empty()) { models = bundledModelDir(); }
+        if (models.empty())
+        { writeLogError_("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); return ILLEGAL_PARAMETERS; }
+        if (!std::filesystem::exists(std::filesystem::path(models) / "peptdeep_rt_dynamic.onnx"))
+        { writeLogError_("no peptdeep_rt_dynamic.onnx in " + models); return ILLEGAL_PARAMETERS; }
+#endif
+      }
       try { search = std::make_unique<ODIA::search::SearchParams>(searchParams_()); }
       catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
       out_ids = getParam_().getValue("out_ids").toString();
@@ -526,6 +573,17 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json tune_prov = json::object();
     json search_prov;
     std::string run_hash;
+    // Once the search has written its report, a later failure must say that the
+    // report is still there: -out_ids is never overwritten, so the same command
+    // would now be refused.
+    bool report_written = false;
+    auto keptReport = [&]() {
+      if (report_written)
+      {
+        writeLogError_("the identification report " + out_ids + " was kept; rerun with -ids " + out_ids +
+                       " instead of -run to reuse it, or remove it");
+      }
+    };
     try
     {
       ODIA::DIANNLibraryFile::load(in, library);
@@ -533,6 +591,23 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                     std::to_string(library.transitionCount()) + " transitions");
       if (search)
       {
+        // Protein groups: tuning builds its held-out cohorts from them, and the
+        // report's PG.Q.Value (the -q_protein gate) is 1 without them. Checked
+        // before the search, not after it.
+        std::size_t targets = 0, grouped = 0;
+        for (std::size_t i = 0; i < library.precursorCount(); ++i)
+        {
+          if (library.precursors().decoy[i]) { continue; }
+          ++targets;
+          grouped += library.strings().get(library.precursors().protein_group[i]).empty() ? 0 : 1;
+        }
+        if (grouped == 0 && (tune || p.q_protein < 1.0))
+        {
+          throw std::runtime_error("none of the library's " + std::to_string(targets) + " target precursors has a Protein.Group; " +
+                                   (tune ? std::string("tuning needs protein groups for its held-out cohorts")
+                                         : std::string("every PG.Q.Value would be 1 and -q_protein would reject everything "
+                                                       "(pass -q_protein 1 to refine without the protein gate)")));
+        }
         writeLogWarn_("-run is EXPERIMENTAL: the built-in identification has not passed its entrapment validation yet");
         if (p.filter)
         { writeLogWarn_("-mode refine with -run keeps only precursors identified among the at most search:max_pairs pairs "
@@ -540,6 +615,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         ODIA::search::Identifier identifier(*search, [this](const std::string& m) { writeLogInfo_(m); },
                                             [this](const std::string& m) { writeLogWarn_(m); });
         const ODIA::search::IdentificationResult found = identifier.identify(library, run, out_ids, DIALIBGEN_VERSION);
+        report_written = true;
         search_prov = json::parse(found.provenance_json);
         run_hash = ODIA::DIANNLibraryFile::hashFile(run);
         // The hand-off: the report just written IS the reference from here on,
@@ -757,7 +833,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogWarn_(std::to_string(st.lib_unknown_mod_tokens) + " library modification tokens could not be resolved to UniMod; passed through verbatim and may fail the reference join"); }
       }
     }
-    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); return UNEXPECTED_RESULT; }
+    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); keptReport(); return UNEXPECTED_RESULT; }
 
     if (!tune_only)
     {
@@ -879,7 +955,14 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     {
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
       if (out.ends_with(".parquet"))
-      { ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{}, prov.dump()); }
+      {
+        // The library embeds what is a function of the inputs and settings;
+        // the search's timings and thread count stay in the sidecar, so the
+        // same -run command writes the same library bytes.
+        json embedded = prov;
+        if (embedded.contains("search") && embedded["search"].is_object()) { embedded["search"].erase("resources"); }
+        ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{}, embedded.dump());
+      }
       else if (out.ends_with(".tsv"))
       { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library); }
       else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
@@ -910,7 +993,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       writeLogInfo_("wrote " + out + " and " + out + ".refine.json");
       if (staged_report) { writeLogInfo_("wrote report to " + report); }
     }
-    catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+    catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); keptReport(); return CANNOT_WRITE_OUTPUT_FILE; }
 
     return EXECUTION_OK;
   }

@@ -42,6 +42,31 @@ namespace
     int present_percent = 40;   ///< targets whose first peak group carries signal
     float signal = 2.0f;
     bool decoys = true;         ///< false: decoys get no peak groups (a broken extraction)
+    /// MS2 isolation windows the run reports; none = a run without maps.
+    std::vector<std::pair<double, double>> windows;
+    bool fail_calibration = false;
+  };
+
+  /// A spectrum source that records, when it is destroyed (the run's cache
+  /// files closed), whether the scratch directory still existed: it must,
+  /// since Windows cannot delete a file that is still open.
+  class ClosingProbe : public OpenSwath::ISpectrumAccess
+  {
+  public:
+    ClosingProbe(fs::path dir, int* closed_with_dir) : dir_(std::move(dir)), closed_with_dir_(closed_with_dir) {}
+    ~ClosingProbe() override { *closed_with_dir_ = fs::exists(dir_) ? 1 : 0; }
+    std::shared_ptr<OpenSwath::ISpectrumAccess> lightClone() const override { return nullptr; }
+    OpenSwath::SpectrumPtr getSpectrumById(int) override { return nullptr; }
+    std::vector<std::size_t> getSpectraByRT(double, double) const override { return {}; }
+    size_t getNrSpectra() const override { return 0; }
+    OpenSwath::SpectrumMeta getSpectrumMetaById(int) const override { return OpenSwath::SpectrumMeta(); }
+    OpenSwath::ChromatogramPtr getChromatogramById(int) override { return nullptr; }
+    std::size_t getNrChromatograms() const override { return 0; }
+    std::string getChromatogramNativeID(int) const override { return std::string(); }
+
+  private:
+    fs::path dir_;
+    int* closed_with_dir_;
   };
 
   class SyntheticRun : public Identifier
@@ -52,6 +77,7 @@ namespace
 
     fs::path scratch;   ///< what loadRun created
     std::size_t present = 0;
+    int closed_with_dir = -1;   ///< set when the run's spectrum source is released: 1 = scratch still there
 
     bool isPresent(const SearchSet& set, std::size_t i) const
     {
@@ -70,11 +96,19 @@ namespace
       fs::create_directories(r.scratch);
       std::ofstream(r.scratch / "window_0.cached") << "cache\n";
       scratch = r.scratch;
+      const auto probe = std::make_shared<ClosingProbe>(r.scratch, &closed_with_dir);
+      for (const auto& [lower, upper] : plan_.windows)
+      {
+        OpenSwath::SwathMap m(lower, upper, (lower + upper) / 2, false);
+        m.sptr = probe;
+        r.maps.push_back(m);
+      }
       return r;
     }
 
     Calibration calibrate(const ODIA::Library&, const SearchSet& set, RunData&) override
     {
+      if (plan_.fail_calibration) { throw SearchAbort("search: RT calibration failed (synthetic)"); }
       Calibration c;
       c.seeds = set.pairs();
       c.points = set.pairs();
@@ -224,6 +258,29 @@ int main(int argc, char** argv)
     CHECK(j["scoring"]["features_excluded"] == json::array({"var_norm_rt_score"}));
   }
 
+  // ---- 3b. candidates outside every isolation window are never searched ---------
+  {
+    Plan windowed;
+    windowed.windows = {{350.0, 600.0}, {600.0, 750.0}};
+    SyntheticRun w(params(1), windowed);
+    const auto r = w.identify(lib, "synthetic.mzML", (dir / "windows.ids.parquet").string(), "test");
+    const json j = json::parse(r.provenance_json);
+    std::cout << "windows: " << j["candidates"]["ineligible_window"] << " targets outside, "
+              << j["candidates"]["pairs"] << " pairs searched\n";
+    CHECK(j["candidates"]["isolation_windows"] == 2);
+    CHECK(j["candidates"]["ineligible_window"].get<std::size_t>() > 0);
+    CHECK(j["candidates"]["eligible"].get<std::size_t>() + j["candidates"]["ineligible_window"].get<std::size_t>() ==
+          prov["candidates"]["eligible"].get<std::size_t>());
+    CHECK(r.identified > 0);
+    CHECK(w.closed_with_dir == 1 && !fs::exists(w.scratch));
+    // Every searched pair lies inside a window.
+    const std::vector<IsolationWindow> iw = {{350.0, 600.0}, {600.0, 750.0}};
+    const SearchSet set = CandidateSelector::select(lib, params(1), iw);
+    for (std::size_t k = 0; k < set.pairs(); ++k)
+    { CHECK(CandidateSelector::inWindow(ODIA::fromFixed(set.library.precursors().mz[k]), iw)); }
+    CHECK(set.pairs() == j["candidates"]["pairs"].get<std::size_t>());
+  }
+
   // ---- 4. every guard aborts with counts, writes nothing, cleans up ----------------
   {
     SearchParams p = params(1);
@@ -254,6 +311,24 @@ int main(int argc, char** argv)
     try { checkGuards(untrained, params(1)); } catch (const SearchAbort& e) { message = e.what(); }
     CHECK(message.find("learned no discriminant") != std::string::npos);
   }
+  // A failed calibration: the run's files are closed BEFORE its scratch
+  // directory is removed (the order Windows needs), and it is removed.
+  {
+    Plan failing;
+    failing.windows = {{100.0, 5000.0}};
+    failing.fail_calibration = true;
+    SyntheticRun run(params(1), failing);
+    std::string message;
+    try { (void)run.identify(lib, "synthetic.mzML", (dir / "calibration.parquet").string(), "test"); }
+    catch (const SearchAbort& e) { message = e.what(); }
+    std::cout << "abort (calibration): " << message << "; run closed with its scratch directory present: "
+              << run.closed_with_dir << "\n";
+    CHECK(message.find("RT calibration failed") != std::string::npos);
+    CHECK(run.closed_with_dir == 1);
+    CHECK(!run.scratch.empty() && !fs::exists(run.scratch));
+    CHECK(!fs::exists(dir / "calibration.parquet"));
+  }
+
   // An existing report is refused before the run is touched.
   {
     SyntheticRun refused(params(1), Plan());

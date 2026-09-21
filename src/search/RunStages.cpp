@@ -439,6 +439,12 @@ namespace ODIA::search
       // SwathFile treats tmp as a directory only when it ends in '/', on every platform.
       tmp = run.scratch.generic_string() + "/";
     }
+    // Said before the read, which can take minutes: where the cache goes, so
+    // a killed process leaves a directory the user can find.
+    info("search run: reading " + path + " (" + std::to_string(bytes / 1000000) + " MB) " +
+         (cache ? "into per-window cache files in " + run.scratch.string() + " (about the size of the run; removed after "
+                  "extraction)"
+                : std::string("into memory")));
     try
     {
       OpenMS::SwathFile file;
@@ -537,13 +543,16 @@ namespace ODIA::search
     };
     std::vector<std::size_t> picked;
     std::unordered_set<std::string> picked_ids;
-    std::size_t kit_in_library = 0;
+    std::size_t kit_in_library = 0, kit_outside_windows = 0;
+    const std::vector<IsolationWindow> windows = isolationWindows(run);
     if (!kit.empty())
     {
       for (std::size_t i = 0; i < library.precursorCount(); ++i)
       {
         if (!eligible(i) || !kit.count(strippedSequence(library.strings().get(pre.modified_sequence[i])))) { continue; }
         ++kit_in_library;
+        // A seed outside every isolation window cannot be found.
+        if (!windows.empty() && !CandidateSelector::inWindow(fromFixed(pre.mz[i]), windows)) { ++kit_outside_windows; continue; }
         if (picked_ids.insert(idOf(i)).second) { picked.push_back(i); }   // a duplicated (sequence, charge): first index
       }
     }
@@ -600,6 +609,7 @@ namespace ODIA::search
     detail["kit_files_missing"] = kit_missing;
     detail["kit_sequences"] = kit.size();
     detail["kit_precursors_in_library"] = kit_in_library;
+    detail["kit_precursors_outside_windows"] = kit_outside_windows;
     detail["seeds_kit"] = picked_kit;
     detail["sampling"] = {{"bins", seed_bins}, {"per_bin", seeds_per_bin}, {"top_fraction", seed_top_fraction},
                           {"seed", seed_sampling_seed}};

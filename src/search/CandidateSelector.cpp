@@ -83,7 +83,17 @@ namespace ODIA::search
     return s;
   }
 
-  SearchSet CandidateSelector::select(const Library& library, const SearchParams& params)
+  bool CandidateSelector::inWindow(double mz, const std::vector<IsolationWindow>& windows)
+  {
+    for (const auto& w : windows)
+    {
+      if (w.lower < mz && mz < w.upper) { return true; }
+    }
+    return false;
+  }
+
+  SearchSet CandidateSelector::select(const Library& library, const SearchParams& params,
+                                      const std::vector<IsolationWindow>& windows)
   {
     params.validate();
     SearchSet out;
@@ -102,7 +112,11 @@ namespace ODIA::search
     st.fragment_mz_max = fromFixed(rules.fragment_max);
 
     // 1. Eligible targets. Every exclusion is a property of the target alone,
-    //    which its decoy would share, so it removes whole pairs.
+    //    which its decoy would share, so it removes whole pairs. The window
+    //    check reads the precursor m/z, which a decoy inherits: a pair outside
+    //    every isolation window could never be extracted, and would only use
+    //    up search:max_pairs.
+    st.windows = windows.size();
     std::vector<std::pair<std::uint64_t, std::size_t>> by_identity;
     for (std::size_t i = 0; i < library_size; ++i)
     {
@@ -112,6 +126,7 @@ namespace ODIA::search
       if (pre.charge[i] == 0) { ++st.ineligible_charge; continue; }
       if (!std::isfinite(pre.irt[i])) { ++st.ineligible_rt; continue; }
       if (pre.transition_count[i] < SearchParams::min_assay_fragments) { ++st.ineligible_fragments; continue; }
+      if (!windows.empty() && !inWindow(fromFixed(pre.mz[i]), windows)) { ++st.ineligible_window; continue; }
       by_identity.emplace_back(identity(library, i), i);
     }
     // A (sequence, charge) held by two targets cannot be paired structurally:

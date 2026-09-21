@@ -12,8 +12,11 @@
 /// target whose decoy cannot be built leaves the search together with its
 /// would-be decoy, so what is searched is always whole pairs.
 ///
-/// Nothing here reads the run, and nothing reads a label to decide what is
-/// kept: the draw key is identical for a target and its decoy.
+/// The only thing read from the run is its isolation windows: a target whose
+/// precursor m/z lies in none of them can never be extracted, and its decoy
+/// shares that m/z, so it is ineligible before the draw and the cap. Nothing
+/// reads a label to decide what is kept: the draw key is identical for a
+/// target and its decoy.
 #pragma once
 
 #include <odia/Library.h>
@@ -50,7 +53,9 @@ namespace ODIA::search
     std::size_t ineligible_charge = 0;        ///< charge 0
     std::size_t ineligible_rt = 0;            ///< library RT not finite
     std::size_t ineligible_fragments = 0;     ///< fewer than SearchParams::min_assay_fragments transitions
+    std::size_t ineligible_window = 0;        ///< precursor m/z in no isolation window of the run
     std::size_t duplicate_key = 0;            ///< targets sharing (sequence, charge) with another: all excluded
+    std::size_t windows = 0;                  ///< isolation windows eligibility was checked against (0 = none given)
     std::size_t eligible = 0;
     std::size_t drawn = 0;                    ///< after search:subset
     std::size_t no_decoy = 0;                 ///< drawn targets for which no decoy could be built
@@ -65,6 +70,14 @@ namespace ODIA::search
     double fragment_mz_max = 0.0;
     std::size_t capped = 0;                   ///< pairs removed by search:max_pairs
     std::size_t pairs = 0;                    ///< searched target-decoy pairs
+  };
+
+  /// An MS2 isolation window of the run, m/z. A precursor belongs to it when
+  /// lower < m/z < upper, OpenSWATH's own assignment rule.
+  struct IsolationWindow
+  {
+    double lower = 0.0;
+    double upper = 0.0;
   };
 
   /// The precursors of one search: targets at [0, pairs()), their decoys at
@@ -110,8 +123,14 @@ namespace ODIA::search
     static RtScale rtScale(const Library& library);
 
     /// Select pairs and build their decoys. Deterministic in (library content,
-    /// params); independent of the library's row order. Throws
-    /// std::invalid_argument on settings the selector cannot honour.
-    static SearchSet select(const Library& library, const SearchParams& params);
+    /// params, windows); independent of the library's row order. With
+    /// @p windows (the run's MS2 isolation windows), a target whose precursor
+    /// m/z lies in none of them is ineligible; empty = no window check.
+    /// Throws std::invalid_argument on settings the selector cannot honour.
+    static SearchSet select(const Library& library, const SearchParams& params,
+                            const std::vector<IsolationWindow>& windows = {});
+
+    /// Whether @p mz lies strictly inside one of @p windows.
+    static bool inWindow(double mz, const std::vector<IsolationWindow>& windows);
   };
 }

@@ -4,8 +4,9 @@
 /// The built-in identification step behind `-run`: from a library and one DIA
 /// run to an identification report, which then serves as `-ids`.
 ///
-///   candidates (CandidateSelector)   paired random subset + in-memory decoys
 ///   loadRun                          SwathFile::loadMzML, IM-limit fix, diaPASEF detection   [seam]
+///   candidates (CandidateSelector)   paired random subset inside the run's isolation windows
+///                                    + in-memory decoys
 ///   calibrate                        performRTNormalization on seed assays; windows          [seam]
 ///   extract                          chunked performExtraction -> PeakGroups                 [seam]
 ///   checkExtraction                  decoy:target band
@@ -44,14 +45,17 @@ namespace ODIA::search
     /// The report's Run value. Identifier fills in the file stem when empty.
     std::string name;
     /// One map per isolation window, MS1 maps flagged ms1 (SwathFile::loadMzML).
+    /// Their lower/upper bounds decide which candidates can be searched.
     std::vector<OpenSwath::SwathMap> maps;
+    /// SwathFile's metadata; identify() releases it as soon as loadRun returns.
     std::shared_ptr<OpenMS::ExperimentalSettings> meta;
     /// diaPASEF: MS2 windows carry 1/K0 limits AND spectra carry a per-peak 1/K0 array.
     bool ion_mobility = false;
     /// What the loader actually used ("normal" or "cache").
     std::string read_mode;
     /// A directory the loader created for cache files. identify() removes it
-    /// (recursively) once extraction is over, also when a later stage throws.
+    /// (recursively) once extraction is over, also when a later stage throws,
+    /// and always after the maps (which hold its files open) are released.
     std::filesystem::path scratch;
     /// Anything else the loader wants in the provenance, as a JSON object; may be empty.
     std::string provenance_json;
@@ -114,6 +118,9 @@ namespace ODIA::search
     /// decoy, at precursor q <= search:report_max_q, in SearchSet order.
     static std::vector<ReportRow> reportRows(const SearchSet& set, const PeakGroups& groups,
                                              const ScoringOutcome& outcome, const SearchParams& params);
+
+    /// The MS2 isolation windows of a loaded run (its non-MS1 maps), by lower bound.
+    static std::vector<IsolationWindow> isolationWindows(const RunData& run);
 
   protected:
     // ---- seams: src/search/RunStages.cpp ------------------------------------

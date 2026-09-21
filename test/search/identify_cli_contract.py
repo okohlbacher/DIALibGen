@@ -3,8 +3,8 @@
 overwritten, search: options gated to refine/tune WITH -run, INI round trips.
 
 Needs no pyarrow and no run data: every check here is decided before the run is
-read, or asserts only that the search STARTED (it logs its candidate selection
-before it touches the run) and that a failed search leaves no output behind."""
+read, or asserts only that the search STARTED (it names the run it reads before
+reading it) and that a failed search leaves no output behind."""
 import csv
 import json
 from pathlib import Path
@@ -115,9 +115,10 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     refused('-search:subset has no effect without -run', '-mode', 'tune', '-ini', changed, '-write_config', fresh('.json'))
     run('-mode', 'tune', '-ini', changed, '-run', mzml, '-write_config', fresh('.json'))
 
-    # Accepted options reach the search, which logs its candidates before it
-    # reads the run. This "run" is not one, so the search fails -- and leaves
-    # neither -out_ids nor -out behind.
+    # Accepted options reach the search, which says what it reads before it
+    # reads it (the run comes first: its isolation windows decide which
+    # candidates can be searched). This "run" is not one, so the search fails
+    # -- and leaves neither -out_ids nor -out behind.
     for mode, extra in (('tune', []), ('refine', ['-tune', '-no_filter']), ('refine', [])):
         out = fresh()
         report = root / f'report-{next(counter)}.parquet'
@@ -126,7 +127,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
         if 'no fine-tuning stage' in log:
             continue   # a build without libtorch refuses tuning before anything else
         assert 'has no effect' not in log and 'exactly one' not in log, log
-        assert 'search candidates: ' in log and 'target-decoy pairs (shuffle decoys, seed 3)' in log, log
+        assert 'search run: reading ' + str(mzml) in log, log
         assert 'EXPERIMENTAL' in log, log
         assert not report.exists() and not out.exists() and not Path(str(out) + '.refine.json').exists()
         leftovers = [p.name for p in root.iterdir() if p.name.startswith('.dialibgen-tmp-')]

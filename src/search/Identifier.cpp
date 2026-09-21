@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -40,6 +41,7 @@ namespace ODIA::search
       return {{"library_precursors", s.library_precursors}, {"library_decoys_ignored", s.library_decoys_ignored},
               {"targets", s.targets}, {"ineligible_mz", s.ineligible_mz}, {"ineligible_charge", s.ineligible_charge},
               {"ineligible_rt", s.ineligible_rt}, {"ineligible_fragments", s.ineligible_fragments},
+              {"ineligible_window", s.ineligible_window}, {"isolation_windows", s.windows},
               {"duplicate_key", s.duplicate_key}, {"eligible", s.eligible}, {"drawn", s.drawn},
               {"no_decoy", s.no_decoy},
               {"no_decoy_reasons", {{"unparsable", s.decoy_unparsable}, {"unshufflable", s.decoy_unshufflable},
@@ -147,6 +149,19 @@ namespace ODIA::search
     return rows;
   }
 
+  std::vector<IsolationWindow> Identifier::isolationWindows(const RunData& run)
+  {
+    std::vector<IsolationWindow> out;
+    for (const auto& m : run.maps)
+    {
+      if (!m.ms1) { out.push_back({m.lower, m.upper}); }
+    }
+    std::sort(out.begin(), out.end(), [](const IsolationWindow& a, const IsolationWindow& b) {
+      return a.lower != b.lower ? a.lower < b.lower : a.upper < b.upper;
+    });
+    return out;
+  }
+
   IdentificationResult Identifier::identify(const Library& library, const std::string& run_path,
                                             const std::string& out_ids, const std::string& tool_version)
   {
@@ -159,9 +174,72 @@ namespace ODIA::search
     json warnings = json::array();
     auto warning = [&](const std::string& message) { warn("search: " + message); warnings.push_back(message); };
 
-    // 1. Candidates and their in-memory decoys.
+    // The scratch directory of a cache-mode load goes when this scope ends,
+    // whether the search succeeded or not. It is declared BEFORE the run, so
+    // the run -- and with it every open cache file -- is destroyed first:
+    // Windows cannot delete a file that is still open, and a failure is said.
+    struct Scratch
+    {
+      const Identifier* owner = nullptr;
+      std::filesystem::path path;
+      void remove()
+      {
+        if (path.empty()) { return; }
+        std::error_code ec;
+        std::uintmax_t bytes = 0;
+        for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+        {
+          std::error_code size_ec;
+          if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
+        }
+        ec.clear();
+        std::filesystem::remove_all(path, ec);
+        std::error_code exists_ec;
+        if (ec || std::filesystem::exists(path, exists_ec))
+        {
+          owner->warn("search: could not remove the run's cache directory " + path.string() + " (" +
+                      std::to_string(bytes / 1000000) + " MB" + (ec ? ": " + ec.message() : std::string()) +
+                      "); remove it by hand");
+        }
+        path.clear();
+      }
+      ~Scratch()
+      {
+        try { remove(); } catch (...) {}
+      }
+    } scratch;
+    scratch.owner = this;
+    RunData run;
+    PeakGroups groups;
+    Calibration calibration;
+    json run_json, calibration_json;
+
+    // 1. The run, first: candidate selection needs its isolation windows.
     auto t = Clock::now();
-    const SearchSet set = CandidateSelector::select(library, params_);
+    run = loadRun(run_path);
+    scratch.path = run.scratch;
+    run.meta.reset();   // SwathFile's per-spectrum metadata: nothing reads it (0.56 GB on a 6 GB run)
+    if (run.name.empty()) { run.name = std::filesystem::path(run_path).stem().string(); }
+    if (run.path.empty()) { run.path = run_path; }
+    timing["load"] = since(t);
+    const std::vector<IsolationWindow> windows = isolationWindows(run);
+    {
+      std::size_t ms1 = 0, ms2 = 0;
+      for (const auto& m : run.maps) { (m.ms1 ? ms1 : ms2)++; }
+      run_json = {{"name", run.name}, {"ion_mobility", run.ion_mobility}, {"read_mode", run.read_mode},
+                  {"ms1_maps", ms1}, {"ms2_windows", ms2}, {"loader", object(run.provenance_json)}};
+      if (!windows.empty())
+      { run_json["isolation_mz_range"] = {windows.front().lower, std::max_element(windows.begin(), windows.end(),
+                                           [](const IsolationWindow& a, const IsolationWindow& b) { return a.upper < b.upper; })->upper}; }
+      info("search run: " + run.name + ", " + std::to_string(ms2) + " isolation windows, " + std::to_string(ms1) + " MS1 maps, " +
+           (run.ion_mobility ? "diaPASEF (ion mobility)" : "no ion mobility") + ", read " +
+           (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
+    }
+
+    // 2. Candidates and their in-memory decoys.
+    t = Clock::now();
+    const SearchSet set = CandidateSelector::select(library, params_, windows);
     timing["candidates"] = since(t);
     const auto& st = set.stats;
     info("search candidates: " + std::to_string(st.pairs) + " target-decoy pairs (" + searchDecoyName(params_.decoys) +
@@ -173,39 +251,18 @@ namespace ODIA::search
          std::to_string(st.capped) + "; ineligible: " +
          std::to_string(st.ineligible_mz) + " m/z, " + std::to_string(st.ineligible_charge) + " charge, " +
          std::to_string(st.ineligible_rt) + " RT, " + std::to_string(st.ineligible_fragments) + " < " +
-         std::to_string(SearchParams::min_assay_fragments) + " fragments, " + std::to_string(st.duplicate_key) +
+         std::to_string(SearchParams::min_assay_fragments) + " fragments, " + std::to_string(st.ineligible_window) +
+         " outside the " + std::to_string(st.windows) + " isolation windows, " + std::to_string(st.duplicate_key) +
          " duplicate keys; " + std::to_string(st.library_decoys_ignored) + " library decoys not searched (" +
          seconds(timing["candidates"].get<double>()) + ")");
+    if (st.windows == 0) { warning("the run reported no isolation windows; candidates were not checked against them"); }
     if (st.pairs == 0)
     { throw SearchAbort("search: no target-decoy pair to search (" + std::to_string(st.eligible) + " eligible targets, " +
+                        std::to_string(st.ineligible_window) + " outside every isolation window, " +
                         std::to_string(st.no_decoy) + " without a decoy)"); }
 
-    // 2-4. The run. The scratch directory of a cache-mode load goes when this
-    //      scope ends, whether extraction succeeded or not.
-    RunData run;
-    struct Scratch
+    // 3-4. Calibration and extraction.
     {
-      std::filesystem::path path;
-      ~Scratch() { if (!path.empty()) { std::error_code ec; std::filesystem::remove_all(path, ec); } }
-    } scratch;
-    PeakGroups groups;
-    Calibration calibration;
-    json run_json, calibration_json;
-    {
-      t = Clock::now();
-      run = loadRun(run_path);
-      scratch.path = run.scratch;
-      if (run.name.empty()) { run.name = std::filesystem::path(run_path).stem().string(); }
-      if (run.path.empty()) { run.path = run_path; }
-      timing["load"] = since(t);
-      std::size_t ms1 = 0, ms2 = 0;
-      for (const auto& m : run.maps) { (m.ms1 ? ms1 : ms2)++; }
-      run_json = {{"name", run.name}, {"ion_mobility", run.ion_mobility}, {"read_mode", run.read_mode},
-                  {"ms1_maps", ms1}, {"ms2_windows", ms2}, {"loader", object(run.provenance_json)}};
-      info("search run: " + run.name + ", " + std::to_string(ms2) + " isolation windows, " + std::to_string(ms1) + " MS1 maps, " +
-           (run.ion_mobility ? "diaPASEF (ion mobility)" : "no ion mobility") + ", read " +
-           (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
-
       t = Clock::now();
       calibration = calibrate(library, set, run);
       timing["calibrate"] = since(t);
@@ -226,8 +283,9 @@ namespace ODIA::search
       extract(set, run, calibration, groups);
       timing["extract"] = since(t);
     }
+    // The run's memory and its cache files are not needed for scoring.
     run.maps.clear();
-    run.meta.reset();
+    scratch.remove();
 
     groups.validate(set);
     checkExtraction(set, groups, params_);

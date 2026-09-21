@@ -7,10 +7,10 @@
 /// eligible target is ranked by a hash of the key its decoy will share
 /// ("<modified sequence>/<charge>"), salted by search:seed, and the lowest
 /// search:subset keys are drawn. Decoys are then built for the drawn targets
-/// only, in memory, with LibraryGenerator::appendDecoys on a subset library;
-/// decoys already present in the library file are never searched. A target
-/// whose decoy cannot be built leaves the search together with its would-be
-/// decoy, so what is searched is always whole pairs.
+/// only, in memory, with appendSearchDecoys (SearchDecoys.h) on a subset
+/// library; decoys already present in the library file are never searched. A
+/// target whose decoy cannot be built leaves the search together with its
+/// would-be decoy, so what is searched is always whole pairs.
 ///
 /// Nothing here reads the run, and nothing reads a label to decide what is
 /// kept: the draw key is identical for a target and its decoy.
@@ -39,7 +39,8 @@ namespace ODIA::search
     double toLibrary(double assay_rt) const { return min + assay_rt * (max - min) / 100.0; }
   };
 
-  /// What selection did, count by count. drawn = no_decoy + capped + pairs.
+  /// What selection did, count by count. drawn = no_decoy + capped + pairs,
+  /// and no_decoy is the sum of the decoy_* failure counts.
   struct SelectionStats
   {
     std::size_t library_precursors = 0;
@@ -53,6 +54,15 @@ namespace ODIA::search
     std::size_t eligible = 0;
     std::size_t drawn = 0;                    ///< after search:subset
     std::size_t no_decoy = 0;                 ///< drawn targets for which no decoy could be built
+    std::size_t decoy_unparsable = 0;         ///< ... sequence does not parse or is too short
+    std::size_t decoy_unshufflable = 0;       ///< ... no arrangement differs (EEEEEEK)
+    std::size_t decoy_out_of_range = 0;       ///< ... every arrangement left the targets' fragment m/z range
+    std::size_t decoy_copy = 0;               ///< ... every arrangement reproduced the target's fragment masses
+    std::size_t decoy_too_few_fragments = 0;  ///< ... too few reproducible fragment slots
+    std::size_t decoy_redrawn = 0;            ///< searched pairs whose first arrangement(s) were rejected
+    std::size_t fragment_slots_dropped = 0;   ///< searched target slots no decoy can reproduce, dropped from both
+    double fragment_mz_min = 0.0;             ///< the library's target fragment m/z range, which decoys must keep
+    double fragment_mz_max = 0.0;
     std::size_t capped = 0;                   ///< pairs removed by search:max_pairs
     std::size_t pairs = 0;                    ///< searched target-decoy pairs
   };
@@ -63,8 +73,9 @@ namespace ODIA::search
   /// so a chunk of pairs is an m/z-contiguous slice of the run's windows.
   ///
   /// Decoys carry their target's modified sequence, charge, protein group,
-  /// precursor m/z, RT and 1/K0 (LibraryGenerator::appendDecoys); only their
-  /// fragment m/z differ.
+  /// precursor m/z, RT, 1/K0, fragment slots and intensities
+  /// (appendSearchDecoys); only their fragment m/z differ, and those stay
+  /// within the m/z range of the library's target fragments.
   struct SearchSet
   {
     Library library;                   ///< the searched precursors (a new library; the input is never modified)

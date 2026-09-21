@@ -3,7 +3,7 @@
 
 #include <odia/search/CandidateSelector.h>
 
-#include <odia/LibraryGenerator.h>
+#include <odia/search/SearchDecoys.h>
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +11,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -91,6 +92,14 @@ namespace ODIA::search
     const std::size_t library_size = library.precursorCount();
     st.library_precursors = library_size;
     out.rt_scale = rtScale(library);
+    // Decoy fragments must stay where target fragments can be: the input
+    // library's target fragment range, read from targets only.
+    DecoyRules rules;
+    rules.method = params.decoys;
+    rules.min_fragments = SearchParams::min_assay_fragments;
+    std::tie(rules.fragment_min, rules.fragment_max) = targetFragmentRange(library);
+    st.fragment_mz_min = fromFixed(rules.fragment_min);
+    st.fragment_mz_max = fromFixed(rules.fragment_max);
 
     // 1. Eligible targets. Every exclusion is a property of the target alone,
     //    which its decoy would share, so it removes whole pairs.
@@ -155,6 +164,7 @@ namespace ODIA::search
     Library sub;
     std::vector<std::size_t> decoy_of;
     std::size_t made = 0;
+    DecoyBuild built;
     for (;;)
     {
       std::vector<std::size_t> drawn;
@@ -182,9 +192,11 @@ namespace ODIA::search
           continue;
         }
       }
-      std::size_t skipped = 0;
-      made = LibraryGenerator::appendDecoys(sub, params.decoys, &skipped, SearchParams::min_assay_fragments, false);
-      if (made + skipped != n || sub.precursorCount() != n + made)
+      built = appendSearchDecoys(sub, rules);
+      made = built.made;
+      const auto skipped = static_cast<std::size_t>(
+        std::count_if(built.outcome.begin(), built.outcome.end(), [](DecoyOutcome o) { return o != DecoyOutcome::Made; }));
+      if (made + skipped != n || built.outcome.size() != n || sub.precursorCount() != n + made)
       {
         throw std::logic_error("search: decoy construction accounted for " + std::to_string(made) + " decoys and " +
                                std::to_string(skipped) + " failures among " + std::to_string(n) + " targets");
@@ -214,9 +226,26 @@ namespace ODIA::search
     std::size_t walked = 0;
     for (; walked < n && pair_target.size() < cap; ++walked)
     {
+      switch (built.outcome[walked])
+      {
+        case DecoyOutcome::Made: break;
+        case DecoyOutcome::Unparsable: ++st.decoy_unparsable; break;
+        case DecoyOutcome::Unshufflable: ++st.decoy_unshufflable; break;
+        case DecoyOutcome::OutOfRange: ++st.decoy_out_of_range; break;
+        case DecoyOutcome::Copy: ++st.decoy_copy; break;
+        case DecoyOutcome::TooFewFragments: ++st.decoy_too_few_fragments; break;
+      }
       if (decoy_of[walked] == none) { ++st.no_decoy; }
-      else { pair_target.push_back(walked); }
+      else
+      {
+        pair_target.push_back(walked);
+        if (built.redrawn[walked] > 0) { ++st.decoy_redrawn; }
+        st.fragment_slots_dropped += pre.transition_count[draws[walked].second] - sub.precursors().transition_count[walked];
+      }
     }
+    if (st.no_decoy != st.decoy_unparsable + st.decoy_unshufflable + st.decoy_out_of_range + st.decoy_copy +
+                       st.decoy_too_few_fragments)
+    { throw std::logic_error("search: decoy failures do not add up to the targets without a decoy"); }
     st.capped = draws.size() - walked;
     st.pairs = pair_target.size();
 

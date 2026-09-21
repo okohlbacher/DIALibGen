@@ -165,6 +165,7 @@ set_target_properties(odia_refine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_library(odia_search STATIC
   src/search/SearchParams.cpp
   src/search/CandidateSelector.cpp
+  src/search/SearchDecoys.cpp
   src/search/AssayBuilder.cpp
   src/search/Scoring.cpp
   src/search/ReportWriter.cpp

@@ -286,8 +286,8 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("search:subset", "<n>", 100000, "Targets drawn from the library (0 = every eligible target)", false);
     registerIntOption_("search:max_pairs", "<n>", 40000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap)", false);
     registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
-                          "targets. Decoys in the library file are not searched and stay in the output", false);
-    setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse", "reverse"});
+                          "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
+    setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
     registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how", false);
     registerIntOption_("search:passes", "<n>", 1, "Extraction passes (1 in this version)", false);
     setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);

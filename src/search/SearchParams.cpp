@@ -36,10 +36,16 @@ namespace ODIA::search
     // unknown name to Mutate -- the one method the search must never use.
     if (s == "shuffle") { return DecoyMethod::Shuffle; }
     if (s == "pseudo_reverse") { return DecoyMethod::PseudoReverse; }
-    if (s == "reverse") { return DecoyMethod::Reverse; }
     if (s == "mutate")
-    { throw std::invalid_argument("search:decoys mutate is not offered: its substitution table is DIA-NN's; use shuffle, pseudo_reverse or reverse"); }
-    throw std::invalid_argument("search:decoys must be shuffle, pseudo_reverse or reverse, not '" + s + "'");
+    { throw std::invalid_argument("search:decoys mutate is not offered: its substitution table is DIA-NN's; use shuffle or pseudo_reverse"); }
+    // Whole-sequence reversal moves the C-terminal K/R of a tryptic peptide to
+    // the N-terminus: the classifier then learns how decoys were made rather
+    // than whether a peptide is present (measured on an Astral run: null pairs
+    // won 1.66 : 1 by the target instead of 1.04 : 1 with shuffle).
+    if (s == "reverse")
+    { throw std::invalid_argument("search:decoys reverse is not offered: reversing the termini makes decoys separable from "
+                                  "tryptic targets by construction; use shuffle or pseudo_reverse, which keep both termini"); }
+    throw std::invalid_argument("search:decoys must be shuffle or pseudo_reverse, not '" + s + "'");
   }
 
   const char* searchDecoyName(DecoyMethod m)
@@ -60,8 +66,8 @@ namespace ODIA::search
     auto fail = [](const std::string& what) { throw std::invalid_argument(what); };
     auto finite = [](double v) { return std::isfinite(v); };
     if (candidates != "random") { fail("search:candidates must be random in this version, not '" + candidates + "'"); }
-    if (decoys != DecoyMethod::Shuffle && decoys != DecoyMethod::PseudoReverse && decoys != DecoyMethod::Reverse)
-    { fail(std::string("search:decoys ") + searchDecoyName(decoys) + " is not offered; use shuffle, pseudo_reverse or reverse"); }
+    if (decoys != DecoyMethod::Shuffle && decoys != DecoyMethod::PseudoReverse)
+    { fail(std::string("search:decoys ") + searchDecoyName(decoys) + " is not offered; use shuffle or pseudo_reverse"); }
     if (passes != 1) { fail("search:passes must be 1 in this version, not " + std::to_string(passes)); }
     if (!finite(rt_window) || rt_window < 0) { fail("search:rt_window must be >= 0 seconds (0 = from the calibration)"); }
     if (!finite(mz_ppm) || mz_ppm < 0) { fail("search:mz_ppm must be >= 0 (0 = automatic)"); }

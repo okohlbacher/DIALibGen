@@ -29,8 +29,10 @@ namespace ODIA::search
   const char* toString(ReadMode m);
   ReadMode parseReadMode(const std::string& s);   ///< throws std::invalid_argument
 
-  /// The decoy methods the search accepts: shuffle, pseudo_reverse, reverse.
-  /// `mutate` is refused (its substitution table is DIA-NN's), and so is `none`.
+  /// The decoy methods the search accepts: shuffle and pseudo_reverse, both
+  /// of which keep the target's termini. `mutate` is refused (its substitution
+  /// table is DIA-NN's), `reverse` (it moves the C-terminal K/R, which makes
+  /// decoys separable from tryptic targets) and `none`.
   DecoyMethod parseSearchDecoyMethod(const std::string& s);   ///< throws std::invalid_argument
   const char* searchDecoyName(DecoyMethod m);
 

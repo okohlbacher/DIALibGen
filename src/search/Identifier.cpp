@@ -41,7 +41,13 @@ namespace ODIA::search
               {"targets", s.targets}, {"ineligible_mz", s.ineligible_mz}, {"ineligible_charge", s.ineligible_charge},
               {"ineligible_rt", s.ineligible_rt}, {"ineligible_fragments", s.ineligible_fragments},
               {"duplicate_key", s.duplicate_key}, {"eligible", s.eligible}, {"drawn", s.drawn},
-              {"no_decoy", s.no_decoy}, {"capped", s.capped}, {"pairs", s.pairs}};
+              {"no_decoy", s.no_decoy},
+              {"no_decoy_reasons", {{"unparsable", s.decoy_unparsable}, {"unshufflable", s.decoy_unshufflable},
+                                    {"out_of_range", s.decoy_out_of_range}, {"copy", s.decoy_copy},
+                                    {"too_few_fragments", s.decoy_too_few_fragments}}},
+              {"decoys_redrawn", s.decoy_redrawn}, {"fragment_slots_dropped", s.fragment_slots_dropped},
+              {"decoy_fragment_mz_range", {s.fragment_mz_min, s.fragment_mz_max}},
+              {"capped", s.capped}, {"pairs", s.pairs}};
     }
 
     json scoringJson(const ScoringOutcome& o)
@@ -161,7 +167,10 @@ namespace ODIA::search
     info("search candidates: " + std::to_string(st.pairs) + " target-decoy pairs (" + searchDecoyName(params_.decoys) +
          " decoys, seed " + std::to_string(params_.seed) + ") from " + std::to_string(st.eligible) + " eligible of " +
          std::to_string(st.targets) + " library targets; drawn " + std::to_string(st.drawn) + ", no decoy " +
-         std::to_string(st.no_decoy) + ", capped " + std::to_string(st.capped) + "; ineligible: " +
+         std::to_string(st.no_decoy) + " (" + std::to_string(st.decoy_unshufflable) + " unshufflable, " +
+         std::to_string(st.decoy_out_of_range) + " fragments out of range, " + std::to_string(st.decoy_copy) +
+         " fragment copies, " + std::to_string(st.decoy_unparsable + st.decoy_too_few_fragments) + " other), capped " +
+         std::to_string(st.capped) + "; ineligible: " +
          std::to_string(st.ineligible_mz) + " m/z, " + std::to_string(st.ineligible_charge) + " charge, " +
          std::to_string(st.ineligible_rt) + " RT, " + std::to_string(st.ineligible_fragments) + " < " +
          std::to_string(SearchParams::min_assay_fragments) + " fragments, " + std::to_string(st.duplicate_key) +

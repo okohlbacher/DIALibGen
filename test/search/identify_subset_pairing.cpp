@@ -164,31 +164,32 @@ int main()
     const SearchSet all = CandidateSelector::select(lib, params(0, 0));
     CHECK(all.stats.drawn == precursors.size());
   }
-  // ... also when many drawn targets get no decoy: palindromes have no reversed
-  // decoy, so the cap-aware construction must extend its draw and still keep
-  // exactly the lowest-key pairs.
+  // ... also when many drawn targets get no decoy: an interior of one residue
+  // has no rearrangement (and is never "fixed" by substituting a residue), so
+  // the cap-aware construction must extend its draw and still keep exactly the
+  // lowest-key pairs.
   {
     auto mixed = synth::peptides(200, 5);
-    std::mt19937_64 rng(8);
     static const std::string aa = "ADEFGHILMNPQSTVWY";
     for (std::size_t k = 0; k < 200; ++k)
     {
-      std::string half;
-      while (half.size() < 4 + k % 4) { half.push_back(aa[rng() % aa.size()]); }
       synth::Precursor p;
-      p.sequence = "K" + half + std::string(half.rbegin(), half.rend()) + "K";
-      p.protein = "PALINDROME_" + std::to_string(k);
+      p.sequence = std::string(1, aa[k % aa.size()]) + std::string(4 + k % 4, aa[(k / aa.size()) % aa.size()]) + "K";
+      p.protein = "RUN_" + std::to_string(k);
       p.rt = static_cast<float>(k) / 2.0f;
       for (int z : {2, 3}) { p.charge = z; mixed.push_back(p); }
     }
-    const ODIA::Library pal = synth::library(mixed);
+    const ODIA::Library runs = synth::library(mixed);
     SearchParams p = params(0, 300);
-    p.decoys = parseSearchDecoyMethod("reverse");
-    const SearchSet capped = CandidateSelector::select(pal, p);
+    const SearchSet capped = CandidateSelector::select(runs, p);
     p.max_pairs = 0;
-    const SearchSet full = CandidateSelector::select(pal, p);
-    std::cout << "reverse decoys: " << full.stats.no_decoy << " of " << full.stats.drawn << " drawn targets without a decoy\n";
+    const SearchSet full = CandidateSelector::select(runs, p);
+    std::cout << "one-residue interiors: " << full.stats.no_decoy << " of " << full.stats.drawn
+              << " drawn targets without a decoy (" << full.stats.decoy_unshufflable << " unshufflable)\n";
     CHECK(full.stats.no_decoy >= 350);
+    CHECK(full.stats.decoy_unshufflable >= 350);
+    CHECK(full.stats.no_decoy == full.stats.decoy_unparsable + full.stats.decoy_unshufflable + full.stats.decoy_out_of_range +
+                                 full.stats.decoy_copy + full.stats.decoy_too_few_fragments);
     CHECK(capped.pairs() == 300);
     CHECK(capped.stats.no_decoy > 0);
     CHECK(capped.stats.drawn == capped.stats.no_decoy + capped.stats.capped + capped.stats.pairs);
@@ -196,11 +197,7 @@ int main()
     std::sort(keys.begin(), keys.end());
     std::sort(kept.begin(), kept.end());
     CHECK(std::equal(kept.begin(), kept.end(), keys.begin()));
-    for (std::size_t k = 0; k < capped.pairs(); ++k)
-    {
-      const std::string s(capped.modifiedSequence(k));
-      CHECK(s != std::string(s.rbegin(), s.rend()));
-    }
+    for (std::size_t k = 0; k < capped.pairs(); ++k) { CHECK(std::string(capped.proteinGroup(k)).substr(0, 4) != "RUN_"); }
   }
 
   // ---- 5. exclusions ----------------------------------------------------------
@@ -228,13 +225,19 @@ int main()
     p.decoys = ODIA::DecoyMethod::Mutate;
     try { (void)CandidateSelector::select(lib, p); } catch (const std::invalid_argument&) { refused = true; }
     CHECK(refused);
-    for (const char* m : {"pseudo_reverse", "reverse"})
-    {
-      p.decoys = parseSearchDecoyMethod(m);
-      const SearchSet s = CandidateSelector::select(lib, p);
-      CHECK(s.pairs() >= 90);
-      CHECK(ids(s).size() == 2 * s.pairs());
-    }
+    refused = false;
+    try { (void)parseSearchDecoyMethod("reverse"); } catch (const std::invalid_argument&) { refused = true; }
+    CHECK(refused);
+    refused = false;
+    p.decoys = ODIA::DecoyMethod::Reverse;
+    try { (void)CandidateSelector::select(lib, p); } catch (const std::invalid_argument&) { refused = true; }
+    CHECK(refused);
+    p.decoys = parseSearchDecoyMethod("pseudo_reverse");
+    const SearchSet s = CandidateSelector::select(lib, p);
+    CHECK(s.pairs() >= 90);
+    CHECK(ids(s).size() == 2 * s.pairs());
+    // Selection records the fragment range decoys were held to.
+    CHECK(s.stats.fragment_mz_min > 0 && s.stats.fragment_mz_max > s.stats.fragment_mz_min);
   }
 
   // ---- 7. assays: sequence-blind, verbatim protein groups, [0, 100] RT --------

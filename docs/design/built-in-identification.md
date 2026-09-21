@@ -34,7 +34,7 @@ builds on all five platforms without patches.
   for the rest of the invocation. The report readers, gates and provenance code
   do not change.
 - TOPP subsection `search:` with, among others: `candidates random|evidence`,
-  `subset`, `max_pairs`, `decoys shuffle|pseudo_reverse|reverse`, `seed`,
+  `subset`, `max_pairs`, `decoys shuffle|pseudo_reverse`, `seed`,
   `passes`, `rt_window`, `mz_ppm`, `im_window` (0 = automatic), `ms1`,
   `rt_im_scores`, `calibration_min_rsq 0.70`, `calibration_min_coverage 0.30`,
   `readoptions`, `memory_gb`, `min_ids 200`, `entrapment_tag`, `selftest`.
@@ -53,7 +53,14 @@ bundles do not grow.
 1. **Library.** Loaded as today and never mutated; a side index orders
    precursors by m/z. Decoys for the search are built in memory (shuffle by
    default); decoys already in the file are ignored for the search and left
-   untouched. The DIA-NN-derived `mutate` method is not offered.
+   untouched. The DIA-NN-derived `mutate` method is not offered, and neither
+   is `reverse`, which moves the tryptic C-terminus and makes decoys separable
+   by construction. A decoy must differ from its target in fragment m/z only:
+   a target whose interior cannot be rearranged has no decoy (no residue
+   substitution as a fallback), every decoy fragment lies in the m/z range of
+   the library's target fragments, and an arrangement that reproduces the
+   target's fragment masses (I/L) is re-drawn. Each rule reads the target
+   only, so a failure removes a whole pair.
 2. **Run.** `SwathFile::loadMzML` (`normal` or `cache`). Ion-mobility window
    limits are normalised (lower/upper swapped where reversed, as in current
    mzpeak-convert output). diaPASEF is detected from window limits *and* a

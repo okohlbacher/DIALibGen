@@ -157,6 +157,17 @@ add_library(odia_refine STATIC src/refine/LibraryRefiner.cpp)
 target_link_libraries(odia_refine PUBLIC odia_library)
 add_library(DIALibGen::odia_refine ALIAS odia_refine)
 set_target_properties(odia_refine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# The built-in identification step behind -run (docs/design/built-in-identification.md):
+# OpenSWATH extraction from the OpenMS odia_library already links, the vendored
+# odia-core classifier, and the report hand-off to the refine/tune readers.
+# Linked into the tool only; neither the library nor its headers are installed.
+add_library(odia_search STATIC
+  src/search/SearchParams.cpp
+  src/search/CandidateSelector.cpp
+  src/search/AssayBuilder.cpp)
+target_link_libraries(odia_search PUBLIC odia_refine odia_core PRIVATE nlohmann_json::nlohmann_json)
+set_target_properties(odia_search PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(DIALIBGEN_TARGETS odia_library odia_refine)
 if(DIALIBGEN_BUILD_FINETUNE)
   find_package(Torch REQUIRED CONFIG)
@@ -232,7 +243,8 @@ if(DIALIBGEN_INSTALL)
             DESTINATION ${CMAKE_INSTALL_BINDIR}
             RENAME dialibgen-fetch-models)
   endif()
-  install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  # include/odia/search belongs to the tool-only odia_search target.
+  install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} PATTERN "search" EXCLUDE)
   install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen)
 
   install(DIRECTORY cmake/eigen3-range-shim DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)

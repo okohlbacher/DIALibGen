@@ -61,5 +61,12 @@ namespace ODIA::search
     /// one pair each), every pair in the same chunk as its partner: chunk c
     /// holds the targets of pairs [a, b) followed by their decoys.
     static std::vector<std::vector<std::size_t>> chunks(const SearchSet& set, std::size_t precursors);
+
+    /// Target assays straight from @p library (the unmodified input), for the
+    /// calibration seeds: the same layout as build() -- empty sequence, id
+    /// "<modified sequence><charge>", RT through @p scale, no drift time --
+    /// for library precursors @p which, in that order. Decoys are refused.
+    static OpenSwath::LightTargetedExperiment buildTargets(const Library& library, const std::vector<std::size_t>& which,
+                                                           const RtScale& scale);
   };
 }

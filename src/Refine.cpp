@@ -7,6 +7,8 @@
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/LibraryRefiner.h>
+#include <odia/search/Identifier.h>
+#include <odia/search/SearchParams.h>
 
 #ifdef DIALIBGEN_WITH_FINETUNE
 #include <odia/tune/Trainer.h>
@@ -154,6 +156,14 @@ void DIALibGen::registerRefinementOptions_()
     registerInputFile_("ids", "<file>", "",
                        "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
     setValidFormats_("ids", {"parquet"}, false);
+    registerInputFile_("run", "<file>", "",
+                       "EXPERIMENTAL, in development: a centroided DIA run (mzML) that the built-in identification step "
+                       "searches instead of reading -ids. Give exactly one of -ids and -run. Settings: search:.", false);
+    setValidFormats_("run", {"mzML"}, false);
+    registerOutputFile_("out_ids", "<file>", "",
+                        "With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. "
+                        "Default: <out>.ids.parquet. Never overwritten.", false);
+    setValidFormats_("out_ids", {"parquet"}, false);
     registerOutputFile_("out_report", "<file>", "",
                         "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
     setValidFormats_("out_report", {"tsv"}, false);
@@ -267,6 +277,59 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+
+    registerTOPPSubsection_("search", "Built-in identification with -run (EXPERIMENTAL): candidates, decoys, extraction, "
+                                      "calibration and the run-level guards. See docs/design/built-in-identification.md");
+    registerStringOption_("search:candidates", "<rule>", "random", "Candidate selection: random = a deterministic, label-blind "
+                          "random subset of target-decoy pairs", false);
+    setValidStrings_("search:candidates", {"random"});
+    registerIntOption_("search:subset", "<n>", 100000, "Targets drawn from the library (0 = every eligible target)", false);
+    registerIntOption_("search:max_pairs", "<n>", 40000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap)", false);
+    registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
+                          "targets. Decoys in the library file are not searched and stay in the output", false);
+    setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse", "reverse"});
+    registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how", false);
+    registerIntOption_("search:passes", "<n>", 1, "Extraction passes (1 in this version)", false);
+    setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);
+    registerDoubleOption_("search:rt_window", "<s>", 0.0, "Full RT extraction window, seconds (0 = from the calibration)", false);
+    setMinFloat_("search:rt_window", 0.0);
+    registerDoubleOption_("search:mz_ppm", "<ppm>", 0.0, "Full fragment m/z extraction window, ppm (0 = automatic)", false);
+    setMinFloat_("search:mz_ppm", 0.0);
+    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility runs (0 = automatic, -1 = off)", false);
+    setMinFloat_("search:im_window", -1.0);
+    registerStringOption_("search:ms1", "<true/false>", "true", "Extract MS1 traces and use the MS1 sub-scores", false);
+    setValidStrings_("search:ms1", {"true", "false"});
+    registerStringOption_("search:rt_im_scores", "<true/false>", "true", "Let the RT and 1/K0 deviation sub-scores into the "
+                          "classifier; false is an ablation for tuning, which exists to correct those deviations", false);
+    setValidStrings_("search:rt_im_scores", {"true", "false"});
+    registerDoubleOption_("search:calibration_min_rsq", "<r2>", 0.70, "Least r^2 of the RT calibration on the seed assays", false);
+    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays the RT calibration must find", false);
+    for (const char* name : {"search:calibration_min_rsq", "search:calibration_min_coverage"})
+    { setMinFloat_(name, 0.0); setMaxFloat_(name, 1.0); }
+    registerFlag_("search:allow_bootstrap", "When the RT calibration fails, map the library RT range linearly onto the run "
+                                            "instead of aborting. A test hook, recorded in the provenance");
+    registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = per-window "
+                          "cache files, auto = decided from the run", false);
+    setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
+    registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the system temporary directory); "
+                          "they are removed after the search", false);
+    registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
+    registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "
+                          "precursors passes q <= 0.01: no honest decoy set looks like that", false);
+    setMinFloat_("search:max_target_fraction", 0.0); setMaxFloat_("search:max_target_fraction", 1.0);
+    registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors, targets and decoys, up to this precursor q-value "
+                          "go into -out_ids", false);
+    setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
+    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Protein-group prefix of entrapment proteins: log and record "
+                          "the combined entrapment FDP estimate. A validation aid", false);
+    registerFlag_("search:selftest", "Also score with swapped and with random pair labels, and abort unless both identify "
+                                     "(almost) nothing");
+    registerIntOption_("search:batch_size", "<n>", 500, "Advanced: transitions per extraction batch", false);
+    registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together", false);
+    for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
+    setMinInt_("search:batch_size", 1);
+    setMinInt_("search:chunk", 2);
+
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
@@ -281,7 +344,39 @@ void DIALibGen::registerRefinementOptions_()
       const auto flag = flags.find(key);
       refinement_options_.insert(flag == flags.end() ? key : flag->second);
     }
-    refinement_options_.insert({"ids", "out_report"});
+    refinement_options_.insert({"ids", "out_report", "run", "out_ids"});
+  }
+
+ODIA::search::SearchParams DIALibGen::searchParams_()
+  {
+    auto count = [this](const char* name) { return static_cast<std::size_t>(std::max(0, getIntOption_(name))); };
+    ODIA::search::SearchParams s;
+    s.candidates = getStringOption_("search:candidates");
+    s.subset = count("search:subset");
+    s.max_pairs = count("search:max_pairs");
+    s.decoys = ODIA::search::parseSearchDecoyMethod(getStringOption_("search:decoys"));
+    s.seed = static_cast<std::uint64_t>(count("search:seed"));
+    s.passes = getIntOption_("search:passes");
+    s.rt_window = getDoubleOption_("search:rt_window");
+    s.mz_ppm = getDoubleOption_("search:mz_ppm");
+    s.im_window = getDoubleOption_("search:im_window");
+    s.ms1 = getStringOption_("search:ms1") == "true";
+    s.rt_im_scores = getStringOption_("search:rt_im_scores") == "true";
+    s.batch_size = count("search:batch_size");
+    s.chunk = count("search:chunk");
+    s.calibration_min_rsq = getDoubleOption_("search:calibration_min_rsq");
+    s.calibration_min_coverage = getDoubleOption_("search:calibration_min_coverage");
+    s.allow_bootstrap = getFlag_("search:allow_bootstrap");
+    s.readoptions = ODIA::search::parseReadMode(getStringOption_("search:readoptions"));
+    s.cache_dir = getStringOption_("search:cache_dir");
+    s.min_ids = count("search:min_ids");
+    s.max_target_fraction = getDoubleOption_("search:max_target_fraction");
+    s.report_max_q = getDoubleOption_("search:report_max_q");
+    s.entrapment_tag = getStringOption_("search:entrapment_tag");
+    s.selftest = getFlag_("search:selftest");
+    s.threads = std::max(1, getIntOption_("threads"));
+    s.validate();
+    return s;
   }
 
 
@@ -373,21 +468,45 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       return EXECUTION_OK;
     }
 
-    const std::string in = getStringOption_("in"), ids = getStringOption_("ids");
+    const std::string in = getStringOption_("in");
+    std::string ids = getStringOption_("ids");
+    const std::string run = getStringOption_("run");
     // TOPP's writable-file probe follows and then removes dangling symlinks.
     // Inspect destinations before any output-file getter can run that probe.
     const std::string out = getParam_().getValue("out").toString();
-    if (in.empty() || ids.empty() || out.empty())
-    { writeLogError_("-in, -ids and -out are required"); return ILLEGAL_PARAMETERS; }
+    if (in.empty() || out.empty() || (ids.empty() && run.empty()))
+    { writeLogError_("-in, -ids and -out are required (-run can take the place of -ids)"); return ILLEGAL_PARAMETERS; }
+    if (!ids.empty() && !run.empty())
+    { writeLogError_("give exactly one of -ids and -run: -run writes its own identification report and uses it as -ids"); return ILLEGAL_PARAMETERS; }
 #ifndef DIALIBGEN_WITH_FINETUNE
     if (tune)
     { writeLogError_("this build has no fine-tuning stage; configure DIALIBGEN_BUILD_FINETUNE with libtorch"); return ILLEGAL_PARAMETERS; }
 #endif
     if (!out.ends_with(".parquet") && !out.ends_with(".tsv"))
     { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
+
+    // The built-in identification step (-run): refusals, settings, report path.
+    std::string out_ids;
+    std::unique_ptr<ODIA::search::SearchParams> search;
+    if (!run.empty())
+    {
+      if (p.write_intensity)
+      { writeLogError_("-write_intensity is not available with -run yet: the built-in search does not measure fragment intensities"); return ILLEGAL_PARAMETERS; }
+      if (!p.require_gates)
+      { writeLogError_("-empirical_library does not apply to -run: the built-in report carries every gate column"); return ILLEGAL_PARAMETERS; }
+      if (p.min_fragments > 0)
+      { writeLogError_("-min_fragments is not available with -run yet: the built-in report carries no fragment identities"); return ILLEGAL_PARAMETERS; }
+      try { search = std::make_unique<ODIA::search::SearchParams>(searchParams_()); }
+      catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+      out_ids = getParam_().getValue("out_ids").toString();
+      if (out_ids.empty()) { out_ids = out + ".ids.parquet"; }
+      if (!out_ids.ends_with(".parquet"))
+      { writeLogError_("-out_ids must end in .parquet"); return ILLEGAL_PARAMETERS; }
+    }
+
     const std::string report = getParam_().getValue("out_report").toString();
     std::set<std::filesystem::path> destinations;
-    for (const auto& file : {out, out + ".refine.json", report})
+    for (const auto& file : {out, out + ".refine.json", report, out_ids})
     {
       if (file.empty()) { continue; }
       if (std::filesystem::exists(file) || std::filesystem::is_symlink(file))
@@ -397,15 +516,35 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     }
     (void)getStringOption_("out");
     (void)getStringOption_("out_report");
+    if (!run.empty()) { (void)getStringOption_("out_ids"); }
 
     ODIA::Library library;
     ODIA::RefineStats st;
     json tune_prov = json::object();
+    json search_prov;
+    std::string run_hash;
     try
     {
       ODIA::DIANNLibraryFile::load(in, library);
       writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
                     std::to_string(library.transitionCount()) + " transitions");
+      if (search)
+      {
+        writeLogWarn_("-run is EXPERIMENTAL: the built-in identification has not passed its entrapment validation yet");
+        if (p.filter)
+        { writeLogWarn_("-mode refine with -run keeps only precursors identified among the at most search:max_pairs pairs "
+                        "searched; the built-in workflow is -mode refine -tune -no_filter"); }
+        ODIA::search::Identifier identifier(*search, [this](const std::string& m) { writeLogInfo_(m); },
+                                            [this](const std::string& m) { writeLogWarn_(m); });
+        const ODIA::search::IdentificationResult found = identifier.identify(library, run, out_ids, DIALIBGEN_VERSION);
+        search_prov = json::parse(found.provenance_json);
+        run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+        // The hand-off: the report just written IS the reference from here on,
+        // read, gated and hashed by exactly the code that reads -ids.
+        ids = out_ids;
+        writeLogInfo_("identification report " + out_ids + " serves as -ids: " + std::to_string(found.identified) +
+                      " target precursors at q <= 0.01");
+      }
       ODIA::LibraryRefiner::ObsMap obs;
       if (!tune_only) { obs = ODIA::LibraryRefiner::readObservations(ids, p, st); }
 
@@ -719,6 +858,12 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                                                    (p.filter ? "" : "; UNMATCHED precursors keep MS2-model predictions") : std::string("unchanged (library prediction)")}}},
       {"warning", tune_only ? "Predictions adapted to one reference run; evaluate transfer on a different run." :
                              "Observed values describe the reference run and its gradient; evaluate transfer on a different run."}};
+    if (search)
+    {
+      prov["inputs"]["run"] = std::filesystem::absolute(run).string();
+      prov["inputs"]["run_fnv1a64"] = run_hash;
+      prov["search"] = search_prov;
+    }
     if (tune_only)
     {
       prov["reference"] = nullptr;

@@ -22,3 +22,10 @@ target_link_libraries(identify_pipeline_synthetic PRIVATE odia_search nlohmann_j
 add_test(NAME identify_pipeline_synthetic
          COMMAND identify_pipeline_synthetic "${CMAKE_CURRENT_BINARY_DIR}/pipeline-synthetic")
 set_tests_properties(identify_pipeline_synthetic PROPERTIES TIMEOUT 600)
+
+if(TARGET DIALibGen AND ODIA_PYTHON)
+  add_test(NAME identify_cli_contract
+           COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1 ${ODIA_PYTHON}
+                   "${CMAKE_CURRENT_SOURCE_DIR}/identify_cli_contract.py" $<TARGET_FILE:DIALibGen>)
+  set_tests_properties(identify_cli_contract PROPERTIES TIMEOUT 300)
+endif()

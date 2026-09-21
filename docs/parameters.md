@@ -13,6 +13,8 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |
 | `-ids` | input-file | (empty) |  | DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised. |
+| `-run` | input-file | (empty) |  | EXPERIMENTAL, in development: a centroided DIA run (mzML) that the built-in identification step searches instead of reading -ids. Give exactly one of -ids and -run. Settings: search:. |
+| `-out_ids` | output-file | (empty) |  | With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. Default: <out>.ids.parquet. Never overwritten. |
 | `-out_report` | output-file | (empty) |  | Per-axis residual report (TSV), measured BEFORE the overwrite. |
 | `-no_filter` | bool | `false` |  | Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent. |
 | `-empirical_library` | bool | `false` |  | Declare -ids a pre-filtered empirical library rather than a report: gates whose columns are absent are BYPASSED and each bypass is recorded. Without this, a missing gate column is an error. |
@@ -99,3 +101,26 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:threads` | int | `4` | 1: | CPU threads used for training |
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
+| `-search:candidates` | string | `random` | random | Candidate selection: random = a deterministic, label-blind random subset of target-decoy pairs |
+| `-search:subset` | int | `100000` | 0: | Targets drawn from the library (0 = every eligible target) |
+| `-search:max_pairs` | int | `40000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap) |
+| `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse,reverse | How the search's in-memory decoys are built from the selected targets. Decoys in the library file are not searched and stay in the output |
+| `-search:seed` | int | `42` | 0: | Salt of the candidate draw: changes which pairs are searched, not how |
+| `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
+| `-search:rt_window` | double | `0.0` | 0.0: | Full RT extraction window, seconds (0 = from the calibration) |
+| `-search:mz_ppm` | double | `0.0` | 0.0: | Full fragment m/z extraction window, ppm (0 = automatic) |
+| `-search:im_window` | double | `0.0` | -1.0: | Full 1/K0 extraction window on ion-mobility runs (0 = automatic, -1 = off) |
+| `-search:ms1` | string | `true` | true,false | Extract MS1 traces and use the MS1 sub-scores |
+| `-search:rt_im_scores` | string | `true` | true,false | Let the RT and 1/K0 deviation sub-scores into the classifier; false is an ablation for tuning, which exists to correct those deviations |
+| `-search:calibration_min_rsq` | double | `0.7` | 0.0:1.0 | Least r^2 of the RT calibration on the seed assays |
+| `-search:calibration_min_coverage` | double | `0.3` | 0.0:1.0 | Least fraction of the seed assays the RT calibration must find |
+| `-search:allow_bootstrap` | bool | `false` |  | When the RT calibration fails, map the library RT range linearly onto the run instead of aborting. A test hook, recorded in the provenance |
+| `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = decided from the run |
+| `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the system temporary directory); they are removed after the search |
+| `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
+| `-search:max_target_fraction` | double | `0.5` | 0.0:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
+| `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |
+| `-search:entrapment_tag` | string | (empty) |  | Protein-group prefix of entrapment proteins: log and record the combined entrapment FDP estimate. A validation aid |
+| `-search:selftest` | bool | `false` |  | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing |
+| `-search:batch_size` | int | `500` | 1: | Advanced: transitions per extraction batch |
+| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together |

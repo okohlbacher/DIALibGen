@@ -66,25 +66,34 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   const std::string write_config = parameters.getValue("write_config").toString();
   if (!write_config.empty() && (fs::exists(write_config) || fs::is_symlink(write_config)))
   { writeLogError_("refusing to overwrite config output: " + write_config); return CANNOT_WRITE_OUTPUT_FILE; }
+  const bool with_run = !parameters.getValue("run").toString().empty();
   for (const auto& option : supplied_)
   {
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
-    const bool refinement = refinement_options_.count(option) || training;
+    // The built-in identification's settings: refine and tune, and only with -run.
+    const bool search = option.starts_with("search:");
+    const bool refinement = refinement_options_.count(option) || training || search;
     bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
     if (mode == "refine" && training && !getFlag_("tune")) { wrong_mode = true; }
-    if (mode == "tune" && refinement && !training && option != "ids" && option != "out_report" &&
-        option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
+    if (mode == "tune" && refinement && !training && !search && option != "ids" && option != "out_report" &&
+        option != "run" && option != "out_ids" && option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
+    const bool needs_run = !wrong_mode && (search || option == "out_ids") && !with_run;
     // A generated INI contains every mode's defaults. Only reject an explicit
     // value that would change behavior if it belonged to the selected mode.
-    if (!wrong_mode) { continue; }
+    if (!wrong_mode && !needs_run) { continue; }
     const auto& info = findEntry_(option);
     const auto default_value = info.type == OpenMS::ParameterInformation::FLAG ? OpenMS::ParamValue("false") : info.default_value;
     if (parameters.getValue(option) != default_value)
     {
-      writeLogError_("-" + option + " has no effect in -mode " + mode +
-                     (mode == "refine" && training ? "; enable -tune or remove the training option" :
-                                                    "; select the matching mode or remove the option"));
+      if (needs_run)
+      { writeLogError_("-" + option + " has no effect without -run; give -run or remove the option"); }
+      else
+      {
+        writeLogError_("-" + option + " has no effect in -mode " + mode +
+                       (mode == "refine" && training ? "; enable -tune or remove the training option" :
+                                                      "; select the matching mode or remove the option"));
+      }
       return ILLEGAL_PARAMETERS;
     }
   }

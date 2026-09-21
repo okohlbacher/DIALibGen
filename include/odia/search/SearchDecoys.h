@@ -29,6 +29,11 @@
 ///
 /// A fragment slot no decoy can reproduce (an unknown ion type or neutral loss)
 /// is dropped from the target AND the decoy, so both assays keep the same slots.
+///
+/// searchDecoy() computes one target's decoy without building it into a
+/// library: the evidence prefilter (EvidencePrefilter.h) indexes the decoy
+/// fragments of every eligible target that way, and appendSearchDecoys() is
+/// built on it, so the prefilter scores exactly the decoys that are searched.
 #pragma once
 
 #include <odia/Library.h>
@@ -77,16 +82,40 @@ namespace ODIA::search
     std::size_t slots_dropped = 0;       ///< target fragment slots dropped from both classes (not reproducible)
   };
 
+  /// One target's search decoy, computed without touching the library: what
+  /// appendSearchDecoys appends for that target, and what the evidence
+  /// prefilter indexes for it. One function builds both, so the prefilter
+  /// scores exactly the decoy that is later searched.
+  struct DecoyAssay
+  {
+    DecoyOutcome outcome = DecoyOutcome::Made;
+    std::uint16_t redrawn = 0;           ///< arrangements rejected for range or copy before this one
+    /// The target's transitions the decoy reproduces, in the target's order,
+    /// as indices into the library's transition arrays. The target's other
+    /// transitions are dropped from BOTH assays. Empty unless outcome is Made.
+    std::vector<std::uint32_t> slots;
+    std::vector<MzFixed> mz;             ///< the decoy's product m/z, per slot
+    std::vector<std::int8_t> charge;     ///< the fragment charge per slot (a library charge of 0 reads as 1)
+  };
+
   /// The inclusive m/z range of @p library's target fragments (representable
   /// values only). Throws std::invalid_argument when there is none.
   std::pair<MzFixed, MzFixed> targetFragmentRange(const Library& library);
+
+  /// The decoy of target precursor @p i of @p library. Deterministic in the
+  /// target's sequence, transitions and @p rules; reads nothing else and writes
+  /// nothing, so it may run on many targets at once. Throws
+  /// std::invalid_argument on a decoy precursor or on a method other than
+  /// Shuffle or PseudoReverse.
+  DecoyAssay searchDecoy(const Library& library, std::size_t i, const DecoyRules& rules);
 
   /// Append one decoy per target of @p library, which must hold targets only,
   /// after them and in their order (decoy k belongs to the k-th target that
   /// got one). A decoy copies its target's modified sequence, charge, protein
   /// group, precursor m/z, RT, 1/K0, CCS, fragment slots and intensities; its
-  /// fragment m/z are recomputed from the rearranged sequence. Deterministic
-  /// in the sequence. Throws std::invalid_argument on a decoy in @p library or
-  /// on a method other than Shuffle or PseudoReverse.
+  /// fragment m/z are recomputed from the rearranged sequence (searchDecoy).
+  /// Deterministic in the sequence, whatever the thread count. Throws
+  /// std::invalid_argument on a decoy in @p library or on a method other than
+  /// Shuffle or PseudoReverse.
   DecoyBuild appendSearchDecoys(Library& library, const DecoyRules& rules);
 }

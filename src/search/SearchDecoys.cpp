@@ -124,21 +124,15 @@ namespace ODIA::search
     return {lo, hi};
   }
 
-  DecoyBuild appendSearchDecoys(Library& library, const DecoyRules& rules)
+  DecoyAssay searchDecoy(const Library& library, std::size_t i, const DecoyRules& rules)
   {
     if (rules.method != DecoyMethod::Shuffle && rules.method != DecoyMethod::PseudoReverse)
     { throw std::invalid_argument("search decoys: only shuffle and pseudo_reverse keep both termini of the target"); }
-    const std::size_t n = library.precursorCount();
-    for (std::size_t i = 0; i < n; ++i)
-    {
-      if (library.precursors().decoy[i]) { throw std::invalid_argument("search decoys: the library must hold targets only"); }
-    }
-    DecoyBuild out;
-    out.outcome.assign(n, DecoyOutcome::Made);
-    out.redrawn.assign(n, 0);
+    if (i >= library.precursorCount())
+    { throw std::out_of_range("search decoys: precursor " + std::to_string(i) + " of " + std::to_string(library.precursorCount())); }
+    if (library.precursors().decoy[i]) { throw std::invalid_argument("search decoys: precursor " + std::to_string(i) + " is a decoy"); }
+    DecoyAssay out;
     const std::size_t keep_n = DECOY_KEEP_NTERM, keep_c = DECOY_KEEP_CTERM;
-
-    for (std::size_t i = 0; i < n; ++i)
     {
       const std::string sequence(library.strings().get(library.precursors().modified_sequence[i]));
       AASequence target;
@@ -156,8 +150,8 @@ namespace ODIA::search
           tokens.push_back({single.toString(), residue.isModified()});
         }
       }
-      catch (const std::exception&) { out.outcome[i] = DecoyOutcome::Unparsable; continue; }
-      if (tokens.size() <= keep_n + keep_c + 1) { out.outcome[i] = DecoyOutcome::Unparsable; continue; }
+      catch (const std::exception&) { out.outcome = DecoyOutcome::Unparsable; return out; }
+      if (tokens.size() <= keep_n + keep_c + 1) { out.outcome = DecoyOutcome::Unparsable; return out; }
 
       // The slots a decoy can reproduce; the others go from both assays.
       const auto& pre = library.precursors();
@@ -177,7 +171,7 @@ namespace ODIA::search
         target_mz.push_back(fromFixed(tr.product_mz[s]));
       }
       if (slots.size() < std::max<std::size_t>(1, rules.min_fragments))
-      { out.outcome[i] = DecoyOutcome::TooFewFragments; continue; }
+      { out.outcome = DecoyOutcome::TooFewFragments; return out; }
       std::vector<double> sorted_target(target_mz);
       std::sort(sorted_target.begin(), sorted_target.end());
 
@@ -264,22 +258,74 @@ namespace ODIA::search
       }
       if (result != Try::Ok)
       {
-        if (differing == 0) { out.outcome[i] = DecoyOutcome::Unshufflable; }
-        else if (invalid == differing) { out.outcome[i] = DecoyOutcome::Unparsable; }
-        else { out.outcome[i] = range >= copies ? DecoyOutcome::OutOfRange : DecoyOutcome::Copy; }
-        continue;
+        if (differing == 0) { out.outcome = DecoyOutcome::Unshufflable; }
+        else if (invalid == differing) { out.outcome = DecoyOutcome::Unparsable; }
+        else { out.outcome = range >= copies ? DecoyOutcome::OutOfRange : DecoyOutcome::Copy; }
+        return out;
       }
-      out.redrawn[i] = static_cast<std::uint16_t>(std::min<std::size_t>(differing, 65535));
-
-      // Accepted. Drop unreproducible slots from the target first, so both
-      // assays carry the same slots in the same order.
-      auto& p = library.precursors();
-      auto& t = library.transitions();
-      if (slots.size() < count)
+      out.redrawn = static_cast<std::uint16_t>(std::min<std::size_t>(differing, 65535));
+      out.slots.reserve(slots.size());
+      out.charge.reserve(slots.size());
+      for (const Slot& slot : slots)
       {
-        for (std::size_t k = 0; k < slots.size(); ++k)
+        out.slots.push_back(slot.index);
+        out.charge.push_back(static_cast<std::int8_t>(slot.charge));
+      }
+      out.mz = std::move(decoy_mz);
+    }
+    return out;
+  }
+
+  DecoyBuild appendSearchDecoys(Library& library, const DecoyRules& rules)
+  {
+    if (rules.method != DecoyMethod::Shuffle && rules.method != DecoyMethod::PseudoReverse)
+    { throw std::invalid_argument("search decoys: only shuffle and pseudo_reverse keep both termini of the target"); }
+    const std::size_t n = library.precursorCount();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+      if (library.precursors().decoy[i]) { throw std::invalid_argument("search decoys: the library must hold targets only"); }
+    }
+    DecoyBuild out;
+    out.outcome.assign(n, DecoyOutcome::Made);
+    out.redrawn.assign(n, 0);
+
+    // Each decoy is a function of its own target alone: computed in parallel,
+    // applied in library order, so the result does not depend on threads.
+    std::vector<DecoyAssay> assays(n);
+    {
+      const Library& read = library;
+      const auto count = static_cast<std::ptrdiff_t>(n);
+      std::string failure;
+#pragma omp parallel for schedule(dynamic, 64)
+      for (std::ptrdiff_t k = 0; k < count; ++k)
+      {
+        try { assays[static_cast<std::size_t>(k)] = searchDecoy(read, static_cast<std::size_t>(k), rules); }
+        catch (const std::exception& e)
         {
-          const std::uint32_t from = slots[k].index, to = begin + static_cast<std::uint32_t>(k);
+#pragma omp critical(odia_search_decoys)
+          { if (failure.empty()) { failure = e.what(); } }
+        }
+      }
+      if (!failure.empty()) { throw std::runtime_error("search decoys: " + failure); }
+    }
+
+    auto& p = library.precursors();
+    auto& t = library.transitions();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+      DecoyAssay& a = assays[i];
+      out.outcome[i] = a.outcome;
+      if (a.outcome != DecoyOutcome::Made) { continue; }
+      out.redrawn[i] = a.redrawn;
+      const std::uint32_t begin = p.transition_begin[i], count = p.transition_count[i];
+      const std::size_t kept = a.slots.size();
+      // Drop unreproducible slots from the target first, so both assays carry
+      // the same slots in the same order: slot k then sits at begin + k.
+      if (kept < count)
+      {
+        for (std::size_t k = 0; k < kept; ++k)
+        {
+          const std::uint32_t from = a.slots[k], to = begin + static_cast<std::uint32_t>(k);
           if (from == to) { continue; }
           t.product_mz[to] = t.product_mz[from];
           t.library_intensity[to] = t.library_intensity[from];
@@ -287,21 +333,20 @@ namespace ODIA::search
           t.ordinal[to] = t.ordinal[from];
           t.charge[to] = t.charge[from];
           t.loss[to] = t.loss[from];
-          slots[k].index = to;
         }
-        out.slots_dropped += count - slots.size();
-        p.transition_count[i] = static_cast<std::uint32_t>(slots.size());
+        out.slots_dropped += count - kept;
+        p.transition_count[i] = static_cast<std::uint32_t>(kept);
       }
-      Library::checkTransitionCapacity(t.product_mz.size(), slots.size());
+      Library::checkTransitionCapacity(t.product_mz.size(), kept);
       const auto new_begin = static_cast<std::uint32_t>(t.product_mz.size());
-      for (std::size_t k = 0; k < slots.size(); ++k)
+      for (std::size_t k = 0; k < kept; ++k)
       {
-        const std::uint32_t s = slots[k].index;
-        t.product_mz.push_back(decoy_mz[k]);
+        const std::uint32_t s = begin + static_cast<std::uint32_t>(k);
+        t.product_mz.push_back(a.mz[k]);
         t.library_intensity.push_back(t.library_intensity[s]);
         t.type.push_back(t.type[s]);
         t.ordinal.push_back(t.ordinal[s]);
-        t.charge.push_back(static_cast<std::int8_t>(slots[k].charge));
+        t.charge.push_back(a.charge[k]);
         t.loss.push_back(t.loss[s]);
       }
       // Everything else is the target's, the precursor m/z included (the field
@@ -315,8 +360,9 @@ namespace ODIA::search
       p.modified_sequence.push_back(p.modified_sequence[i]);
       p.protein_group.push_back(p.protein_group[i]);
       p.transition_begin.push_back(new_begin);
-      p.transition_count.push_back(static_cast<std::uint32_t>(slots.size()));
+      p.transition_count.push_back(static_cast<std::uint32_t>(kept));
       ++out.made;
+      a = DecoyAssay();   // release as we go
     }
     if (out.made) { library.markUnsorted(); }
     return out;

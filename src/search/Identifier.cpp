@@ -295,8 +295,16 @@ namespace ODIA::search
                           {"rt_window_s", num(calibration.rt_window)}, {"mz_ppm", num(calibration.mz_ppm)},
                           {"ms1_mz_ppm", num(calibration.ms1_mz_ppm)}, {"im_window", num(calibration.im_window)},
                           {"detail", object(calibration.provenance_json)}};
+      const json& cd = calibration_json["detail"];
+      std::string model = cd.contains("model") ? cd["model"].get<std::string>() : std::string("linear");
+      if (cd.contains("nonlinear") && cd["nonlinear"].contains("window_lowess_s") && cd["nonlinear"]["window_lowess_s"].is_number() &&
+          cd["nonlinear"].contains("window_linear_s") && cd["nonlinear"]["window_linear_s"].is_number())
+      {
+        model += " (LOWESS window " + seconds(cd["nonlinear"]["window_lowess_s"].get<double>()) + ", linear " +
+                 seconds(cd["nonlinear"]["window_linear_s"].get<double>()) + ")";
+      }
       info("search calibration: " + std::to_string(calibration.points) + " points from " + std::to_string(calibration.seeds) +
-           " seeds, r^2 " + (std::isfinite(calibration.rsq) ? std::to_string(calibration.rsq) : std::string("n/a")) +
+           " seeds, " + model + ", r^2 " + (std::isfinite(calibration.rsq) ? std::to_string(calibration.rsq) : std::string("n/a")) +
            ", windows RT " + std::to_string(calibration.rt_window) + " s, m/z " + std::to_string(calibration.mz_ppm) +
            " ppm, 1/K0 " + (calibration.im_window > 0 ? std::to_string(calibration.im_window) : std::string("off")) +
            (calibration.bootstrap ? " (BOOTSTRAP)" : "") + " (" +

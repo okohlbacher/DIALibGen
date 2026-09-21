@@ -47,6 +47,43 @@ struct RankedGroup
   double pep = 1.0;      ///< posterior error probability = LOCAL false-discovery rate at this score
 };
 
+/// Project the `pep` of a list sorted by score descending onto a non-decreasing sequence (PEP
+/// must not fall as the score falls): weighted pool-adjacent-violators, the least-squares
+/// isotonic fit. Items of equal score form one block and get one value.
+///
+/// ODIA swept a running MAX from the low-score end instead. That is an upper envelope of
+/// everything BELOW an item, and the bottom of any list is at PEP 1, so every PEP came out 1.
+inline void isotonicNonDecreasing(std::vector<RankedGroup>& ranked)
+{
+  struct Block { double sum; double weight; std::size_t end; };
+  std::vector<Block> blocks;
+  for (std::size_t begin = 0; begin < ranked.size();)
+  {
+    std::size_t end = begin + 1;
+    while (end < ranked.size() && ranked[end].score == ranked[begin].score) { ++end; }
+    double sum = 0.0;
+    for (std::size_t i = begin; i < end; ++i) { sum += ranked[i].pep; }
+    blocks.push_back({sum, static_cast<double>(end - begin), end});
+    while (blocks.size() >= 2)
+    {
+      const Block& b = blocks[blocks.size() - 1];
+      const Block& a = blocks[blocks.size() - 2];
+      if (a.sum / a.weight <= b.sum / b.weight) { break; }
+      const Block merged{a.sum + b.sum, a.weight + b.weight, b.end};
+      blocks.pop_back();
+      blocks.back() = merged;
+    }
+    begin = end;
+  }
+  std::size_t begin = 0;
+  for (const Block& b : blocks)
+  {
+    const double value = std::min(1.0, std::max(0.0, b.sum / b.weight));
+    for (std::size_t i = begin; i < b.end; ++i) { ranked[i].pep = value; }
+    begin = b.end;
+  }
+}
+
 /// Target-decoy q-values, p-values and PEP for a list with one score per item.
 ///
 /// Equal scores are one threshold, so the result does not depend on the order of ties. The list
@@ -56,7 +93,7 @@ struct RankedGroup
 ///         The +1 is Kall's finite-sample correction on the decoy count.
 ///   p   : (decoys at or above + 1) / (N_dec + 1).
 ///   PEP : the local analogue of the q estimator in a sliding window of the ranked list, made
-///         non-increasing in score by an isotonic sweep.
+///         non-increasing in score by isotonic regression (isotonicNonDecreasing).
 ///
 /// pi0 = 1 unless use_pi0 (Storey, lambda = 0.5). pi0 = 1 is the honest default.
 inline void assignQValues(std::vector<RankedGroup>& ranked, bool use_pi0)
@@ -138,8 +175,7 @@ inline void assignQValues(std::vector<RankedGroup>& ranked, bool use_pi0)
 
   // PEP: in a score neighbourhood holding t targets and d decoys, the expected null-target count
   // is pi0 * d * (Ntar / Ndec), so PEP ~ that over t. Sliding counts keep the pass O(n); the
-  // window is ~0.5 % of the list and at least 101 wide. The raw local ratio is noisy, so it is
-  // projected onto non-increasing-in-score by a running max from the low-score end.
+  // window is ~0.5 % of the list and at least 101 wide.
   {
     const std::size_t n = ranked.size();
     const std::size_t half = std::max<std::size_t>(50, n / 200);
@@ -155,12 +191,7 @@ inline void assignQValues(std::vector<RankedGroup>& ranked, bool use_pi0)
       if (t > 0) { pep = pi0 * static_cast<double>(d) * scale / static_cast<double>(t); }
       ranked[i].pep = std::min(1.0, std::max(0.0, pep));
     }
-    double running_max = 0.0;
-    for (std::size_t end = n; end > 0; --end)
-    {
-      running_max = std::max(running_max, ranked[end - 1].pep);
-      ranked[end - 1].pep = running_max;
-    }
+    isotonicNonDecreasing(ranked);
   }
 }
 

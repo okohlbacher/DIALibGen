@@ -151,40 +151,58 @@ int main()
   if (emp_fdr > 0.05)  { std::fprintf(stderr, "FAIL: empirical FDR %.3f > 0.05\n", emp_fdr); return 1; }
 
   // p-value, q-value and PEP must be three DISTINCT statistics:
-  //   (a) they are not all identical;
-  //   (b) PEP >= q at the same peak group -- local FDR cannot be below the average FDR above it;
-  //   (c) PEP is monotone non-increasing in d-score.
+  //   (a) they are not all identical, and PEP is not a constant;
+  //   (b) PEP >= q at the same group -- local FDR cannot be below the average FDR above it;
+  //   (c) PEP is non-increasing in the group's best d-score.
+  // Checked per GROUP: every row carries its group's statistics, so a runner-up row with a low
+  // d-score carries the PEP of its group's best row, and a row-level ordering proves nothing.
+  // The ported ODIA check was row-level and passed only because every PEP was 1.
   {
-    std::size_t n_all_equal = 0, n_pep_below_q = 0;
+    std::vector<std::size_t> best_row(ng, rows);
     for (std::size_t i = 0; i < rows; ++i)
     {
-      if (s.pvalue[i] == s.qvalue[i] && s.qvalue[i] == s.pep[i]) { ++n_all_equal; }
-      if (s.pep[i] < s.qvalue[i] - 1e-9) { ++n_pep_below_q; }
+      const std::size_t g = static_cast<std::size_t>(group[i]);
+      if (best_row[g] == rows || s.dscore[i] > s.dscore[best_row[g]]) { best_row[g] = i; }
     }
-    if (n_all_equal == rows)
-    {
-      std::fprintf(stderr, "FAIL: p-value, q-value and PEP are identical on all %zu rows\n", rows);
-      return 1;
-    }
-    if (n_pep_below_q > rows / 20)
-    {
-      std::fprintf(stderr, "FAIL: PEP < q-value on %zu/%zu rows\n", n_pep_below_q, rows);
-      return 1;
-    }
+    std::size_t n_all_equal = 0, n_pep_below_q = 0, n_confident = 0;
     std::vector<std::pair<double, double>> ds;
-    ds.reserve(rows);
-    for (std::size_t i = 0; i < rows; ++i) { ds.emplace_back(s.dscore[i], s.pep[i]); }
+    ds.reserve(ng);
+    for (std::size_t g = 0; g < ng; ++g)
+    {
+      const std::size_t i = best_row[g];
+      if (s.pvalue[i] == s.qvalue[i] && s.qvalue[i] == s.pep[i]) { ++n_all_equal; }
+      if (s.pep[i] < s.qvalue[i] - 0.02) { ++n_pep_below_q; }   // both saturate near 1
+      if (s.pep[i] < 0.05) { ++n_confident; }
+      ds.emplace_back(s.dscore[i], s.pep[i]);
+    }
+    if (n_all_equal == ng)
+    {
+      std::fprintf(stderr, "FAIL: p-value, q-value and PEP are identical for all %zu groups\n", ng);
+      return 1;
+    }
+    if (n_confident < static_cast<std::size_t>(rec_target) / 2)
+    {
+      std::fprintf(stderr, "FAIL: only %zu groups have PEP < 0.05 against %d targets at q < 0.01\n",
+                   n_confident, rec_target);
+      return 1;
+    }
+    if (n_pep_below_q > ng / 20)
+    {
+      std::fprintf(stderr, "FAIL: PEP < q-value for %zu/%zu groups\n", n_pep_below_q, ng);
+      return 1;
+    }
     std::sort(ds.begin(), ds.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     for (std::size_t i = 1; i < ds.size(); ++i)
     {
-      if (ds[i].second < ds[i - 1].second - 1e-9)
+      if (ds[i].first < ds[i - 1].first && ds[i].second < ds[i - 1].second - 1e-9)
       {
         std::fprintf(stderr, "FAIL: PEP increases with d-score at rank %zu (%.4f -> %.4f)\n",
                      i, ds[i - 1].second, ds[i].second);
         return 1;
       }
     }
-    std::fprintf(stderr, "p/q/PEP distinct OK (all-equal rows: %zu/%zu)\n", n_all_equal, rows);
+    std::fprintf(stderr, "p/q/PEP distinct OK (all-equal groups: %zu/%zu, PEP<0.05: %zu)\n",
+                 n_all_equal, ng, n_confident);
   }
 
   std::fprintf(stderr, "odia_lda_test OK\n");

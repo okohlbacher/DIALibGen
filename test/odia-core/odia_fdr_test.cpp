@@ -11,6 +11,7 @@
 //   T4 picked competition collapses each pair to one entry, keeps the winner, ties -> DECOY.
 //   T5 picked competition removes the protein-SIZE bias.
 //   T6 the entrapment estimator reproduces (1+1/r)*n_ent/n and refuses degenerate inputs.
+//   T7 PEP is a local error rate: near 0 for clear hits, near 1 for the null, monotone.
 
 #include <odia-core/odia_fdr.h>
 
@@ -175,6 +176,50 @@ int main()
     check(!odia::core::entrapmentFdp(0, 0, 5000, 5000).valid, "T6 nothing reported -> invalid");
     auto d = odia::core::entrapmentFdp(100, 90, 5000, 5000);
     check(d.valid && d.fdp == 1.0, "T6 FDP clamped to 1");
+  }
+
+  // ---- T7: PEP is a LOCAL error rate, not a constant ---------------------------------
+  // 800 clear hits far above a null of 2000 targets and 2000 decoys. The hits must get a PEP
+  // near 0, the null a PEP near 1, PEP must not fall as the score falls, and ties share a value.
+  // ODIA's running max from the low-score end set every PEP to 1.
+  {
+    std::mt19937 rng(21);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Entity> e;
+    for (int i = 0; i < 800; ++i) { e.push_back({"H" + std::to_string(i), 1, 8.0 + nd(rng)}); }
+    for (int i = 0; i < 2000; ++i) { e.push_back({"N" + std::to_string(i), 1, nd(rng)}); }
+    for (int i = 0; i < 2000; ++i) { e.push_back({"D" + std::to_string(i), 0, nd(rng)}); }
+    e.push_back({"TIE_T", 1, 0.5});
+    e.push_back({"TIE_D", 0, 0.5});
+    odia::core::assignQValues(e, false);
+    // The window is ~100 items wide, so the lowest-scoring hits share it with the top of the
+    // null and carry a larger PEP; the bulk of the hits must not.
+    std::size_t confident_hits = 0;
+    double null_pep = 1.0;
+    for (const auto& x : e)
+    {
+      if (x.id[0] == 'H' && x.pep < 0.05) { ++confident_hits; }
+      if (x.id[0] == 'N' && x.score < 0.0) { null_pep = std::min(null_pep, x.pep); }
+    }
+    check(confident_hits >= 720, "T7 clear hits have a PEP near 0");
+    check(null_pep > 0.9, "T7 null targets have a PEP near 1");
+    auto by_score = e;
+    std::sort(by_score.begin(), by_score.end(),
+              [](const Entity& a, const Entity& b) { return a.score > b.score; });
+    bool monotone = true;
+    for (std::size_t i = 1; i < by_score.size(); ++i)
+    {
+      if (by_score[i].score < by_score[i - 1].score && by_score[i].pep < by_score[i - 1].pep) { monotone = false; }
+    }
+    check(monotone, "T7 PEP does not fall as the score falls");
+    double tie_t = -1.0, tie_d = -2.0;
+    for (const auto& x : e) { if (x.id == "TIE_T") { tie_t = x.pep; } if (x.id == "TIE_D") { tie_d = x.pep; } }
+    check(tie_t == tie_d, "T7 equal scores share one PEP");
+    // Local FDR at a cut is not below the average FDR above it. Both saturate near 1 in the
+    // null, where they differ by smoothing noise, hence the tolerance.
+    std::size_t q_above_pep = 0;
+    for (const auto& x : e) { if (x.pep < x.qvalue - 0.02) { ++q_above_pep; } }
+    check(q_above_pep <= e.size() / 20, "T7 PEP (local) is rarely below q (average above the cut)");
   }
 
   if (failures) { std::fprintf(stderr, "odia_fdr_test FAILED (%d)\n", failures); return 1; }

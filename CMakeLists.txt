@@ -145,6 +145,14 @@ if(OpenMP_CXX_FOUND)
 endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# The classifier and FDR core vendored from OpenDIAlyzer: dependency-free C++17
+# headers, origin and changes in src/odia-core/MANIFEST.json. Nothing installs
+# them; an exported target links it as $<BUILD_INTERFACE:odia_core>.
+add_library(odia_core INTERFACE)
+target_include_directories(odia_core INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+target_compile_features(odia_core INTERFACE cxx_std_17)
+
 add_library(odia_refine STATIC src/refine/LibraryRefiner.cpp)
 target_link_libraries(odia_refine PUBLIC odia_library)
 add_library(DIALibGen::odia_refine ALIAS odia_refine)

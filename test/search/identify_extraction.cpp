@@ -11,10 +11,15 @@
 //     groups about as often as targets;
 //   * the peak-group table does not depend on search:chunk;
 //   * cache mode loads into a scratch directory under search:cache_dir and
-//     recovers the same planted precursors.
+//     recovers the same planted precursors;
+//   * search:candidates evidence: the prefilter's seeds calibrate the run,
+//     their prefilter RT agrees with the calibration points, and extraction
+//     of the evidence set recovers the planted precursors it holds, with the
+//     same peak groups at two chunk sizes.
 
 #include "synthetic_run.h"
 
+#include <odia/search/EvidencePrefilter.h>
 #include <odia/search/Identifier.h>
 #include <odia/search/RobustLine.h>
 
@@ -290,6 +295,49 @@ int main(int argc, char** argv)
     bool threw = false;
     try { (void)stray.loadRun((dir / "absent.mzML").string()); } catch (const std::exception&) { threw = true; }
     CHECK(threw);
+  }
+
+  // ---- 6. search:candidates evidence: seeds, calibration, extraction ------------------
+  {
+    SearchParams p = params();
+    CHECK(p.candidates == "evidence");   // the default
+    Stages ev(p);
+    RunData r = ev.loadRun(mzml);
+    const std::vector<IsolationWindow> windows = Identifier::isolationWindows(r);
+    const SearchSet es = EvidencePrefilter::select(fx.library, ev.params(), windows, r.maps,
+                                                   [](const std::string& m) { std::cout << "  info: " << m << "\n"; });
+    const Calibration c = ev.calibrate(fx.library, es, r);
+    std::cout << "evidence calibration: " << c.points << " points from " << c.seeds << " seeds, r^2 " << c.rsq << ", RT window "
+              << c.rt_window << " s\n  " << c.provenance_json << "\n";
+    CHECK(es.seeds.size() >= 100);
+    CHECK(c.provenance_json.find("\"seed_rule\":\"evidence\"") != std::string::npos);
+    CHECK(c.provenance_json.find("\"prefilter_agreement\"") != std::string::npos);
+    CHECK(c.provenance_json.find("\"nonlinear\"") != std::string::npos);
+    CHECK(!c.bootstrap && c.points >= 50 && c.rsq > 0.95);
+    CHECK(c.rt_window >= 30.0 && c.rt_window <= 90.0);
+    {
+      OpenMS::TransformationDescription inverse = c.rt;
+      inverse.invert();
+      std::vector<double> error;
+      for (const auto& pl : fx.planted)
+      { error.push_back(std::fabs(inverse.apply(es.rt_scale.toAssay(fx.library.precursors().irt[pl.index])) - pl.apex_s)); }
+      std::sort(error.begin(), error.end());
+      std::cout << "planted apex vs evidence-calibrated RT: median " << error[error.size() / 2] << " s, p95 "
+                << error[error.size() * 95 / 100] << " s\n";
+      CHECK(error[error.size() / 2] < 4.0);
+      CHECK(error[error.size() * 95 / 100] < c.rt_window / 2);
+    }
+    PeakGroups g1, g2;
+    ev.extract(es, r, c, g1);
+    g1.validate(es);
+    Stages small(params(300));
+    small.extract(es, r, c, g2);
+    const auto [f, n] = recovered(fx, es, g1, spec.cycle_s);
+    std::cout << "evidence set: " << es.pairs() << " pairs, planted among them " << n << ", recovered " << f << "; "
+              << g1.rows() << " peak groups (chunk 300: " << g2.rows() << ")\n";
+    CHECK(n >= 400 && static_cast<double>(f) >= 0.95 * static_cast<double>(n));
+    CHECK(identical(g1, g2));
+    r.maps.clear();
   }
 
   fs::remove_all(dir);

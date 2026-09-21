@@ -126,6 +126,13 @@ namespace ODIA::search
     /// Monoisotopic MS1 trace only: stock 3.5.0 places the isotope traces at
     /// +k * 1.00336 Th regardless of charge (ChromatogramExtractor::prepare_coordinates).
     constexpr int ms1_isotope_traces = 0;
+    /// The non-linear second fit of the RT calibration needs this many
+    /// points and must narrow the RT window to this fraction of the linear one.
+    constexpr std::size_t lowess_min_points = 50;
+    constexpr double lowess_gain = 0.9;
+    /// An evidence seed's calibration point "agrees" with the prefilter when
+    /// the two run times are this close (seconds); a diagnostic.
+    constexpr double prefilter_agreement_s = 30.0;
 
     /// A standard stream silenced while a stock call runs: OpenSWATH prints
     /// one line per window and batch to std::cout ("Thread 3_0 will analyze
@@ -284,6 +291,21 @@ namespace ODIA::search
       p.setValue("NrRTBins", 10);
       p.setValue("MinPeptidesPerBin", 1);
       p.setValue("MinBinsFilled", 8);
+      return p;
+    }
+
+    /// The non-linear RT model: stock LOWESS with its span chosen by
+    /// cross-validation, linear interpolation between the smoothed points (a
+    /// cubic spline can overshoot and stop increasing), and outside the points
+    /// the line through the first and last one.
+    Param lowessParam()
+    {
+      Param p;
+      p.setValue("span", 0.3);
+      p.setValue("auto_span", "true");
+      p.setValue("auto_span_grid", "0.1,0.15,0.2,0.3,0.4,0.5,0.7");
+      p.setValue("interpolation_type", "linear");
+      p.setValue("extrapolation_type", "two-point-linear");
       return p;
     }
 
@@ -600,12 +622,33 @@ namespace ODIA::search
     }
     const std::size_t picked_kit = picked.size();
 
-    // 2. The stock sampler over the other targets: RT bins, the most intense
-    //    share first. It de-duplicates by compound.sequence, so it sees the
-    //    STRIPPED sequence (one seed per peptide, whatever its charge states);
-    //    one transition per compound carries the summed library intensity it
-    //    ranks by. The seed assays are rebuilt sequence-blind below.
+    // 2a. Evidence seeds (search:candidates evidence): targets with fragment
+    //     evidence of their own, spread over the library RT range by the
+    //     prefilter, which also says where each was seen.
+    std::unordered_map<std::size_t, double> seen_at;   // input library index -> prefilter best-spectrum RT
+    if (!set.seeds.empty())
     {
+      std::size_t added = 0;
+      for (const SeedHint& s : set.seeds)
+      {
+        if (!eligible(s.index) || !picked_ids.insert(idOf(s.index)).second) { continue; }
+        picked.push_back(s.index);
+        seen_at.emplace(s.index, s.rt_s);
+        ++added;
+      }
+      detail["seed_rule"] = "evidence";
+      detail["seeds_evidence"] = added;
+      detail["seed_candidates"] = set.seeds.size();
+    }
+    // 2b. Otherwise the stock sampler over the other targets: RT bins, the
+    //    most intense share first. It de-duplicates by compound.sequence, so
+    //    it sees the STRIPPED sequence (one seed per peptide, whatever its
+    //    charge states); one transition per compound carries the summed
+    //    library intensity it ranks by. The seed assays are rebuilt
+    //    sequence-blind below.
+    else
+    {
+      detail["seed_rule"] = "sampled";
       std::vector<std::size_t> candidates;
       candidates.reserve(set.pairs());
       for (std::size_t k = 0; k < set.pairs(); ++k) { candidates.push_back(set.source[k]); }
@@ -660,8 +703,11 @@ namespace ODIA::search
     detail["kit_precursors_in_library"] = kit_in_library;
     detail["kit_precursors_outside_windows"] = kit_outside_windows;
     detail["seeds_kit"] = picked_kit;
-    detail["sampling"] = {{"bins", seed_bins}, {"per_bin", seeds_per_bin}, {"top_fraction", seed_top_fraction},
-                          {"seed", seed_sampling_seed}};
+    if (set.seeds.empty())
+    {
+      detail["sampling"] = {{"bins", seed_bins}, {"per_bin", seeds_per_bin}, {"top_fraction", seed_top_fraction},
+                            {"seed", seed_sampling_seed}};
+    }
     detail["seed_mz_ppm"] = calibration_mz_ppm;
     detail["model"] = "linear";
     detail["outliers"] = "iter_residual, estimateBestPeptides";
@@ -711,9 +757,9 @@ namespace ODIA::search
     // 4. Refit robustly, then validate: stock stops removing outliers as soon as
     //    r^2 reaches min_rsq, and accepts a handful of points and any slope.
     std::vector<std::pair<double, double>> points;
+    std::vector<std::pair<double, double>> stock;
     if (failure.empty())
     {
-      std::vector<std::pair<double, double>> stock;
       for (const auto& dp : cal.rt.getDataPoints()) { stock.emplace_back(dp.first, dp.second); }
       detail["points_stock"] = stock.size();
       const RobustLine line = robustLine(stock, robust_cut, robust_min_scale);
@@ -798,6 +844,103 @@ namespace ODIA::search
       return cal;
     }
 
+    // 4a. Where the prefilter saw the evidence seeds, against the peak groups
+    //     the stock calibration picked for them: two independent looks at
+    //     the same seed. Recorded, not used. A point is matched to its seed
+    //     by the seed's assay RT, the only key performRTNormalization keeps.
+    if (!seen_at.empty())
+    {
+      std::unordered_map<double, std::vector<double>> by_assay_rt;
+      for (const auto& [index, rt] : seen_at) { by_assay_rt[set.rt_scale.toAssay(pre.irt[index])].push_back(rt); }
+      std::vector<double> gap;
+      for (const auto& p : stock)
+      {
+        const auto it = by_assay_rt.find(p.second);
+        if (it == by_assay_rt.end()) { continue; }
+        double best = std::numeric_limits<double>::infinity();
+        for (const double rt : it->second) { best = std::min(best, std::fabs(rt - p.first)); }
+        if (std::isfinite(best)) { gap.push_back(best); }
+      }
+      std::size_t within = 0;
+      for (const double g : gap) { within += g <= prefilter_agreement_s ? 1 : 0; }
+      detail["prefilter_agreement"] = {{"points", gap.size()}, {"median_s", num(quantile(gap, 0.5))},
+                                       {"p90_s", num(quantile(gap, 0.9))}, {"within_s", prefilter_agreement_s},
+                                       {"within", within}};
+    }
+
+    // 4b. A non-linear second fit: a predicted library's RT is not a linear
+    //     function of the run's (the linear residuals on an Astral run had a
+    //     p99 of 3.2 min), and the RT window is sized by those residuals.
+    //     LOWESS (stock TransformationModelLowess, span by cross-validation)
+    //     on the stock points, with its own iterative outlier cut; used only
+    //     when enough points remain, both directions are increasing, and it
+    //     narrows the window by at least lowess_gain.
+    {
+      json nonlinear = {{"model", "lowess"}, {"min_points", lowess_min_points}, {"gain_required", lowess_gain}, {"used", false}};
+      if (points.size() >= lowess_min_points && params().rt_window <= 0)
+      {
+        try
+        {
+          QuietStreams quiet;   // the CV span search logs to std::cout
+          const double linear_window = cal.rt.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+          std::vector<std::pair<double, double>> current = points;
+          OpenMS::TransformationDescription fit;
+          std::size_t iterations = 0;
+          double scale = 0.0;
+          for (; iterations < 10; ++iterations)
+          {
+            fit = OpenMS::TransformationDescription();
+            fit.setDataPoints(current);
+            fit.fitModel("lowess", lowessParam());
+            std::vector<double> residual;
+            for (const auto& p : current) { residual.push_back(std::fabs(p.second - fit.apply(p.first))); }
+            scale = std::max(robust_min_scale, 1.4826 * quantile(residual, 0.5));
+            std::vector<std::pair<double, double>> next;
+            for (const auto& p : stock) { if (std::fabs(p.second - fit.apply(p.first)) <= robust_cut * scale) { next.push_back(p); } }
+            if (next == current || next.size() < lowess_min_points) { break; }
+            current.swap(next);
+          }
+          // Increasing both ways, over the run and over the assay range: the
+          // extraction maps assay RT through the inverse fit.
+          OpenMS::TransformationDescription inverse = fit;
+          inverse.invert();
+          bool increasing = true;
+          double previous = -std::numeric_limits<double>::infinity(), previous_inverse = previous;
+          for (int g = 0; g <= 200 && increasing; ++g)
+          {
+            const double x = run_first + run_span * g / 200.0, a = 100.0 * g / 200.0;
+            const double y = fit.apply(x), r = inverse.apply(a);
+            increasing = y > previous && r > previous_inverse;
+            previous = y;
+            previous_inverse = r;
+          }
+          const double window = fit.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+          nonlinear["points"] = current.size();
+          nonlinear["iterations"] = iterations + 1;
+          nonlinear["span"] = static_cast<double>(fit.getModelParameters().getValue("span"));
+          nonlinear["scale_library"] = scale;
+          nonlinear["increasing"] = increasing;
+          nonlinear["window_linear_s"] = num(linear_window);
+          nonlinear["window_lowess_s"] = num(window);
+          if (!increasing) { nonlinear["reason"] = "not increasing over the run"; }
+          else if (current.size() < lowess_min_points) { nonlinear["reason"] = "too few points after the outlier cut"; }
+          else if (!(window < lowess_gain * linear_window)) { nonlinear["reason"] = "does not narrow the RT window enough"; }
+          else
+          {
+            nonlinear["used"] = true;
+            cal.rt = fit;
+            points = current;
+            detail["model"] = "lowess";
+          }
+        }
+        catch (const std::exception& e) { nonlinear["reason"] = std::string("fit failed: ") + e.what(); }
+      }
+      else { nonlinear["reason"] = params().rt_window > 0 ? "search:rt_window is set" : "too few points"; }
+      detail["nonlinear"] = nonlinear;
+    }
+
+    cal.points = points.size();
+
     // 5. Windows. RT: the seed residuals (TOPP's quantile and padding), with a
     //    floor; m/z: the calibration's estimate may only NARROW the default.
     {
@@ -874,13 +1017,27 @@ namespace ODIA::search
     OpenMS::OpenSwathOSWWriter osw("", 0);   // an empty name: inactive
     OpenMS::NoopMSDataWritingConsumer chromatograms("");
 
-    const auto chunks = AssayBuilder::chunks(set, params().chunk);
+    const auto chunks = AssayBuilder::chunks(set, params().chunk, params().batch_size);
+    const std::vector<IsolationWindow> windows = isolationWindows(run);
     const float nan = std::numeric_limits<float>::quiet_NaN();
     std::size_t done = 0;
     for (std::size_t c = 0; c < chunks.size(); ++c)
     {
       const auto started = std::chrono::steady_clock::now();
       const AssayChunk assays = AssayBuilder::build(set, chunks[c], AssayOptions{});
+      std::size_t spread = 0;   // isolation windows this chunk has precursors in
+      {
+        std::vector<char> used(windows.size(), 0);
+        for (const std::size_t i : chunks[c])
+        {
+          const double mz = fromFixed(set.library.precursors().mz[i]);
+          for (std::size_t w = 0; w < windows.size(); ++w)
+          {
+            if (windows[w].lower < mz && mz < windows[w].upper) { used[w] = 1; }
+          }
+        }
+        spread = static_cast<std::size_t>(std::count(used.begin(), used.end(), 1));
+      }
       std::unordered_map<std::string, std::size_t> precursor_of;
       precursor_of.reserve(assays.precursor.size());
       for (std::size_t k = 0; k < assays.precursor.size(); ++k)
@@ -951,7 +1108,8 @@ namespace ODIA::search
       done += assays.precursor.size();
       const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
       info("search extraction: chunk " + std::to_string(c + 1) + "/" + std::to_string(chunks.size()) + ", " +
-           std::to_string(assays.precursor.size()) + " precursors: " + std::to_string(n_features) + " peak groups for " +
+           std::to_string(assays.precursor.size()) + " precursors in " + std::to_string(spread) + " of " +
+           std::to_string(windows.size()) + " isolation windows: " + std::to_string(n_features) + " peak groups for " +
            std::to_string(targets) + " targets and " + std::to_string(decoys) + " decoys (" + std::to_string(done) + "/" +
            std::to_string(set.size()) + " done, " + fixed(seconds, 1) + " s)");
     }

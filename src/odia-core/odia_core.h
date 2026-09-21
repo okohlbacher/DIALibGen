@@ -49,6 +49,12 @@ struct Options
   QEstimator estimator = QEstimator::Ratio;
   /// The cut the diagnostic counts are taken at.
   double report_q = 0.01;
+  /// Sub-scores the fit must not see at all, by exact column name. For a discriminant that
+  /// selects retention-time or ion-mobility calibration anchors, the RT and 1/K0 deviation scores
+  /// (e.g. var_norm_rt_score, var_im_delta_score): anchors picked by the very agreement they are
+  /// meant to correct would bias the correction toward the uncorrected state. Names that match
+  /// no column are reported in Diagnostics::exclusions_unmatched, never silently ignored.
+  std::vector<std::string> exclude_features;
 };
 
 /// One precursor.
@@ -77,6 +83,8 @@ struct Diagnostics
   std::size_t decoys_unpaired = 0;     ///< decoy precursors whose target has no row
   std::vector<std::string> features_used;
   std::vector<std::string> features_dropped;   ///< all missing, or constant (label-blind)
+  std::vector<std::string> features_excluded;  ///< removed by Options::exclude_features
+  std::vector<std::string> exclusions_unmatched;   ///< requested exclusions that named no column
   std::size_t cells_imputed = 0;       ///< missing cells of used columns, imputed at the column mean
   int n_folds = 0;
   int iterations_trained = 0;          ///< 0 means no discriminant was ever learned
@@ -126,13 +134,16 @@ inline std::vector<std::size_t> canonicalOrder(const ScoreTable& table)
 
 /// Columns that carry signal: at least one finite value, and not constant among the finite
 /// values. Label-blind (it reads no label, so it cannot leak into the cross-validation); keeps
-/// an all-missing column from turning every d-score into NaN.
-inline std::vector<std::size_t> informativeColumns(const ScoreTable& table)
+/// an all-missing column from turning every d-score into NaN. Columns flagged in @p skip are
+/// not considered at all.
+inline std::vector<std::size_t> informativeColumns(const ScoreTable& table,
+                                                   const std::vector<char>& skip = {})
 {
   std::vector<std::size_t> keep;
   const std::size_t m = table.width();
   for (std::size_t j = 0; j < m; ++j)
   {
+    if (j < skip.size() && skip[j]) { continue; }
     bool have_first = false, varies = false;
     float first = 0.0f;
     for (std::size_t i = 0; i < table.rows() && !varies; ++i)
@@ -167,19 +178,33 @@ inline ScoredResult scoreAndControl(const ScoreTable& table, const Options& opti
 
   const std::vector<std::size_t> order = canonicalOrder(table);
 
-  const std::vector<std::size_t> kept = informativeColumns(table);
+  // Excluded columns are removed before anything else looks at them, so the fit -- seed,
+  // iterations and held-out scoring alike -- never sees them.
+  std::vector<char> excluded(width, 0);
+  for (const std::string& name : options.exclude_features)
+  {
+    bool matched = false;
+    for (std::size_t j = 0; j < width; ++j)
+    {
+      if (table.feature_names[j] == name) { excluded[j] = 1; matched = true; }
+    }
+    if (!matched) { diag.exclusions_unmatched.push_back(name); }
+  }
+  const std::vector<std::size_t> kept = informativeColumns(table, excluded);
   {
     std::vector<char> is_kept(width, 0);
     for (const std::size_t j : kept) { is_kept[j] = 1; diag.features_used.push_back(table.feature_names[j]); }
     for (std::size_t j = 0; j < width; ++j)
     {
-      if (!is_kept[j]) { diag.features_dropped.push_back(table.feature_names[j]); }
+      if (excluded[j]) { diag.features_excluded.push_back(table.feature_names[j]); }
+      else if (!is_kept[j]) { diag.features_dropped.push_back(table.feature_names[j]); }
     }
   }
   if (kept.empty())
   {
     throw std::invalid_argument("odia::core::scoreAndControl: none of the " + std::to_string(width) +
-                                " sub-score columns varies; nothing to classify on");
+                                " sub-score columns varies (" + std::to_string(diag.features_excluded.size()) +
+                                " excluded); nothing to classify on");
   }
 
   // The classifier's inputs, in canonical order. Missing stays NaN here; the LDA imputes it at

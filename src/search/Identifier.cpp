@@ -102,6 +102,11 @@ namespace ODIA::search
     if (warn_) { warn_(message); } else { std::cerr << "Warning: " << message << std::endl; }
   }
 
+  std::filesystem::path Identifier::scratchParent() const
+  {
+    return output_dir_.empty() ? std::filesystem::temp_directory_path() : output_dir_;
+  }
+
   std::vector<ReportRow> Identifier::reportRows(const SearchSet& set, const PeakGroups& groups,
                                                 const ScoringOutcome& outcome, const SearchParams& params)
   {
@@ -142,6 +147,7 @@ namespace ODIA::search
     params_.validate();
     if (std::filesystem::exists(out_ids) || std::filesystem::is_symlink(out_ids))
     { throw std::runtime_error("refusing to overwrite existing output: " + out_ids); }
+    output_dir_ = std::filesystem::absolute(out_ids).parent_path();
     const auto started = Clock::now();
     json timing = json::object();
     json warnings = json::array();
@@ -248,7 +254,7 @@ namespace ODIA::search
 
     json search = {
       {"experimental", true},
-      {"settings", json::parse(params_.toJson())},
+      {"settings", json::parse(params_.toJson(false))},
       {"candidates", selectionJson(st)},
       {"run", run_json},
       {"calibration", calibration_json},
@@ -257,12 +263,15 @@ namespace ODIA::search
       {"entrapment", entrapmentJson(outcome)},
       {"selftest", selftestJson(outcome)}};
     // The report carries everything that is a function of the inputs and
-    // settings, and nothing that is not (timings, threads, paths of this machine).
+    // settings, and nothing that is not (timings, threads, chunking, paths of
+    // this machine): the same search at any -threads or search:chunk writes
+    // the same bytes. The provenance sidecar gets the full settings.
     const json embedded = {{"tool", "DIALibGen"}, {"tool_version", tool_version},
                            {"producer", "DIALibGen built-in identification (-run); DIA-NN column names as a compatibility "
                                         "dialect, not a DIA-NN result"},
                            {"search", search}};
     ReportWriter::write(out_ids, run.name, rows, {{"odia.identifier", embedded.dump()}});
+    search["settings"] = json::parse(params_.toJson(true));
     timing["report"] = since(t);
     timing["total"] = since(started);
     info("search report: " + std::to_string(rows.size()) + " precursors (" + std::to_string(result.report_targets) + " targets, " +

@@ -79,9 +79,9 @@ namespace ODIA::search
     if (threads < 1) { fail("threads must be at least 1"); }
   }
 
-  std::string SearchParams::toJson() const
+  std::string SearchParams::toJson(bool execution) const
   {
-    const nlohmann::json j = {
+    nlohmann::json j = {
       {"candidates", candidates},
       {"subset", subset},
       {"max_pairs", max_pairs},
@@ -110,6 +110,10 @@ namespace ODIA::search
       {"identification_q", identification_q},
       {"decoy_ratio_band", {decoy_ratio_low, decoy_ratio_high}},
       {"min_assay_fragments", min_assay_fragments}};
+    if (!execution)
+    {
+      for (const char* key : {"chunk", "batch_size", "readoptions", "cache_dir"}) { j.erase(key); }
+    }
     return j.dump();
   }
 }

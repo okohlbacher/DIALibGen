@@ -118,7 +118,10 @@ namespace ODIA::search
   protected:
     // ---- seams: src/search/RunStages.cpp ------------------------------------
     /// Load @p path (search:readoptions, search:cache_dir): swap reversed 1/K0
-    /// window limits, detect diaPASEF, record the scratch directory.
+    /// window limits, detect diaPASEF, record the scratch directory. Auto
+    /// caches runs above 3 GB; the cache directory is created under
+    /// search:cache_dir, else under scratchParent(). This version searches an
+    /// ion-mobility run by m/z and RT only, and says so.
     virtual RunData loadRun(const std::string& path);
     /// Calibrate RT (and 1/K0) on seed assays -- targets of @p set, or kit
     /// peptides found in @p library (which is the unmodified input) -- with the
@@ -135,8 +138,15 @@ namespace ODIA::search
     void info(const std::string& message) const;
     void warn(const std::string& message) const;
 
+    /// Where a cache-mode load puts its scratch directory when search:cache_dir
+    /// is empty: the directory of -out_ids (set by identify()), which is where
+    /// the user already expects large files; the system temporary directory
+    /// when the loader runs outside identify().
+    std::filesystem::path scratchParent() const;
+
   private:
     SearchParams params_;
     Log info_, warn_;
+    std::filesystem::path output_dir_;
   };
 }

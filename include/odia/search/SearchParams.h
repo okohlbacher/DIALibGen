@@ -21,7 +21,7 @@ namespace ODIA::search
   /// How the run is held while it is searched (`search:readoptions`).
   enum class ReadMode
   {
-    Auto,     ///< cache for large or ion-mobility runs, normal otherwise (the loader decides)
+    Auto,     ///< cache for runs above 3 GB, normal otherwise (the loader decides)
     Normal,   ///< the whole run in memory
     Cache     ///< per-window cache files in search:cache_dir, read back on demand
   };
@@ -79,7 +79,7 @@ namespace ODIA::search
 
     // ---- run input -----------------------------------------------------------
     ReadMode readoptions = ReadMode::Auto;
-    /// Where cache files go; empty = the system temporary directory.
+    /// Where cache files go; empty = the directory of -out_ids.
     std::string cache_dir;
 
     // ---- scoring and run-level guards -----------------------------------------
@@ -117,8 +117,12 @@ namespace ODIA::search
     /// Throws std::invalid_argument naming the first bad setting.
     void validate() const;
 
-    /// The settings as a JSON object (for the provenance and the report metadata).
-    std::string toJson() const;
+    /// The settings as a JSON object. With @p execution false it leaves out the
+    /// settings that decide how the search runs but must not change what it
+    /// finds -- chunk, batch_size, readoptions (the mode actually used is
+    /// recorded with the run) and cache_dir (a path of this machine) -- which
+    /// is what the report embeds; the provenance sidecar gets everything.
+    std::string toJson(bool execution = true) const;
   };
 
   /// Thrown by a run-level guard. The message always carries the counts.

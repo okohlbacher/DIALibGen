@@ -270,7 +270,7 @@ namespace ODIA::search
       calibration = calibrate(library, set, run);
       timing["calibrate"] = since(t);
       calibration_json = {{"seeds", calibration.seeds}, {"points", calibration.points}, {"rsq", num(calibration.rsq)},
-                          {"coverage", num(calibration.coverage)}, {"bootstrap", calibration.bootstrap},
+                          {"points_per_seed", num(calibration.coverage)}, {"bootstrap", calibration.bootstrap},
                           {"rt_window_s", num(calibration.rt_window)}, {"mz_ppm", num(calibration.mz_ppm)},
                           {"ms1_mz_ppm", num(calibration.ms1_mz_ppm)}, {"im_window", num(calibration.im_window)},
                           {"detail", object(calibration.provenance_json)}};
@@ -353,7 +353,9 @@ namespace ODIA::search
     search["report"] = {{"path", std::filesystem::absolute(out_ids).string()}, {"rows", rows.size()},
                         {"targets", result.report_targets}, {"decoys", result.report_decoys}, {"max_q", params_.report_max_q}};
     search["warnings"] = warnings;
-    search["resources"] = {{"threads", params_.threads}, {"seconds", timing}};
+    search["resources"] = {{"threads", params_.threads},
+                           {"openswath_threads", std::min(params_.threads, SearchParams::openswath_max_threads)},
+                           {"seconds", timing}};
     result.provenance_json = search.dump();
     return result;
   }

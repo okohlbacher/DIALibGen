@@ -125,6 +125,10 @@ namespace ODIA::search
     /// Fewest transitions a search assay may have, for targets and decoys alike
     /// (the generator's own floor).
     static constexpr std::size_t min_assay_fragments = 3;
+    /// The most OpenMP threads a stock OpenSWATH call (calibration, extraction)
+    /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
+    /// a process-wide lock, and more threads only spin (see RunStages.cpp).
+    static constexpr int openswath_max_threads = 8;
 
     /// Throws std::invalid_argument naming the first bad setting.
     void validate() const;

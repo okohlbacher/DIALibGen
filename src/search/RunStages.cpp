@@ -55,6 +55,10 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -147,13 +151,51 @@ namespace ODIA::search
     };
 
     /// Both standard streams: stock extraction and calibration print per-window
-    /// progress to std::cout and "Detected N empty chromatograms" to std::cerr;
-    /// the Swath loader prints "Read chromatogram while reading SWATH files" to
-    /// std::cerr once per chromatogram in the file.
+    /// progress to std::cout. Only std::cout and std::cerr are silenced: lines
+    /// that stock OpenMS writes through its own log streams ("Detected N empty
+    /// chromatograms", "N spectra and 0 chromatograms stored", "Read
+    /// chromatogram while reading SWATH files") or with printf (the m/z
+    /// regression parameters) still reach the console, and the printf cannot
+    /// be silenced portably.
     struct QuietStreams
     {
       Quiet out{std::cout};
       Quiet err{std::cerr};
+    };
+
+    /// The OpenMP team for one stock OpenSWATH call, restored afterwards. Stock
+    /// 3.5.0 scores every feature through MetaInfo::setValue/getValue, which
+    /// take a process-wide critical section (MetaInfoRegistry); above about
+    /// eight threads the team mostly spins on it. Measured on an Astral slice
+    /// (40,000 pairs): extraction 108 s at 4 threads, 62-64 s at 8, 57 s at 16
+    /// and 94-106 s at 32, with 3x the CPU of 16. The result does not depend on it.
+    class ThreadCap
+    {
+    public:
+      explicit ThreadCap(int cap)
+      {
+#ifdef _OPENMP
+        previous_ = omp_get_max_threads();
+        used_ = std::max(1, std::min(previous_, cap));
+        omp_set_num_threads(used_);
+#else
+        (void)cap;
+#endif
+      }
+      ~ThreadCap()
+      {
+#ifdef _OPENMP
+        omp_set_num_threads(previous_);
+#endif
+      }
+      ThreadCap(const ThreadCap&) = delete;
+      ThreadCap& operator=(const ThreadCap&) = delete;
+      int used() const { return used_; }
+      int requested() const { return previous_; }
+
+    private:
+      int previous_ = 1;
+      int used_ = 1;
     };
 
     std::string fixed(double v, int digits)
@@ -594,12 +636,19 @@ namespace ODIA::search
         pool.compounds.push_back(std::move(c));
         pool.transitions.push_back(std::move(t));
       }
-      if (pool.compounds.size() >= 3)
+      // The sampler keeps the top share first and only then needs three
+      // candidates (it throws below that): pools under ceil(3 / top share)
+      // contribute no sampled seeds, and the calibration guard below says so.
+      if (static_cast<double>(pool.compounds.size()) * seed_top_fraction >= 3.0)
       {
-        QuietStreams quiet;
-        const OpenSwath::LightTargetedExperiment sampled = OpenMS::OpenSwathHelper::sampleExperiment(
-          pool, seed_bins, seeds_per_bin, seed_sampling_seed, true, seed_top_fraction);
-        for (const auto& c : sampled.compounds) { picked.push_back(index_of.at(c.id)); }
+        try
+        {
+          QuietStreams quiet;
+          const OpenSwath::LightTargetedExperiment sampled = OpenMS::OpenSwathHelper::sampleExperiment(
+            pool, seed_bins, seeds_per_bin, seed_sampling_seed, true, seed_top_fraction);
+          for (const auto& c : sampled.compounds) { picked.push_back(index_of.at(c.id)); }
+        }
+        catch (const std::exception& e) { detail["seed_sampling_failure"] = e.what(); }
       }
       detail["seed_candidates"] = pool.compounds.size();
     }
@@ -633,6 +682,7 @@ namespace ODIA::search
         OpenMS::TransformationDescription im_trafo;
         const Param ff = featureFinderParam(false, false);
         const OpenMS::ChromExtractParams cp_irt = chromParams(calibration_mz_ppm, -1.0, -1.0);
+        const ThreadCap team(SearchParams::openswath_max_threads);
         QuietStreams quiet;
         // pasef false: this version searches ion-mobility runs by m/z and RT only.
         cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
@@ -645,10 +695,16 @@ namespace ODIA::search
       catch (const std::exception& e)
       {
         failure = std::string("performRTNormalization failed: ") + e.what();
-        // The stock binned-coverage check (8 of 10 library-RT bins) fails
-        // on runs that cover part of the gradient only, such as a slice.
+        // The stock binned-coverage check (8 of 10 library-RT bins) fails when
+        // too few seeds are found across the library's RT range: a run that
+        // covers part of the gradient only (a slice), or a library that does
+        // not match the run. Nothing here can tell the two apart.
         if (failure.find("not enough bins") != std::string::npos)
-        { failure += " -- calibration points must cover most of the library RT range, which a partial run (a slice) cannot"; }
+        {
+          failure += " -- the seeds found in the run do not cover most of the library RT range: either the run covers "
+                     "only part of the gradient (a slice), or the library does not match the run (organism, "
+                     "modifications, a different gradient)";
+        }
       }
     }
 
@@ -840,6 +896,13 @@ namespace ODIA::search
       {
         OpenMS::FeatureMap features;
         {
+          const ThreadCap team(SearchParams::openswath_max_threads);
+          if (c == 0 && team.used() < team.requested())
+          {
+            info("search extraction: OpenSWATH runs on " + std::to_string(team.used()) + " of the " +
+                 std::to_string(team.requested()) + " threads; stock OpenSWATH does not scale beyond " +
+                 std::to_string(SearchParams::openswath_max_threads));
+          }
           QuietStreams quiet;
           workflow.performExtraction(run.maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
                                      &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);

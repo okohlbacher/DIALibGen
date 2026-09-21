@@ -77,6 +77,9 @@ namespace ODIA::search
     std::size_t seeds = 0;       ///< seed assays searched
     std::size_t points = 0;      ///< points the RT model was fitted to
     double rsq = std::numeric_limits<double>::quiet_NaN();
+    /// points / seeds, recorded as points_per_seed. Not what
+    /// search:calibration_min_coverage bounds: that is the share of the FOUND
+    /// seeds the stock outlier removal must keep.
     double coverage = std::numeric_limits<double>::quiet_NaN();
     bool bootstrap = false;      ///< search:allow_bootstrap was USED (calibration had failed)
     /// Anything else for the provenance, as a JSON object; may be empty.

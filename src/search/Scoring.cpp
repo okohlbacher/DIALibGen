@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -172,7 +173,14 @@ namespace ODIA::search
       peptide[g] = it->second;
       protein[g] = std::string(set.proteinGroup(i));
     }
-    const auto peptides = odia::core::entityQValues(out.scored, peptide, false);
+    // Peptides and protein groups alike: picked competition between a key's
+    // target and decoy entity (ties to the decoy), q = (D + 1) / T -- the
+    // precursor level's estimator one level up. A pooled ranking would count
+    // every decoy of a PRESENT target: with fixed termini a decoy shares
+    // b(n-1)/y(n-1) with its target and lights up with it, then loses its
+    // pair, and in a pooled list still counts as a false discovery (measured:
+    // 375 of 825 precursor identifications passed the pooled peptide gate).
+    const auto peptides = odia::core::entityQValues(out.scored, peptide, true);
     const auto proteins = odia::core::entityQValues(out.scored, protein, true);
     out.peptide_q = peptides.group_qvalue;
     out.protein_q = proteins.group_qvalue;
@@ -208,11 +216,45 @@ namespace ODIA::search
                                " at nominal 1% (" + std::to_string(trapped) + " entrapment of " + std::to_string(reported) + " identified)"); }
     }
 
-    if (diag.pooled_vs_paired > SearchParams::pooled_vs_paired_warn || diag.pooled_vs_paired < 1.0 / SearchParams::pooled_vs_paired_warn)
+    // The pooled estimator ranks losers too. Below the paired count is the
+    // expected direction (decoys of present targets share fragments with them
+    // and score high while losing their pair); ABOVE it means targets lose
+    // pairs they should win, which is worth a warning.
+    if (diag.pooled_vs_paired > SearchParams::pooled_vs_paired_warn)
     {
-      out.warnings.push_back("pooled and paired precursor FDR disagree: " + std::to_string(diag.pooled_targets_at_q) + " vs " +
-                             std::to_string(diag.targets_at_q) + " identifications at q <= 0.01; the pairs may not behave as "
-                             "exchangeable target-decoy pairs");
+      out.warnings.push_back("the pooled precursor estimate identifies " + std::to_string(diag.pooled_targets_at_q) +
+                             " targets at q <= 0.01, more than " + fixed(SearchParams::pooled_vs_paired_warn, 0) +
+                             "x the paired " + std::to_string(diag.targets_at_q) + ": targets lose pair competitions they "
+                             "should win (decoys too close to their targets?)");
+    }
+
+    // Null-pair balance: among complete pairs whose winner scores in the lowest
+    // share of all winners -- pairs where nothing is present -- targets and
+    // decoys must win about equally often. The self-checks below cannot see a
+    // decoy set that is weaker than null targets by construction; this can.
+    {
+      std::unordered_map<std::int64_t, int> members;
+      for (const auto& gr : result) { ++members[gr.pair]; }
+      std::vector<std::pair<double, bool>> winners;   // (score, is_decoy)
+      for (const auto& gr : result)
+      {
+        if (gr.winner && members[gr.pair] == 2) { winners.emplace_back(gr.score, gr.is_decoy); }
+      }
+      std::sort(winners.begin(), winners.end(), [](const auto& a, const auto& b) {
+        return a.first != b.first ? a.first < b.first : a.second < b.second;
+      });
+      const auto low = static_cast<std::size_t>(std::floor(SearchParams::null_balance_fraction * static_cast<double>(winners.size())));
+      for (std::size_t k = 0; k < low; ++k) { (winners[k].second ? out.null_decoys : out.null_targets)++; }
+      const double t = static_cast<double>(out.null_targets), d = static_cast<double>(out.null_decoys);
+      out.null_ratio = d > 0 ? t / d : std::numeric_limits<double>::quiet_NaN();
+      out.null_z = (t + d) > 0 ? (t - d) / std::sqrt(t + d) : 0.0;
+      if (std::fabs(out.null_z) > SearchParams::null_balance_warn_z)
+      {
+        out.warnings.push_back("null-pair balance: in the lowest " + fixed(100.0 * SearchParams::null_balance_fraction, 0) +
+                               " % of pair winners, targets won " + std::to_string(out.null_targets) + " and decoys " +
+                               std::to_string(out.null_decoys) + " (z " + fixed(out.null_z, 1) + "); null targets and their decoys "
+                               "are not exchangeable, and the FDR is " + (out.null_z > 0 ? "UNDERestimated" : "overestimated"));
+      }
     }
     if (diag.folds_unscaled > 0)
     { out.warnings.push_back(std::to_string(diag.folds_unscaled) + " cross-validation fold(s) could not be rescaled (too few precursors)"); }
@@ -227,7 +269,9 @@ namespace ODIA::search
       for (auto& d : swapped.is_decoy) { d = d ? 0 : 1; }
       out.selftest_label_swap_ids = odia::core::scoreAndControl(swapped, options).diagnostics.targets_at_q;
       // Random labels: each pair's two labels exchanged on a fair coin. Targets
-      // and decoys are then exchangeable by construction -- a pure null.
+      // and decoys are then exchangeable by construction, so this checks the
+      // classifier and the estimator -- not the decoys, whose construction it
+      // symmetrises away (the null-pair balance above is the check for that).
       odia::core::ScoreTable shuffled = groups.scores;
       for (std::size_t r = 0; r < shuffled.rows(); ++r)
       {

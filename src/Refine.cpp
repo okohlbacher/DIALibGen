@@ -323,8 +323,10 @@ void DIALibGen::registerRefinementOptions_()
     setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
     registerStringOption_("search:entrapment_tag", "<prefix>", "", "Protein-group prefix of entrapment proteins: log and record "
                           "the combined entrapment FDP estimate. A validation aid", false);
-    registerFlag_("search:selftest", "Also score with swapped and with random pair labels, and abort unless both identify "
-                                     "(almost) nothing");
+    registerStringOption_("search:selftest", "<true/false>", "true", "Also score with swapped and with random pair labels, "
+                          "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
+                          "decoys that are built weaker than null targets", false);
+    setValidStrings_("search:selftest", {"true", "false"});
     registerIntOption_("search:batch_size", "<n>", 500, "Advanced: transitions per extraction batch", false);
     registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together", false);
     for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
@@ -374,7 +376,7 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.max_target_fraction = getDoubleOption_("search:max_target_fraction");
     s.report_max_q = getDoubleOption_("search:report_max_q");
     s.entrapment_tag = getStringOption_("search:entrapment_tag");
-    s.selftest = getFlag_("search:selftest");
+    s.selftest = getStringOption_("search:selftest") == "true";
     s.threads = std::max(1, getIntOption_("threads"));
     s.validate();
     return s;

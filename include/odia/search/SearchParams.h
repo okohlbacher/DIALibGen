@@ -94,8 +94,11 @@ namespace ODIA::search
     double report_max_q = 0.10;
     /// Protein-group prefix marking entrapment proteins; empty = no entrapment estimate.
     std::string entrapment_tag;
-    /// Also run the label-swap and random-label self-checks, aborting on failure.
-    bool selftest = false;
+    /// Also run the label-swap and random-label self-checks, aborting on
+    /// failure (validation gate (e): on every run). They catch a classifier
+    /// that leaks labels; decoys built weaker than null targets they cannot
+    /// see -- that is what the null-pair balance diagnostic is for.
+    bool selftest = true;
 
     /// Threads for extraction and the classifier's folds (TOPP -threads).
     int threads = 1;
@@ -109,9 +112,15 @@ namespace ODIA::search
     /// this band the pairing or the extraction is broken and the FDR meaningless.
     static constexpr double decoy_ratio_low = 0.8;
     static constexpr double decoy_ratio_high = 1.25;
-    /// Pooled vs paired identification count ratio beyond which the provenance
-    /// carries a warning (the pairs do not behave as exchangeable).
+    /// Pooled vs paired identification count ratio ABOVE which the provenance
+    /// carries a warning. Below 1 is expected: the pooled estimator also counts
+    /// decoys that light up with their present target and lose their pair.
     static constexpr double pooled_vs_paired_warn = 2.0;
+    /// The null-pair balance looks at the lowest this share of pair winners ...
+    static constexpr double null_balance_fraction = 0.25;
+    /// ... and warns when targets and decoys win there more unevenly than this
+    /// many binomial standard deviations.
+    static constexpr double null_balance_warn_z = 3.0;
     /// Fewest transitions a search assay may have, for targets and decoys alike
     /// (the generator's own floor).
     static constexpr std::size_t min_assay_fragments = 3;

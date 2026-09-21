@@ -63,7 +63,10 @@ namespace ODIA::search
         {"cells_imputed", d.cells_imputed}, {"folds", d.n_folds}, {"iterations_trained", d.iterations_trained},
         {"iterations_skipped", d.iterations_skipped}, {"folds_unscaled", d.folds_unscaled},
         {"target_winners", d.target_winners}, {"decoy_winners", d.decoy_winners},
-        {"estimator", "concatenated pair competition, q = (D + 1) / T"}};
+        {"estimator", "concatenated pair competition, q = (D + 1) / T; peptides and protein groups by picked competition"},
+        {"null_balance", {{"fraction", SearchParams::null_balance_fraction}, {"targets", o.null_targets},
+                          {"decoys", o.null_decoys}, {"ratio", num(o.null_ratio)}, {"z", num(o.null_z)},
+                          {"warn_z", SearchParams::null_balance_warn_z}}}};
       return j;
     }
 
@@ -302,7 +305,8 @@ namespace ODIA::search
          std::to_string(d.decoys_at_q) + " decoys; pooled estimate " + std::to_string(d.pooled_targets_at_q) + "), " +
          std::to_string(outcome.peptides_at_q) + " peptides, " + std::to_string(outcome.proteins_at_q) + " protein groups; " +
          std::to_string(d.features_used.size()) + " sub-scores, " + std::to_string(d.iterations_trained) +
-         " iterations trained (" + seconds(timing["score"].get<double>()) + ")");
+         " iterations trained; null-pair balance " + std::to_string(outcome.null_targets) + " : " +
+         std::to_string(outcome.null_decoys) + " (" + seconds(timing["score"].get<double>()) + ")");
     if (outcome.selftest)
     {
       info("search self-check: label swap " + std::to_string(outcome.selftest_label_swap_ids) + ", random pair labels " +

@@ -45,6 +45,11 @@ namespace
     /// MS2 isolation windows the run reports; none = a run without maps.
     std::vector<std::pair<double, double>> windows;
     bool fail_calibration = false;
+    /// Decoys of present targets carry this share of the signal: they light up
+    /// with their target (shared fragments) and lose their pair.
+    float lit_decoys = 0.0f;
+    /// Added to every decoy sub-score: decoys built weaker (< 0) than null targets.
+    float decoy_shift = 0.0f;
   };
 
   /// A spectrum source that records, when it is destroyed (the run's cache
@@ -131,6 +136,7 @@ namespace
         if (set.isDecoy(n) && !plan_.decoys) { continue; }
         const bool signal = isPresent(set, n);
         present += signal ? 1 : 0;
+        const bool lit = set.isDecoy(n) && isPresent(set, set.partnerOf(n));
         const double apex_min = 5.0 + 0.3 * set.library.precursors().irt[n];
         for (int f = 0; f < 3; ++f)
         {
@@ -139,6 +145,8 @@ namespace
           float v[8];
           for (float& x : v) { x = noise(rng); }
           if (signal && f == 0) { for (int c = 0; c < 6; ++c) { v[c] += plan_.signal; } }
+          if (lit && f == 0) { for (int c = 0; c < 6; ++c) { v[c] += plan_.lit_decoys * plan_.signal; } }
+          if (set.isDecoy(n)) { for (int c = 0; c < 6; ++c) { v[c] += plan_.decoy_shift; } }
           const float apex = static_cast<float>(apex_min * 60.0) + 20.0f * static_cast<float>(f);
           out.add(set, n, f, v, apex, apex - 6.0f, apex + 6.0f, std::nanf(""));
         }
@@ -206,7 +214,11 @@ int main(int argc, char** argv)
   CHECK(prov["report"]["rows"] == result.report_rows);
   CHECK(prov["settings"]["decoys"] == "shuffle");
   CHECK(prov["scoring"]["iterations_trained"].get<int>() > 0);
-  CHECK(prov["selftest"].is_null() && prov["entrapment"].is_null());
+  CHECK(!prov["selftest"].is_null() && prov["entrapment"].is_null());   // self-checks run by default
+  // An exchangeable null: the lowest-scoring pair winners split about evenly.
+  std::cout << "null-pair balance: " << prov["scoring"]["null_balance"].dump() << "\n";
+  CHECK(std::fabs(prov["scoring"]["null_balance"]["z"].get<double>()) <= 3.0);
+  CHECK(prov["scoring"]["null_balance"]["targets"].get<std::size_t>() + prov["scoring"]["null_balance"]["decoys"].get<std::size_t>() > 100);
   CHECK(prov["run"]["read_mode"] == "synthetic");
   CHECK(prov["calibration"]["rsq"] == 0.99);
 
@@ -258,6 +270,28 @@ int main(int argc, char** argv)
     CHECK(j["scoring"]["features_excluded"] == json::array({"var_norm_rt_score"}));
   }
 
+  // ---- 3a. decoys that light up with their present target --------------------------
+  // With fixed termini a decoy shares fragments with its target, so the decoy
+  // of a PRESENT target scores high and loses its pair. The peptide level
+  // (Global.Q.Value, refine's q_global gate) must not count it as a false
+  // discovery: refine's three gates keep (nearly) every precursor identification.
+  {
+    Plan lit;
+    lit.lit_decoys = 0.3f;
+    const fs::path out = dir / "lit.ids.parquet";
+    SyntheticRun r(params(1), lit);
+    const auto res = r.identify(lib, "synthetic.mzML", out.string(), "test");
+    ODIA::RefineParams p;
+    ODIA::RefineStats st;
+    (void)ODIA::LibraryRefiner::readObservations(out.string(), p, st);
+    const json j = json::parse(res.provenance_json);
+    std::cout << "lit decoys: " << res.identified << " precursors at q <= 0.01, " << st.ids_passing
+              << " pass refine's precursor, peptide and protein gates; peptides at q <= 0.01: "
+              << j["identifications"]["peptides"] << "\n";
+    CHECK(res.identified >= 100);
+    CHECK(static_cast<double>(st.ids_passing) >= 0.9 * static_cast<double>(res.identified));
+  }
+
   // ---- 3b. candidates outside every isolation window are never searched ---------
   {
     Plan windowed;
@@ -279,6 +313,25 @@ int main(int argc, char** argv)
     for (std::size_t k = 0; k < set.pairs(); ++k)
     { CHECK(CandidateSelector::inWindow(ODIA::fromFixed(set.library.precursors().mz[k]), iw)); }
     CHECK(set.pairs() == j["candidates"]["pairs"].get<std::size_t>());
+  }
+
+  // ---- 3c. decoys built weaker than null targets are reported --------------------
+  // The self-checks symmetrise the labels and cannot see this; the null-pair
+  // balance can.
+  {
+    Plan weak;
+    weak.decoy_shift = -0.5f;
+    SearchParams p = params(1);
+    p.max_target_fraction = 1.0;   // weak decoys pass null targets: that guard would fire first
+    SyntheticRun r(p, weak);
+    const auto res = r.identify(lib, "synthetic.mzML", (dir / "weak.ids.parquet").string(), "test");
+    const json j = json::parse(res.provenance_json);
+    std::cout << "weak decoys: null-pair balance " << j["scoring"]["null_balance"].dump() << ", self-check "
+              << j["selftest"].dump() << "\n";
+    CHECK(j["scoring"]["null_balance"]["z"].get<double>() > 3.0);
+    bool warned = false;
+    for (const auto& w : j["warnings"]) { warned = warned || w.get<std::string>().find("null-pair balance") != std::string::npos; }
+    CHECK(warned);
   }
 
   // ---- 4. every guard aborts with counts, writes nothing, cleans up ----------------

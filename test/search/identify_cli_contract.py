@@ -87,9 +87,10 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     refused('has no effect in -mode generate', '-mode', 'generate', '-out_ids', root / 'x.parquet', '-write_config', fresh('.json'))
     for mode in ('refine', 'tune'):
         refused('-search:seed has no effect without -run', '-mode', mode, '-search:seed', 7, '-write_config', fresh('.json'))
-        refused('-search:selftest has no effect without -run', '-mode', mode, '-search:selftest', '-write_config', fresh('.json'))
+        refused('-search:selftest has no effect without -run', '-mode', mode, '-search:selftest', 'false',
+                '-write_config', fresh('.json'))
         refused('-out_ids has no effect without -run', '-mode', mode, '-out_ids', root / 'x.parquet', '-write_config', fresh('.json'))
-        run('-mode', mode, '-run', mzml, '-search:seed', 7, '-search:selftest', '-out_ids', root / 'x.parquet',
+        run('-mode', mode, '-run', mzml, '-search:seed', 7, '-search:selftest', 'false', '-out_ids', root / 'x.parquet',
             '-write_config', fresh('.json'))
     run('-mode', 'refine', '-tune', '-run', mzml, '-search:max_pairs', 10, '-write_config', fresh('.json'))
 

@@ -7,10 +7,17 @@
 /// Precursor level: semi-supervised LDA over the sub-scores, the best peak
 /// group per precursor, concatenated target-decoy competition within each
 /// structural pair (ties to the decoy), q = (D + 1) / T. Peptide level
-/// (Global.Q.Value): best precursor per canonical modified sequence, pooled.
-/// Protein level (PG.Q.Value): best precursor per Protein.Group string, picked
-/// competition. A decoy is keyed by its target's sequence and protein group,
-/// so target and decoy entities pair structurally at every level.
+/// (Global.Q.Value): best precursor per canonical modified sequence; protein
+/// level (PG.Q.Value): best precursor per Protein.Group string; both by picked
+/// competition with the same estimator. A decoy is keyed by its target's
+/// sequence and protein group, so target and decoy entities pair structurally
+/// at every level.
+///
+/// Diagnostics, never gates: the pooled precursor estimate (no competition;
+/// conservative when decoys of present targets light up with them), and the
+/// null-pair balance -- targets vs decoys among the lowest-scoring pair
+/// winners, which must be about even when decoys are exchangeable with null
+/// targets.
 #pragma once
 
 #include <odia/search/CandidateSelector.h>
@@ -75,6 +82,13 @@ namespace ODIA::search
     bool entrapment = false;             ///< search:entrapment_tag was set
     odia::core::EntrapmentEstimate entrapment_estimate;
     std::size_t entrapment_shared = 0;   ///< identified targets whose group mixes tagged and untagged proteins (left out)
+
+    /// Null-pair balance: winners of complete pairs in the lowest
+    /// SearchParams::null_balance_fraction of winning scores, by class.
+    std::size_t null_targets = 0;
+    std::size_t null_decoys = 0;
+    double null_ratio = 0.0;             ///< null_targets / null_decoys (NaN without decoys)
+    double null_z = 0.0;                 ///< (T - D) / sqrt(T + D); > 0: decoys weaker than null targets
 
     bool selftest = false;               ///< search:selftest ran
     std::size_t selftest_label_swap_ids = 0;

@@ -102,9 +102,9 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
 | `-search:candidates` | string | `random` | random | Candidate selection: random = a deterministic, label-blind random subset of target-decoy pairs |
-| `-search:subset` | int | `100000` | 0: | Targets drawn from the library (0 = every eligible target) |
-| `-search:max_pairs` | int | `40000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap) |
-| `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse,reverse | How the search's in-memory decoys are built from the selected targets. Decoys in the library file are not searched and stay in the output |
+| `-search:subset` | int | `0` | 0: | Targets drawn from the library before the cap (0 = every eligible target) |
+| `-search:max_pairs` | int | `200000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap). Identifications scale with the share of the library present in the run, so a whole-proteome library may need more pairs for tuning's 100-unit cohorts |
+| `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse | How the search's in-memory decoys are built from the selected targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output |
 | `-search:seed` | int | `42` | 0: | Salt of the candidate draw: changes which pairs are searched, not how |
 | `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
 | `-search:rt_window` | double | `0.0` | 0.0: | Full RT extraction window, seconds (0 = from the calibration) |
@@ -118,9 +118,9 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = cache for runs above 3 GB |
 | `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the directory of -out_ids); they are removed after the search |
 | `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
-| `-search:max_target_fraction` | double | `0.5` | 0.0:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
+| `-search:max_target_fraction` | double | `0.5` | 0.01:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
 | `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |
 | `-search:entrapment_tag` | string | (empty) |  | Protein-group prefix of entrapment proteins: log and record the combined entrapment FDP estimate. A validation aid |
-| `-search:selftest` | bool | `false` |  | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing |
-| `-search:batch_size` | int | `500` | 1: | Advanced: transitions per extraction batch |
-| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together |
+| `-search:selftest` | string | `true` | true,false | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not decoys that are built weaker than null targets |
+| `-search:batch_size` | int | `500` | 1: | Advanced: precursors per extraction batch within one isolation window |
+| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Chunks are m/z-contiguous and OpenSWATH parallelises over isolation windows, so a small chunk leaves threads idle; it bounds extraction memory only, not the calibration's |

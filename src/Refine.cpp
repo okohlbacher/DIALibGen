@@ -283,8 +283,10 @@ void DIALibGen::registerRefinementOptions_()
     registerStringOption_("search:candidates", "<rule>", "random", "Candidate selection: random = a deterministic, label-blind "
                           "random subset of target-decoy pairs", false);
     setValidStrings_("search:candidates", {"random"});
-    registerIntOption_("search:subset", "<n>", 100000, "Targets drawn from the library (0 = every eligible target)", false);
-    registerIntOption_("search:max_pairs", "<n>", 40000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap)", false);
+    registerIntOption_("search:subset", "<n>", 0, "Targets drawn from the library before the cap (0 = every eligible target)", false);
+    registerIntOption_("search:max_pairs", "<n>", 200000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no "
+                       "cap). Identifications scale with the share of the library present in the run, so a whole-proteome "
+                       "library may need more pairs for tuning's 100-unit cohorts", false);
     registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
                           "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
     setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
@@ -328,7 +330,9 @@ void DIALibGen::registerRefinementOptions_()
                           "decoys that are built weaker than null targets", false);
     setValidStrings_("search:selftest", {"true", "false"});
     registerIntOption_("search:batch_size", "<n>", 500, "Advanced: precursors per extraction batch within one isolation window", false);
-    registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together", false);
+    registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together. "
+                       "Chunks are m/z-contiguous and OpenSWATH parallelises over isolation windows, so a small chunk leaves "
+                       "threads idle; it bounds extraction memory only, not the calibration's", false);
     for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
     setMinInt_("search:batch_size", 1);
     setMinInt_("search:chunk", 2);

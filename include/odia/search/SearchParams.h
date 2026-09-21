@@ -42,11 +42,17 @@ namespace ODIA::search
     /// Candidate selection. Only "random" exists in this version: a
     /// deterministic, paired, label-blind random subset of the library's targets.
     std::string candidates = "random";
-    /// Targets drawn by the random selection; 0 = every eligible target.
-    std::size_t subset = 100000;
+    /// Targets drawn by the random selection before the cap; 0 = every
+    /// eligible target.
+    std::size_t subset = 0;
     /// Cap on target-decoy pairs after selection; 0 = no cap. Search time is
-    /// linear in pairs.
-    std::size_t max_pairs = 40000;
+    /// linear in pairs, identifications in the share of the library present
+    /// in the run. Measured on a 6.4 GB Orbitrap Astral run with a library of
+    /// which DIA-NN identified 2.9 % (8 threads): 40,000 pairs gave 1,045
+    /// identifications (tuning's validation cohort 93 units, below its floor
+    /// of 100), 100,000 gave 2,804 (250) in 9 min, 200,000 gave 5,821 (454)
+    /// in 20 min at 4.5 GB peak.
+    std::size_t max_pairs = 200000;
     /// How the in-memory search decoys are built (decoys already in the library
     /// file are ignored by the search and left untouched).
     DecoyMethod decoys = DecoyMethod::Shuffle;

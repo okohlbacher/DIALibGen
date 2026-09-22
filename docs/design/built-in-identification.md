@@ -39,7 +39,9 @@ builds on all five platforms without patches.
 - TOPP subsection `search:` with, among others: `candidates evidence|random`
   (default evidence since M3), `prefilter_depth 5`, `prefilter_top_peaks 1000`,
   `prefilter_ppm 10`, `subset` (random only), `max_pairs 200000`,
-  `decoys shuffle|pseudo_reverse`, `seed`, `passes`, `rt_window`, `mz_ppm`,
+  `decoys shuffle|pseudo_reverse`, `intensities predicted|library` (default
+  predicted since the M3 review), `instrument auto`, `nce -1`, `seed`,
+  `passes`, `rt_window`, `mz_ppm`,
   `im_window` (0 = automatic), `ms1`, `rt_im_scores`,
   `calibration_min_rsq 0.70`, `calibration_min_coverage 0.30`, `readoptions`,
   `min_ids 200`, `entrapment_tag`, `selftest true`, `chunk`, `batch_size`.
@@ -47,8 +49,12 @@ builds on all five platforms without patches.
   `-empirical_library`, `-min_fragments`, `-write_im` and `-tune_heads
   ccs|both` (M1 measures no 1/K0). Everything that would fail after the search
   (tuning recipe, models, a library without protein groups, a directory such
-  as a Bruker `.d` given as `-run`) is checked before the run is read; a
-  failure after the search keeps the report and says how to reuse it.
+  as a Bruker `.d` given as `-run`, the MS2 model that `intensities
+  predicted` needs, a library whose RT has no range) is checked before the
+  run is read; a failure after the search keeps the report and says how to
+  reuse it. The MS2 model comes from where `-tune` finds its models
+  (`-tune_models`, allowed with `-run` in `refine` for this, then
+  `$DIALIBGEN_MODEL_DIR`, then the bundled models).
 - The provenance sidecar gains `inputs.run` and a `search` block: settings,
   calibration, candidate counts, targets and decoys at each gate, resources.
   The refined Parquet library embeds it without the resources (timings,
@@ -75,12 +81,63 @@ bundles do not grow.
    default); decoys already in the file are ignored for the search and left
    untouched. The DIA-NN-derived `mutate` method is not offered, and neither
    is `reverse`, which moves the tryptic C-terminus and makes decoys separable
-   by construction. A decoy must differ from its target in fragment m/z only:
-   a target whose interior cannot be rearranged has no decoy (no residue
-   substitution as a fallback), every decoy fragment lies in the m/z range of
-   the library's target fragments, and an arrangement that reproduces the
-   target's fragment masses (I/L) is re-drawn. Each rule reads the target
-   only, so a failure removes a whole pair.
+   by construction. A target whose interior cannot be rearranged has no decoy
+   (no residue substitution as a fallback), and an arrangement that
+   reproduces the target's fragment masses (I/L) or puts one outside the
+   m/z range of the library's target fragments is re-drawn. Each rule reads
+   the target only, so a failure removes a whole pair.
+   **Both termini keep TWO residues** (the generator's own decoys keep one;
+   `SEARCH_DECOY_KEEP_NTERM`). The second residue from each end fixes the
+   short ions -- y1, y2, b1, b2 and, with the composition, y(n-1), y(n-2),
+   b(n-1), b(n-2) -- and a whole proteome shares those: every peptide ending
+   in "PK" has the same y2, and the run's spectra are full of it because
+   cleavage N-terminal to proline makes it intense in the peptides that ARE
+   there. A decoy that moves the second residue trades its target's short ion
+   for another composition, so a null pair is decided by which member drew
+   the commoner one. Measured on the Astral entrapment library, 2.69 M
+   known-absent pairs with predicted assays: keeping one residue, the deeper
+   member of a null pair was its decoy 821,653 times against the target's
+   790,097 (sign test z -25), and null targets whose second-to-last residue
+   is P beat their decoys 1.73 : 1 while the rest lost; keeping two,
+   753,786 against 753,635 (z -0.1) with every positional split flat, and the
+   present targets' excess at the full prefilter depth untouched (10,671
+   against their decoys' 4,578). Cost: a peptide of six residues or fewer has
+   no decoy (3,415 of 6.16 M eligible targets against 357).
+   **Fragments and intensities of both members (`search:intensities
+   predicted`, the default since the M3 review).** The target and its decoy
+   are each predicted by the same PeptDeep MS2 model (the instrument and NCE
+   the library recorded when DIALibGen generated it, else `search:instrument`
+   / timsTOF for an ion-mobility run / QE) from their OWN sequences, and each
+   takes its own most intense b/y fragments (charge 1 to min(2, precursor
+   charge), no loss, within the library's target fragment m/z range, the
+   generator's rank order), the same number for both: min(the target's
+   library transition count, max(3, the fewer of the two members' fragments
+   above 1e-4 of their base peak)). A pair the model cannot predict, whose
+   decoy's chosen fragments all lie within 10 ppm of the target's, or with
+   fewer than 3 fragments leaves whole. For a library DIALibGen generated
+   with the same model, the target's assay is its library assay, cut to that
+   count (a test checks it with the real model); for a library from another
+   predictor, the search's targets are the built-in model's. Why: a decoy in
+   its target's fragment slots with its target's intensities (the M1-M3 rule,
+   still `search:intensities library` for comparison) is weaker than a null
+   target. The slots were chosen by a predictor for the TARGET's sequence --
+   the compositions real peptides fragment into, Pro-directed y2/y3 ions
+   above all -- and the decoy puts random compositions into them. On the M3
+   acceptance runs, known-absent entrapment targets reached the prefilter
+   depth 1.18x (timsTOF) and 1.11x (Astral) as often as their own decoys
+   (sign tests z 81 and 79), and won 240 : 168 of the entrapment pairs
+   identified at q <= 0.01 (z 3.6; 2,594 : 2,078 at q <= 0.1): q-values about
+   1.4x too optimistic, the whole entrapment excess over nominal. The same
+   slots chosen at random or from the bottom of the ranking shrank the
+   imbalance; only each member's own prediction removes it by construction.
+   Cost: every eligible pair is predicted (about 7,000 peptides per second
+   at 16 CPU sessions), and the searched set once more. When a sample of
+   2,000 targets re-predicted by the model carries exactly its library
+   assays (a library DIALibGen generated with the same model, instrument and
+   NCE), the targets keep their library assays and only the decoys are
+   predicted -- half the work; otherwise (another predictor, rewritten
+   intensities) both members are. The check's result is logged and
+   recorded.
 2. **Run.** `SwathFile::loadMzML` (`normal` or `cache`). Ion-mobility window
    limits are normalised (lower/upper swapped where reversed, as in current
    mzpeak-convert output). diaPASEF is detected from window limits *and* a
@@ -99,9 +156,10 @@ bundles do not grow.
      every eligible target gets its search decoy computed (`searchDecoy`, the
      one function `appendSearchDecoys` is built on, so the prefilter scores
      exactly the decoy that is later searched; a test checks the m/z bit for
-     bit). Both members enter one m/z-sorted index per isolation window with
-     their 6 most intense predicted fragments, the decoy with its target's
-     slots. One sweep over the run's MS2 spectra matches each spectrum's
+     bit), and both members are predicted (above). Both members enter one
+     m/z-sorted index per isolation window with their own 6 most intense
+     predicted fragments (with `intensities library`: the target's by
+     library intensity, the decoy in the same slots). One sweep over the run's MS2 spectra matches each spectrum's
      `prefilter_top_peaks` most intense peaks at +-`prefilter_ppm`; per member
      it records the depth (distinct indexed fragments matched in one
      spectrum), the spectra reaching `prefilter_depth`, and the run time of the
@@ -116,7 +174,9 @@ bundles do not grow.
      the label; indexing every target fragment as its decoy's (a test hook)
      gives the exact swap of the evidence and the identical pair set.
    - `search:candidates random` (M1): a deterministic, paired random subset
-     (the draw hashes the key target and decoy share, so it is label-blind).
+     (the draw hashes the key target and decoy share, so it is label-blind);
+     with predicted intensities, the first `max_pairs` drawn pairs that the
+     model can predict.
 4. **Assays.** Per chunk, an `OpenSwath::LightTargetedExperiment` built directly
    from the library arrays. Never the whole library. Peptide sequences are left
    empty for targets and decoys, which makes OpenSWATH's scoring sequence-blind
@@ -127,9 +187,17 @@ bundles do not grow.
    points are refit robustly and validated (>= 20 points, r^2, slope, span).
    Failure aborts. Seeds: every iRT/CiRT kit precursor the library holds,
    plus, with evidence candidates (M3), the prefilter's seeds -- targets that
-   reach the depth THEMSELVES, one per peptide, the best (depth, spectra) of
-   each of 100 library-RT bins, at most 2,000 -- and with random candidates
-   (M1) a stock-sampled share of the searched targets. Random seeds are what
+   reach the depth THEMSELVES and beat their own decoy clearly (at least 3
+   spectra at the depth and 3x their decoy's), one per peptide, the best
+   (depth, spectra) of each of 100 bins, at most 2,000; a bin without such a
+   target stays empty -- and with random candidates (M1) a stock-sampled
+   share of the searched targets. Every seed, kit precursors included, comes
+   from the central library-RT range (the 0.1 % to 99.9 % quantiles of the
+   targets' library RT), and the 100 bins span that range: before the M3
+   review they spanned the raw minimum to maximum, so ONE library row with an
+   absurd RT cut the evidence seeds 10-fold and, if it was a seed itself,
+   failed the stock binned-coverage check and the whole search (the abort
+   message now names the seeds' and the library's RT ranges). Random seeds are what
    limited M1: on a whole-proteome library of which DIA-NN identifies 0.23 %
    of the precursors in the Astral run, 2,191 seeds gave 16 points and the
    calibration failed. The prefilter's best-spectrum RT of each seed is
@@ -137,14 +205,23 @@ bundles do not grow.
    diagnostic, not a filter). A LOWESS second fit (stock
    `TransformationModelLowess`, span chosen by cross-validation, linear
    interpolation, the line through the end points outside them, its own
-   iterative 3-sigma outlier cut on the stock points) replaces the line only
-   when at least 50 points remain, the map increases in both directions, and
-   it narrows the RT window (0.99 quantile x 1.3, doubled) to 90 % of the
-   linear one or less; both windows are recorded either way. Measured: on
-   Astral the evidence seeds gave 944 points (M1's random seeds 16) and
-   LOWESS did not narrow the window (321 s against 317 s: the residuals are
-   the predictor's scatter, not curvature); on timsTOF it did (661 s against
-   756 s). Calibration memory grows with seeds x fragments x spectra per
+   iterative 3-sigma outlier cut on the stock points, at most 10 fits)
+   replaces the line when at least 200 points remain, the map increases in
+   both directions, and it predicts held-out points better: 5-fold
+   cross-validation of both models on ONE point set (the union of both
+   inlier sets), residuals capped at 3 robust line scales, LOWESS's mean
+   error below 0.97x the line's. Until the M3 review the rule compared the
+   two RT windows (0.99 quantile of each model's own inliers): on the Astral
+   run it kept the line, which ran a median 89 s late in the top library-RT
+   decile and missed 26 % of DIA-NN's identifications there -- a bias the
+   global quantile cannot see, not "the predictor's scatter". The median
+   residual per library-RT decile of the chosen model is recorded. The RT
+   window (0.99 quantile of the residuals x 1.3, doubled, at least 30 s) is
+   never narrower than 2 x 1.3 x 2.576 robust SDs of the residuals, so a
+   0.99 quantile of 20 residuals (their maximum) cannot size it alone, and a
+   calibration on fewer than 100 points warns. Measured before the review:
+   on Astral the evidence seeds gave 944 points (M1's random seeds 16); on
+   timsTOF LOWESS narrowed the window (661 s against 756 s). Calibration memory grows with seeds x fragments x spectra per
    window (M1: 3.5 GiB on the 6.4 GB Astral run, 1.5 GiB above extraction).
 6. **Extraction.** `OpenSwathWorkflow::performExtraction` (stock 13-argument form)
    per chunk, with an inactive OSW writer and in-memory features. After each
@@ -195,16 +272,36 @@ patched-OpenMS prefilter are not ported.
   provenance as a diagnostic; "pooled below paired" is the expected direction,
   and only pooled above twice the paired count (targets losing pairs they
   should win) is a warning.
-- What tests exchangeability: the **null-pair balance**. Among complete pairs
-  whose winner is in the lowest quarter of winning scores (pairs where nothing
-  is present), targets and decoys must win about equally often; logged,
-  recorded, and a warning at |z| > 3. This assumes most candidates are null,
-  which held for random candidates and holds for the prefilter's default; a
-  much more selective prefilter (depth 6 on the Astral run: 54 % of the
-  targets identified) puts present targets into that lowest quarter, and the
-  balance then warns (z 3.2) without showing a fault (Resources, M3).
-- Entrapment (`search:entrapment_tag`, a validation aid, not a gate): the
-  combined estimator weights each entrapment identification by 1 + 1/r, r the
+- What tests exchangeability, and what does not.
+  - The **null-pair balance** is a BULK diagnostic, not the exchangeability
+    test. Among complete pairs whose winner is in the lowest quarter of
+    winning scores, targets and decoys must win about equally often; logged,
+    recorded, a warning at |z| > 3. It assumes most candidates are null
+    (depth 6 on the Astral run, 54 % of the targets identified, puts present
+    targets into that quarter: z 3.2 without a fault). And it cannot see an
+    asymmetry that grows with the score, which is where the 1 % cut falls:
+    the M3 Astral entrapment search passed it (23,676 : 24,082, z -1.9) while
+    its entrapment pairs were won 439 : 347 by the target at q <= 0.1
+    (z 3.3); on timsTOF the ratio grew into the tail (1.25 at q <= 0.1, 1.43
+    at 0.01, 2.0 at 0.001).
+  - The **entrapment winner test** is. With `search:entrapment_tag`, every
+    pair whose target is an entrapment entity is a known null pair: target
+    and decoy must win it equally often. The winners at q <= 0.01 and
+    q <= 0.1 are counted at precursor, peptide and protein-group level
+    (picked entities), recorded with their binomial z, and z > 3 at any of
+    them warns that decoys are weaker than null targets. It needs no
+    database ratio and no isomer screening, and it is a standing acceptance
+    metric of gate (a). For production runs without entrapment, a hidden
+    probe set (shuffled copies of a few percent of the targets, competing
+    with their own decoys and left out of the report) would give the same
+    check; it is not built yet.
+- Entrapment (`search:entrapment_tag`, a validation aid, not a gate): a
+  protein is entrapment when its id starts with the tag or carries it right
+  after a '|' (`sp|ENTRAP_P12345|...`, what `generate` writes; before the M3
+  review only the start counted, and the estimate silently read "no
+  estimate"), the same rule for every member of a group (all tagged: an
+  entrapment group; some: shared, left out). A tag that matches no protein
+  warns. The combined estimator weights each entrapment identification by 1 + 1/r, r the
   database ratio of entrapment to real targets. With random candidates r is
   counted over the searched pairs; with evidence candidates over the eligible
   pairs BEFORE the prefilter, which keeps present targets far more often
@@ -221,17 +318,17 @@ patched-OpenMS prefilter are not ported.
   must identify (almost) nothing. They catch a classifier that leaks labels.
   They do NOT catch decoys built weaker than null targets -- random pair labels
   symmetrise the construction away (reverse decoys, whose null pairs won 1.66:1
-  by the target, passed both with 0 and 0). That is the null-pair balance's job.
-- Decoy construction and what is known about it (Astral run): targets and
-  decoys have identical precursor m/z, RT, charge, protein group, fragment
-  slots and intensities; extraction finds peak groups for 199,999 targets and
-  200,000 decoys of 200,000 pairs, and the null-pair balance is 25,016 : 24,983. A review measured a small residual asymmetry on
-  null pairs of an entrapment search, before classification: null targets beat
-  their shuffle decoys on the MS2 fragment sub-scores in 51.2-51.5 % of pairs
-  (z 7-9 over 105,433 pairs), persisting with every decoy fragment in range.
-  Decoys copy their target's predicted-intensity slot choice; re-predicting
-  intensities for the decoy sequence is the candidate fix and is not done in
-  M1. Until the balance on null pairs is near 0.5, `-run` stays experimental.
+  by the target, passed both with 0 and 0). Only known nulls do: the
+  entrapment winner test above.
+- Decoy construction and what is known about it: targets and decoys have
+  identical precursor m/z, RT, charge and protein group. In M1 (Astral run)
+  extraction found peak groups for 199,999 targets and 200,000 decoys of
+  200,000 pairs, and the null-pair balance was 25,016 : 24,983; but null
+  targets beat their shuffle decoys on the MS2 fragment sub-scores in
+  51.2-51.5 % of the pairs of an entrapment search (z 7-9 over 105,433
+  pairs), and the M3 review traced this, and the entrapment excess, to the
+  decoy's inherited fragment slots and intensities (Architecture, 1). Since
+  the review both members are predicted (`search:intensities predicted`).
 
 ## Resources
 
@@ -302,9 +399,11 @@ co-occurrence is common up to depth 4, and the targets' excess (signal)
 lies at depths 5 and 6. Of 974 calibration points matched to an evidence
 seed, 968 lie within 30 s of the seed's best prefilter spectrum (median
 0.37 s). LOWESS did not narrow the RT window (321 s against the line's
-317 s, span 0.2): the linear residuals (median 33 s, p99 136 s) are the
-predictor's per-peptide scatter, not curvature, so only tuning shrinks them
-(a second pass with the tuned model is M7).
+317 s, span 0.2), and the rule of the time kept the line. That was read as
+"per-peptide scatter, not curvature"; the M3 review showed otherwise: the
+line runs a median 89 s late in the top library-RT decile and misses 26 % of
+DIA-NN's identifications there, and LOWESS on the same points halves that
+bias (the rule now cross-validates, Architecture, 5).
 
 Choosing the defaults (first the probe, 4 min per grid, then full searches in
 `-mode refine`):
@@ -354,9 +453,21 @@ per precursor, twice over for the two 1/K0 halves (M2). The prefilter took
 25.8 s (decoys 6.9 s, index 0.5 s and 514 MB for 61.6 M fragments, sweep
 17.0 s over 236,052 spectra); the cache took 78.1 GB, 2.56x the mzML.
 The entrapment numbers are a quick look with the entrapment design's
-peptide classes (T, E; shared excluded) and r = 1, not gate (a): the
-shuffled twins are isomeric with real peptides and inflate the combined
-estimate. The null-pair balance warning comes with 38,364 of DIA-NN's
+peptide classes (T, E; shared excluded) and r = 1. The acceptance read them
+as "not shown to be anti-conservative" (lower bound minus 2 SE below 1 %)
+and credited isomeric twins with part of the excess (leaving out the 47
+entrapment identifications whose target twin co-elutes gave 1.20 %). The
+M3 review corrected both: the lower bound assumes no false null-target
+discoveries and cannot show anti-conservativeness, and the direct test
+does -- entrapment pairs were won by the target 240 : 168 at precursor
+q <= 0.01 (z 3.6), 223 : 150 at peptide level and 44 : 25 at protein level;
+leaving co-eluting twins out of BOTH sides (the decoys of those pairs
+co-elute with the twin too) still gives 196 : 150 (z 2.5). With r = 1
+confirmed in the searched set (80,524 entrapment against 80,963 real
+DIA-NN-absent pairs kept), the excess is real: gate (a) failed on timsTOF
+by a direct exchangeability test, independent of isomer screening, and had
+E wins equalled decoy wins the combined FDP would have been 1.05 %. The
+cause was the decoys' inherited fragment slots (Architecture, 1). The null-pair balance warning comes with 38,364 of DIA-NN's
 precursors among 200,000 searched targets: the lowest quarter of pair
 winners is no longer only null pairs.
 
@@ -408,6 +519,89 @@ Making depth 6, or a depth adapted to the run, the default needs two things:
   is 27,124 of 31,442 at depth 6;
 - the entrapment campaign of M5.
 
+### After the M3 review: predicted decoys (`search:intensities predicted`)
+
+Measured with the review-fix build on the same node (16 threads; up to six
+jobs of this measurement at once, so wall times are inflated). Report
+analysis: `tools/ana.py`, `tools/dn.py` in `/scratch/kohlbach/bid3r-m3r-fix/`,
+and the acceptance's `entrap_score.py` and `cmp.py` unchanged. "E pairs" are
+pairs whose target is an entrapment peptide of the design table (known
+absent); their winners are counted target : decoy.
+
+**Astral, entrapment library** (8,045,757 precursors; M3 defaults otherwise):
+
+| | M3 acceptance (library rule) | this build, `intensities library` | this build, `predicted` |
+|---|---|---|---|
+| pairs searched | 191,035 | 191,035 | 200,000 of 210,144 (decoys now pass as often as targets: 109,455 against 112,486 at depth 5) |
+| calibration | 744 points, linear | 916 points, LOWESS (CV error 2.20 against 2.58) | 908 points, LOWESS |
+| target precursors at q <= 0.01 (decoys) | 3,772 (36) | 3,964 (38) | 3,119 (30) |
+| combined FDP, precursors / peptides / protein groups | 1.43 % / 1.58 % / 2.64 % | 1.56 % / 1.66 % / 2.62 % | **0.90 % / 0.65 % / 1.97 %** (2 entrapment of 203 groups) |
+| E-pair winners, precursor q <= 0.01 / 0.1 | 27 : 18 / 439 : 347 (z 3.3) | 31 : 19 / 467 : 376 (z 3.1; the product's winner test warns) | **14 : 18 / 280 : 311** (z -0.7 / -1.3) |
+| E-pair winners, peptide / protein group, q <= 0.1 | 375 : 301 / 44 : 36 | 383 : 319 / 44 : 37 | 240 : 278 / 25 : 35 |
+| prefilter, E pairs: depth >= 5 target / decoy; sign test | 50,955 / 45,874 (1.11); z 78.8 | as the acceptance | 50,926 / 54,035 (0.94); z -25.0 |
+| null-pair balance | z -1.9 | 23,869 : 23,889 | 25,130 : 24,870 |
+| E among the calibration seeds | 437 of 1,754 | 446 of 1,964 | 448 of 1,964 |
+| wall / peak RSS | 15:53 / 9.9 GB | 19:03 / 10.1 GB | 30:59 / 13.0 GB (14 min predicting 6.2 M decoys) |
+
+The winner test, the direct exchangeability check, is balanced at every
+level with predicted decoys, and the combined FDP is 0.90 % at nominal 1 %.
+With the library rule the same build reproduces the acceptance's target
+favour (467 : 376, z 3.1), which the new in-product winner test flags while
+the null-pair balance does not. The prefilter's E-pair sign test is no longer
+target-favoured but now decoy-favoured (a 6 % excess of decoys at depth 5):
+conservative, not anti-conservative, and not yet explained; it costs
+identifications (3,119 against the library rule's 3,964, most of them the
+library rule's excess). The entrapment seeds are twins of present peptides
+(isomers that share their fragments): the robust calibration fit drops their
+points, but the "beat your own decoy" rule does not exclude them.
+
+**Astral, whole-proteome library** (`-mode tune -tune_heads rt`):
+
+| | M3 acceptance | predicted |
+|---|---|---|
+| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted |
+| pairs searched / DIA-NN in the set | 100,728 / 7,698 (83.1 %) | 110,530 / 7,704 (83.2 %) |
+| calibration | 944 points from 1,927 seeds, linear, 317 s | 1,141 points from 2,143 seeds (99 of 100 bins), LOWESS (CV 2.16 against 2.54), 325 s |
+| target precursors at q <= 0.01 (decoys) | 4,755 (46) | 4,423 (43) |
+| in DIA-NN's report / recovered overall / within the searched set | 94.5 % / 48.5 % / 58.4 % | 94.3 % / 45.0 % / 54.1 % |
+| median \|dRT\| | 0.006 min | 0.006 min |
+| tuning (RT): TEST calibrated SD | 0.910 -> 0.500 min | 1.016 -> 0.486 min |
+| prefilter / extraction / whole invocation, peak RSS | 12 s / 373 s / 12:39, 17.1 GB | 451 s (418 s predicting 3.08 M decoys) / 439 s / 20:45, 17.9 GB |
+
+**timsTOF (diaPASEF, RT only), whole-proteome library with shuffled-twin
+entrapment** (5,754,771 precursors, `-mode tune -tune_heads rt`). The library
+is another predictor's, so both members are predicted:
+
+| | M3 acceptance | predicted |
+|---|---|---|
+| prefilter, depth >= 5: targets / decoys | 144,970 / 89,754 | 129,212 / 91,046 |
+| pairs searched | 200,000 of 226,175 | 200,000 of 212,958 |
+| calibration | 1,077 points, LOWESS, window 661 s | 1,238 points from 2,134 seeds (100 of 100 bins), LOWESS (CV error 1.37 against the line's 1.52), window 675 s |
+| target precursors at q <= 0.01 (decoys) | 32,193 (320) | 30,018 (299) |
+| peptides / protein groups | 29,068 / 4,820 | 27,063 / 4,168 |
+| in DIA-NN's report | 96.1 % | 97.0 % (29,102 of 30,018) |
+| combined FDP, precursors / peptides / protein groups | 1.49 % / 1.54 % / 1.83 % | **0.91 % / 0.89 % / 0.82 %** (DIA-NN on the same design: 1.06 / 1.20 / 1.28 %) |
+| E-pair winners, precursor q <= 0.01 / 0.1 | 240 : 168 (z 3.6) / 2,594 : 2,078 (z 7.6) | **137 : 158 (z -1.2) / 1,933 : 1,916 (z 0.3)** |
+| E-pair winners, peptide / protein group, q <= 0.01 | 223 : 150 / 44 : 25 | 120 : 142 / 17 : 25 |
+| targets at a matched combined FDP of 1 % | q* 0.0067: 30,895 | q* 0.0111: 30,204 |
+| prefilter, E pairs: depth >= 5 target / decoy; sign test | 1.18; z 81 | 47,617 / 48,245 (0.99); z -13.1 |
+| null-pair balance | 25,574 : 24,426 (z 5.1, warns) | 25,286 : 24,714 (z 2.6) |
+| E among the calibration seeds | 70 of 1,771 | 54 of 1,991 |
+| tuning (RT): TEST calibrated SD | 2.161 -> 1.167 min | 2.149 -> 1.126 min |
+| wall / peak RSS | 2:04:42 / 17.6 GB | 3:15:40 / 25.6 GB (24 min predicting both members of 5.1 M pairs; extraction 9,140 s against 6,467 s at 2 to 4 times the node load, same 400,000 precursors) |
+
+The run that settled gate (a) is now the run that passes it: the entrapment
+winner test is flat at every level and every threshold (the largest |z| over
+precursors, peptides and protein groups at q <= 0.01, 0.02, 0.05 and 0.1 is
+2.2), and the three combined FDP figures fall from 1.49 / 1.54 / 1.83 % to
+0.91 / 0.89 / 0.82 %, below DIA-NN's on the same design. It costs
+identifications: 30,018 against 32,193 at q <= 0.01, and 30,204 against
+30,895 where the entrapment estimate itself reads 1 % -- 2.2 % of them, the
+price of q-values that are now slightly conservative rather than 1.5x
+optimistic. The timsTOF targets also lose their library's own predicted
+intensities (the built-in model's replace them), which the Astral runs do
+not.
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged
@@ -427,7 +621,10 @@ an OpenMS upgrade), and `.mzpeak` on POSIX builds.
   prefilter (default), evidence seeds with a LOWESS second fit, chunks spread
   over the windows, OpenMS's own parse errors, the report kept on
   `search:min_ids`, the cache-size log; measured on Astral and timsTOF
-  (Resources).
+  (Resources). Its review added predicted decoys (`search:intensities
+  predicted`), the entrapment winner test and the tag rule for UniProt ids,
+  seeds from the central RT range that beat their decoy, and LOWESS chosen
+  by cross-validation (Resources, "After the M3 review").
 - **M4** Streaming store with a memory budget; 16 GB / 8-core gate.
 - **M5** Honesty and purpose campaign: entrapment, concordance, tuning transfer.
 - **M6** Desktop app, README figure (identification becomes a DIALibGen step),
@@ -439,8 +636,12 @@ an OpenMS upgrade), and `.mzpeak` on POSIX builds.
 
 - **(a) Honesty:** entrapment on the timsTOF test runs and on an Astral run:
   combined FDP <= 1.5 % at nominal 1 % for precursors, peptides and proteins,
-  reported with its lower bound. Identification counts and the internal decoy
-  rate never decide this. The entrapment peptides must be screened against the
+  reported with its lower bound; AND the entrapment winner test (pairs whose
+  target is entrapment won by target and decoy equally often: binomial
+  |z| < 3 at q <= 0.01 and q <= 0.1, at precursor, peptide and protein level),
+  which needs no database ratio and no isomer screening; and the E-pair
+  depth sign test of the prefilter (|z| < 3). Identification counts and the
+  internal decoy rate never decide this. The entrapment peptides must be screened against the
   sample's full proteome -- with I = L, isomers (same composition and termini)
   and missed-cleavage joins -- or come from a foreign proteome: shuffled twins
   that keep each tryptic piece's composition are isomeric with real peptides,
@@ -472,9 +673,15 @@ an OpenMS upgrade), and `.mzpeak` on POSIX builds.
    identifications with every guard meaningful) and the best of the timsTOF
    probe grid too; depth 6 finds more on Astral and waits for guards stated
    relative to the prefilter's evidence and for M5 (Resources, M3).
-7. LOWESS replaces the linear RT map only when it narrows the window by 10 %
-   or more. Stock `TransformationModelLowess`; ODIA's PAVA/LOESS code is not
-   ported.
+7. LOWESS replaces the linear RT map when it predicts held-out points
+   better (5-fold cross-validation on one point set, error below 0.97x the
+   line's) with at least 200 points; until the M3 review, when it narrowed
+   the window by 10 %. Stock `TransformationModelLowess`; ODIA's PAVA/LOESS
+   code is not ported.
+8. Both members of every search pair predicted by one MS2 model, each with
+   its own most intense fragments (`search:intensities predicted`, M3
+   review). The decoy in its target's slots (`library`) stays as a
+   comparison setting and warns.
 
 ## Main risk
 
@@ -484,13 +691,17 @@ cohort, ideally thousands of identifications) and the honesty of the anchors are
 unknown until M2 and M5; on the Astral run above, the M1 default clears the
 cohort floor 4.5-fold with a FASTA-subset library, and with M3 a whole-proteome
 library clears it too (Astral: test 887 / val 329 units, 58 % of DIA-NN's
-precursors in the searched set recovered where gate (b) asks 60 %; timsTOF,
-ion mobility still ignored: 5,936 / 3,554 units, 81 % recovered). The
-prefilter is the one selection step that reads the run before the decoys are
-scored: it is label-symmetric by construction and by test, and its effect on
-the error rate is what the entrapment campaign of M5 must measure (the
-timsTOF entrapment numbers under Resources, M3, are a first look, not the
-gate). A biased anchor set would silently degrade every later
+precursors in the searched set recovered where gate (b) asks 60 %, 54 % with
+predicted decoys; timsTOF, ion mobility still ignored: 5,936 / 3,554 units,
+81 % recovered). The prefilter is the one selection step that reads the run
+before the decoys are scored: it is label-symmetric by construction and by
+test -- but label symmetry of the SELECTION is not enough: the M3 review
+found the decoys themselves weaker than null targets (their inherited
+fragment slots), which paired competition cannot survive. Predicted decoys
+fixed the entrapment winner test on Astral; the prefilter's evidence is now
+slightly decoy-favoured, which is conservative and not yet understood. The
+entrapment campaign of M5 must confirm the error rate on screened
+entrapment. A biased anchor set would silently degrade every later
 search of the tuned library, which is why every selection step is label-
 symmetric, every failure aborts, and the option stays experimental until
 entrapment confirms the error rate.

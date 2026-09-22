@@ -11,11 +11,19 @@
 //      fragments, where the generator put every target fragment;
 //   3. no decoy is a fragment-level copy of its target (I = L swaps);
 //   4. only methods that keep both termini are offered: reverse moves the
-//      C-terminal K/R and is refused like mutate.
+//      C-terminal K/R and is refused like mutate;
+//   5. each terminus keeps TWO residues, so the short ions a proteome shares
+//      (y1, y2, b1, b2 and their complements) are shared by the pair -- with
+//      one kept, null pairs went to whichever member drew the more common
+//      short composition (SearchDecoys.h).
 
 #include "synthetic_library.h"
 
 #include <odia/search/CandidateSelector.h>
+#include <odia/search/SearchDecoys.h>
+
+#include <OpenMS/CHEMISTRY/AASequence.h>
+#include <OpenMS/CHEMISTRY/Residue.h>
 
 #include <algorithm>
 #include <cmath>
@@ -157,6 +165,46 @@ int main()
                 << " without a decoy, " << outside << " decoy fragments outside [" << lo << ", " << hi << "]\n";
       CHECK(outside == 0);
     }
+  }
+
+  // 5. Both termini: TWO residues each, so the short ions a whole proteome
+  //    shares (y1, y2, b1, b2, and with them y(n-1), y(n-2), b(n-1), b(n-2))
+  //    are the pair's, not one member's. With one residue kept, a decoy
+  //    traded its target's y2 for another composition, and a null pair was
+  //    decided by which of the two is the more common one (a 4 % excess of
+  //    decoys at the prefilter depth on an entrapment library; targets whose
+  //    second-to-last residue is P won 1.73 : 1).
+  {
+    const ODIA::Library lib = synth::library(precursors);
+    const DecoyRules rules = CandidateSelector::decoyRules(lib, params("shuffle"));
+    std::size_t made = 0, interior_differs = 0;
+    for (std::size_t i = 0; i < lib.precursorCount(); ++i)
+    {
+      const DecoyAssay a = searchDecoy(lib, i, rules);
+      if (a.outcome != DecoyOutcome::Made) { continue; }
+      ++made;
+      const auto target = OpenMS::AASequence::fromString(std::string(lib.strings().get(lib.precursors().modified_sequence[i])));
+      const auto decoy = OpenMS::AASequence::fromString(a.sequence);
+      CHECK(decoy.size() == target.size());
+      CHECK(decoy.getPrefix(SEARCH_DECOY_KEEP_NTERM).toString() == target.getPrefix(SEARCH_DECOY_KEEP_NTERM).toString());
+      CHECK(decoy.getSuffix(SEARCH_DECOY_KEEP_CTERM).toString() == target.getSuffix(SEARCH_DECOY_KEEP_CTERM).toString());
+      // y1, y2, b1, b2 and their complements are then the same ions in both.
+      for (const std::size_t o : {std::size_t{1}, std::size_t{2}})
+      {
+        for (int z : {1, 2})
+        {
+          CHECK(std::fabs(decoy.getSuffix(o).getMZ(z, OpenMS::Residue::YIon) - target.getSuffix(o).getMZ(z, OpenMS::Residue::YIon)) < 1e-9);
+          CHECK(std::fabs(decoy.getPrefix(o).getMZ(z, OpenMS::Residue::BIon) - target.getPrefix(o).getMZ(z, OpenMS::Residue::BIon)) < 1e-9);
+          const std::size_t big = target.size() - o;
+          CHECK(std::fabs(decoy.getPrefix(big).getMZ(z, OpenMS::Residue::BIon) - target.getPrefix(big).getMZ(z, OpenMS::Residue::BIon)) < 1e-9);
+          CHECK(std::fabs(decoy.getSuffix(big).getMZ(z, OpenMS::Residue::YIon) - target.getSuffix(big).getMZ(z, OpenMS::Residue::YIon)) < 1e-9);
+        }
+      }
+      interior_differs += decoy.toString() != target.toString() ? 1 : 0;
+    }
+    std::cout << "terminal residues kept: " << made << " decoys, " << interior_differs << " differ from their target\n";
+    CHECK(made > 700);
+    CHECK(interior_differs == made);
   }
 
   // 4. Only methods that keep both termini.

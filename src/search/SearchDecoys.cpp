@@ -133,7 +133,7 @@ namespace ODIA::search
     { throw std::out_of_range("search decoys: precursor " + std::to_string(i) + " of " + std::to_string(library.precursorCount())); }
     if (library.precursors().decoy[i]) { throw std::invalid_argument("search decoys: precursor " + std::to_string(i) + " is a decoy"); }
     DecoyAssay out;
-    const std::size_t keep_n = DECOY_KEEP_NTERM, keep_c = DECOY_KEEP_CTERM;
+    const std::size_t keep_n = SEARCH_DECOY_KEEP_NTERM, keep_c = SEARCH_DECOY_KEEP_CTERM;
     {
       const std::string sequence(library.strings().get(library.precursors().modified_sequence[i]));
       AASequence target;
@@ -234,8 +234,8 @@ namespace ODIA::search
       else
       {
         // Deterministic in the sequence (FNV-1a), so the same library gives
-        // the same decoys on every machine: the first arrangement is the one
-        // LibraryGenerator's shuffle draws. Fisher-Yates with rejection
+        // the same decoys on every machine (the draw is LibraryGenerator's,
+        // over the shorter interior this keeps). Fisher-Yates with rejection
         // sampling, since std::shuffle is not specified across standard libraries.
         std::uint64_t seed = 14695981039346656037ull;
         for (const char ch : sequence) { seed = (seed ^ static_cast<std::uint8_t>(ch)) * 1099511628211ull; }

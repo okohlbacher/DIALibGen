@@ -6,7 +6,10 @@
 /// could never show.
 ///
 /// The library generator's LibraryGenerator::appendDecoys is not used, for
-/// three reasons measured on a full Orbitrap Astral run:
+/// four reasons measured on a full Orbitrap Astral run (the fourth is
+/// SEARCH_DECOY_KEEP_NTERM below: the search holds two residues at each
+/// terminus, not one, so the short ions a whole proteome shares are shared by
+/// the pair instead of being drawn for one member):
 ///   * its shuffle falls back to substituting a residue from a fixed table
 ///     when the interior cannot be rearranged (EEEEEEK, LLLLLLLLLLR); that
 ///     table is not ours to use, and the substituted decoy no longer matches
@@ -47,6 +50,34 @@
 
 namespace ODIA::search
 {
+  /// Residues the SEARCH's decoys hold fixed at each terminus. The library
+  /// generator's own decoys keep DECOY_KEEP_NTERM / DECOY_KEEP_CTERM; the
+  /// search keeps TWO, for exchangeability with null targets.
+  ///
+  /// Why. The second residue from each terminus fixes the SHORT ions -- y1,
+  /// y2, b1, b2 -- and, with the composition, their complements y(n-1),
+  /// y(n-2), b(n-1), b(n-2). A whole proteome shares the m/z of those: every
+  /// peptide ending in "PK" has the same y2, and a run's spectra are full of
+  /// it, because cleavage N-terminal to proline makes it intense in the
+  /// peptides that ARE there. A decoy that moves the second residue trades
+  /// its target's short ion for another one, so a null pair is decided by
+  /// which member happens to hold the more common composition -- not by the
+  /// run. Measured on the Astral entrapment library, 2.69 M known-absent
+  /// pairs, both members predicted (`search:intensities predicted`): with one
+  /// residue kept, the pair's deeper member was its decoy 822 k times against
+  /// the target's 790 k (sign test z -25; targets whose second-to-last
+  /// residue is P won 1.73 : 1, the rest lost). With two, 753,786 against
+  /// 753,635 (z -0.1), and the present targets' excess at the full prefilter
+  /// depth is untouched (10,671 against their decoys' 4,578). A decoy shares
+  /// those short ions with its target; shared fragments hit both members
+  /// equally, which is what exchangeability means.
+  ///
+  /// The cost is a shorter interior: a peptide of 6 residues or fewer has no
+  /// decoy (0.06 % of an 8 M library's targets against 0.006 %), and the
+  /// search's decoys are no longer the generator's first shuffle.
+  inline constexpr std::size_t SEARCH_DECOY_KEEP_NTERM = 2;
+  inline constexpr std::size_t SEARCH_DECOY_KEEP_CTERM = 2;
+
   /// Why a target got no search decoy.
   enum class DecoyOutcome : std::uint8_t
   {

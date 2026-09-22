@@ -299,7 +299,8 @@ namespace ODIA::search
       }
       intensities_json["model"] = model->describe();
       intensities_json["instrument_source"] = params_.instrument_source;
-      info("search intensities: both members of every pair predicted by " + model->describe() +
+      info("search intensities: every pair's decoy, and its target unless the library holds the model's own prediction, "
+           "predicted by " + model->describe() +
            (params_.instrument_source.empty() ? std::string() : " (instrument from " + params_.instrument_source + ")"));
     }
     else
@@ -316,6 +317,9 @@ namespace ODIA::search
                                                                model.get())
                           : predicted ? EvidencePrefilter::selectRandom(library, params_, windows, *model)
                                       : CandidateSelector::select(library, params_, windows);
+    // The model's sessions (weights and arenas, several GB at 16 sessions) are
+    // not needed once the searched set carries its assays.
+    model.reset();
     timing["candidates"] = since(t);
     if (!prefilter_seconds.empty()) { timing["prefilter"] = json::parse(prefilter_seconds); }
     const auto& st = set.stats;

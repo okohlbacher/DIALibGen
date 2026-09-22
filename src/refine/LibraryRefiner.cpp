@@ -457,6 +457,9 @@ namespace ODIA
     out.reserve(static_cast<std::size_t>(rows) / 4 + 16);
     std::unordered_map<std::string, std::set<std::tuple<FragmentType, int, int>>> frag_ids;
     std::set<std::string> distinct;
+    // Rows each q gate rejected, for the error when none passes (the Stats
+    // keep only their sum).
+    std::size_t above_precursor = 0, above_global = 0, above_protein = 0;
 
     for (std::int64_t r = 0; r < rows; ++r)
     {
@@ -476,9 +479,13 @@ namespace ODIA
       distinct.insert(k);
 
       // Gates. A missing or non-numeric q is not "passes"; it is rejected (M5/M8).
-      if (use_q)   { if (!finite(qv[i]) || qv[i] < 0 || qv[i] > 1)   { ++stats.ids_q_invalid; continue; } if (qv[i]  > p.q_precursor) { ++stats.ids_q_above; continue; } }
-      if (use_gq)  { if (!finite(gq[i]) || gq[i] < 0 || gq[i] > 1)   { ++stats.ids_q_invalid; continue; } if (gq[i]  > p.q_global)    { ++stats.ids_q_above; continue; } }
-      if (use_pgq) { if (!finite(pgq[i]) || pgq[i] < 0 || pgq[i] > 1) { ++stats.ids_q_invalid; continue; } if (pgq[i] > p.q_protein)   { ++stats.ids_q_above; continue; } }
+      // Which of the three rejected a row is kept per gate, for the error when
+      // none passes: a report whose protein groups all sit above -q_protein
+      // (a shallow search: most groups rest on one precursor) leaves nothing
+      // to refine against although its precursors pass.
+      if (use_q)   { if (!finite(qv[i]) || qv[i] < 0 || qv[i] > 1)   { ++stats.ids_q_invalid; continue; } if (qv[i]  > p.q_precursor) { ++stats.ids_q_above; ++above_precursor; continue; } }
+      if (use_gq)  { if (!finite(gq[i]) || gq[i] < 0 || gq[i] > 1)   { ++stats.ids_q_invalid; continue; } if (gq[i]  > p.q_global)    { ++stats.ids_q_above; ++above_global; continue; } }
+      if (use_pgq) { if (!finite(pgq[i]) || pgq[i] < 0 || pgq[i] > 1) { ++stats.ids_q_invalid; continue; } if (pgq[i] > p.q_protein)   { ++stats.ids_q_above; ++above_protein; continue; } }
 
       if (have_fragments)
       {
@@ -554,7 +561,20 @@ namespace ODIA
 
     stats.ids_precursors = distinct.size();
     stats.ids_passing = out.size();
-    if (out.empty()) { throw std::runtime_error("no reference observation passed the gates; nothing to refine against"); }
+    if (out.empty())
+    {
+      auto gate = [](const char* name, std::size_t rejected, double value) {
+        return rejected > 0 ? ", " + std::to_string(rejected) + " above -" + name + " " + std::to_string(value) : std::string();
+      };
+      throw std::runtime_error("no reference observation passed the gates; nothing to refine against (" +
+                               std::to_string(distinct.size()) + " distinct precursors read" +
+                               (stats.ids_decoy > 0 ? ", " + std::to_string(stats.ids_decoy) + " decoy rows" : "") +
+                               gate("q_precursor", above_precursor, p.q_precursor) + gate("q_global", above_global, p.q_global) +
+                               gate("q_protein", above_protein, p.q_protein) +
+                               (stats.ids_too_few_fragments > 0 ? ", " + std::to_string(stats.ids_too_few_fragments) +
+                                " below -min_fragments" : "") +
+                               "); raise the gate that rejected them, or search deeper");
+    }
     return out;
   }
 

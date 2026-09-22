@@ -30,6 +30,18 @@ namespace ODIA::search
     throw std::invalid_argument("search:readoptions must be auto, normal or cache, not '" + s + "'");
   }
 
+  const char* toString(Intensities i)
+  {
+    return i == Intensities::Library ? "library" : "predicted";
+  }
+
+  Intensities parseIntensities(const std::string& s)
+  {
+    if (s == "predicted") { return Intensities::Predicted; }
+    if (s == "library") { return Intensities::Library; }
+    throw std::invalid_argument("search:intensities must be predicted or library, not '" + s + "'");
+  }
+
   DecoyMethod parseSearchDecoyMethod(const std::string& s)
   {
     // Spelled out rather than routed through parseDecoyMethod, which maps every
@@ -89,6 +101,7 @@ namespace ODIA::search
     if (!finite(report_max_q) || report_max_q < identification_q || report_max_q > 1)
     { fail("search:report_max_q must be in [0.01, 1]: the report must carry every identification the gates can pass"); }
     if (threads < 1) { fail("threads must be at least 1"); }
+    if (!finite(nce) || nce > 100) { fail("search:nce must be <= 100 (<= 0: the instrument's default)"); }
   }
 
   std::string SearchParams::toJson(bool execution) const
@@ -103,6 +116,12 @@ namespace ODIA::search
       {"prefilter_fragments", prefilter_fragments},
       {"calibration_seeds", calibration_seeds},
       {"decoys", searchDecoyName(decoys)},
+      {"intensities", toString(intensities)},
+      {"ms2_model", ms2_model},
+      {"ms2_model_hash", ms2_model_hash},
+      {"instrument", instrument},
+      {"nce", nce},
+      {"instrument_source", instrument_source},
       {"seed", seed},
       {"passes", passes},
       {"rt_window", rt_window},
@@ -129,7 +148,7 @@ namespace ODIA::search
       {"min_assay_fragments", min_assay_fragments}};
     if (!execution)
     {
-      for (const char* key : {"chunk", "batch_size", "readoptions", "cache_dir"}) { j.erase(key); }
+      for (const char* key : {"chunk", "batch_size", "readoptions", "cache_dir", "ms2_model"}) { j.erase(key); }
     }
     return j.dump();
   }

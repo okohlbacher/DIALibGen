@@ -9,6 +9,8 @@
 //   identify_prefilter_probe <library> <run.mzML> <out prefix> [key=value ...]
 //     threads=16  readoptions=auto|normal|cache  cache_dir=<dir>  decoys=shuffle
 //     top=1000[,...]  ppm=10[,...]  depth=3,4,5,6  max_pairs=200000
+//     intensities=predicted|library  model=<peptdeep_ms2_dynamic.onnx>  instrument=<name>  nce=<nce>
+//     (predicted needs model; instrument empty = timsTOF on an ion-mobility run, QE otherwise)
 //
 // Writes <prefix>.json (counts, timings, memory) and, per sweep,
 // <prefix>.top<N>_ppm<P>.tsv: every pair whose better member reached depth 3,
@@ -31,6 +33,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -84,7 +87,8 @@ int main(int argc, char** argv)
   }
   std::map<std::string, std::string> opt = {{"threads", "16"}, {"readoptions", "auto"}, {"cache_dir", ""},
                                             {"decoys", "shuffle"}, {"top", "1000"}, {"ppm", "10"},
-                                            {"depth", "3,4,5,6"}, {"max_pairs", "200000"}};
+                                            {"depth", "3,4,5,6"}, {"max_pairs", "200000"}, {"intensities", "predicted"},
+                                            {"model", ""}, {"instrument", ""}, {"nce", "-1"}};
   for (int a = 4; a < argc; ++a)
   {
     const std::string kv = argv[a];
@@ -99,6 +103,7 @@ int main(int argc, char** argv)
   params.cache_dir = opt["cache_dir"];
   params.decoys = parseSearchDecoyMethod(opt["decoys"]);
   params.max_pairs = std::stoul(opt["max_pairs"]);
+  params.intensities = parseIntensities(opt["intensities"]);
 #ifdef _OPENMP
   omp_set_num_threads(params.threads);
 #endif
@@ -119,8 +124,17 @@ int main(int argc, char** argv)
   record["windows"] = windows.size();
   record["mb_after_load"] = peakMB();
 
+  std::unique_ptr<PeptDeepFragmentModel> model;
+  if (params.intensities == Intensities::Predicted)
+  {
+    if (opt["model"].empty()) { std::cerr << "intensities=predicted needs model=<peptdeep_ms2_dynamic.onnx>\n"; return 2; }
+    const std::string instrument = !opt["instrument"].empty() ? opt["instrument"] : (run.ion_mobility ? "timsTOF" : "QE");
+    model = std::make_unique<PeptDeepFragmentModel>(opt["model"], instrument, std::stod(opt["nce"]), params.threads);
+    record["model"] = model->describe();
+    std::cout << "model: " << model->describe() << std::endl;
+  }
   t = std::chrono::steady_clock::now();
-  const PrefilterPairs universe = EvidencePrefilter::pairs(library, params, windows);
+  const PrefilterPairs universe = EvidencePrefilter::pairs(library, params, windows, model.get());
   record["seconds_pairs"] = since(t);
   record["pairs"] = universe.size();
   record["eligible"] = universe.stats.eligible;
@@ -161,7 +175,7 @@ int main(int argc, char** argv)
                              {"kept", sel.kept.size()}, {"kept_targets_passing", sel.kept_targets_passing},
                              {"kept_decoys_passing", sel.kept_decoys_passing}, {"strata", sel.strata},
                              {"depth_targets", sel.depth_targets}, {"depth_decoys", sel.depth_decoys},
-                             {"seeds", EvidencePrefilter::seeds(library, universe, evidence, q, CandidateSelector::rtScale(library)).size()},
+                             {"seeds", EvidencePrefilter::seeds(library, universe, evidence, q, CandidateSelector::robustRtRange(library)).size()},
                              {"seconds_choose", since(c)}});
       }
       s["depths"] = per_depth;

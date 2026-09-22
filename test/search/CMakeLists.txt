@@ -1,7 +1,9 @@
 # The built-in identification step (-run): odia_search.
 #
 # The C++ tests build their own synthetic libraries and, for the pipeline test,
-# a synthetic run behind the Identifier seams; none needs data or models.
+# a synthetic run behind the Identifier seams; none needs data, and only
+# identify_predicted_assays_model needs a model (the PeptDeep MS2 model; the
+# others use toy_fragment_model.h or search:intensities library).
 
 add_executable(identify_subset_pairing identify_subset_pairing.cpp)
 target_link_libraries(identify_subset_pairing PRIVATE odia_search)
@@ -10,6 +12,28 @@ add_test(NAME identify_subset_pairing COMMAND identify_subset_pairing)
 add_executable(identify_decoy_symmetry identify_decoy_symmetry.cpp)
 target_link_libraries(identify_decoy_symmetry PRIVATE odia_search)
 add_test(NAME identify_decoy_symmetry COMMAND identify_decoy_symmetry)
+
+# Search decoys exchangeable with null targets: search:intensities predicted
+# against library, on a toy fragment model (toy_fragment_model.h), and the
+# entrapment tag rule.
+add_executable(identify_decoy_exchangeability identify_decoy_exchangeability.cpp)
+target_link_libraries(identify_decoy_exchangeability PRIVATE odia_search)
+add_test(NAME identify_decoy_exchangeability COMMAND identify_decoy_exchangeability)
+set_tests_properties(identify_decoy_exchangeability PROPERTIES TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=4")
+
+# The same with the real PeptDeep MS2 model: the searched targets' assays are
+# the generator's, the decoys' their own predictions.
+add_executable(identify_predicted_assays_model identify_predicted_assays_model.cpp)
+target_link_libraries(identify_predicted_assays_model PRIVATE odia_search)
+if(EXISTS "${ODIA_MS2_MODEL_PATH}")
+  add_test(NAME identify_predicted_assays_model COMMAND identify_predicted_assays_model "${ODIA_MS2_MODEL_PATH}")
+  set_tests_properties(identify_predicted_assays_model PROPERTIES TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=2")
+endif()
+
+# The RT calibration's line-or-LOWESS choice on synthetic calibration points.
+add_executable(identify_rt_model identify_rt_model.cpp)
+target_link_libraries(identify_rt_model PRIVATE odia_search nlohmann_json::nlohmann_json)
+add_test(NAME identify_rt_model COMMAND identify_rt_model)
 
 add_executable(identify_report_roundtrip identify_report_roundtrip.cpp)
 target_link_libraries(identify_report_roundtrip PRIVATE odia_search nlohmann_json::nlohmann_json)

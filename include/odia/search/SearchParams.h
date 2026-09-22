@@ -29,6 +29,25 @@ namespace ODIA::search
   const char* toString(ReadMode m);
   ReadMode parseReadMode(const std::string& s);   ///< throws std::invalid_argument
 
+  /// Where the fragments and intensities of both members of a search pair come
+  /// from (`search:intensities`).
+  enum class Intensities
+  {
+    /// Both the target and its decoy are predicted by the same fragment model
+    /// from their OWN sequences, and each takes its own most intense fragments
+    /// (PredictedAssays.h). A decoy is then built the way a null target is,
+    /// which paired competition needs.
+    Predicted,
+    /// The library's target assay; the decoy re-uses its target's fragment
+    /// slots and intensities with recomputed m/z. Known to make decoys weaker
+    /// than null targets (entrapment targets beat their own decoys about
+    /// 1.4 : 1 at q <= 0.01): a comparison and test hook, not a way to search.
+    Library
+  };
+
+  const char* toString(Intensities i);
+  Intensities parseIntensities(const std::string& s);   ///< throws std::invalid_argument
+
   /// The decoy methods the search accepts: shuffle and pseudo_reverse, both
   /// of which keep the target's termini. `mutate` is refused (its substitution
   /// table is DIA-NN's), `reverse` (it moves the C-terminal K/R, which makes
@@ -70,6 +89,20 @@ namespace ODIA::search
     /// How the in-memory search decoys are built (decoys already in the library
     /// file are ignored by the search and left untouched).
     DecoyMethod decoys = DecoyMethod::Shuffle;
+    /// Where both members' fragments and intensities come from (Intensities).
+    Intensities intensities = Intensities::Predicted;
+    /// search:intensities predicted: the PeptDeep MS2 model file, its content
+    /// hash (DIANNLibraryFile::hashFile; what the report records instead of
+    /// the path), the instrument and the NCE it is run with. An empty
+    /// instrument means "timsTOF on an ion-mobility run, QE otherwise"; an
+    /// NCE <= 0 the instrument's default (PeptDeepEncoder::defaultNce).
+    std::string ms2_model;
+    std::string ms2_model_hash;
+    std::string instrument;
+    double nce = -1.0;
+    /// Where instrument and NCE came from, for the provenance ("search:instrument",
+    /// "library", "run").
+    std::string instrument_source;
     /// Salt of the candidate draw. Changes WHICH pairs are searched, never how.
     std::uint64_t seed = 42;
     /// Extraction passes. 1 in this version.
@@ -117,8 +150,10 @@ namespace ODIA::search
     std::string entrapment_tag;
     /// Also run the label-swap and random-label self-checks, aborting on
     /// failure (validation gate (e): on every run). They catch a classifier
-    /// that leaks labels; decoys built weaker than null targets they cannot
-    /// see -- that is what the null-pair balance diagnostic is for.
+    /// that leaks labels. Decoys built weaker than null targets they cannot
+    /// see, and neither can the null-pair balance below in general: that
+    /// asymmetry grows with the score and sits in the tail where the 1 % cut
+    /// falls. Only known nulls see it: search:entrapment_tag's winner test.
     bool selftest = true;
 
     /// Threads for extraction and the classifier's folds (TOPP -threads).
@@ -137,7 +172,9 @@ namespace ODIA::search
     /// carries a warning. Below 1 is expected: the pooled estimator also counts
     /// decoys that light up with their present target and lose their pair.
     static constexpr double pooled_vs_paired_warn = 2.0;
-    /// The null-pair balance looks at the lowest this share of pair winners ...
+    /// The null-pair balance (a bulk diagnostic, NOT an exchangeability test:
+    /// it cannot see an asymmetry confined to the high-scoring tail) looks at
+    /// the lowest this share of pair winners ...
     static constexpr double null_balance_fraction = 0.25;
     /// ... and warns when targets and decoys win there more unevenly than this
     /// many binomial standard deviations.
@@ -149,13 +186,31 @@ namespace ODIA::search
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
     /// a process-wide lock, and more threads only spin (see RunStages.cpp).
     static constexpr int openswath_max_threads = 8;
-    /// Evidence prefilter: the predicted fragments indexed per precursor, the
-    /// most intense by library intensity (a decoy uses its target's slots).
+    /// Evidence prefilter: the fragments indexed per pair member, its own most
+    /// intense (search:intensities predicted: each member by its own
+    /// prediction; library: by the target's library intensity, in the same
+    /// slots for the decoy).
     static constexpr std::size_t prefilter_fragments = 6;
+    /// With search:entrapment_tag: pairs whose target is an entrapment peptide
+    /// (known absent) must be won by the target and by its decoy equally
+    /// often. A one-sided binomial z above this at q <= 0.01 or q <= 0.10, at
+    /// any level, is warned about: the decoys are weaker than null targets.
+    static constexpr double entrapment_winner_warn_z = 3.0;
     /// Evidence-seeded calibration: at most this many seeds, spread over the
-    /// library RT range in calibration_seed_bins bins.
+    /// library RT range in calibration_seed_bins bins. The range is the
+    /// central calibration_rt_quantile .. 1 - calibration_rt_quantile of the
+    /// eligible targets' library RT, so a few out-of-range library rows
+    /// cannot squeeze the bins; a seed outside it (a kit precursor included)
+    /// is not used.
     static constexpr std::size_t calibration_seeds = 2000;
     static constexpr std::size_t calibration_seed_bins = 100;
+    static constexpr double calibration_rt_quantile = 0.001;
+    /// An evidence seed must beat its own decoy clearly: at least
+    /// seed_min_spectra spectra at search:prefilter_depth, and at least
+    /// seed_decoy_factor times its decoy's. A library-RT bin without such a
+    /// target stays empty.
+    static constexpr std::uint32_t seed_min_spectra = 3;
+    static constexpr std::uint32_t seed_decoy_factor = 3;
     /// A candidate set whose decoy:target count ratio leaves this band is a
     /// broken selection (pairs are kept whole, so it is exactly 1).
     static constexpr double candidate_ratio_low = 0.8;

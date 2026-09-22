@@ -16,8 +16,14 @@
 /// Diagnostics, never gates: the pooled precursor estimate (no competition;
 /// conservative when decoys of present targets light up with them), and the
 /// null-pair balance -- targets vs decoys among the lowest-scoring pair
-/// winners, which must be about even when decoys are exchangeable with null
-/// targets.
+/// winners. The balance is a BULK diagnostic: an asymmetry between decoys and
+/// null targets that grows with the score -- and so sits in the tail where the
+/// 1 % cut falls -- passes it (measured: an Astral entrapment search at z
+/// -1.9 whose entrapment pairs were won 439 : 347 by the target at q <= 0.1).
+/// The test that sees such an asymmetry needs known nulls: with
+/// search:entrapment_tag, the pairs whose target is an entrapment peptide
+/// must be won by target and decoy equally often (the entrapment winner test,
+/// at precursor, peptide and protein-group level).
 #pragma once
 
 #include <odia/search/CandidateSelector.h>
@@ -80,7 +86,21 @@ namespace ODIA::search
     std::size_t peptides_at_q = 0;       ///< target peptides at q <= 0.01
     std::size_t proteins_at_q = 0;       ///< target protein groups at q <= 0.01
 
+    /// With search:entrapment_tag: among competition winners at q <= q whose
+    /// pair's target is an entrapment entity (known absent), how many are the
+    /// target and how many its decoy; z = (targets - decoys) / sqrt(n).
+    struct EntrapmentWinners
+    {
+      std::string level;                 ///< "precursor", "peptide", "protein_group"
+      double q = 0.0;
+      std::size_t targets = 0;
+      std::size_t decoys = 0;
+      double z = 0.0;
+    };
+
     bool entrapment = false;             ///< search:entrapment_tag was set
+    std::vector<EntrapmentWinners> entrapment_winners;
+    std::size_t entrapment_tag_matches = 0;   ///< precursors of the database basis the tag classes as entrapment
     odia::core::EntrapmentEstimate entrapment_estimate;
     std::string entrapment_db_basis;     ///< where the estimator's database ratio was counted
     std::size_t entrapment_shared = 0;   ///< identified targets whose group mixes tagged and untagged proteins (left out)
@@ -120,8 +140,11 @@ namespace ODIA::search
   /// Identified target precursors (winners at q <= 0.01).
   std::size_t identifications(const ScoringOutcome& outcome);
 
-  /// A protein group's entrapment class: Trap when every member starts with
-  /// @p tag, Real when none does, Shared otherwise.
+  /// A protein group's entrapment class: Trap when every member (';'-separated)
+  /// carries @p tag, Real when none does, Shared otherwise. A member carries
+  /// the tag when it starts with it or has it right after a '|' (UniProt-style
+  /// ids: "sp|ENTRAP_P12345|ENTRAP_X_HUMAN" carries "ENTRAP_"). The same rule
+  /// for every member.
   enum class Entrapment { Real, Trap, Shared };
   Entrapment entrapmentClass(std::string_view group, const std::string& tag);
 }

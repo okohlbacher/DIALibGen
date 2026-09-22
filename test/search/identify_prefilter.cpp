@@ -32,6 +32,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <numeric>
 #include <set>
 #include <string>
 #include <vector>
@@ -118,6 +119,7 @@ int main(int argc, char** argv)
     for (const char* method : {"shuffle", "pseudo_reverse"})
     {
       SearchParams params;
+      params.intensities = Intensities::Library;
       params.decoys = parseSearchDecoyMethod(method);
       params.max_pairs = 0;
       const DecoyRules rules = CandidateSelector::decoyRules(lib, params);
@@ -181,6 +183,7 @@ int main(int argc, char** argv)
   const std::string mzml = (dir / "run.mzML").string();
   synthrun::writeMzML(spec, fx, mzml);
   SearchParams params;
+  params.intensities = Intensities::Library;   // the fixture plants the library's fragments
   params.threads = 4;
   Loader loader(params);
   RunData run = loader.loadRun(mzml);
@@ -234,7 +237,7 @@ int main(int argc, char** argv)
     CHECK(std::fabs(static_cast<double>(null_targets_passing) - static_cast<double>(null_decoys_passing)) <= spread);
     // Seeds: targets that pass themselves, one per peptide, best first: the
     // strongest evidence is planted signal.
-    const RtScale scale = CandidateSelector::rtScale(fx.library);
+    const RtScale scale = CandidateSelector::robustRtRange(fx.library);
     const auto seeds = EvidencePrefilter::seeds(fx.library, universe, evidence, params, scale);
     std::set<std::string> peptides;
     std::size_t planted_top = 0;
@@ -248,6 +251,48 @@ int main(int argc, char** argv)
     }
     std::cout << "seeds: " << seeds.size() << ", " << planted_top << " of the best 100 planted\n";
     CHECK(seeds.size() >= 150 && planted_top >= 95);
+    // Every seed beats its own decoy clearly.
+    std::map<std::size_t, std::size_t> pair_of;
+    for (std::size_t k = 0; k < universe.size(); ++k) { pair_of[universe.targets[k].second] = k; }
+    for (const auto& s : seeds)
+    {
+      const std::size_t k = pair_of.at(s.index);
+      CHECK(evidence[2 * k].spectra >= SearchParams::seed_min_spectra);
+      CHECK(evidence[2 * k].spectra >= SearchParams::seed_decoy_factor * evidence[2 * k + 1].spectra);
+    }
+
+    // One library row with an absurd RT (a planted seed, the worst case) must
+    // not squeeze the seed bins: over the robust range the seeds are those of
+    // the library without it, but that row; over the raw min/max (the rule
+    // before) they collapse into a few bins.
+    {
+      std::size_t outlier = seeds.front().index;
+      ODIA::Library bent = fx.library.subsetByIndex([&] {
+        std::vector<std::size_t> all(fx.library.precursorCount());
+        std::iota(all.begin(), all.end(), std::size_t{0});
+        return all;
+      }());
+      bent.precursors().irt[outlier] = 100.0f * std::max(1.0f, *std::max_element(fx.library.precursors().irt.begin(), fx.library.precursors().irt.end()));
+      PrefilterPairs bent_universe = universe;
+      for (std::size_t k = 0; k < bent_universe.size(); ++k)
+      { bent_universe.library_rt[k] = bent.precursors().irt[bent_universe.targets[k].second]; }
+      auto bins = [&](const ODIA::Library& lib, const std::vector<SeedHint>& v, const RtScale& sc) {
+        std::set<std::size_t> b;
+        for (const auto& h : v)
+        { b.insert(static_cast<std::size_t>(std::min(99.0, std::max(0.0, std::floor(sc.toAssay(lib.precursors().irt[h.index])))))); }
+        return b.size();
+      };
+      const RtScale robust = CandidateSelector::robustRtRange(bent), raw = CandidateSelector::rtScale(bent);
+      const auto kept = EvidencePrefilter::seeds(bent, bent_universe, evidence, params, robust);
+      const auto squeezed = EvidencePrefilter::seeds(bent, bent_universe, evidence, params, raw);
+      std::cout << "RT outlier: seeds " << kept.size() << " over " << bins(bent, kept, robust) << " bins (robust range), "
+                << squeezed.size() << " over " << bins(bent, squeezed, raw) << " bins (raw min/max); without it "
+                << seeds.size() << " over " << bins(fx.library, seeds, scale) << "\n";
+      CHECK(static_cast<double>(kept.size()) >= 0.95 * static_cast<double>(seeds.size() - 1));
+      CHECK(bins(bent, kept, robust) + 3 >= bins(fx.library, seeds, scale));
+      CHECK(squeezed.size() * 2 < kept.size());   // the rule before: the bins collapse
+      for (const auto& h : kept) { CHECK(h.index != outlier); }
+    }
   }
 
   // ---- 3. label symmetry ---------------------------------------------------------------

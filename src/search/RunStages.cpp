@@ -133,9 +133,23 @@ namespace ODIA::search
     /// +k * 1.00336 Th regardless of charge (ChromatogramExtractor::prepare_coordinates).
     constexpr int ms1_isotope_traces = 0;
     /// The non-linear second fit of the RT calibration needs this many
-    /// points and must narrow the RT window to this fraction of the linear one.
-    constexpr std::size_t lowess_min_points = 50;
-    constexpr double lowess_gain = 0.9;
+    /// points (with fewer, LOWESS's own span choice and outlier cut are
+    /// erratic: 100 evidence seeds gave a narrower but worse window than 200)
+    /// and must predict held-out points better than the line: its
+    /// cross-validated error (lowess_folds folds of one point set, residuals
+    /// capped at robust_cut line scales) must be below lowess_gain times the
+    /// line's.
+    constexpr std::size_t lowess_min_points = 200;
+    constexpr double lowess_gain = 0.97;
+    constexpr std::size_t lowess_folds = 5;
+    constexpr std::size_t lowess_max_fits = 10;
+    /// Below this many points the calibration is accepted with a warning:
+    /// its RT window rests on the extreme residuals of a few seeds.
+    constexpr std::size_t calibration_warn_points = 100;
+    /// The RT window's small-sample margin: half-width at least the padding
+    /// times this normal quantile (0.995) times the residuals' robust SD, so
+    /// a 0.99 quantile of 20 residuals (their maximum) cannot size it alone.
+    constexpr double rt_window_normal_quantile = 2.5758;
     /// An evidence seed's calibration point "agrees" with the prefilter when
     /// the two run times are this close (seconds); a diagnostic.
     constexpr double prefilter_agreement_s = 30.0;
@@ -694,6 +708,144 @@ namespace ODIA::search
 
   // ---- calibration ------------------------------------------------------------
 
+  // ---- the RT model: line or LOWESS -----------------------------------------------
+
+  Identifier::RtModelChoice Identifier::chooseRtModel(const std::vector<std::pair<double, double>>& stock,
+                                                      const std::vector<std::pair<double, double>>& points,
+                                                      const OpenMS::TransformationDescription& line, double run_first,
+                                                      double run_span)
+  {
+    // A predicted library's RT is not a linear function of the run's
+    // everywhere (an Astral run: the line ran a median 89 s late in the top
+    // library-RT decile), and the RT window is sized by the residuals.
+    // LOWESS (stock TransformationModelLowess, span by cross-validation) on
+    // the stock points, with its own iterative outlier cut. The choice is made
+    // on held-out accuracy, not on window widths (those come from different
+    // inlier sets and cannot see a bias confined to one part of the
+    // gradient): both models are fitted and scored by lowess_folds-fold
+    // cross-validation on ONE point set, the union of both inlier sets,
+    // residuals capped at robust_cut line scales so an outlier costs both
+    // models the same. LOWESS is used when enough points remain, both
+    // directions are increasing, and its held-out error is below lowess_gain
+    // times the line's.
+    RtModelChoice out;
+    json nonlinear = {{"model", "lowess"}, {"min_points", lowess_min_points}, {"gain_required", lowess_gain},
+                      {"rule", "cross-validated error on one point set"}, {"used", false}};
+    if (points.size() < lowess_min_points)
+    {
+      nonlinear["reason"] = "too few points";
+      out.record_json = nonlinear.dump();
+      return out;
+    }
+    try
+    {
+      QuietStreams quiet;   // the CV span search logs to std::cout
+      OpenMS::TransformationDescription linear = line;
+      const double linear_window = linear.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+      std::vector<std::pair<double, double>> current = points;
+      OpenMS::TransformationDescription fit;
+      std::size_t fits = 0;
+      bool converged = false;
+      double scale = 0.0;
+      for (;;)
+      {
+        fit = OpenMS::TransformationDescription();
+        fit.setDataPoints(current);
+        fit.fitModel("lowess", lowessParam());
+        ++fits;
+        std::vector<double> residual;
+        for (const auto& p : current) { residual.push_back(std::fabs(p.second - fit.apply(p.first))); }
+        scale = std::max(robust_min_scale, 1.4826 * quantile(residual, 0.5));
+        std::vector<std::pair<double, double>> next;
+        for (const auto& p : stock) { if (std::fabs(p.second - fit.apply(p.first)) <= robust_cut * scale) { next.push_back(p); } }
+        if (next == current) { converged = true; break; }
+        // Stop with `fit` fitted on `current`, never one set behind it.
+        if (next.size() < lowess_min_points || fits >= lowess_max_fits) { break; }
+        current.swap(next);
+      }
+      // Increasing both ways, over the run and over the assay range: the
+      // extraction maps assay RT through the inverse fit.
+      OpenMS::TransformationDescription inverse = fit;
+      inverse.invert();
+      bool increasing = true;
+      double previous = -std::numeric_limits<double>::infinity(), previous_inverse = previous;
+      for (int g = 0; g <= 200 && increasing; ++g)
+      {
+        const double x = run_first + run_span * g / 200.0, a = 100.0 * g / 200.0;
+        const double y = fit.apply(x), r = inverse.apply(a);
+        increasing = y > previous && r > previous_inverse;
+        previous = y;
+        previous_inverse = r;
+      }
+      // Held-out error of both models on the union of both inlier sets.
+      std::vector<std::pair<double, double>> common = points;
+      common.insert(common.end(), current.begin(), current.end());
+      std::sort(common.begin(), common.end());
+      common.erase(std::unique(common.begin(), common.end()), common.end());
+      double line_scale = 0.0;
+      {
+        std::vector<double> r;
+        for (const auto& p : points) { r.push_back(std::fabs(p.second - linear.apply(p.first))); }
+        line_scale = std::max(robust_min_scale, 1.4826 * quantile(r, 0.5));
+      }
+      const double cap = robust_cut * line_scale;
+      double error_line = 0.0, error_lowess = 0.0;
+      std::size_t held = 0;
+      for (std::size_t f = 0; f < lowess_folds; ++f)
+      {
+        std::vector<std::pair<double, double>> train, test;
+        for (std::size_t k = 0; k < common.size(); ++k) { (k % lowess_folds == f ? test : train).push_back(common[k]); }
+        if (train.size() < 2 || test.empty()) { continue; }
+        OpenMS::TransformationDescription line_f, lowess_f;
+        line_f.setDataPoints(train);
+        line_f.fitModel("linear", Param());
+        lowess_f.setDataPoints(train);
+        lowess_f.fitModel("lowess", lowessParam());
+        for (const auto& p : test)
+        {
+          error_line += std::min(cap, std::fabs(p.second - line_f.apply(p.first)));
+          error_lowess += std::min(cap, std::fabs(p.second - lowess_f.apply(p.first)));
+          ++held;
+        }
+      }
+      if (held > 0) { error_line /= static_cast<double>(held); error_lowess /= static_cast<double>(held); }
+      const double window = fit.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+      nonlinear["points"] = current.size();
+      nonlinear["fits"] = fits;
+      nonlinear["converged"] = converged;
+      nonlinear["span"] = static_cast<double>(fit.getModelParameters().getValue("span"));
+      nonlinear["scale_library"] = scale;
+      nonlinear["increasing"] = increasing;
+      nonlinear["window_linear_s"] = num(linear_window);
+      nonlinear["window_lowess_s"] = num(window);
+      nonlinear["cv"] = {{"folds", lowess_folds}, {"points", common.size()}, {"cap_library", cap},
+                         {"error_linear", num(error_line)}, {"error_lowess", num(error_lowess)}};
+      if (!increasing) { nonlinear["reason"] = "not increasing over the run"; }
+      else if (current.size() < lowess_min_points) { nonlinear["reason"] = "too few points after the outlier cut"; }
+      else if (held == 0 || !(error_lowess < lowess_gain * error_line))
+      { nonlinear["reason"] = "does not predict held-out points better than the line"; }
+      else
+      {
+        nonlinear["used"] = true;
+        out.lowess = true;
+        out.fit = fit;
+        out.points = current;
+      }
+    }
+    catch (const std::exception& e) { nonlinear["reason"] = std::string("fit failed: ") + e.what(); }
+    // The span search logs one info line per fit; the log stream prints a
+    // "<line> occurred N times" note when its repeat cache empties. Empty it
+    // now, while std::cout is still silenced.
+    {
+      QuietStreams quiet;
+      OpenMS::OpenMS_Log_info.rdbuf()->clearCache();
+    }
+    out.record_json = nonlinear.dump();
+    return out;
+  }
+
+  // ---- calibration ----------------------------------------------------------------
+
   Calibration Identifier::calibrate(const Library& library, const SearchSet& set, RunData& run)
   {
     Calibration cal;
@@ -721,7 +873,14 @@ namespace ODIA::search
     };
     std::vector<std::size_t> picked;
     std::unordered_set<std::string> picked_ids;
-    std::size_t kit_in_library = 0, kit_outside_windows = 0;
+    std::size_t kit_in_library = 0, kit_outside_windows = 0, kit_outside_rt = 0;
+    // Seeds only from the central library-RT range: one kit row with an absurd
+    // RT would stretch the seeds' RT span, and the stock binned-coverage check
+    // over that span would then fail the whole search.
+    const bool has_central = set.rt_robust.max > set.rt_robust.min;   // a set built by hand may not carry one
+    auto centralRt = [&](std::size_t i) {
+      return !has_central || (pre.irt[i] >= set.rt_robust.min && pre.irt[i] <= set.rt_robust.max);
+    };
     const std::vector<IsolationWindow> windows = isolationWindows(run);
     if (!kit.empty())
     {
@@ -731,6 +890,7 @@ namespace ODIA::search
         ++kit_in_library;
         // A seed outside every isolation window cannot be found.
         if (!windows.empty() && !CandidateSelector::inWindow(fromFixed(pre.mz[i]), windows)) { ++kit_outside_windows; continue; }
+        if (!centralRt(i)) { ++kit_outside_rt; continue; }
         if (picked_ids.insert(idOf(i)).second) { picked.push_back(i); }   // a duplicated (sequence, charge): first index
       }
     }
@@ -775,7 +935,7 @@ namespace ODIA::search
       for (const std::size_t i : candidates)
       {
         const std::string id = idOf(i);
-        if (picked_ids.count(id) || !index_of.emplace(id, i).second) { continue; }
+        if (!centralRt(i) || picked_ids.count(id) || !index_of.emplace(id, i).second) { continue; }
         OpenSwath::LightCompound c;
         c.id = id;
         c.sequence = strippedSequence(library.strings().get(pre.modified_sequence[i]));
@@ -816,6 +976,8 @@ namespace ODIA::search
     detail["kit_sequences"] = kit.size();
     detail["kit_precursors_in_library"] = kit_in_library;
     detail["kit_precursors_outside_windows"] = kit_outside_windows;
+    detail["kit_precursors_outside_library_rt_range"] = kit_outside_rt;
+    detail["seed_library_rt_range"] = {set.rt_robust.min, set.rt_robust.max};
     detail["seeds_kit"] = picked_kit;
     if (set.seeds.empty())
     {
@@ -864,6 +1026,12 @@ namespace ODIA::search
           failure += " -- the seeds found in the run do not cover most of the library RT range: either the run covers "
                      "only part of the gradient (a slice), or the library does not match the run (organism, "
                      "modifications, a different gradient)";
+          double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+          for (const auto& c : seed.compounds) { lo = std::min(lo, c.rt); hi = std::max(hi, c.rt); }
+          failure += "; the seed assays span library RT " + fixed(set.rt_scale.toLibrary(lo), 3) + " .. " +
+                     fixed(set.rt_scale.toLibrary(hi), 3) + " (seeds come from the central library-RT range " + fixed(set.rt_robust.min, 3) +
+                     " .. " + fixed(set.rt_robust.max, 3) + "; all library targets span " + fixed(set.rt_scale.min, 3) + " .. " +
+                     fixed(set.rt_scale.max, 3) + ")";
         }
       }
     }
@@ -982,96 +1150,66 @@ namespace ODIA::search
                                        {"within", within}};
     }
 
-    // 4b. A non-linear second fit: a predicted library's RT is not a linear
-    //     function of the run's (the linear residuals on an Astral run had a
-    //     p99 of 3.2 min), and the RT window is sized by those residuals.
-    //     LOWESS (stock TransformationModelLowess, span by cross-validation)
-    //     on the stock points, with its own iterative outlier cut; used only
-    //     when enough points remain, both directions are increasing, and it
-    //     narrows the window by at least lowess_gain.
+    // 4b. A non-linear second fit (Identifier::chooseRtModel): LOWESS
+    //     replaces the line when it predicts held-out points better.
     {
-      json nonlinear = {{"model", "lowess"}, {"min_points", lowess_min_points}, {"gain_required", lowess_gain}, {"used", false}};
-      if (points.size() >= lowess_min_points && params().rt_window <= 0)
+      json nonlinear;
+      if (params().rt_window <= 0)
       {
-        try
+        const RtModelChoice choice = chooseRtModel(stock, points, cal.rt, run_first, run_span);
+        nonlinear = json::parse(choice.record_json);
+        if (choice.lowess)
         {
-          QuietStreams quiet;   // the CV span search logs to std::cout
-          const double linear_window = cal.rt.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
-          std::vector<std::pair<double, double>> current = points;
-          OpenMS::TransformationDescription fit;
-          std::size_t iterations = 0;
-          double scale = 0.0;
-          for (; iterations < 10; ++iterations)
-          {
-            fit = OpenMS::TransformationDescription();
-            fit.setDataPoints(current);
-            fit.fitModel("lowess", lowessParam());
-            std::vector<double> residual;
-            for (const auto& p : current) { residual.push_back(std::fabs(p.second - fit.apply(p.first))); }
-            scale = std::max(robust_min_scale, 1.4826 * quantile(residual, 0.5));
-            std::vector<std::pair<double, double>> next;
-            for (const auto& p : stock) { if (std::fabs(p.second - fit.apply(p.first)) <= robust_cut * scale) { next.push_back(p); } }
-            if (next == current || next.size() < lowess_min_points) { break; }
-            current.swap(next);
-          }
-          // Increasing both ways, over the run and over the assay range: the
-          // extraction maps assay RT through the inverse fit.
-          OpenMS::TransformationDescription inverse = fit;
-          inverse.invert();
-          bool increasing = true;
-          double previous = -std::numeric_limits<double>::infinity(), previous_inverse = previous;
-          for (int g = 0; g <= 200 && increasing; ++g)
-          {
-            const double x = run_first + run_span * g / 200.0, a = 100.0 * g / 200.0;
-            const double y = fit.apply(x), r = inverse.apply(a);
-            increasing = y > previous && r > previous_inverse;
-            previous = y;
-            previous_inverse = r;
-          }
-          const double window = fit.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
-          nonlinear["points"] = current.size();
-          nonlinear["iterations"] = iterations + 1;
-          nonlinear["span"] = static_cast<double>(fit.getModelParameters().getValue("span"));
-          nonlinear["scale_library"] = scale;
-          nonlinear["increasing"] = increasing;
-          nonlinear["window_linear_s"] = num(linear_window);
-          nonlinear["window_lowess_s"] = num(window);
-          if (!increasing) { nonlinear["reason"] = "not increasing over the run"; }
-          else if (current.size() < lowess_min_points) { nonlinear["reason"] = "too few points after the outlier cut"; }
-          else if (!(window < lowess_gain * linear_window)) { nonlinear["reason"] = "does not narrow the RT window enough"; }
-          else
-          {
-            nonlinear["used"] = true;
-            cal.rt = fit;
-            points = current;
-            detail["model"] = "lowess";
-          }
-        }
-        catch (const std::exception& e) { nonlinear["reason"] = std::string("fit failed: ") + e.what(); }
-        // The span search logs one info line per fit; the log stream prints a
-        // "<line> occurred N times" note when its repeat cache empties. Empty
-        // it now, while std::cout is still silenced.
-        {
-          QuietStreams quiet;
-          OpenMS::OpenMS_Log_info.rdbuf()->clearCache();
+          cal.rt = choice.fit;
+          points = choice.points;
+          detail["model"] = "lowess";
         }
       }
-      else { nonlinear["reason"] = params().rt_window > 0 ? "search:rt_window is set" : "too few points"; }
+      else { nonlinear = {{"model", "lowess"}, {"used", false}, {"reason", "search:rt_window is set"}}; }
       detail["nonlinear"] = nonlinear;
+    }
+
+    // 4c. Where the chosen model is biased, by library-RT decile of the
+    //     points (median signed residual, run seconds): a diagnostic.
+    {
+      std::vector<std::pair<double, double>> by_assay;   // (assay RT, run - model run RT)
+      OpenMS::TransformationDescription inverse = cal.rt;
+      inverse.invert();
+      for (const auto& p : points) { by_assay.emplace_back(p.second, p.first - inverse.apply(p.second)); }
+      std::sort(by_assay.begin(), by_assay.end());
+      json deciles = json::array();
+      for (std::size_t d = 0; d < 10 && !by_assay.empty(); ++d)
+      {
+        const std::size_t lo = d * by_assay.size() / 10, hi = (d + 1) * by_assay.size() / 10;
+        std::vector<double> r;
+        for (std::size_t k = lo; k < hi; ++k) { r.push_back(by_assay[k].second); }
+        deciles.push_back(num(r.empty() ? std::numeric_limits<double>::quiet_NaN() : quantile(r, 0.5)));
+      }
+      detail["median_residual_s_by_library_rt_decile"] = deciles;
     }
 
     cal.points = points.size();
 
     // 5. Windows. RT: the seed residuals (TOPP's quantile and padding), with a
     //    floor; m/z: the calibration's estimate may only NARROW the default.
+    double robust_sd_s = std::numeric_limits<double>::quiet_NaN();
     {
       OpenMS::TransformationDescription inverse = cal.rt;
       inverse.invert();
       std::vector<double> residual;
       residual.reserve(points.size());
       for (const auto& dp : points) { residual.push_back(std::fabs(inverse.apply(dp.second) - dp.first)); }
+      robust_sd_s = 1.4826 * quantile(residual, 0.5);
       detail["residual_s"] = {{"median", num(quantile(residual, 0.5))}, {"p95", num(quantile(residual, 0.95))},
-                              {"p99", num(quantile(residual, 0.99))}, {"max", num(quantile(residual, 1.0))}};
+                              {"p99", num(quantile(residual, 0.99))}, {"max", num(quantile(residual, 1.0))},
+                              {"robust_sd", num(robust_sd_s)}};
+    }
+    if (points.size() < calibration_warn_points)
+    {
+      warn("search: the RT calibration rests on " + std::to_string(points.size()) + " points, fewer than " +
+           std::to_string(calibration_warn_points) + ": its RT window is sized with a small-sample margin and may still "
+           "miss true precursors");
+      detail["few_points_warning"] = true;
     }
     if (params().rt_window > 0)
     {
@@ -1081,10 +1219,13 @@ namespace ODIA::search
     else
     {
       const double estimate = cal.rt.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
-      cal.rt_window = std::min(2.0 * run_span, std::max(rt_window_floor_s, estimate));
+      const double margin = std::isfinite(robust_sd_s) ? 2.0 * rt_window_padding * rt_window_normal_quantile * robust_sd_s : 0.0;
+      cal.rt_window = std::min(2.0 * run_span, std::max({rt_window_floor_s, estimate, margin}));
       detail["rt_window_estimate_s"] = num(estimate);
+      detail["rt_window_margin_s"] = num(margin);
       detail["rt_window_rule"] = "2 x " + fixed(rt_window_quantile, 2) + " quantile of the seed residuals x " +
-                                 fixed(rt_window_padding, 1) + ", at least " + fixed(rt_window_floor_s, 0) + " s";
+                                 fixed(rt_window_padding, 1) + ", at least 2 x " + fixed(rt_window_padding, 1) + " x " +
+                                 fixed(rt_window_normal_quantile, 3) + " robust SDs of them and " + fixed(rt_window_floor_s, 0) + " s";
     }
     auto mzWindow = [&](double estimate) {
       if (params().mz_ppm > 0) { return params().mz_ppm; }

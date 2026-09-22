@@ -55,6 +55,9 @@ namespace
   SearchParams params(std::size_t chunk = 20000)
   {
     SearchParams p;
+    // The fixture plants the LIBRARY's fragments; the predicted assays need
+    // the PeptDeep model and are tested in identify_decoy_exchangeability.
+    p.intensities = Intensities::Library;
     p.threads = 2;
     p.chunk = chunk;
     return p;

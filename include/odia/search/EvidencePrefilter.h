@@ -6,9 +6,11 @@
 ///
 ///   pairs     every eligible target (CandidateSelector::eligible) that gets a
 ///             search decoy (searchDecoy, the decoy that is later searched),
-///             with the m/z of its top prefilter_fragments predicted fragments
-///             by library intensity and of its decoy's fragments in the SAME
-///             slots;
+///             with the m/z of each member's top prefilter_fragments
+///             fragments: with search:intensities predicted, each member's
+///             own most intense by the fragment model (PredictedAssays.h);
+///             with library, the target's by library intensity and its
+///             decoy's in the SAME slots;
 ///   sweep     one pass over the run's MS2 spectra: per isolation window, one
 ///             m/z-sorted index of both members' fragments; per spectrum, its
 ///             search:prefilter_top_peaks most intense peaks are matched at
@@ -21,7 +23,8 @@
 ///             as targets (ratio guard) and capped to search:max_pairs by a
 ///             stratified, label-blind rank;
 ///   seeds     the calibration's seeds: targets that reach the depth
-///             THEMSELVES, one per peptide, the best of each library-RT bin.
+///             THEMSELVES and clearly beat their own decoy, one per peptide,
+///             the best of each bin of the central library-RT range.
 ///
 /// Label symmetry is the design rule: the index, the sweep and the matching
 /// treat a decoy fragment exactly as a target fragment, and every decision
@@ -34,6 +37,7 @@
 
 #include <odia/Library.h>
 #include <odia/search/CandidateSelector.h>
+#include <odia/search/PredictedAssays.h>
 #include <odia/search/SearchParams.h>
 
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/SwathMap.h>
@@ -63,6 +67,9 @@ namespace ODIA::search
   {
     std::vector<std::pair<std::uint64_t, std::size_t>> targets;   ///< (draw key, input library index)
     std::vector<std::uint8_t> fragments;   ///< per pair: fragments indexed per member (<= prefilter_fragments)
+    /// Per pair: fragments per member of the searched assays (predicted: the
+    /// pair's count, which PredictedAssays::apply must reproduce).
+    std::vector<std::uint8_t> assay_fragments;
     /// Per member, prefilter_fragments slots (unused slots NaN): the target's
     /// top predicted fragments, and the decoy's fragments in the same slots.
     std::vector<float> fragment_mz;
@@ -70,6 +77,7 @@ namespace ODIA::search
     std::vector<float> library_rt;         ///< per pair, the input library's RT
     std::vector<std::uint8_t> charge;      ///< per pair
     SelectionStats stats;                  ///< eligibility and decoy counts
+    std::size_t processed = 0;             ///< targets of the ordered input examined (all unless stopped early)
     double decoy_seconds = 0.0;
 
     std::size_t size() const { return targets.size(); }
@@ -113,7 +121,20 @@ namespace ODIA::search
     /// @p windows), each with its search decoy (searchDecoy with
     /// CandidateSelector::decoyRules); targets without a decoy are counted in
     /// stats.no_decoy and its reasons. Deterministic whatever the thread count.
-    static PrefilterPairs pairs(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows);
+    /// With search:intensities predicted, @p model predicts both members
+    /// (required; std::invalid_argument without it).
+    /// @p progress, when given, hears about the prediction every 30 s or so
+    /// (it takes minutes on a whole-proteome library).
+    static PrefilterPairs pairs(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows,
+                                FragmentModel* model = nullptr, const Log& progress = Log());
+
+    /// pairs() over targets already chosen and ordered (draw order), with the
+    /// counts of the choice in @p stats. With @p stop_after, stops after the
+    /// block in which that many pairs got a decoy (processed says how far).
+    static PrefilterPairs pairsOf(const Library& library, const SearchParams& params,
+                                  const std::vector<std::pair<std::uint64_t, std::size_t>>& ordered,
+                                  const SelectionStats& stats, FragmentModel* model, std::size_t stop_after,
+                                  const Log& progress = Log());
 
     /// One sweep over the MS2 maps of @p maps (MS1 maps are skipped): the
     /// evidence of every member, 2 * pairs.size() entries. A member is
@@ -134,10 +155,13 @@ namespace ODIA::search
     static PrefilterSelection choose(const PrefilterPairs& pairs, const std::vector<MemberEvidence>& evidence,
                                      const SearchParams& params, const std::vector<IsolationWindow>& windows);
 
-    /// Calibration seeds: targets whose OWN depth reaches search:prefilter_depth,
-    /// the best (depth, spectra, draw key) per stripped peptide sequence, at
-    /// most calibration_seeds / calibration_seed_bins from each of
-    /// calibration_seed_bins library-RT bins of @p scale; best first.
+    /// Calibration seeds: targets whose OWN depth reaches search:prefilter_depth
+    /// and that beat their own decoy clearly (at least seed_min_spectra
+    /// spectra at that depth and seed_decoy_factor times the decoy's), the
+    /// best (depth, spectra, draw key) per stripped peptide sequence, at most
+    /// calibration_seeds / calibration_seed_bins from each of
+    /// calibration_seed_bins bins of @p scale (the central library-RT range,
+    /// SearchSet::rt_robust); a target outside it is not a seed. Best first.
     static std::vector<SeedHint> seeds(const Library& library, const PrefilterPairs& pairs,
                                        const std::vector<MemberEvidence>& evidence, const SearchParams& params,
                                        const RtScale& scale);
@@ -151,7 +175,17 @@ namespace ODIA::search
     /// Everything: the search set of the kept pairs (CandidateSelector::
     /// fromTargets), its seeds, and the record in prefilter_json. Timings go
     /// to @p seconds (a JSON object), never into the set.
+    /// With search:intensities predicted, @p model predicts both members of
+    /// every pair and the searched set's assays (PredictedAssays::apply).
     static SearchSet select(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows,
-                            const std::vector<OpenSwath::SwathMap>& maps, const Log& info, std::string* seconds = nullptr);
+                            const std::vector<OpenSwath::SwathMap>& maps, const Log& info, std::string* seconds = nullptr,
+                            FragmentModel* model = nullptr);
+
+    /// search:candidates random with search:intensities predicted: the
+    /// random draw of CandidateSelector::select (search:subset lowest draw
+    /// keys, then the first search:max_pairs with a decoy), whose pairs are
+    /// predicted like the evidence prefilter's.
+    static SearchSet selectRandom(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows,
+                                  FragmentModel& model);
   };
 }

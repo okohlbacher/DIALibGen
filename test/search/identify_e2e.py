@@ -4,6 +4,9 @@
   identify_e2e.py refine <DIALibGen> <identify_synth_run>
   identify_e2e.py tune   <DIALibGen> <identify_synth_run> <models-dir>
 
+Every search uses search:intensities library: the fixture plants the library's
+fragments.
+
 refine: -mode refine -run completes, writes the identification report and a
         refined library that consumed it; the report is byte-identical at
         -threads 1 and 4 and at two search:chunk sizes; with pyarrow, the
@@ -33,6 +36,13 @@ def fail(message):
 
 
 def run(*args, ok=True):
+    # The synthetic run plants the LIBRARY's fragments (synthetic_run.h), so
+    # every search here uses them: search:intensities predicted (the default)
+    # would search the model's fragments of these made-up peptides instead.
+    # The predicted assays are tested in identify_decoy_exchangeability and
+    # identify_pipeline_synthetic.
+    if '-run' in [str(a) for a in args]:
+        args = args + ('-search:intensities', 'library')
     r = subprocess.run([str(a) for a in args], capture_output=True, text=True, timeout=1800)
     log = r.stdout + r.stderr
     if ok and r.returncode != 0:

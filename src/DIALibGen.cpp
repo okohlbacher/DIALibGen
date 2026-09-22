@@ -75,7 +75,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const bool search = option.starts_with("search:");
     const bool refinement = refinement_options_.count(option) || training || search;
     bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
-    if (mode == "refine" && training && !getFlag_("tune")) { wrong_mode = true; }
+    // -tune_models also names where -run finds the MS2 model (search:intensities predicted).
+    if (mode == "refine" && training && !getFlag_("tune") && !(option == "tune_models" && with_run)) { wrong_mode = true; }
     if (mode == "tune" && refinement && !training && !search && option != "ids" && option != "out_report" &&
         option != "run" && option != "out_ids" && option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
     const bool needs_run = !wrong_mode && (search || option == "out_ids") && !with_run;

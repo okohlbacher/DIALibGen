@@ -57,7 +57,8 @@ namespace ODIA::search
               {"no_decoy", s.no_decoy},
               {"no_decoy_reasons", {{"unparsable", s.decoy_unparsable}, {"unshufflable", s.decoy_unshufflable},
                                     {"out_of_range", s.decoy_out_of_range}, {"copy", s.decoy_copy},
-                                    {"too_few_fragments", s.decoy_too_few_fragments}}},
+                                    {"too_few_fragments", s.decoy_too_few_fragments},
+                                    {"unpredictable", s.decoy_unpredictable}}},
               {"decoys_redrawn", s.decoy_redrawn}, {"fragment_slots_dropped", s.fragment_slots_dropped},
               {"decoy_fragment_mz_range", {s.fragment_mz_min, s.fragment_mz_max}},
               {"capped", s.capped}, {"pairs", s.pairs}};
@@ -75,7 +76,9 @@ namespace ODIA::search
         {"iterations_skipped", d.iterations_skipped}, {"folds_unscaled", d.folds_unscaled},
         {"target_winners", d.target_winners}, {"decoy_winners", d.decoy_winners},
         {"estimator", "concatenated pair competition, q = (D + 1) / T; peptides and protein groups by picked competition"},
-        {"null_balance", {{"fraction", SearchParams::null_balance_fraction}, {"targets", o.null_targets},
+        {"null_balance", {{"role", "bulk diagnostic: the lowest-scoring pair winners; it cannot see an asymmetry confined to the "
+                                   "high-scoring tail (the entrapment winner test can)"},
+                          {"fraction", SearchParams::null_balance_fraction}, {"targets", o.null_targets},
                           {"decoys", o.null_decoys}, {"ratio", num(o.null_ratio)}, {"z", num(o.null_z)},
                           {"warn_z", SearchParams::null_balance_warn_z}}}};
       return j;
@@ -94,10 +97,18 @@ namespace ODIA::search
     {
       if (!o.entrapment) { return nullptr; }
       const auto& e = o.entrapment_estimate;
+      json winners = json::array();
+      for (const auto& w : o.entrapment_winners)
+      {
+        winners.push_back({{"level", w.level}, {"q", w.q}, {"targets", w.targets}, {"decoys", w.decoys}, {"z", num(w.z)}});
+      }
       return {{"estimator", "combined"}, {"valid", e.valid}, {"identified", e.n_reported}, {"entrapment", e.n_entrapment},
               {"shared_left_out", o.entrapment_shared}, {"db_basis", o.entrapment_db_basis},
               {"db_target", e.db_target}, {"db_entrapment", e.db_entrapment},
-              {"ratio", num(e.ratio)}, {"fdp", num(e.fdp)}};
+              {"ratio", num(e.ratio)}, {"fdp", num(e.fdp)},
+              {"winner_test", {{"rule", "winners of pairs whose target is an entrapment entity: target vs its decoy; "
+                                        "exchangeable decoys split them evenly"},
+                               {"warn_z", SearchParams::entrapment_winner_warn_z}, {"levels", winners}}}};
     }
 
     json selftestJson(const ScoringOutcome& o)
@@ -230,6 +241,22 @@ namespace ODIA::search
     Calibration calibration;
     json run_json, calibration_json;
 
+    // 0. What depends on the library alone is checked before the run is read
+    //    (minutes, and a cache the size of the run, on a large diaPASEF run).
+    (void)CandidateSelector::rtScale(library);
+    (void)CandidateSelector::decoyRules(library, params_);
+    const bool predicted = params_.intensities == Intensities::Predicted;
+    if (predicted && !fragment_model_)
+    {
+      if (params_.ms2_model.empty())
+      {
+        throw std::invalid_argument("search:intensities predicted needs the PeptDeep MS2 model (peptdeep_ms2_dynamic.onnx; "
+                                    "-tune_models or $DIALIBGEN_MODEL_DIR)");
+      }
+      if (!std::filesystem::exists(params_.ms2_model))
+      { throw std::invalid_argument("search:intensities predicted: no MS2 model at " + params_.ms2_model); }
+    }
+
     // 1. The run, first: candidate selection needs its isolation windows.
     auto t = Clock::now();
     run = loadRun(run_path);
@@ -252,13 +279,43 @@ namespace ODIA::search
            (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
     }
 
-    // 2. Candidates and their in-memory decoys.
+    // 2. Candidates and their in-memory decoys; with search:intensities
+    //    predicted, both members of every pair predicted by one model.
+    std::shared_ptr<FragmentModel> model = fragment_model_;
+    json intensities_json = {{"source", toString(params_.intensities)}};
+    if (predicted)
+    {
+      if (!model)
+      {
+        if (params_.instrument.empty())
+        {
+          params_.instrument = run.ion_mobility ? "timsTOF" : "QE";
+          params_.instrument_source = "run (" + std::string(run.ion_mobility ? "ion mobility" : "no ion mobility") + ")";
+        }
+        auto peptdeep = std::make_shared<PeptDeepFragmentModel>(params_.ms2_model, params_.instrument, params_.nce, params_.threads);
+        params_.instrument = peptdeep->instrument();
+        params_.nce = peptdeep->nce();
+        model = peptdeep;
+      }
+      intensities_json["model"] = model->describe();
+      intensities_json["instrument_source"] = params_.instrument_source;
+      info("search intensities: both members of every pair predicted by " + model->describe() +
+           (params_.instrument_source.empty() ? std::string() : " (instrument from " + params_.instrument_source + ")"));
+    }
+    else
+    {
+      warning("search:intensities library: every decoy re-uses its target's fragment slots and intensities, which makes "
+              "decoys weaker than null targets and the q-values optimistic (entrapment: about 1.4x at q <= 0.01); "
+              "a comparison setting, not a way to search");
+    }
     t = Clock::now();
     const bool evidence = params_.candidates == "evidence";
     std::string prefilter_seconds;
     const SearchSet set = evidence ? EvidencePrefilter::select(library, params_, windows, run.maps,
-                                                               [this](const std::string& m) { info(m); }, &prefilter_seconds)
-                                   : CandidateSelector::select(library, params_, windows);
+                                                               [this](const std::string& m) { info(m); }, &prefilter_seconds,
+                                                               model.get())
+                          : predicted ? EvidencePrefilter::selectRandom(library, params_, windows, *model)
+                                      : CandidateSelector::select(library, params_, windows);
     timing["candidates"] = since(t);
     if (!prefilter_seconds.empty()) { timing["prefilter"] = json::parse(prefilter_seconds); }
     const auto& st = set.stats;
@@ -268,7 +325,7 @@ namespace ODIA::search
          (evidence ? "kept by the prefilter " : "drawn ") + std::to_string(st.drawn) + ", no decoy " +
          std::to_string(st.no_decoy) + " (" + std::to_string(st.decoy_unshufflable) + " unshufflable, " +
          std::to_string(st.decoy_out_of_range) + " fragments out of range, " + std::to_string(st.decoy_copy) +
-         " fragment copies, " + std::to_string(st.decoy_unparsable + st.decoy_too_few_fragments) + " other), capped " +
+         " fragment copies, " + std::to_string(st.decoy_unparsable + st.decoy_too_few_fragments + st.decoy_unpredictable) + " other), capped " +
          std::to_string(st.capped) + "; ineligible: " +
          std::to_string(st.ineligible_mz) + " m/z, " + std::to_string(st.ineligible_charge) + " charge, " +
          std::to_string(st.ineligible_rt) + " RT, " + std::to_string(st.ineligible_fragments) + " < " +
@@ -339,6 +396,21 @@ namespace ODIA::search
          std::to_string(d.features_used.size()) + " sub-scores, " + std::to_string(d.iterations_trained) +
          " iterations trained; null-pair balance " + std::to_string(outcome.null_targets) + " : " +
          std::to_string(outcome.null_decoys) + " (" + seconds(timing["score"].get<double>()) + ")");
+    if (outcome.entrapment)
+    {
+      const auto& e = outcome.entrapment_estimate;
+      std::string line = "search entrapment: ";
+      line += e.valid ? "combined FDP " + fixed2(100.0 * e.fdp) + " % (" + std::to_string(e.n_entrapment) + " entrapment of " +
+                          std::to_string(e.n_reported) + ", r " + fixed2(e.ratio) + ")"
+                      : std::string("no estimate");
+      line += "; winner test, entrapment target : its decoy at";
+      for (const auto& w : outcome.entrapment_winners)
+      {
+        line += " " + w.level + " q<=" + fixed2(w.q) + " " + std::to_string(w.targets) + ":" + std::to_string(w.decoys) +
+                " (z " + fixed2(w.z) + ")";
+      }
+      info(line);
+    }
     if (outcome.selftest)
     {
       info("search self-check: label swap " + std::to_string(outcome.selftest_label_swap_ids) + ", random pair labels " +
@@ -362,6 +434,7 @@ namespace ODIA::search
 
     json candidates = selectionJson(st);
     candidates["method"] = params_.candidates;
+    candidates["intensities"] = intensities_json;
     candidates["prefilter"] = set.prefilter_json.empty() ? json(nullptr) : json::parse(set.prefilter_json);
     json search = {
       {"experimental", true},

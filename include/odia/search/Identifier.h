@@ -5,8 +5,9 @@
 /// run to an identification report, which then serves as `-ids`.
 ///
 ///   loadRun                          SwathFile::loadMzML, IM-limit fix, diaPASEF detection   [seam]
-///   candidates (CandidateSelector)   paired random subset inside the run's isolation windows
-///                                    + in-memory decoys
+///   candidates                       evidence prefilter (default) or paired random subset inside
+///                                    the run's isolation windows + in-memory decoys; both members'
+///                                    assays predicted by one model (search:intensities predicted)
 ///   calibrate                        performRTNormalization on seed assays; windows          [seam]
 ///   extract                          chunked performExtraction -> PeakGroups                 [seam]
 ///   checkExtraction                  decoy:target band
@@ -20,6 +21,7 @@
 
 #include <odia/Library.h>
 #include <odia/search/CandidateSelector.h>
+#include <odia/search/PredictedAssays.h>
 #include <odia/search/ReportWriter.h>
 #include <odia/search/Scoring.h>
 #include <odia/search/SearchParams.h>
@@ -120,6 +122,11 @@ namespace ODIA::search
 
     const SearchParams& params() const { return params_; }
 
+    /// The fragment model search:intensities predicted uses instead of the
+    /// PeptDeep model named by search's ms2_model (a test seam: a synthetic
+    /// run needs a model that predicts what it planted).
+    void setFragmentModel(std::shared_ptr<FragmentModel> model) { fragment_model_ = std::move(model); }
+
     /// The report rows of a scored search: every competition winner, target or
     /// decoy, at precursor q <= search:report_max_q, in SearchSet order.
     static std::vector<ReportRow> reportRows(const SearchSet& set, const PeakGroups& groups,
@@ -127,6 +134,24 @@ namespace ODIA::search
 
     /// The MS2 isolation windows of a loaded run (its non-MS1 maps), by lower bound.
     static std::vector<IsolationWindow> isolationWindows(const RunData& run);
+
+    /// The RT calibration's second model: LOWESS (stock, span by
+    /// cross-validation, its own iterative outlier cut on @p stock) replaces
+    /// @p line, fitted to @p points (the line's inliers), when at least 200
+    /// points remain, it increases over the run and the assay range, and its
+    /// 5-fold cross-validated error on ONE point set (the union of both
+    /// inlier sets, residuals capped at 3 line scales) is below 0.97x the
+    /// line's. Points are (run seconds, assay RT). record_json says why.
+    struct RtModelChoice
+    {
+      bool lowess = false;
+      OpenMS::TransformationDescription fit;           ///< the LOWESS fit, when used
+      std::vector<std::pair<double, double>> points;   ///< its inliers, when used
+      std::string record_json;
+    };
+    static RtModelChoice chooseRtModel(const std::vector<std::pair<double, double>>& stock,
+                                       const std::vector<std::pair<double, double>>& points,
+                                       const OpenMS::TransformationDescription& line, double run_first, double run_span);
 
   protected:
     // ---- seams: src/search/RunStages.cpp ------------------------------------
@@ -161,5 +186,6 @@ namespace ODIA::search
     SearchParams params_;
     Log info_, warn_;
     std::filesystem::path output_dir_;
+    std::shared_ptr<FragmentModel> fragment_model_;
   };
 }

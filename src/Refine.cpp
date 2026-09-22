@@ -226,7 +226,9 @@ void DIALibGen::registerRefinementOptions_()
                           "BEFORE refining, so precursors the reference never identified are corrected too. "
                           "Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a "
                           "training run plus whole-library inference.");
-    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs}_dynamic.onnx. "
+    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs,ms2}_dynamic.onnx: "
+                                                      "-tune starts from the RT and CCS models, and -run predicts both members "
+                                                      "of every searched target-decoy pair with the MS2 model. "
                                                       "Default: $DIALIBGEN_MODEL_DIR or the bundled models.", false);
     registerStringOption_("tune_heads", "<which>", "both", "Which models to tune.", false);
     setValidStrings_("tune_heads", {"rt", "ccs", "both"});
@@ -301,6 +303,18 @@ void DIALibGen::registerRefinementOptions_()
     registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
                           "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
     setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
+    registerStringOption_("search:intensities", "<source>", "predicted", "Fragments and intensities of both members of each "
+                          "target-decoy pair: predicted = both predicted by the PeptDeep MS2 model (tune_models, "
+                          "$DIALIBGEN_MODEL_DIR or the bundled models) from their own sequences, each taking its own most "
+                          "intense fragments; library = the library's target assay, the decoy in its target's fragment slots "
+                          "with its target's intensities (makes decoys weaker than null targets; for comparison only)", false);
+    setValidStrings_("search:intensities", {"predicted", "library"});
+    registerStringOption_("search:instrument", "<name>", "auto", "search:intensities predicted: the MS2 model's instrument "
+                          "(QE, Lumos, timsTOF, SciexTOF, ThermoTOF or an alias); auto = the instrument DIALibGen generate "
+                          "recorded in the library, else timsTOF for an ion-mobility run and QE otherwise", false);
+    registerDoubleOption_("search:nce", "<nce>", -1.0, "search:intensities predicted: the MS2 model's collision energy; -1 = "
+                          "the one recorded in the library with its instrument, else the instrument's default", false);
+    setMinFloat_("search:nce", -1.0); setMaxFloat_("search:nce", 100.0);
     registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how", false);
     registerIntOption_("search:passes", "<n>", 1, "Extraction passes (1 in this version)", false);
     setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);
@@ -334,8 +348,9 @@ void DIALibGen::registerRefinementOptions_()
     registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors, targets and decoys, up to this precursor q-value "
                           "go into -out_ids", false);
     setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
-    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Protein-group prefix of entrapment proteins: log and record "
-                          "the combined entrapment FDP estimate. A validation aid", false);
+    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Prefix of entrapment protein ids, at the start of an id or "
+                          "right after a '|' (sp|ENTRAP_P12345|...): log and record the combined entrapment FDP estimate and "
+                          "the entrapment winner test. A validation aid", false);
     registerStringOption_("search:selftest", "<true/false>", "true", "Also score with swapped and with random pair labels, "
                           "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
                           "decoys that are built weaker than null targets", false);
@@ -376,6 +391,13 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.prefilter_top_peaks = count("search:prefilter_top_peaks");
     s.prefilter_ppm = getDoubleOption_("search:prefilter_ppm");
     s.decoys = ODIA::search::parseSearchDecoyMethod(getStringOption_("search:decoys"));
+    s.intensities = ODIA::search::parseIntensities(getStringOption_("search:intensities"));
+    if (getStringOption_("search:instrument") != "auto")
+    {
+      s.instrument = getStringOption_("search:instrument");
+      s.instrument_source = "search:instrument";
+    }
+    s.nce = getDoubleOption_("search:nce");
     s.seed = static_cast<std::uint64_t>(count("search:seed"));
     s.passes = getIntOption_("search:passes");
     s.rt_window = getDoubleOption_("search:rt_window");
@@ -570,6 +592,52 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       if (out_ids.empty()) { out_ids = out + ".ids.parquet"; }
       if (!out_ids.ends_with(".parquet"))
       { writeLogError_("-out_ids must end in .parquet"); return ILLEGAL_PARAMETERS; }
+      if (search->intensities == ODIA::search::Intensities::Predicted)
+      {
+        // The MS2 model both members of every pair are predicted with: where
+        // -tune finds its stock models.
+        std::string models = getStringOption_("tune_models");
+        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
+        if (models.empty()) { models = bundledModelDir(); }
+        const std::filesystem::path ms2 = models.empty() ? std::filesystem::path() : std::filesystem::path(models) / "peptdeep_ms2_dynamic.onnx";
+        if (models.empty() || !std::filesystem::exists(ms2))
+        {
+          writeLogError_("-run predicts the fragments of every target and decoy it searches (search:intensities predicted) "
+                         "and needs peptdeep_ms2_dynamic.onnx: " +
+                         (models.empty() ? std::string("give -tune_models or $DIALIBGEN_MODEL_DIR") : "none in " + models));
+          return ILLEGAL_PARAMETERS;
+        }
+        search->ms2_model = ms2.string();
+        search->ms2_model_hash = ODIA::DIANNLibraryFile::hashFile(search->ms2_model);
+        if (!search->instrument.empty() && ODIA::PeptDeepEncoder::canonicalInstrument(search->instrument).empty())
+        {
+          writeLogError_("search:instrument: unknown instrument '" + search->instrument +
+                         "' (QE, Lumos, timsTOF, SciexTOF, ThermoTOF, or auto)");
+          return ILLEGAL_PARAMETERS;
+        }
+        // The instrument and NCE the library was generated with, when
+        // DIALibGen generate recorded them: the targets are then predicted
+        // exactly as the library predicted them.
+        if (search->instrument.empty())
+        {
+          try
+          {
+            const std::string config = ODIA::DIANNLibraryFile::readFingerprint(in, "odia.config_json");
+            if (!config.empty())
+            {
+              const json j = json::parse(config);
+              if (j.contains("instrument") && j["instrument"].is_string() && !j["instrument"].get<std::string>().empty())
+              {
+                search->instrument = j["instrument"].get<std::string>();
+                search->instrument_source = "library";
+                if (search->nce <= 0 && j.contains("nce") && j["nce"].is_number() && j["nce"].get<double>() > 0)
+                { search->nce = j["nce"].get<double>(); }
+              }
+            }
+          }
+          catch (const std::exception&) {}   // not a DIALibGen library: the run decides
+        }
+      }
     }
 
     const std::string report = getParam_().getValue("out_report").toString();

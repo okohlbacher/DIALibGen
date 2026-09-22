@@ -41,6 +41,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -54,7 +55,8 @@ namespace ODIA::search
     Unshufflable,     ///< no arrangement of the interior differs from the target's (EEEEEEK)
     OutOfRange,       ///< every arrangement tried puts a fragment outside the targets' fragment m/z range
     Copy,             ///< every arrangement tried reproduces the target's fragment masses (I = L)
-    TooFewFragments   ///< fewer reproducible fragment slots than the assay minimum
+    TooFewFragments,  ///< fewer reproducible fragment slots than the assay minimum
+    Unpredictable     ///< search:intensities predicted: the model cannot predict the target or its decoy
   };
 
   const char* toString(DecoyOutcome o);
@@ -96,6 +98,9 @@ namespace ODIA::search
     std::vector<std::uint32_t> slots;
     std::vector<MzFixed> mz;             ///< the decoy's product m/z, per slot
     std::vector<std::int8_t> charge;     ///< the fragment charge per slot (a library charge of 0 reads as 1)
+    /// The decoy peptide itself (OpenMS notation, terminal modifications
+    /// included): what search:intensities predicted feeds the fragment model.
+    std::string sequence;
   };
 
   /// The inclusive m/z range of @p library's target fragments (representable

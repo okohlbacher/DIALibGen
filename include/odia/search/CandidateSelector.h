@@ -68,7 +68,8 @@ namespace ODIA::search
     std::size_t decoy_unshufflable = 0;       ///< ... no arrangement differs (EEEEEEK)
     std::size_t decoy_out_of_range = 0;       ///< ... every arrangement left the targets' fragment m/z range
     std::size_t decoy_copy = 0;               ///< ... every arrangement reproduced the target's fragment masses
-    std::size_t decoy_too_few_fragments = 0;  ///< ... too few reproducible fragment slots
+    std::size_t decoy_too_few_fragments = 0;  ///< ... too few reproducible fragment slots (or, predicted, too few predicted fragments)
+    std::size_t decoy_unpredictable = 0;      ///< ... search:intensities predicted: the model cannot predict the target or its decoy
     std::size_t decoy_redrawn = 0;            ///< searched pairs whose first arrangement(s) were rejected
     std::size_t fragment_slots_dropped = 0;   ///< searched target slots no decoy can reproduce, dropped from both
     double fragment_mz_min = 0.0;             ///< the library's target fragment m/z range, which decoys must keep
@@ -110,6 +111,12 @@ namespace ODIA::search
     std::vector<std::size_t> source;   ///< per precursor: index of the target (for a decoy: of its target) in the input library
     std::vector<std::uint64_t> draw;   ///< per pair: its draw key
     RtScale rt_scale;
+    /// The central library-RT range of the library's targets (quantiles
+    /// calibration_rt_quantile .. 1 - calibration_rt_quantile,
+    /// CandidateSelector::robustRtRange): what calibration seeds are binned
+    /// over and must lie in. A few library rows with an out-of-range RT
+    /// stretch rt_scale, never this.
+    RtScale rt_robust;
     SelectionStats stats;
     /// Calibration seeds from the evidence prefilter, best first; empty for
     /// search:candidates random (the calibration then samples seeds itself).
@@ -149,6 +156,12 @@ namespace ODIA::search
     /// The input library's RT range over finite target values. Throws
     /// std::invalid_argument when it is empty or a single point.
     static RtScale rtScale(const Library& library);
+
+    /// The central range of the library's finite target RTs: the
+    /// SearchParams::calibration_rt_quantile and 1 - that quantile (nearest
+    /// rank). Falls back to rtScale when the quantiles coincide. Throws as
+    /// rtScale does.
+    static RtScale robustRtRange(const Library& library);
 
     /// The decoy rules of a search on @p library: search:decoys, the assay
     /// fragment minimum, and the input library's TARGET fragment m/z range.

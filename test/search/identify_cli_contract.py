@@ -7,6 +7,7 @@ read, or asserts only that the search STARTED (it names the run it reads before
 reading it) and that a failed search leaves no output behind."""
 import csv
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -61,6 +62,28 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     models = root / 'models'
     models.mkdir()
     (models / 'peptdeep_rt_dynamic.onnx').write_bytes(b'not read: the search fails first\n')
+    # search:intensities predicted (the default) needs the MS2 model before
+    # anything is read; every -run below finds this stand-in, which the failing
+    # searches never load.
+    (models / 'peptdeep_ms2_dynamic.onnx').write_bytes(b'not read: the search fails first\n')
+    os.environ['DIALIBGEN_MODEL_DIR'] = str(models)
+
+    # The MS2 model is required up front, unless the search is told to use
+    # the library's intensities; a bad instrument name is refused up front too.
+    empty = root / 'no-models'
+    empty.mkdir()
+    log = refused('needs peptdeep_ms2_dynamic.onnx: none in', '-mode', 'refine', '-in', library, '-run', mzml,
+                  '-out', fresh(), '-tune_models', empty)
+    assert 'search run' not in log, log
+    log = run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-tune_models', empty,
+              '-search:intensities', 'library', ok=False)
+    assert 'search run: reading ' + str(mzml) in log, log
+    # -tune_models without -run (and without -tune) stays a training option.
+    refused('-tune_models has no effect in -mode refine', '-mode', 'refine', '-in', library, '-ids', ids, '-out', fresh(),
+            '-tune_models', empty)
+    refused("unknown instrument 'Orbitrap9000'", '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
+            '-search:instrument', 'Orbitrap9000')
+    run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:intensities', 'guessed', ok=False)
 
     # -ids XOR -run
     refused('exactly one of -ids and -run', '-mode', 'refine', '-in', library, '-ids', ids, '-run', mzml, '-out', fresh())

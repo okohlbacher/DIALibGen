@@ -83,6 +83,28 @@ namespace ODIA::search
     return s;
   }
 
+  RtScale CandidateSelector::robustRtRange(const Library& library)
+  {
+    const RtScale full = rtScale(library);
+    const auto& p = library.precursors();
+    std::vector<float> rts;
+    rts.reserve(library.precursorCount());
+    for (std::size_t i = 0; i < library.precursorCount(); ++i)
+    {
+      if (!p.decoy[i] && std::isfinite(p.irt[i])) { rts.push_back(p.irt[i]); }
+    }
+    auto at = [&](double q) {
+      const auto k = static_cast<std::size_t>(std::floor(q * static_cast<double>(rts.size() - 1) + 0.5));
+      std::nth_element(rts.begin(), rts.begin() + static_cast<std::ptrdiff_t>(k), rts.end());
+      return static_cast<double>(rts[k]);
+    };
+    RtScale r;
+    r.min = at(SearchParams::calibration_rt_quantile);
+    r.max = at(1.0 - SearchParams::calibration_rt_quantile);
+    if (!(r.max > r.min)) { return full; }
+    return r;
+  }
+
   bool CandidateSelector::inWindow(double mz, const std::vector<IsolationWindow>& windows)
   {
     for (const auto& w : windows)
@@ -171,6 +193,7 @@ namespace ODIA::search
     SearchSet out;
     SelectionStats& st = out.stats;
     out.rt_scale = rtScale(library);
+    out.rt_robust = robustRtRange(library);
     const DecoyRules rules = decoyRules(library, params);
     st.fragment_mz_min = fromFixed(rules.fragment_min);
     st.fragment_mz_max = fromFixed(rules.fragment_max);
@@ -201,6 +224,7 @@ namespace ODIA::search
     SearchSet out;
     out.stats = stats;
     out.rt_scale = rtScale(library);
+    out.rt_robust = robustRtRange(library);
     const DecoyRules rules = decoyRules(library, params);
     out.stats.fragment_mz_min = fromFixed(rules.fragment_min);
     out.stats.fragment_mz_max = fromFixed(rules.fragment_max);
@@ -300,6 +324,7 @@ namespace ODIA::search
         case DecoyOutcome::OutOfRange: ++st.decoy_out_of_range; break;
         case DecoyOutcome::Copy: ++st.decoy_copy; break;
         case DecoyOutcome::TooFewFragments: ++st.decoy_too_few_fragments; break;
+        case DecoyOutcome::Unpredictable: ++st.decoy_unpredictable; break;
       }
       if (decoy_of[walked] == none) { ++st.no_decoy; }
       else
@@ -310,7 +335,7 @@ namespace ODIA::search
       }
     }
     if (st.no_decoy != st.decoy_unparsable + st.decoy_unshufflable + st.decoy_out_of_range + st.decoy_copy +
-                       st.decoy_too_few_fragments)
+                       st.decoy_too_few_fragments + st.decoy_unpredictable)
     { throw std::logic_error("search: decoy failures do not add up to the targets without a decoy"); }
     st.capped = draws.size() - walked;
     st.pairs = pair_target.size();

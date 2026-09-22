@@ -100,6 +100,7 @@ namespace ODIA::search
       case DecoyOutcome::OutOfRange: return "out_of_range";
       case DecoyOutcome::Copy: return "copy";
       case DecoyOutcome::TooFewFragments: return "too_few_fragments";
+      case DecoyOutcome::Unpredictable: return "unpredictable";
     }
     return "?";
   }
@@ -178,6 +179,7 @@ namespace ODIA::search
       std::string original;
       for (std::size_t k = keep_n; k + keep_c < tokens.size(); ++k) { original += tokens[k].text; }
       std::vector<MzFixed> decoy_mz(slots.size());
+      std::string decoy_sequence;
 
       auto attempt = [&](const std::vector<Token>& mid) {
         std::string middle;
@@ -212,6 +214,7 @@ namespace ODIA::search
             copy = it != sorted_target.end() && *it <= mz + tol;
           }
         }
+        if (!copy) { decoy_sequence = decoy.toString(); }
         return copy ? Try::Copy : Try::Ok;
       };
 
@@ -272,6 +275,7 @@ namespace ODIA::search
         out.charge.push_back(static_cast<std::int8_t>(slot.charge));
       }
       out.mz = std::move(decoy_mz);
+      out.sequence = std::move(decoy_sequence);
     }
     return out;
   }

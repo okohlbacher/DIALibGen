@@ -3,6 +3,7 @@
 
 #include <odia/search/EvidencePrefilter.h>
 
+#include <odia/search/PredictedAssays.h>
 #include <odia/search/Scoring.h>
 #include <odia/search/SearchDecoys.h>
 
@@ -94,69 +95,129 @@ namespace ODIA::search
   // ---- the pair universe ----------------------------------------------------------
 
   PrefilterPairs EvidencePrefilter::pairs(const Library& library, const SearchParams& params,
-                                          const std::vector<IsolationWindow>& windows)
+                                          const std::vector<IsolationWindow>& windows, FragmentModel* model, const Log& progress)
   {
     params.validate();
-    const auto started = Clock::now();
-    PrefilterPairs out;
-    SelectionStats& st = out.stats;
+    SelectionStats st;
     std::vector<std::pair<std::uint64_t, std::size_t>> eligible = CandidateSelector::eligible(library, params, windows, st);
     std::sort(eligible.begin(), eligible.end(),
               [&](const auto& a, const auto& b) { return CandidateSelector::drawLess(library, a, b); });
+    return pairsOf(library, params, eligible, st, model, 0, progress);
+  }
+
+  PrefilterPairs EvidencePrefilter::pairsOf(const Library& library, const SearchParams& params,
+                                            const std::vector<std::pair<std::uint64_t, std::size_t>>& ordered,
+                                            const SelectionStats& stats, FragmentModel* model, std::size_t stop_after,
+                                            const Log& progress)
+  {
+    const auto started = Clock::now();
+    PrefilterPairs out;
+    out.stats = stats;
+    SelectionStats& st = out.stats;
     const DecoyRules rules = CandidateSelector::decoyRules(library, params);
     st.fragment_mz_min = fromFixed(rules.fragment_min);
     st.fragment_mz_max = fromFixed(rules.fragment_max);
+    const bool predicted = params.intensities == Intensities::Predicted;
+    if (predicted && !model)
+    { throw std::invalid_argument("search:intensities predicted needs a fragment model (the PeptDeep MS2 model)"); }
 
-    // Each target's decoy, exactly as the search will build it; the top F
-    // slots by the TARGET's library intensity (ties to the earlier slot),
-    // and the decoy's m/z in the same slots.
-    const std::size_t n = eligible.size();
+    // Each target's decoy, exactly as the search will build it, and each
+    // member's top F fragments:
+    //   predicted: both members predicted by the model from their own
+    //     sequences, each its own most intense (PredictedAssays.h);
+    //   library: the top F slots by the TARGET's library intensity (ties to
+    //     the earlier slot), and the decoy's m/z in the same slots.
+    const std::size_t n = ordered.size();
     const auto& pre = library.precursors();
     const auto& tr = library.transitions();
     std::vector<DecoyOutcome> outcome(n, DecoyOutcome::Made);
-    std::vector<std::uint8_t> count(n, 0);
+    std::vector<std::uint8_t> count(n, 0), assay(n, 0);
     std::vector<float> mz(n * 2 * F, std::numeric_limits<float>::quiet_NaN());
     std::string failure;
-    const auto total = static_cast<std::ptrdiff_t>(n);
-#pragma omp parallel for schedule(dynamic, 256)
-    for (std::ptrdiff_t s = 0; s < total; ++s)
+    const std::size_t block = predicted ? PredictedAssays::block_pairs : std::max<std::size_t>(1, n);
+    std::size_t processed = 0, made_so_far = 0;
+    auto reported = Clock::now();
+    for (std::size_t base = 0; base < n; base += block)
     {
-      const auto k = static_cast<std::size_t>(s);
-      try
+      const std::size_t last = std::min(n, base + block);
+      std::vector<std::string> sequences(predicted ? last - base : 0);
+      const auto total = static_cast<std::ptrdiff_t>(last - base);
+#pragma omp parallel for schedule(dynamic, 256)
+      for (std::ptrdiff_t s = 0; s < total; ++s)
       {
-        const DecoyAssay a = searchDecoy(library, eligible[k].second, rules);
-        outcome[k] = a.outcome;
-        if (a.outcome != DecoyOutcome::Made) { continue; }
-        std::vector<std::size_t> order(a.slots.size());
-        std::iota(order.begin(), order.end(), std::size_t{0});
-        std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) {
-          return tr.library_intensity[a.slots[x]] > tr.library_intensity[a.slots[y]];
-        });
-        const std::size_t m = std::min(F, order.size());
-        for (std::size_t j = 0; j < m; ++j)
+        const std::size_t k = base + static_cast<std::size_t>(s);
+        try
         {
-          mz[(2 * k) * F + j] = static_cast<float>(fromFixed(tr.product_mz[a.slots[order[j]]]));
-          mz[(2 * k + 1) * F + j] = static_cast<float>(fromFixed(a.mz[order[j]]));
+          DecoyAssay a = searchDecoy(library, ordered[k].second, rules);
+          outcome[k] = a.outcome;
+          if (a.outcome != DecoyOutcome::Made) { continue; }
+          if (predicted) { sequences[k - base] = std::move(a.sequence); continue; }
+          std::vector<std::size_t> order(a.slots.size());
+          std::iota(order.begin(), order.end(), std::size_t{0});
+          std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) {
+            return tr.library_intensity[a.slots[x]] > tr.library_intensity[a.slots[y]];
+          });
+          const std::size_t m = std::min(F, order.size());
+          for (std::size_t j = 0; j < m; ++j)
+          {
+            mz[(2 * k) * F + j] = static_cast<float>(fromFixed(tr.product_mz[a.slots[order[j]]]));
+            mz[(2 * k + 1) * F + j] = static_cast<float>(fromFixed(a.mz[order[j]]));
+          }
+          count[k] = static_cast<std::uint8_t>(m);
+          assay[k] = static_cast<std::uint8_t>(std::min<std::size_t>(255, a.slots.size()));
         }
-        count[k] = static_cast<std::uint8_t>(m);
-      }
-      catch (const std::exception& e)
-      {
+        catch (const std::exception& e)
+        {
 #pragma omp critical(odia_prefilter_failure)
-        { if (failure.empty()) { failure = e.what(); } }
+          { if (failure.empty()) { failure = e.what(); } }
+        }
       }
+      if (!failure.empty()) { throw std::runtime_error("search prefilter: " + failure); }
+      if (predicted)
+      {
+        std::vector<std::size_t> targets;
+        targets.reserve(last - base);
+        for (std::size_t k = base; k < last; ++k) { targets.push_back(ordered[k].second); }
+        std::vector<PairPrediction> predictions;
+        PredictedAssays::predict(library, targets, sequences, rules, *model, predictions);
+        for (std::size_t k = base; k < last; ++k)
+        {
+          if (sequences[k - base].empty()) { continue; }   // no decoy: its outcome stands
+          const PairPrediction& p = predictions[k - base];
+          outcome[k] = p.outcome;
+          if (p.outcome != DecoyOutcome::Made) { continue; }
+          const std::size_t m = std::min(F, p.count());
+          for (std::size_t j = 0; j < m; ++j)
+          {
+            mz[(2 * k) * F + j] = static_cast<float>(p.target[j].mz);
+            mz[(2 * k + 1) * F + j] = static_cast<float>(p.decoy[j].mz);
+          }
+          count[k] = static_cast<std::uint8_t>(m);
+          assay[k] = static_cast<std::uint8_t>(std::min<std::size_t>(255, p.count()));
+        }
+      }
+      processed = last;
+      for (std::size_t k = base; k < last; ++k) { made_so_far += outcome[k] == DecoyOutcome::Made ? 1 : 0; }
+      if (predicted && progress && (since(reported) >= 30.0 || last == n))
+      {
+        const double s = since(started);
+        progress("search prefilter: " + std::to_string(last) + " of " + std::to_string(n) + " targets and their decoys predicted (" +
+                 fixed(s, 0) + " s" + (last < n ? ", about " + fixed(s * static_cast<double>(n - last) / static_cast<double>(last), 0) +
+                                                      " s to go" : std::string()) + ")");
+        reported = Clock::now();
+      }
+      if (stop_after != 0 && made_so_far >= stop_after) { break; }
     }
-    if (!failure.empty()) { throw std::runtime_error("search prefilter: " + failure); }
 
-    std::size_t made = 0;
-    for (std::size_t k = 0; k < n; ++k) { made += outcome[k] == DecoyOutcome::Made ? 1 : 0; }
-    out.targets.reserve(made);
-    out.fragments.reserve(made);
-    out.fragment_mz.reserve(made * 2 * F);
-    out.precursor_mz.reserve(made);
-    out.library_rt.reserve(made);
-    out.charge.reserve(made);
-    for (std::size_t k = 0; k < n; ++k)
+    out.targets.reserve(made_so_far);
+    out.fragments.reserve(made_so_far);
+    out.assay_fragments.reserve(made_so_far);
+    out.fragment_mz.reserve(made_so_far * 2 * F);
+    out.precursor_mz.reserve(made_so_far);
+    out.library_rt.reserve(made_so_far);
+    out.charge.reserve(made_so_far);
+    out.processed = processed;
+    for (std::size_t k = 0; k < processed; ++k)
     {
       switch (outcome[k])
       {
@@ -166,11 +227,13 @@ namespace ODIA::search
         case DecoyOutcome::OutOfRange: ++st.decoy_out_of_range; break;
         case DecoyOutcome::Copy: ++st.decoy_copy; break;
         case DecoyOutcome::TooFewFragments: ++st.decoy_too_few_fragments; break;
+        case DecoyOutcome::Unpredictable: ++st.decoy_unpredictable; break;
       }
       if (outcome[k] != DecoyOutcome::Made) { ++st.no_decoy; continue; }
-      const std::size_t i = eligible[k].second;
-      out.targets.push_back(eligible[k]);
+      const std::size_t i = ordered[k].second;
+      out.targets.push_back(ordered[k]);
       out.fragments.push_back(count[k]);
+      out.assay_fragments.push_back(assay[k]);
       out.fragment_mz.insert(out.fragment_mz.end(), mz.begin() + static_cast<std::ptrdiff_t>(2 * k * F),
                              mz.begin() + static_cast<std::ptrdiff_t>(2 * (k + 1) * F));
       out.precursor_mz.push_back(fromFixed(pre.mz[i]));
@@ -216,41 +279,52 @@ namespace ODIA::search
 #pragma omp parallel for schedule(dynamic, 1)
     for (std::ptrdiff_t w = 0; w < W; ++w)
     {
-      WindowIndex& x = index[static_cast<std::size_t>(w)];
-      x.lower = bounds[static_cast<std::size_t>(w)].first;
-      x.upper = bounds[static_cast<std::size_t>(w)].second;
-      std::size_t entries = 0;
-      for (std::size_t k = 0; k < P; ++k)
+      // An exception must not escape the parallel region (std::terminate): an
+      // allocation failure on a very large library is reported like the
+      // other loops' failures.
+      try
       {
-        const double mz = pairs.precursor_mz[k];
-        if (x.lower < mz && mz < x.upper)
+        WindowIndex& x = index[static_cast<std::size_t>(w)];
+        x.lower = bounds[static_cast<std::size_t>(w)].first;
+        x.upper = bounds[static_cast<std::size_t>(w)].second;
+        std::size_t entries = 0;
+        for (std::size_t k = 0; k < P; ++k)
         {
-          x.pairs.push_back(static_cast<std::uint32_t>(k));
-          entries += 2u * pairs.fragments[k];
+          const double mz = pairs.precursor_mz[k];
+          if (x.lower < mz && mz < x.upper)
+          {
+            x.pairs.push_back(static_cast<std::uint32_t>(k));
+            entries += 2u * pairs.fragments[k];
+          }
         }
+        if (2 * x.pairs.size() >= (std::size_t{1} << 29))
+        {
+#pragma omp critical(odia_prefilter_failure)
+          { failure = "an isolation window holds " + std::to_string(x.pairs.size()) + " pairs, more than the index can address"; }
+          continue;
+        }
+        std::vector<std::pair<float, std::uint32_t>> e;
+        e.reserve(entries);
+        for (std::size_t l = 0; l < x.pairs.size(); ++l)
+        {
+          const std::size_t k = x.pairs[l];
+          for (std::uint32_t cls = 0; cls < 2; ++cls)
+          {
+            const std::uint32_t member = static_cast<std::uint32_t>(2 * l) + (swap_classes ? 1u - cls : cls);
+            const float* f = pairs.mz(2 * k + cls);
+            for (std::uint32_t j = 0; j < pairs.fragments[k]; ++j) { e.emplace_back(f[j], (member << 3) | j); }
+          }
+        }
+        std::sort(e.begin(), e.end());
+        x.mz.resize(e.size());
+        x.code.resize(e.size());
+        for (std::size_t j = 0; j < e.size(); ++j) { x.mz[j] = e[j].first; x.code[j] = e[j].second; }
       }
-      if (2 * x.pairs.size() >= (std::size_t{1} << 29))
+      catch (const std::exception& e)
       {
 #pragma omp critical(odia_prefilter_failure)
-        { failure = "an isolation window holds " + std::to_string(x.pairs.size()) + " pairs, more than the index can address"; }
-        continue;
+        { if (failure.empty()) { failure = std::string("index: ") + e.what(); } }
       }
-      std::vector<std::pair<float, std::uint32_t>> e;
-      e.reserve(entries);
-      for (std::size_t l = 0; l < x.pairs.size(); ++l)
-      {
-        const std::size_t k = x.pairs[l];
-        for (std::uint32_t cls = 0; cls < 2; ++cls)
-        {
-          const std::uint32_t member = static_cast<std::uint32_t>(2 * l) + (swap_classes ? 1u - cls : cls);
-          const float* f = pairs.mz(2 * k + cls);
-          for (std::uint32_t j = 0; j < pairs.fragments[k]; ++j) { e.emplace_back(f[j], (member << 3) | j); }
-        }
-      }
-      std::sort(e.begin(), e.end());
-      x.mz.resize(e.size());
-      x.code.resize(e.size());
-      for (std::size_t j = 0; j < e.size(); ++j) { x.mz[j] = e[j].first; x.code[j] = e[j].second; }
     }
     if (!failure.empty()) { throw std::runtime_error("search prefilter: " + failure); }
     for (const auto& x : index)
@@ -535,7 +609,18 @@ namespace ODIA::search
     const auto& pre = library.precursors();
     for (std::size_t k = 0; k < pairs.size(); ++k)
     {
-      if (evidence[2 * k].depth < D || !std::isfinite(evidence[2 * k].rt)) { continue; }
+      const MemberEvidence& t = evidence[2 * k];
+      const MemberEvidence& d = evidence[2 * k + 1];
+      if (t.depth < D || !std::isfinite(t.rt)) { continue; }
+      // A seed must beat its own decoy clearly: a target that only matches as
+      // well as a random rearrangement of itself is a chance match, and on
+      // an entrapment library a sparse RT bin was otherwise filled with them.
+      if (t.spectra < SearchParams::seed_min_spectra ||
+          static_cast<std::uint64_t>(t.spectra) < std::uint64_t{SearchParams::seed_decoy_factor} * d.spectra)
+      { continue; }
+      // Only the central library-RT range: a library row with an absurd RT
+      // must neither squeeze the bins nor stretch the seeds' RT span.
+      if (!(pairs.library_rt[k] >= scale.min && pairs.library_rt[k] <= scale.max)) { continue; }
       const std::string peptide = stripped(library.strings().get(pre.modified_sequence[pairs.targets[k].second]));
       const auto it = best.find(peptide);
       if (it == best.end()) { best.emplace(peptide, k); }
@@ -568,16 +653,63 @@ namespace ODIA::search
 
   // ---- everything --------------------------------------------------------------------
 
+  namespace
+  {
+    /// The searched set's predicted assays: pair k takes the count its
+    /// target got in @p universe.
+    void predictSet(SearchSet& set, const Library& library, const SearchParams& params, const PrefilterPairs& universe,
+                    FragmentModel& model)
+    {
+      std::unordered_map<std::size_t, std::uint8_t> count_of;
+      count_of.reserve(universe.size());
+      for (std::size_t k = 0; k < universe.size(); ++k) { count_of.emplace(universe.targets[k].second, universe.assay_fragments[k]); }
+      std::vector<std::uint8_t> counts(set.pairs(), 0);
+      for (std::size_t k = 0; k < set.pairs(); ++k)
+      {
+        const auto it = count_of.find(set.source[k]);
+        if (it == count_of.end()) { throw std::logic_error("search: a searched pair is not in the prefilter's universe"); }
+        counts[k] = it->second;
+      }
+      PredictedAssays::apply(set, library, CandidateSelector::decoyRules(library, params), model, counts);
+      set.stats.fragment_slots_dropped = 0;   // a library-slot notion; predicted assays drop none
+    }
+  }
+
+  SearchSet EvidencePrefilter::selectRandom(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows,
+                                            FragmentModel& model)
+  {
+    params.validate();
+    SelectionStats st;
+    std::vector<std::pair<std::uint64_t, std::size_t>> draws = CandidateSelector::eligible(library, params, windows, st);
+    auto less = [&](const auto& a, const auto& b) { return CandidateSelector::drawLess(library, a, b); };
+    std::sort(draws.begin(), draws.end(), less);
+    if (params.subset != 0 && params.subset < draws.size()) { draws.resize(params.subset); }
+    st.drawn = draws.size();
+    const std::size_t cap = params.max_pairs != 0 ? params.max_pairs : std::numeric_limits<std::size_t>::max();
+    const PrefilterPairs universe = pairsOf(library, params, draws, st, &model, cap == std::numeric_limits<std::size_t>::max() ? 0 : cap);
+    std::vector<std::pair<std::uint64_t, std::size_t>> chosen(universe.targets.begin(),
+                                                              universe.targets.begin() + static_cast<std::ptrdiff_t>(std::min(cap, universe.size())));
+    SearchSet set = CandidateSelector::fromTargets(library, params, chosen, universe.stats);
+    set.stats.drawn = st.drawn;
+    set.stats.capped = st.drawn - set.stats.no_decoy - set.stats.pairs;
+    predictSet(set, library, params, universe, model);
+    return set;
+  }
+
   SearchSet EvidencePrefilter::select(const Library& library, const SearchParams& params, const std::vector<IsolationWindow>& windows,
-                                      const std::vector<OpenSwath::SwathMap>& maps, const Log& info, std::string* seconds)
+                                      const std::vector<OpenSwath::SwathMap>& maps, const Log& info, std::string* seconds,
+                                      FragmentModel* model)
   {
     auto say = [&](const std::string& m) { if (info) { info(m); } };
     const auto started = Clock::now();
-    const PrefilterPairs universe = pairs(library, params, windows);
+    const bool predicted = params.intensities == Intensities::Predicted;
+    const PrefilterPairs universe = pairs(library, params, windows, model, info);
     const SelectionStats& ps = universe.stats;
     say("search prefilter: " + std::to_string(universe.size()) + " target-decoy pairs indexed from " + std::to_string(ps.eligible) +
         " eligible targets (" + std::to_string(ps.no_decoy) + " without a decoy; " + std::to_string(ps.ineligible_window) +
-        " library targets outside the isolation windows) (" + fixed(universe.decoy_seconds, 1) + " s)");
+        " library targets outside the isolation windows); " +
+        (predicted ? "both members predicted by " + model->describe() : std::string("library intensities, decoys in their target's slots")) +
+        " (" + fixed(universe.decoy_seconds, 1) + " s)");
 
     SweepStats sw;
     const std::vector<MemberEvidence> evidence = sweep(universe, maps, params, &sw);
@@ -601,10 +733,11 @@ namespace ODIA::search
     for (const std::size_t k : sel.kept) { chosen.push_back(universe.targets[k]); }
     t = Clock::now();
     SearchSet set = CandidateSelector::fromTargets(library, params, std::move(chosen), ps);
+    if (predicted) { predictSet(set, library, params, universe, *model); }
     const double build_s = since(t);
     set.stats.capped = sel.capped;
     checkRatio(set.pairs(), set.size() - set.pairs());
-    set.seeds = seeds(library, universe, evidence, params, set.rt_scale);
+    set.seeds = seeds(library, universe, evidence, params, set.rt_robust);
     if (!params.entrapment_tag.empty())
     {
       set.entrapment_db_universe = true;
@@ -617,12 +750,15 @@ namespace ODIA::search
     }
 
     auto ratio = [](std::size_t a, std::size_t b) { return b > 0 ? json(static_cast<double>(a) / static_cast<double>(b)) : json(nullptr); };
-    std::size_t seed_bins = 0;
+    std::size_t seed_bins = 0, seeds_trap = 0;
     {
       std::vector<char> filled(SearchParams::calibration_seed_bins, 0);
       for (const auto& s : set.seeds)
       {
-        const double a = set.rt_scale.toAssay(library.precursors().irt[s.index]);
+        if (!params.entrapment_tag.empty() &&
+            entrapmentClass(library.strings().get(library.precursors().protein_group[s.index]), params.entrapment_tag) == Entrapment::Trap)
+        { ++seeds_trap; }
+        const double a = set.rt_robust.toAssay(library.precursors().irt[s.index]);
         filled[static_cast<std::size_t>(std::min<double>(SearchParams::calibration_seed_bins - 1,
                                                          std::max(0.0, std::floor(a / 100.0 * SearchParams::calibration_seed_bins))))] = 1;
       }
@@ -644,8 +780,17 @@ namespace ODIA::search
                {"kept_passing", {{"targets", sel.kept_targets_passing}, {"decoys", sel.kept_decoys_passing},
                                  {"target_decoy_ratio", ratio(sel.kept_targets_passing, sel.kept_decoys_passing)}}}}},
       {"candidate_ratio_band", {SearchParams::candidate_ratio_low, SearchParams::candidate_ratio_high}},
+      {"intensities", {{"source", toString(params.intensities)}, {"model", predicted ? json(model->describe()) : json(nullptr)},
+                       {"rule", predicted ? "both members predicted from their own sequences by one model; each takes its own most "
+                                            "intense b/y fragments, the same number for both"
+                                          : "the target's library assay; the decoy in its target's slots with its target's intensities"}}},
       {"seeds", {{"count", set.seeds.size()}, {"bins", SearchParams::calibration_seed_bins}, {"bins_filled", seed_bins},
-                 {"rule", "targets whose own depth passes, one per peptide, best (depth, spectra) per library-RT bin"}}}};
+                 {"library_rt_range", {set.rt_robust.min, set.rt_robust.max}},
+                 {"library_rt_full", {set.rt_scale.min, set.rt_scale.max}},
+                 {"entrapment", params.entrapment_tag.empty() ? json(nullptr) : json(seeds_trap)},
+                 {"rule", "targets whose own depth passes, with >= " + std::to_string(SearchParams::seed_min_spectra) +
+                          " spectra and >= " + std::to_string(SearchParams::seed_decoy_factor) +
+                          "x their decoy's; one per peptide, best (depth, spectra) per bin of the central library-RT range"}}}};
     set.prefilter_json = record.dump();
     if (seconds)
     {

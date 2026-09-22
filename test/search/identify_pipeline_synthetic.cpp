@@ -8,6 +8,7 @@
 // exercised without OpenMS extraction.
 
 #include "synthetic_library.h"
+#include "toy_fragment_model.h"
 
 #include <odia/LibraryRefiner.h>
 #include <odia/search/Identifier.h>
@@ -50,6 +51,8 @@ namespace
     float lit_decoys = 0.0f;
     /// Added to every decoy sub-score: decoys built weaker (< 0) than null targets.
     float decoy_shift = 0.0f;
+    /// Targets whose protein group contains this are never present (entrapment).
+    std::string absent_tag;
   };
 
   /// A spectrum source that records, when it is destroyed (the run's cache
@@ -86,6 +89,7 @@ namespace
 
     bool isPresent(const SearchSet& set, std::size_t i) const
     {
+      if (!plan_.absent_tag.empty() && set.proteinGroup(i).find(plan_.absent_tag) != std::string_view::npos) { return false; }
       return !set.isDecoy(i) && static_cast<int>(mix(static_cast<std::uint64_t>(set.pairOf(i)) + 17) % 100) < plan_.present_percent;
     }
 
@@ -167,6 +171,9 @@ namespace
     p.max_pairs = 0;
     p.min_ids = 100;
     p.threads = threads;
+    // The cases below rebuild the searched set with CandidateSelector::select;
+    // search:intensities predicted runs in its own case with a toy model.
+    p.intensities = Intensities::Library;
     return p;
   }
 
@@ -420,6 +427,121 @@ int main(int argc, char** argv)
     catch (const std::runtime_error& e) { threw = std::string(e.what()).find("refusing to overwrite") != std::string::npos; }
     CHECK(threw);
     CHECK(refused.scratch.empty());
+  }
+
+  // ---- 5. search:intensities predicted: both members predicted by one model --------
+  {
+    SearchParams p = params(1);
+    p.intensities = Intensities::Predicted;
+    // Without a model (none injected, none named) the search is refused
+    // before the run is read.
+    {
+      SyntheticRun none(p, Plan());
+      std::string message;
+      try { (void)none.identify(lib, "synthetic.mzML", (dir / "nomodel.parquet").string(), "test"); }
+      catch (const std::invalid_argument& e) { message = e.what(); }
+      CHECK(message.find("needs the PeptDeep MS2 model") != std::string::npos);
+      CHECK(none.scratch.empty());
+    }
+    auto model = std::make_shared<toy::ProlineModel>();
+    const fs::path pa = dir / "predicted1.ids.parquet", pb = dir / "predicted3.ids.parquet";
+    SyntheticRun one(p, Plan());
+    one.setFragmentModel(model);
+    const auto r1 = one.identify(lib, "synthetic.mzML", pa.string(), "test");
+    const json j = json::parse(r1.provenance_json);
+    std::cout << "predicted: " << r1.identified << " identified, " << j["candidates"]["pairs"] << " pairs, intensities "
+              << j["candidates"]["intensities"].dump() << ", no decoy " << j["candidates"]["no_decoy_reasons"].dump() << "\n";
+    CHECK(j["candidates"]["intensities"]["source"] == "predicted");
+    CHECK(j["candidates"]["intensities"]["model"] == "toy proline model");
+    CHECK(j["settings"]["intensities"] == "predicted");
+    CHECK(r1.identified >= 100);
+    CHECK(model->calls > 0);
+    SearchParams p3 = p;
+    p3.threads = 3;
+    SyntheticRun three(p3, Plan());
+    three.setFragmentModel(model);
+    const auto r3 = three.identify(lib, "synthetic.mzML", pb.string(), "test");
+    CHECK(r3.identified == r1.identified);
+    CHECK(bytes(pa) == bytes(pb));
+  }
+
+  // ---- 6. a library-only defect is refused before the run is read -----------------
+  {
+    std::vector<synth::Precursor> flat = synth::peptides(200, 5);
+    for (auto& x : flat) { x.rt = 50.0f; }
+    SyntheticRun r(params(1), Plan());
+    std::string message;
+    try { (void)r.identify(synth::library(flat), "synthetic.mzML", (dir / "flat.parquet").string(), "test"); }
+    catch (const std::invalid_argument& e) { message = e.what(); }
+    std::cout << "flat library RT: " << message << "; run read: " << !r.scratch.empty() << "\n";
+    CHECK(message.find("an RT scale needs a range") != std::string::npos);
+    CHECK(r.scratch.empty());
+  }
+
+  // ---- 7. entrapment: UniProt-style ids, a tag that matches nothing, the winner test --
+  {
+    std::vector<synth::Precursor> te = synth::peptides(1500, 21);
+    for (std::size_t k = 0; k < te.size(); ++k)
+    {
+      const std::size_t protein = k / 6;
+      te[k].protein = protein % 2 ? "sp|ENTRAP_S" + std::to_string(protein) + "|ENTRAP_SYN" + std::to_string(protein) + "_HUMAN"
+                                  : "sp|S" + std::to_string(protein) + "|SYN" + std::to_string(protein) + "_HUMAN";
+    }
+    const ODIA::Library tlib = synth::library(te);
+    auto winners = [](const json& j, const std::string& level, double q) {
+      for (const auto& w : j["entrapment"]["winner_test"]["levels"])
+      {
+        if (w["level"] == level && std::fabs(w["q"].get<double>() - q) < 1e-9) { return w; }
+      }
+      return json();
+    };
+    auto warned = [](const json& j, const std::string& what) {
+      bool found = false;
+      for (const auto& w : j["warnings"]) { found = found || w.get<std::string>().find(what) != std::string::npos; }
+      return found;
+    };
+    Plan absent;
+    absent.absent_tag = "ENTRAP_";
+    {
+      SearchParams p = params(1);
+      p.entrapment_tag = "ENTRAP_";
+      SyntheticRun r(p, absent);
+      const auto res = r.identify(tlib, "synthetic.mzML", (dir / "entrap.ids.parquet").string(), "test");
+      const json j = json::parse(res.provenance_json);
+      std::cout << "entrapment: " << j["entrapment"].dump() << "\n";
+      CHECK(j["entrapment"]["db_entrapment"].get<std::size_t>() > 0);   // sp|ENTRAP_... is entrapment
+      CHECK(j["entrapment"]["valid"] == true);
+      CHECK(!warned(j, "matches no protein"));
+      const json w = winners(j, "precursor", 0.10);
+      CHECK(!w.is_null() && std::fabs(w["z"].get<double>()) <= 3.0);   // exchangeable by construction here
+      CHECK(!winners(j, "peptide", 0.01).is_null() && !winners(j, "protein_group", 0.10).is_null());
+      CHECK(!warned(j, "entrapment winner test"));
+    }
+    {
+      SearchParams p = params(1);
+      p.entrapment_tag = "DECOY_";
+      SyntheticRun r(p, absent);
+      const auto res = r.identify(tlib, "synthetic.mzML", (dir / "notag.ids.parquet").string(), "test");
+      const json j = json::parse(res.provenance_json);
+      CHECK(warned(j, "search:entrapment_tag 'DECOY_' matches no protein"));
+    }
+    {
+      // Decoys weaker than null targets: the known-null pairs are won by
+      // their targets, and the winner test says so.
+      Plan weak = absent;
+      weak.decoy_shift = -1.0f;
+      SearchParams p = params(1);
+      p.entrapment_tag = "ENTRAP_";
+      p.max_target_fraction = 1.0;
+      p.selftest = false;
+      SyntheticRun r(p, weak);
+      const auto res = r.identify(tlib, "synthetic.mzML", (dir / "entrap_weak.ids.parquet").string(), "test");
+      const json j = json::parse(res.provenance_json);
+      const json w = winners(j, "precursor", 0.10);
+      std::cout << "weak decoys, entrapment winners at q <= 0.10: " << w.dump() << "\n";
+      CHECK(!w.is_null() && w["z"].get<double>() > 3.0);
+      CHECK(warned(j, "entrapment winner test"));
+    }
   }
 
   fs::remove_all(dir);

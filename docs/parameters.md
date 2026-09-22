@@ -41,7 +41,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-im_ramp_margin` | double | `0.02` |  | See -im_ramp_top. |
 | `-min_match_fraction` | double | `0.0` |  | Refuse when fewer than this fraction of passing reference precursors match the library. 0 = refuse only when nothing matches. |
 | `-tune` | bool | `false` |  | Fine-tune the RT and CCS models on -ids and re-predict the whole library through them BEFORE refining, so precursors the reference never identified are corrected too. Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a training run plus whole-library inference. |
-| `-tune_models` | string | (empty) |  | Directory holding the stock peptdeep_{rt,ccs}_dynamic.onnx. Default: $DIALIBGEN_MODEL_DIR or the bundled models. |
+| `-tune_models` | string | (empty) |  | Directory holding the stock peptdeep_{rt,ccs,ms2}_dynamic.onnx: -tune starts from the RT and CCS models, and -run predicts both members of every searched target-decoy pair with the MS2 model. Default: $DIALIBGEN_MODEL_DIR or the bundled models. |
 | `-tune_heads` | string | `both` | rt,ccs,both | Which models to tune. |
 | `-tune_out_models` | string | (empty) |  | Keep the tuned ONNX files and their .tune.json and .trajectory.tsv sidecars here. Default: a scratch directory, removed on exit -- the deliverable is the library. |
 | `-tune_predict_gpu` | bool | `false` |  | Use the GPU for the re-prediction pass (the ONNX one, not training). |
@@ -108,6 +108,9 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:prefilter_top_peaks` | int | `1000` | 1: | search:candidates evidence: the most intense peaks of each MS2 spectrum the prefilter matches |
 | `-search:prefilter_ppm` | double | `10.0` | 0.1:100.0 | search:candidates evidence: fragment match tolerance, ppm either side |
 | `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse | How the search's in-memory decoys are built from the selected targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output |
+| `-search:intensities` | string | `predicted` | predicted,library | Fragments and intensities of both members of each target-decoy pair: predicted = both predicted by the PeptDeep MS2 model (tune_models, $DIALIBGEN_MODEL_DIR or the bundled models) from their own sequences, each taking its own most intense fragments; library = the library's target assay, the decoy in its target's fragment slots with its target's intensities (makes decoys weaker than null targets; for comparison only) |
+| `-search:instrument` | string | `auto` |  | search:intensities predicted: the MS2 model's instrument (QE, Lumos, timsTOF, SciexTOF, ThermoTOF or an alias); auto = the instrument DIALibGen generate recorded in the library, else timsTOF for an ion-mobility run and QE otherwise |
+| `-search:nce` | double | `-1.0` | -1.0:100.0 | search:intensities predicted: the MS2 model's collision energy; -1 = the one recorded in the library with its instrument, else the instrument's default |
 | `-search:seed` | int | `42` | 0: | Salt of the candidate draw: changes which pairs are searched, not how |
 | `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
 | `-search:rt_window` | double | `0.0` | 0.0: | Full RT extraction window, seconds (0 = from the calibration) |
@@ -123,7 +126,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
 | `-search:max_target_fraction` | double | `0.5` | 0.01:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
 | `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |
-| `-search:entrapment_tag` | string | (empty) |  | Protein-group prefix of entrapment proteins: log and record the combined entrapment FDP estimate. A validation aid |
+| `-search:entrapment_tag` | string | (empty) |  | Prefix of entrapment protein ids, at the start of an id or right after a '\|' (sp\|ENTRAP_P12345\|...): log and record the combined entrapment FDP estimate and the entrapment winner test. A validation aid |
 | `-search:selftest` | string | `true` | true,false | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not decoys that are built weaker than null targets |
 | `-search:batch_size` | int | `500` | 1: | Advanced: precursors per extraction batch within one isolation window |
 | `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's |

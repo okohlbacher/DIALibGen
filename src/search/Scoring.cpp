@@ -66,7 +66,14 @@ namespace ODIA::search
     {
       const std::size_t end = std::min(group.find(';', start), group.size());
       const std::string_view member = group.substr(start, end - start);
-      if (!member.empty()) { (member.substr(0, tag.size()) == tag ? any_trap : any_real) = true; }
+      if (!member.empty())
+      {
+        // At the start of the id, or right after any '|' in it.
+        bool tagged = !tag.empty() && member.substr(0, tag.size()) == tag;
+        for (std::size_t bar = member.find('|'); !tagged && bar != std::string_view::npos; bar = member.find('|', bar + 1))
+        { tagged = !tag.empty() && member.substr(bar + 1, tag.size()) == tag; }
+        (tagged ? any_trap : any_real) = true;
+      }
       start = end + 1;
     }
     if (any_trap && any_real) { return Entrapment::Shared; }
@@ -224,13 +231,70 @@ namespace ODIA::search
         ++reported;
         if (c == Entrapment::Trap) { ++trapped; }
       }
+      out.entrapment_tag_matches = db_trap;
       out.entrapment_estimate = odia::core::entrapmentFdp(reported, trapped, db_real, db_trap);
-      if (!out.entrapment_estimate.valid)
+      if (db_trap == 0)
+      {
+        out.warnings.push_back("search:entrapment_tag '" + params.entrapment_tag + "' matches no protein of the " +
+                               std::to_string(db_real) + " target precursors counted (" + out.entrapment_db_basis +
+                               "): the tag must start a protein id or follow a '|' in it (sp|" + params.entrapment_tag +
+                               "P12345|...); no entrapment estimate");
+      }
+      else if (!out.entrapment_estimate.valid)
       { out.warnings.push_back("entrapment: no estimate (" + std::to_string(db_trap) + " entrapment and " + std::to_string(db_real) +
                                " real target precursors searched, " + std::to_string(reported) + " identified)"); }
       else if (out.entrapment_estimate.fdp > 0.015)
       { out.warnings.push_back("entrapment: combined FDP estimate " + percent(out.entrapment_estimate.fdp, 1.0) +
                                " at nominal 1% (" + std::to_string(trapped) + " entrapment of " + std::to_string(reported) + " identified)"); }
+
+      // The entrapment winner test: a pair whose target is an entrapment
+      // entity is a known null pair, so target and decoy must win it equally
+      // often at every threshold. Needs no database ratio and no isomer
+      // screening; a target-favoured split means decoys weaker than null
+      // targets, and q-values that are too optimistic.
+      std::vector<Entrapment> group_class(result.size(), Entrapment::Real);
+      for (std::size_t g = 0; g < result.size(); ++g)
+      { group_class[g] = entrapmentClass(set.proteinGroup(static_cast<std::size_t>(result[g].group)), params.entrapment_tag); }
+      std::unordered_map<std::string, Entrapment> peptide_class;
+      for (std::size_t g = 0; g < result.size(); ++g)
+      {
+        const auto it = peptide_class.emplace(peptide[g], group_class[g]).first;
+        if (it->second != group_class[g]) { it->second = Entrapment::Shared; }
+      }
+      for (const double q : {SearchParams::identification_q, 0.10})
+      {
+        ScoringOutcome::EntrapmentWinners w{"precursor", q};
+        for (std::size_t g = 0; g < result.size(); ++g)
+        {
+          const auto& gr = result[g];
+          if (!gr.winner || gr.qvalue > q || group_class[g] != Entrapment::Trap) { continue; }
+          (gr.is_decoy ? w.decoys : w.targets)++;
+        }
+        ScoringOutcome::EntrapmentWinners wp{"peptide", q}, wg{"protein_group", q};
+        for (const auto& e : peptides.entities)
+        {
+          const auto it = peptide_class.find(e.id);
+          if (e.qvalue > q || it == peptide_class.end() || it->second != Entrapment::Trap) { continue; }
+          (e.label == 0 ? wp.decoys : wp.targets)++;
+        }
+        for (const auto& e : proteins.entities)
+        {
+          if (e.qvalue > q || entrapmentClass(e.id, params.entrapment_tag) != Entrapment::Trap) { continue; }
+          (e.label == 0 ? wg.decoys : wg.targets)++;
+        }
+        for (auto* x : {&w, &wp, &wg})
+        {
+          const double t = static_cast<double>(x->targets), d = static_cast<double>(x->decoys);
+          x->z = (t + d) > 0 ? (t - d) / std::sqrt(t + d) : 0.0;
+          if (x->z > SearchParams::entrapment_winner_warn_z)
+          {
+            out.warnings.push_back("entrapment winner test: at " + x->level + " q <= " + fixed(q, 2) + ", entrapment targets won " +
+                                   std::to_string(x->targets) + " pairs and their decoys " + std::to_string(x->decoys) + " (z " +
+                                   fixed(x->z, 1) + "): the decoys are weaker than null targets, and the q-values are too optimistic");
+          }
+          out.entrapment_winners.push_back(*x);
+        }
+      }
     }
 
     // The pooled estimator ranks losers too. Below the paired count is the

@@ -96,6 +96,11 @@ namespace ODIA::search
     }
     const float floor = peak * predicted_floor;
     const int max_z = std::min(2, std::max(1, precursor_charge));
+    // The range test in fixed point, as the library stores m/z and as
+    // searchDecoy tests it: a double bound from fromFixed() can sit a
+    // rounding above the library's own extreme fragment and drop it.
+    const MzFixed lo = toFixed(mz_min), hi = toFixed(mz_max);
+    auto inRange = [&](double mz) { const MzFixed f = toFixed(mz); return f != MZ_INVALID && f >= lo && f <= hi; };
     for (std::size_t o = 1; o < n; ++o)
     {
       // Position q separates prefix q + 1 from suffix n - q - 1 (alphabase's
@@ -105,13 +110,13 @@ namespace ODIA::search
       for (int z = 1; z <= max_z; ++z)
       {
         const double b = prefix.getMZ(z, Residue::BIon);
-        if (b >= mz_min && b <= mz_max && b_position < spectrum.positions)
+        if (inRange(b) && b_position < spectrum.positions)
         {
           out.push_back({b, std::max(0.0f, spectrum.at(b_position, z == 1 ? 0 : 1)), FragmentType::B,
                          static_cast<std::uint8_t>(o), static_cast<std::int8_t>(z)});
         }
         const double y = suffix.getMZ(z, Residue::YIon);
-        if (y >= mz_min && y <= mz_max && y_position < spectrum.positions)
+        if (inRange(y) && y_position < spectrum.positions)
         {
           out.push_back({y, std::max(0.0f, spectrum.at(y_position, z == 1 ? 2 : 3)), FragmentType::Y,
                          static_cast<std::uint8_t>(o), static_cast<std::int8_t>(z)});
@@ -130,11 +135,84 @@ namespace ODIA::search
     return count >= min_fragments ? count : 0;
   }
 
+  // ---- the library's own assays ----------------------------------------------------
+
+  std::vector<PredictedFragment> PredictedAssays::libraryAssay(const Library& library, std::size_t i)
+  {
+    const auto& pre = library.precursors();
+    const auto& tr = library.transitions();
+    std::vector<PredictedFragment> out;
+    for (std::uint32_t k = 0; k < pre.transition_count[i]; ++k)
+    {
+      const std::uint32_t j = pre.transition_begin[i] + k;
+      if ((tr.type[j] != FragmentType::B && tr.type[j] != FragmentType::Y) || tr.loss[j] != LossType::None ||
+          tr.product_mz[j] == MZ_INVALID)
+      { return {}; }
+      out.push_back({fromFixed(tr.product_mz[j]), tr.library_intensity[j], tr.type[j], tr.ordinal[j],
+                     static_cast<std::int8_t>(tr.charge[j] == 0 ? 1 : tr.charge[j])});
+    }
+    std::sort(out.begin(), out.end(), before);
+    return out;
+  }
+
+  bool PredictedAssays::libraryIsModel(const Library& library, const std::vector<std::size_t>& sample, const DecoyRules& rules,
+                                       FragmentModel& model, std::size_t* matched)
+  {
+    if (matched) { *matched = 0; }
+    if (sample.empty()) { return false; }
+    const auto& pre = library.precursors();
+    const double mz_min = fromFixed(rules.fragment_min), mz_max = fromFixed(rules.fragment_max);
+    std::vector<AASequence> peptides(sample.size());
+    std::vector<int> charges(sample.size(), 1);
+    std::vector<char> parsed(sample.size(), 1);
+    for (std::size_t k = 0; k < sample.size(); ++k)
+    {
+      try { peptides[k] = AASequence::fromString(std::string(library.strings().get(pre.modified_sequence[sample[k]]))); }
+      catch (...) { parsed[k] = 0; peptides[k] = AASequence::fromString("PEPTIDEK"); }
+      charges[k] = std::max(1, static_cast<int>(pre.charge[sample[k]]));
+    }
+    const auto spectra = model.predict(peptides, charges);
+    std::size_t same = 0;
+    std::vector<PredictedFragment> ranked;
+    for (std::size_t k = 0; k < sample.size(); ++k)
+    {
+      if (!parsed[k] || k >= spectra.size() || spectra[k].positions == 0) { continue; }
+      const std::vector<PredictedFragment> lib = libraryAssay(library, sample[k]);
+      if (lib.empty()) { continue; }
+      std::size_t above = 0;
+      rank(peptides[k], charges[k], spectra[k], mz_min, mz_max, ranked, above);
+      if (ranked.size() < lib.size()) { continue; }
+      // Every library fragment is predicted with its library intensity, and
+      // nothing outside the library ranks above the library's weakest.
+      bool ok = true;
+      for (const auto& f : lib)
+      {
+        const auto it = std::find_if(ranked.begin(), ranked.end(), [&](const PredictedFragment& g) {
+          return g.type == f.type && g.ordinal == f.ordinal && g.charge == f.charge;
+        });
+        ok = ok && it != ranked.end() &&
+             std::fabs(it->intensity - f.intensity) <= library_match_tolerance * std::max(1e-3f, std::fabs(f.intensity));
+      }
+      const float weakest = lib.back().intensity;
+      for (std::size_t j = lib.size(); ok && j < ranked.size(); ++j)
+      {
+        const auto& g = ranked[j];
+        const bool in_library = std::any_of(lib.begin(), lib.end(), [&](const PredictedFragment& f) {
+          return g.type == f.type && g.ordinal == f.ordinal && g.charge == f.charge;
+        });
+        ok = in_library || g.intensity <= weakest * (1.0f + library_match_tolerance);
+      }
+      same += ok ? 1 : 0;
+    }
+    if (matched) { *matched = same; }
+    return static_cast<double>(same) >= library_match_share * static_cast<double>(sample.size());
+  }
+
   // ---- pairs -----------------------------------------------------------------------
 
   void PredictedAssays::predict(const Library& library, const std::vector<std::size_t>& targets, const std::vector<std::string>& decoys,
                                 const DecoyRules& rules, FragmentModel& model, std::vector<PairPrediction>& out,
-                                const std::vector<std::uint8_t>* counts)
+                                const std::vector<std::uint8_t>* counts, bool library_targets)
   {
     if (decoys.size() != targets.size() || (counts && counts->size() != targets.size()))
     { throw std::invalid_argument("PredictedAssays::predict: one decoy sequence (and count) per target"); }
@@ -142,12 +220,14 @@ namespace ODIA::search
     const auto& pre = library.precursors();
     const double mz_min = fromFixed(rules.fragment_min), mz_max = fromFixed(rules.fragment_max);
 
-    // Members of the pairs with a decoy, target then decoy: 2 * m peptides.
+    // Members of the pairs with a decoy, target then decoy (2 * m peptides),
+    // or the decoys alone (m) when the targets' library assays are the model's.
     std::vector<std::size_t> pairs;
     for (std::size_t k = 0; k < targets.size(); ++k) { if (!decoys[k].empty()) { pairs.push_back(k); } }
     const auto m = static_cast<std::ptrdiff_t>(pairs.size());
-    std::vector<AASequence> peptides(2 * pairs.size());
-    std::vector<int> charges(2 * pairs.size(), 0);
+    const std::size_t per = library_targets ? 1 : 2;   // peptides predicted per pair
+    std::vector<AASequence> peptides(per * pairs.size()), members(2 * pairs.size());
+    std::vector<int> charges(per * pairs.size(), 0);
     std::vector<char> parsed(pairs.size(), 1);
 #pragma omp parallel for schedule(dynamic, 256)
     for (std::ptrdiff_t s = 0; s < m; ++s)
@@ -156,17 +236,20 @@ namespace ODIA::search
       const std::size_t k = pairs[j], i = targets[k];
       try
       {
-        peptides[2 * j] = AASequence::fromString(std::string(library.strings().get(pre.modified_sequence[i])));
-        peptides[2 * j + 1] = AASequence::fromString(decoys[k]);
+        members[2 * j] = AASequence::fromString(std::string(library.strings().get(pre.modified_sequence[i])));
+        members[2 * j + 1] = AASequence::fromString(decoys[k]);
       }
-      catch (...) { parsed[j] = 0; peptides[2 * j] = AASequence(); peptides[2 * j + 1] = AASequence(); }
-      charges[2 * j] = charges[2 * j + 1] = std::max(1, static_cast<int>(pre.charge[i]));
-    }
-    // An unparsable pair is predicted as a stub and discarded; the model sees
-    // the same input whatever failed, so the others do not move.
-    for (std::size_t j = 0; j < pairs.size(); ++j)
-    {
-      if (!parsed[j]) { peptides[2 * j] = peptides[2 * j + 1] = AASequence::fromString("PEPTIDEK"); }
+      catch (...) { parsed[j] = 0; members[2 * j] = members[2 * j + 1] = AASequence::fromString("PEPTIDEK"); }
+      // An unparsable pair is predicted as a stub and discarded; the model
+      // sees the same input whatever failed, so the others do not move.
+      const int z = std::max(1, static_cast<int>(pre.charge[i]));
+      if (library_targets) { peptides[j] = members[2 * j + 1]; charges[j] = z; }
+      else
+      {
+        peptides[2 * j] = members[2 * j];
+        peptides[2 * j + 1] = members[2 * j + 1];
+        charges[2 * j] = charges[2 * j + 1] = z;
+      }
     }
     const std::vector<PeptDeepPredictor::Spectrum> spectra = model.predict(peptides, charges);
     if (spectra.size() != peptides.size())
@@ -179,11 +262,19 @@ namespace ODIA::search
       const std::size_t k = pairs[j], i = targets[k];
       PairPrediction& p = out[k];
       p = PairPrediction();
-      if (!parsed[j] || spectra[2 * j].positions == 0 || spectra[2 * j + 1].positions == 0)
+      const PeptDeepPredictor::Spectrum& decoy_spectrum = spectra[library_targets ? j : 2 * j + 1];
+      if (!parsed[j] || decoy_spectrum.positions == 0 || (!library_targets && spectra[2 * j].positions == 0))
       { p.outcome = DecoyOutcome::Unpredictable; continue; }
+      const int z = std::max(1, static_cast<int>(pre.charge[i]));
       std::size_t above_t = 0, above_d = 0;
-      rank(peptides[2 * j], charges[2 * j], spectra[2 * j], mz_min, mz_max, p.target, above_t);
-      rank(peptides[2 * j + 1], charges[2 * j + 1], spectra[2 * j + 1], mz_min, mz_max, p.decoy, above_d);
+      if (library_targets)
+      {
+        p.target = libraryAssay(library, i);
+        above_t = p.target.size();
+        if (p.target.empty()) { p.outcome = DecoyOutcome::Unpredictable; continue; }
+      }
+      else { rank(members[2 * j], z, spectra[2 * j], mz_min, mz_max, p.target, above_t); }
+      rank(members[2 * j + 1], z, decoy_spectrum, mz_min, mz_max, p.decoy, above_d);
       std::size_t count = 0;
       if (counts) { count = std::min<std::size_t>({(*counts)[k], p.target.size(), p.decoy.size()}); }
       else
@@ -209,7 +300,7 @@ namespace ODIA::search
   }
 
   void PredictedAssays::apply(SearchSet& set, const Library& input, const DecoyRules& rules, FragmentModel& model,
-                              const std::vector<std::uint8_t>& counts)
+                              const std::vector<std::uint8_t>& counts, bool library_targets)
   {
     const std::size_t P = set.pairs();
     if (counts.size() != P) { throw std::invalid_argument("PredictedAssays::apply: one count per pair"); }
@@ -245,7 +336,7 @@ namespace ODIA::search
       }
       if (!failure.empty()) { throw std::runtime_error("search decoys: " + failure); }
       std::vector<PairPrediction> predicted;
-      predict(input, targets, decoys, rules, model, predicted, &fixed);
+      predict(input, targets, decoys, rules, model, predicted, &fixed, library_targets);
       for (std::size_t k = base; k < last; ++k)
       {
         PairPrediction& p = predicted[k - base];

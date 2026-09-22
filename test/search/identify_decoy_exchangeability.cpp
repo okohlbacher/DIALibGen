@@ -196,7 +196,19 @@ int main()
     p.prefilter_depth = 1;   // spectra = spectra with any indexed fragment matched
     p.threads = 2;
     const bool predicted = mode == Intensities::Predicted;
+    const std::size_t seen_before = model.peptides_seen;
     const PrefilterPairs universe = EvidencePrefilter::pairs(lib, p, windows, predicted ? &model : nullptr);
+    if (predicted)
+    {
+      // The library holds the toy model's own top six: the targets keep them,
+      // and only the decoys (and the check's sample) are predicted.
+      std::cout << "library check: " << universe.library_check_matched << " of " << universe.library_check_sample
+                << " sampled targets as the model predicts them\n";
+      CHECK(universe.library_targets && universe.library_check_matched == universe.library_check_sample);
+      const std::size_t predicted_now = model.peptides_seen - seen_before;   // the sample, then one decoy per pair
+      CHECK(predicted_now >= universe.library_check_sample + universe.size() &&
+            predicted_now <= universe.library_check_sample + universe.size() + universe.stats.no_decoy);
+    }
     const std::vector<MemberEvidence> evidence = EvidencePrefilter::sweep(universe, maps, p);
     Sign& sign = by_mode[predicted ? 1 : 0];
     auto strength = [](const MemberEvidence& e) { return (static_cast<std::uint64_t>(e.depth) << 32) | e.spectra; };
@@ -244,6 +256,25 @@ int main()
   // The "before" state fails the sign test, the fix passes it.
   CHECK(by_mode[0].z() > 3.0);
   CHECK(std::fabs(by_mode[1].z()) < 3.0);
+
+  // ---- 3b. a library whose intensities are not the model's: both members predicted --------
+  {
+    ODIA::Library other = lib.subsetByIndex([&] {
+      std::vector<std::size_t> all(lib.precursorCount());
+      for (std::size_t k = 0; k < all.size(); ++k) { all[k] = k; }
+      return all;
+    }());
+    for (auto& v : other.transitions().library_intensity) { v = 1.0f / (1.0f + v); }   // reverses every ranking
+    SearchParams p;
+    p.intensities = Intensities::Predicted;
+    p.max_pairs = 0;
+    const std::size_t seen_before = model.peptides_seen;
+    const PrefilterPairs universe = EvidencePrefilter::pairs(other, p, windows, &model);
+    std::cout << "reordered library: " << universe.library_check_matched << " of " << universe.library_check_sample
+              << " sampled targets as the model predicts them; " << (model.peptides_seen - seen_before) << " peptides predicted\n";
+    CHECK(!universe.library_targets && universe.library_check_matched == 0);
+    CHECK(model.peptides_seen - seen_before >= universe.library_check_sample + 2 * universe.size());
+  }
 
   // ---- 4. the searched set's assays are the predicted ones -------------------------------
   {

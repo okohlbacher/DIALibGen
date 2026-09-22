@@ -35,7 +35,11 @@
 ///     target's is a copy and leaves the search whole, as does one the model
 ///     cannot predict (Unpredictable) or with fewer than min_assay_fragments.
 /// For a library DIALibGen generated with the same model, instrument and NCE,
-/// the target's assay is its library assay (up to the count).
+/// the target's assay is its library assay (up to the count). That is checked,
+/// not assumed (libraryIsModel: a sample of targets re-predicted), and then
+/// only the decoys are predicted -- half the model's work; a library from
+/// another predictor, or one whose intensities were rewritten, has both
+/// members predicted.
 #pragma once
 
 #include <odia/Library.h>
@@ -133,9 +137,31 @@ namespace ODIA::search
     /// fixed by an earlier call, so a later one on a different batch cannot
     /// change it); without, pairCount decides. @p out is resized to
     /// targets.size(); entries with an empty decoy keep their outcome.
+    ///
+    /// With @p library_targets, the targets are not predicted: their library
+    /// assays are the model's own (libraryIsModel), ranked by the same rule.
     static void predict(const Library& library, const std::vector<std::size_t>& targets, const std::vector<std::string>& decoys,
                         const DecoyRules& rules, FragmentModel& model, std::vector<PairPrediction>& out,
-                        const std::vector<std::uint8_t>* counts = nullptr);
+                        const std::vector<std::uint8_t>* counts = nullptr, bool library_targets = false);
+
+    /// A target's library assay as predicted fragments, in the rule's rank
+    /// order; empty when a transition is not a b/y ion without loss.
+    static std::vector<PredictedFragment> libraryAssay(const Library& library, std::size_t i);
+
+    /// Whether @p library's target assays are @p model's predictions under
+    /// the search's rule: of @p sample (target indices), how many (@p matched)
+    /// have exactly their library fragments as the model's top fragments,
+    /// intensities within library_match_tolerance; true when at least
+    /// library_match_share of them do.
+    static bool libraryIsModel(const Library& library, const std::vector<std::size_t>& sample, const DecoyRules& rules,
+                               FragmentModel& model, std::size_t* matched = nullptr);
+    /// Relative intensity tolerance and share of matching targets of libraryIsModel.
+    /// Batches of another composition move a prediction in its last bits, which
+    /// can swap two nearly tied fragments (1 % of the targets of a test).
+    static constexpr float library_match_tolerance = 1e-3f;
+    static constexpr double library_match_share = 0.95;
+    /// Targets libraryIsModel re-predicts.
+    static constexpr std::size_t library_check_sample = 2000;
 
     /// Replace the transitions of every precursor of @p set (a search set:
     /// targets at [0, P), decoys at [P, 2P)) by its member's predicted assay,
@@ -143,6 +169,6 @@ namespace ODIA::search
     /// (searchDecoy), exactly as the set was built. Throws std::logic_error
     /// when a pair cannot be predicted now although it could before.
     static void apply(SearchSet& set, const Library& input, const DecoyRules& rules, FragmentModel& model,
-                      const std::vector<std::uint8_t>& counts);
+                      const std::vector<std::uint8_t>& counts, bool library_targets = false);
   };
 }

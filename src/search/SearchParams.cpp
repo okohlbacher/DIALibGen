@@ -90,6 +90,7 @@ namespace ODIA::search
     if (!finite(rt_window) || rt_window < 0) { fail("search:rt_window must be >= 0 seconds (0 = from the calibration)"); }
     if (!finite(mz_ppm) || mz_ppm < 0) { fail("search:mz_ppm must be >= 0 (0 = automatic)"); }
     if (!finite(im_window) || (im_window < 0 && im_window != -1.0)) { fail("search:im_window must be >= 0, or -1 for off"); }
+    if (im_window > 1.0) { fail("search:im_window is a full 1/K0 width; " + std::to_string(im_window) + " exceeds the whole mobility range"); }
     if (batch_size == 0) { fail("search:batch_size must be at least 1"); }
     if (chunk < 2) { fail("search:chunk must be at least 2 (one target-decoy pair)"); }
     if (!finite(calibration_min_rsq) || calibration_min_rsq < 0 || calibration_min_rsq > 1)

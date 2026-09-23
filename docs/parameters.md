@@ -115,7 +115,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
 | `-search:rt_window` | double | `0.0` | 0.0: | Full RT extraction window, seconds (0 = from the calibration) |
 | `-search:mz_ppm` | double | `0.0` | 0.0: | Full fragment m/z extraction window, ppm (0 = automatic) |
-| `-search:im_window` | double | `0.0` | -1.0: | Full 1/K0 extraction window on ion-mobility runs (0 = automatic, -1 = off) |
+| `-search:im_window` | double | `0.0` | -1.0: | Full 1/K0 extraction window on ion-mobility (diaPASEF) runs: 0 = automatic, from the run's 1/K0 calibration; > 0 = this width; -1 = off (searched by m/z and RT only, no observed 1/K0: -write_im and the CCS head are refused) |
 | `-search:ms1` | string | `true` | true,false | Extract MS1 traces and use the MS1 sub-scores |
 | `-search:rt_im_scores` | string | `true` | true,false | Let the RT and 1/K0 deviation sub-scores into the classifier; false is an ablation for tuning, which exists to correct those deviations |
 | `-search:calibration_min_rsq` | double | `0.7` | 0.0:1.0 | Least r^2 of the RT calibration on the seed assays |

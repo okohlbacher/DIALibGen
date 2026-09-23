@@ -322,7 +322,9 @@ void DIALibGen::registerRefinementOptions_()
     setMinFloat_("search:rt_window", 0.0);
     registerDoubleOption_("search:mz_ppm", "<ppm>", 0.0, "Full fragment m/z extraction window, ppm (0 = automatic)", false);
     setMinFloat_("search:mz_ppm", 0.0);
-    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility runs (0 = automatic, -1 = off)", false);
+    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility (diaPASEF) runs: "
+                          "0 = automatic, from the run's 1/K0 calibration; > 0 = this width; -1 = off (searched by m/z and RT "
+                          "only, no observed 1/K0: -write_im and the CCS head are refused)", false);
     setMinFloat_("search:im_window", -1.0);
     registerStringOption_("search:ms1", "<true/false>", "true", "Extract MS1 traces and use the MS1 sub-scores", false);
     setValidStrings_("search:ms1", {"true", "false"});
@@ -558,19 +560,27 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogError_("-empirical_library does not apply to -run: the built-in report carries every gate column"); return ILLEGAL_PARAMETERS; }
       if (p.min_fragments > 0)
       { writeLogError_("-min_fragments is not available with -run yet: the built-in report carries no fragment identities"); return ILLEGAL_PARAMETERS; }
-      if (p.write_im)
-      { writeLogError_("-write_im is not available with -run yet: the built-in search does not measure 1/K0, so nothing would be written"); return ILLEGAL_PARAMETERS; }
+      // Observed 1/K0 comes only from an ion-mobility (diaPASEF) run searched
+      // with its ion mobility: whether the run has it is known once it is
+      // loaded, which the search checks before searching anything
+      // (SearchParams::require_ion_mobility); search:im_window -1 is refused here.
+      std::vector<std::string> needs_im;
+      if (p.write_im) { needs_im.push_back("-write_im"); }
+      if (tune && getStringOption_("tune_heads") != "rt") { needs_im.push_back("-tune_heads " + getStringOption_("tune_heads")); }
+      std::string needs_im_text;
+      for (const auto& n : needs_im) { needs_im_text += (needs_im_text.empty() ? "" : " and ") + n; }
+      if (!needs_im.empty() && getDoubleOption_("search:im_window") == -1.0)
+      {
+        writeLogError_(needs_im_text + " needs observed 1/K0 values, and search:im_window -1 searches without ion mobility, so "
+                       "the built-in search measures none" + std::string(tune ? "; use -tune_heads rt" : ""));
+        return ILLEGAL_PARAMETERS;
+      }
       // Everything that would fail AFTER the search (minutes on a full run)
       // is checked before it.
       if (tune)
       {
         const std::string heads = getStringOption_("tune_heads");
-        if (heads != "rt")
-        {
-          writeLogError_("-tune_heads " + heads + " needs observed 1/K0 values, which the built-in search (-run) does not "
-                         "measure yet; use -tune_heads rt");
-          return ILLEGAL_PARAMETERS;
-        }
+        (void)heads;   // read by the model checks of a build with fine-tuning
         const int epochs = getIntOption_("train:epochs"), warmup = getIntOption_("train:warmup");
         if (epochs < 1 || warmup < 0 || warmup > epochs)
         { writeLogError_("train:warmup must be in [0, train:epochs]"); return ILLEGAL_PARAMETERS; }
@@ -582,12 +592,18 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         if (models.empty()) { models = bundledModelDir(); }
         if (models.empty())
         { writeLogError_("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); return ILLEGAL_PARAMETERS; }
-        if (!std::filesystem::exists(std::filesystem::path(models) / "peptdeep_rt_dynamic.onnx"))
-        { writeLogError_("no peptdeep_rt_dynamic.onnx in " + models); return ILLEGAL_PARAMETERS; }
+        for (const char* head : {"rt", "ccs"})
+        {
+          if (heads == (std::string(head) == "rt" ? "ccs" : "rt")) { continue; }
+          const std::string file = std::string("peptdeep_") + head + "_dynamic.onnx";
+          if (!std::filesystem::exists(std::filesystem::path(models) / file))
+          { writeLogError_("no " + file + " in " + models); return ILLEGAL_PARAMETERS; }
+        }
 #endif
       }
       try { search = std::make_unique<ODIA::search::SearchParams>(searchParams_()); }
       catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+      search->require_ion_mobility = needs_im_text;
       out_ids = getParam_().getValue("out_ids").toString();
       if (out_ids.empty()) { out_ids = out + ".ids.parquet"; }
       if (!out_ids.ends_with(".parquet"))

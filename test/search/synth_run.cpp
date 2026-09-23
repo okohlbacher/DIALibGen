@@ -5,7 +5,11 @@
 // tests: <dir>/library.tsv (a DIA-NN TSV library of targets), <dir>/run.mzML
 // and <dir>/truth.tsv (the planted precursors).
 //
-//   identify_synth_run <dir> [peptides] [planted_fraction] [seed]
+//   identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im]
+//
+// "im": a diaPASEF run -- two 1/K0 bands per isolation window, the library's
+// 1/K0 reading 0.08 high (identify_ion_mobility's fixture) -- and the true
+// 1/K0 in truth.tsv.
 
 #include "synthetic_run.h"
 
@@ -20,7 +24,7 @@ int main(int argc, char** argv)
 {
   if (argc < 2)
   {
-    std::cerr << "usage: identify_synth_run <dir> [peptides] [planted_fraction] [seed]\n";
+    std::cerr << "usage: identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im]\n";
     return 2;
   }
   try
@@ -31,12 +35,18 @@ int main(int argc, char** argv)
     if (argc > 2) { spec.peptides = std::stoul(argv[2]); }
     if (argc > 3) { spec.planted_fraction = std::stod(argv[3]); }
     if (argc > 4) { spec.seed = std::stoull(argv[4]); }
+    if (argc > 5 && std::string(argv[5]) == "im")
+    {
+      spec.im_bands = 2;
+      spec.im_library_offset = 0.08;
+    }
     const synthrun::Fixture fx = synthrun::make(spec);
     ODIA::DIANNLibraryFile::storeTSV((dir / "library.tsv").string(), fx.library);
     synthrun::writeMzML(spec, fx, (dir / "run.mzML").string());
-    synthrun::writeTruth(fx, (dir / "truth.tsv").string());
+    synthrun::writeTruth(fx, (dir / "truth.tsv").string(), &spec);
     std::cout << "synthetic run: " << fx.library.precursorCount() << " library precursors, " << fx.planted.size()
-              << " planted, " << spec.windows << " windows, " << spec.run_s << " s at " << spec.cycle_s << " s per cycle\n";
+              << " planted, " << spec.windows << " windows" << (spec.im_bands ? " x " + std::to_string(spec.im_bands) + " 1/K0 bands" : std::string())
+              << ", " << spec.run_s << " s at " << spec.cycle_s << " s per cycle\n";
     return 0;
   }
   catch (const std::exception& e)

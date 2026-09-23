@@ -287,6 +287,16 @@ namespace ODIA::search
            (run.ion_mobility ? "diaPASEF (ion mobility)" : "no ion mobility") + ", read " +
            (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
     }
+    // A caller that needs observed 1/K0 (-write_im, the CCS head) learns
+    // before anything is searched that this run cannot give it any.
+    if (!params_.require_ion_mobility.empty() && !(run.ion_mobility && params_.im_window != -1.0))
+    {
+      throw SearchAbort("search: " + params_.require_ion_mobility + " needs observed 1/K0 values, and " +
+                        (run.ion_mobility ? std::string("search:im_window -1 searches this ion-mobility run without them")
+                                          : "the run " + run_path + " has no ion mobility (that needs 1/K0 limits on its isolation "
+                                            "windows AND a per-peak 1/K0 array, as in a diaPASEF mzML)") +
+                        "; nothing was searched (-tune_heads rt, and refine without -write_im, need none)");
+    }
 
     // 2. Candidates and their in-memory decoys; with search:intensities
     //    predicted, both members of every pair predicted by one model.

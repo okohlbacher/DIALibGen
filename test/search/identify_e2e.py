@@ -11,6 +11,11 @@ refine: -mode refine -run completes, writes the identification report and a
         refined library that consumed it; the report is byte-identical at
         -threads 1 and 4 and at two search:chunk sizes; with pyarrow, the
         report's identifications are checked against the planted truth.
+        Ion mobility: -write_im is refused on the run without it (after it is
+        read, before anything is searched) and, on a synthetic diaPASEF run
+        (two 1/K0 bands per window, the library's 1/K0 mis-calibrated), writes
+        the observed 1/K0 of the identified precursors, within 0.01 of the
+        planted one.
 tune:   -mode tune -run and the documented -mode refine -tune -no_filter -run
         complete with the RT head (the synthetic run has no ion mobility),
         write their reports and tuned libraries of the full library size.
@@ -154,6 +159,53 @@ try:
             if not filecmp.cmp(ids, other, shallow=False):
                 fail('%s differs from %s' % (other, ids))
         print('ok   report byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
+
+        # -write_im needs observed 1/K0: refused on a run without ion mobility,
+        # once the run is read and before anything is searched.
+        d = root / 'no-im'
+        d.mkdir()
+        log = run(tool, '-mode', 'refine', '-in', library, '-run', mzml, '-out', d / 'out.tsv', '-out_ids', d / 'ids.parquet',
+                  '-write_im', ok=False)
+        if 'needs observed 1/K0 values, and the run' not in log or 'has no ion mobility' not in log or 'search candidates' in log:
+            print(log, file=sys.stderr)
+            fail('-write_im on a run without ion mobility must be refused before the search')
+        if (d / 'ids.parquet').exists() or (d / 'out.tsv').exists():
+            fail('a refused -write_im left output behind')
+        print('ok   -write_im refused on a run without ion mobility')
+
+        # ... and accepted on a diaPASEF run, where it writes observed 1/K0.
+        # A fifth of the peptides planted, not the 40 % above: an ion-mobility
+        # window removes nearly all of this fixture's sparse background, and
+        # with half of the searched targets present the run breaks the premise
+        # of the run-level guards (search:max_target_fraction, and the label-
+        # swap self-check, which then finds the decoys of present targets --
+        # measured: 901 "identifications" at 40 %, 0 at 20 % and 10 %).
+        pasef = root / 'pasef'
+        print(run(synth, pasef, peptides, '0.2', '20260921', 'im').strip())
+        im_truth = {r['precursor_id']: float(r['im']) for r in rows(pasef / 'truth.tsv')}
+        d = root / 'im'
+        d.mkdir()
+        out, ids = d / 'out.tsv', d / 'ids.parquet'
+        log = run(tool, '-mode', 'refine', '-in', pasef / 'library.tsv', '-run', pasef / 'run.mzML', '-out', out,
+                  '-out_ids', ids, '-write_im', '-threads', 4)
+        prov = json.loads(Path(str(out) + '.refine.json').read_text())
+        cal = prov['search']['calibration']
+        mob = cal['detail'].get('ion_mobility') or {}
+        if not prov['search']['run']['ion_mobility'] or not cal['im_window'] or cal['im_window'] <= 0 or not mob:
+            print(log, file=sys.stderr)
+            fail('the diaPASEF run was not searched with its ion mobility: %s' % json.dumps(cal))
+        written = prov['library']['im_written']
+        print('ion mobility: 1/K0 window %.3f, calibration %s, %d observed 1/K0 written' %
+              (cal['im_window'], json.dumps({k: mob.get(k) for k in ('slope', 'intercept', 'inliers', 'window_assignment')}), written))
+        if written < 0.7 * len(im_truth):
+            fail('%d observed 1/K0 written for %d planted precursors' % (written, len(im_truth)))
+        lib_im = {r['Precursor.Id']: float(r['IM']) for r in rows(out) if r['Decoy'] == '0'}
+        errors = sorted(abs(lib_im[k] - v) for k, v in im_truth.items() if k in lib_im and not math.isnan(lib_im[k]))
+        within = sum(1 for e in errors if e <= 0.01)
+        print('ok   -write_im on the diaPASEF run: %d of %d planted precursors within 0.01 of their true 1/K0 (median %.4f)'
+              % (within, len(errors), errors[len(errors) // 2] if errors else float('nan')))
+        if not errors or within < 0.9 * len(errors):
+            fail('the written 1/K0 is not the planted one')
 
         try:
             import pyarrow.parquet as pq

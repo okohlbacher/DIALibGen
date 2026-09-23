@@ -29,6 +29,7 @@
 #include <OpenMS/ANALYSIS/MAPMATCHING/TransformationDescription.h>
 #include <OpenMS/METADATA/ExperimentalSettings.h>
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/SwathMap.h>
+#include <OpenMS/OPENSWATHALGO/DATAACCESS/TransitionExperiment.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +55,9 @@ namespace ODIA::search
     std::shared_ptr<OpenMS::ExperimentalSettings> meta;
     /// diaPASEF: MS2 windows carry 1/K0 limits AND spectra carry a per-peak 1/K0 array.
     bool ion_mobility = false;
+    /// ... and the MS1 spectra carry a per-peak 1/K0 array too (MS1 traces
+    /// and MS1 scores are then read within the precursor's 1/K0 range).
+    bool ms1_ion_mobility = false;
     /// What the loader actually used ("normal" or "cache").
     std::string read_mode;
     /// Bytes the cache files took after loading (0 in memory).
@@ -72,13 +76,14 @@ namespace ODIA::search
     /// Run RT (seconds) -> assay RT (SearchSet::rt_scale, [0, 100]): the
     /// orientation OpenSwathWorkflow::performExtraction takes.
     OpenMS::TransformationDescription rt;
-    /// 1/K0 correction as performRTNormalization returns it; the assays apply
-    /// it inverted to library 1/K0 (AssayOptions::im_map).
+    /// Library 1/K0 -> run 1/K0, a line fitted to the seeds' measured 1/K0
+    /// (IonMobility.h); the assays map every library 1/K0 through it
+    /// (AssayOptions::im_map). Empty (no data points) without ion mobility.
     OpenMS::TransformationDescription im;
     double rt_window = 0.0;      ///< full RT extraction width, seconds
     double mz_ppm = 0.0;         ///< full MS2 m/z extraction width, ppm
     double ms1_mz_ppm = 0.0;     ///< full MS1 m/z extraction width, ppm
-    double im_window = -1.0;     ///< full 1/K0 extraction width; -1 = no ion mobility
+    double im_window = -1.0;     ///< full 1/K0 extraction width; -1 = no ion mobility (none, or search:im_window -1)
     std::size_t seeds = 0;       ///< seed assays searched
     std::size_t points = 0;      ///< points the RT model was fitted to
     double rsq = std::numeric_limits<double>::quiet_NaN();
@@ -158,15 +163,19 @@ namespace ODIA::search
     /// Load @p path (search:readoptions, search:cache_dir): swap reversed 1/K0
     /// window limits, detect diaPASEF, record the scratch directory. Auto
     /// caches runs above 3 GB; the cache directory is created under
-    /// search:cache_dir, else under scratchParent(). This version searches an
-    /// ion-mobility run by m/z and RT only, and says so.
+    /// search:cache_dir, else under scratchParent(). On a diaPASEF run it
+    /// checks that sampled MS2 spectra carry a 1/K0 array (unless
+    /// search:im_window -1) and whether the MS1 spectra do.
     virtual RunData loadRun(const std::string& path);
     /// Calibrate RT (and 1/K0) on seed assays -- targets of @p set, or kit
     /// peptides found in @p library (which is the unmodified input) -- with the
     /// thresholds search:calibration_min_rsq / _min_coverage; size the
     /// extraction windows (search:rt_window, mz_ppm, im_window; 0 = from the
     /// calibration). A failed calibration throws SearchAbort unless
-    /// search:allow_bootstrap.
+    /// search:allow_bootstrap. On a diaPASEF run (unless search:im_window -1)
+    /// each seed of the RT calibration is measured in 1/K0 at its apex
+    /// (mobilityApex) and a robust line maps library to run 1/K0; its failure
+    /// throws SearchAbort, whatever search:allow_bootstrap says.
     virtual Calibration calibrate(const Library& library, const SearchSet& set, RunData& run);
     /// Extract every precursor of @p set in chunks (AssayBuilder::chunks with
     /// search:chunk, search:batch_size) and append one row per reported peak
@@ -175,6 +184,16 @@ namespace ODIA::search
 
     void info(const std::string& message) const;
     void warn(const std::string& message) const;
+
+    /// calibrate()'s ion-mobility step: measure the seeds behind the RT
+    /// model's @p points (run seconds, assay RT) in 1/K0 at their apex, fit
+    /// library -> run 1/K0 robustly, validate, and size the window; sets
+    /// @p cal's im and im_window and returns the provenance record (JSON).
+    /// @p seed holds the seed assays, @p picked their input library indices
+    /// in the same order. Throws SearchAbort when the calibration fails.
+    std::string calibrateMobility(const Library& library, const SearchSet& set, const RunData& run,
+                                  const OpenSwath::LightTargetedExperiment& seed, const std::vector<std::size_t>& picked,
+                                  const std::vector<std::pair<double, double>>& points, Calibration& cal);
 
     /// Where a cache-mode load puts its scratch directory when search:cache_dir
     /// is empty: the directory of -out_ids (set by identify()), which is where

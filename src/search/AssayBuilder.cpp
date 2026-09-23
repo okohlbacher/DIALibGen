@@ -3,6 +3,8 @@
 
 #include <odia/search/AssayBuilder.h>
 
+#include <odia/search/IonMobility.h>
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -80,9 +82,7 @@ namespace ODIA::search
       double drift = -1.0;
       if (options.ion_mobility)
       {
-        double k0 = (i < p.im.size()) ? static_cast<double>(p.im[i]) : std::nan("");
-        if (!std::isfinite(k0) && i < p.ccs.size() && std::isfinite(p.ccs[i]))
-        { k0 = mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]); }
+        double k0 = libraryMobility(set.library, i);
         if (std::isfinite(k0) && k0 > 0.0)
         {
           if (options.im_map) { k0 = options.im_map(k0); }
@@ -101,7 +101,7 @@ namespace ODIA::search
   }
 
   OpenSwath::LightTargetedExperiment AssayBuilder::buildTargets(const Library& library, const std::vector<std::size_t>& which,
-                                                                const RtScale& scale)
+                                                                const RtScale& scale, bool ion_mobility)
   {
     const auto& p = library.precursors();
     OpenSwath::LightTargetedExperiment exp;
@@ -116,7 +116,8 @@ namespace ODIA::search
       id += std::to_string(p.charge[i]);
       const std::string pg(library.strings().get(p.protein_group[i]));
       proteins.insert(pg);
-      appendAssay(exp, library, i, id, id, pg, scale.toAssay(p.irt[i]), -1.0, false);
+      const double k0 = ion_mobility ? libraryMobility(library, i) : -1.0;
+      appendAssay(exp, library, i, id, id, pg, scale.toAssay(p.irt[i]), std::isfinite(k0) ? k0 : -1.0, false);
     }
     exp.proteins.reserve(proteins.size());
     for (const auto& pg : proteins) { exp.proteins.push_back(OpenSwath::LightProtein{pg, ""}); }

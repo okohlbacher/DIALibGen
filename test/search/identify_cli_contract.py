@@ -105,14 +105,24 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:max_target_fraction', 0, ok=False)
     refused('-out_ids must end in .parquet', '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
             '-out_ids', root / 'ids.tsv')
-    # The search reports no 1/K0 yet: -write_im would write nothing.
-    refused('-write_im is not available with -run', '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
-            '-write_im')
-
-    # Refused BEFORE the search, not after it: a head that needs 1/K0 ...
+    # Observed 1/K0 (-write_im, the CCS head) needs an ion-mobility run searched
+    # with its ion mobility. search:im_window -1 turns it off: refused up front.
+    log = refused('-write_im needs observed 1/K0 values, and search:im_window -1', '-mode', 'refine', '-in', library,
+                  '-run', mzml, '-out', fresh(), '-write_im', '-search:im_window', -1)
+    assert 'search run' not in log, log
     for mode, extra in (('tune', []), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter'])):
-        log = refused_tune('needs observed 1/K0 values, which the built-in search (-run) does not measure yet; use -tune_heads rt',
-                           '-mode', mode, *extra, '-in', library, '-run', mzml, '-out', fresh(), '-tune_models', models)
+        log = refused_tune('needs observed 1/K0 values, and search:im_window -1', '-mode', mode, *extra, '-in', library,
+                           '-run', mzml, '-out', fresh(), '-tune_models', models, '-search:im_window', -1)
+        assert 'search run' not in log and 'search candidates' not in log, log
+    # Otherwise whether the run has ion mobility is known once it is read:
+    # -write_im reaches the search (identify_e2e checks both kinds of run).
+    log = run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-write_im', ok=False)
+    assert 'search run: reading ' + str(mzml) in log and 'search:im_window -1' not in log, log
+
+    # Refused BEFORE the search, not after it: a head without its stock model ...
+    for mode, extra in (('tune', []), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter'])):
+        log = refused_tune('no peptdeep_ccs_dynamic.onnx in', '-mode', mode, *extra, '-in', library, '-run', mzml,
+                           '-out', fresh(), '-tune_models', models)
         assert 'search run' not in log and 'search candidates' not in log, log
     # ... a training recipe that cannot run, and absent models.
     refused_tune('train:warmup must be in [0, train:epochs]', '-mode', 'tune', '-tune_heads', 'rt', '-in', library,

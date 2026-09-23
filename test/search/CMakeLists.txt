@@ -67,6 +67,14 @@ add_test(NAME identify_extraction
 # OpenMP would otherwise take every core of the machine (and spin on them).
 set_tests_properties(identify_extraction PROPERTIES TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=4")
 
+# Ion mobility (M2) on a synthetic diaPASEF mzML: two 1/K0 bands per window,
+# a mis-calibrated library 1/K0, pair symmetry, and no change without it.
+add_executable(identify_ion_mobility identify_ion_mobility.cpp)
+target_link_libraries(identify_ion_mobility PRIVATE odia_search)
+add_test(NAME identify_ion_mobility
+         COMMAND identify_ion_mobility "${CMAKE_CURRENT_BINARY_DIR}/ion-mobility")
+set_tests_properties(identify_ion_mobility PROPERTIES TIMEOUT 900 ENVIRONMENT "OMP_NUM_THREADS=4")
+
 # The evidence prefilter and the chunking on the same kind of synthetic run.
 add_executable(identify_prefilter identify_prefilter.cpp)
 target_link_libraries(identify_prefilter PRIVATE odia_search)

@@ -1,6 +1,6 @@
 # Design: built-in identification for `refine` and `tune`
 
-Status: **accepted, in implementation** (milestones M1 and M3). The option
+Status: **accepted, in implementation** (milestones M1, M2 and M3). The option
 stays *experimental* until the honesty gate (a) below passes.
 
 ## Goal
@@ -17,8 +17,11 @@ DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -ru
 DIALibGen -mode refine -in predicted.parquet -ids report.parquet -out refined.tsv   # unchanged
 ```
 
-(M1 measures no 1/K0, so the CCS head and `-write_im` are refused with `-run`
-until M2.)
+On an ion-mobility (diaPASEF) run the search measures each identification's
+1/K0 (M2), so the CCS head (`-tune_heads ccs|both`) and `-write_im` work with
+`-run`. On a run without ion mobility they are refused once the run is read and
+before anything is searched, and with `search:im_window -1` before the run is
+read.
 
 The approach follows OpenDIAlyzer (ODIA): OpenSWATH's extraction and
 sub-scoring from OpenMS, with the harness around it (candidate selection,
@@ -42,12 +45,16 @@ builds on all five platforms without patches.
   `decoys shuffle|pseudo_reverse`, `intensities predicted|library` (default
   predicted since the M3 review), `instrument auto`, `nce -1`, `seed`,
   `passes`, `rt_window`, `mz_ppm`,
-  `im_window` (0 = automatic), `ms1`, `rt_im_scores`,
+  `im_window` (diaPASEF only: 0 = automatic from the run's 1/K0 calibration,
+  > 0 = that full width, -1 = off), `ms1`, `rt_im_scores`,
   `calibration_min_rsq 0.70`, `calibration_min_coverage 0.30`, `readoptions`,
   `min_ids 200`, `entrapment_tag`, `selftest true`, `chunk`, `batch_size`.
 - Refused with `-run` until later milestones: `-write_intensity`,
-  `-empirical_library`, `-min_fragments`, `-write_im` and `-tune_heads
-  ccs|both` (M1 measures no 1/K0). Everything that would fail after the search
+  `-empirical_library`, `-min_fragments`. `-write_im` and `-tune_heads
+  ccs|both` need observed 1/K0: refused with `search:im_window -1` before the
+  run is read, and on a run without ion mobility right after it is read
+  (`SearchParams::require_ion_mobility`); the CCS head's stock model is
+  checked before the run too. Everything else that would fail after the search
   (tuning recipe, models, a library without protein groups, a directory such
   as a Bruker `.d` given as `-run`, the MS2 model that `intensities
   predicted` needs, a library whose RT has no range) is checked before the
@@ -142,7 +149,15 @@ bundles do not grow.
 2. **Run.** `SwathFile::loadMzML` (`normal` or `cache`). Ion-mobility window
    limits are normalised (lower/upper swapped where reversed, as in current
    mzpeak-convert output). diaPASEF is detected from window limits *and* a
-   per-peak 1/K0 array. The per-window cache files hold every peak
+   per-peak 1/K0 array. On a diaPASEF run searched with its ion mobility
+   (M2; not with `search:im_window -1`) the loader samples every MS2 window
+   at its first, middle and last spectrum and aborts if one of them has no
+   1/K0 array (stock extraction throws on such a spectrum once a 1/K0
+   window is set), and records whether the MS1 spectra carry one (MS1
+   traces and scores then read the precursor's 1/K0 range too). A diaPASEF
+   mzML converted by mzpeak-convert from 0.13 (PR #32) carries window 1/K0
+   limits on the vendor calibration, the same as its per-peak values, and
+   in the right order; files with reversed limits still load. The per-window cache files hold every peak
    uncompressed: 1.45x the mzML on an Orbitrap Astral run and 2.56x on a
    diaPASEF run (whose 1/K0 array is cached too); the log quotes that range
    before the read and the measured size after it. Later (M4): a
@@ -224,6 +239,40 @@ bundles do not grow.
    on Astral the evidence seeds gave 944 points (M1's random seeds 16); on
    timsTOF LOWESS narrowed the window (661 s against 756 s). Calibration memory grows with seeds x fragments x spectra per
    window (M1: 3.5 GiB on the 6.4 GB Astral run, 1.5 GiB above extraction).
+   **Ion mobility (M2).** On a diaPASEF run searched with its ion mobility,
+   each seed is extracted from the ONE diaPASEF window its library 1/K0
+   falls in (stock `pasef` assignment; seeds without a library 1/K0 are
+   dropped). Before M2 every seed was extracted from every window holding
+   its m/z, and the stock peak picker, which keys chromatograms by
+   transition id, kept whichever window's chromatograms were written last --
+   an order set by thread scheduling. The 1/K0 calibration is DIALibGen's
+   own, not stock `SwathMapMassCorrection::correctIM`: stock measures a
+   seed's 1/K0 only within +-w/2 of its LIBRARY value (an estimate pulled
+   towards the value it is meant to correct), fits a plain least-squares line
+   without outlier handling, and throws on zero points from inside the RT
+   calibration. Here every point of the chosen RT model is its seed at its
+   apex: in the spectra of the windows holding its m/z (the closest and one
+   on each side) and over their WHOLE 1/K0 range, each library fragment's
+   peaks within the calibrated m/z half-width vote for the 1/K0 where they
+   co-locate (`mobilityApex`, IonMobility.h: a mobilogram per fragment in
+   0.002 bins, Gaussian-smoothed with SD 0.004 and scaled to a maximum of 1,
+   so one intense interference cannot outvote the other fragments; the apex
+   refined to the intensity-weighted mean within +-0.01; kept with at least
+   3 fragments there). A robust line (RobustLine.h, 3 robust SDs, scale
+   floor 0.002) maps library to run 1/K0. It aborts with fewer than 20
+   inliers, a slope outside [0.8, 1.25] or an r^2 below
+   `search:calibration_min_rsq` (`search:im_window -1` searches without ion
+   mobility), and `search:allow_bootstrap` does not stand in for a failed RT
+   calibration on such a run: the 1/K0 calibration needs its seeds. The
+   automatic window (`search:im_window 0`) is the RT window's rule on the
+   1/K0 residuals: 2 x 1.3 x the larger of their 0.99 quantile and 2.576
+   robust SDs, clamped to [0.04, 0.16] (the floor holds a whole mobility
+   peak, FWHM about 0.02; the cap stays below one isolation window's 1/K0
+   range, about 0.18 on the timsTOF run). Recorded: the line, its residuals,
+   the window and its rule, how many measured seeds the library's own 1/K0
+   and the calibrated one put in the window their measured 1/K0 is in, and
+   how many searched pairs have a calibrated 1/K0 in no window at their m/z
+   (OpenSWATH extracts neither member of those).
 6. **Extraction.** `OpenSwathWorkflow::performExtraction` (stock 13-argument form)
    per chunk, with an inactive OSW writer and in-memory features. After each
    chunk the features become compact score rows and are freed. Stock OpenSWATH
@@ -236,6 +285,26 @@ bundles do not grow.
    of many windows while each window still sees whole batches (M1's
    contiguous 20,000-precursor chunks covered 1-2 of a diaPASEF run's
    25-Th windows: 43 ms per precursor against 11-17 ms over about 8).
+   **Ion mobility (M2).** The assays carry the CALIBRATED library 1/K0, on
+   the compound and on every transition (the window assignment reads the
+   transition's, the extraction range the compound's); a target and its
+   decoy carry the same value, so they are extracted from the same window
+   over the same 1/K0 range. Stock `pasef` extraction assigns each precursor
+   to the one window holding its m/z and 1/K0 whose 1/K0 centre is closest,
+   instead of every window holding its m/z (the timsTOF run acquires each of
+   its 32 isolation windows in two overlapping 1/K0 ranges, 64 maps);
+   `im_extraction_window` is the calibrated width in MS2 and, when the MS1
+   spectra carry 1/K0 too, in MS1 (`use_ms1_ion_mobility`); and
+   `Scores:use_ion_mobility_scores` is on. The peak group's 1/K0 is stock
+   `im_drift` (the mean over fragments of each fragment's intensity-weighted
+   1/K0 inside the window), NaN when `im_ms1_drift` exists and differs by
+   more than 0.02 (`reportedMobility`). A spectrum's 1/K0 values must lie on
+   a scan grid: stock 3.5.0's `IonMobilityScoring` throws inside an OpenMP
+   region -- the process aborts -- when two of them lie closer than 1e-4
+   without being equal (`alignToGrid_`). A timsTOF frame's values do (every
+   MS2 1/K0 of 825 frame-window spectra of the run is one of its MS1 frame
+   values, 0.0011 apart); the synthetic diaPASEF fixture puts its peaks on
+   such a grid for that reason.
 7. **Scoring and FDR** (below), then the report.
 
 Shared code with ODIA: the dependency-free LDA and FDR headers are vendored into
@@ -246,7 +315,16 @@ patched-OpenMS prefilter are not ported.
 ## Scoring and FDR
 
 - Features: about twelve non-collinear OpenSWATH sub-scores, plus MS1 and ion-
-  mobility scores when available; elution-model and ion-series scores off. The
+  mobility scores when available; elution-model and ion-series scores off.
+  Ion mobility (M2) adds `var_im_xcorr_shape`, `var_im_xcorr_coelution`,
+  `var_im_delta_score` and, with 1/K0 in MS1, `var_im_ms1_delta_score`,
+  appended after the others so a run without ion mobility keeps its columns.
+  Three stock "no signal" values would read as measurements and become
+  missing (NaN, imputed like any other) instead: an MS2 1/K0 deviation of -1,
+  an MS1 deviation computed from an MS1 1/K0 of -1, and a perfect 1/K0
+  co-elution (0) from fewer than two fragment mobilograms. Every one of them
+  is read from the peak group, never from the label; a pair's members share
+  the 1/K0 the deviations are measured from. The
   MS1-MS2 co-elution scores are the `_contrast` variants: stock 3.5.0 computes
   the plain ones only from two or more precursor isotope traces, and only the
   monoisotopic trace is extracted.

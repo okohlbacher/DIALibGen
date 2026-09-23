@@ -69,9 +69,11 @@ namespace ODIA::search
 
     /// Target assays straight from @p library (the unmodified input), for the
     /// calibration seeds: the same layout as build() -- empty sequence, id
-    /// "<modified sequence><charge>", RT through @p scale, no drift time --
-    /// for library precursors @p which, in that order. Decoys are refused.
+    /// "<modified sequence><charge>", RT through @p scale, no drift time
+    /// unless @p ion_mobility, then the library's own 1/K0 (libraryMobility,
+    /// -1 when it has none) -- for library precursors @p which, in that
+    /// order. Decoys are refused.
     static OpenSwath::LightTargetedExperiment buildTargets(const Library& library, const std::vector<std::size_t>& which,
-                                                           const RtScale& scale);
+                                                           const RtScale& scale, bool ion_mobility = false);
   };
 }

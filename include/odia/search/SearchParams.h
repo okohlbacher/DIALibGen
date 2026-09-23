@@ -116,7 +116,12 @@ namespace ODIA::search
     double rt_window = 0.0;
     /// Full width of the fragment m/z extraction window in ppm; 0 = automatic.
     double mz_ppm = 0.0;
-    /// Full width of the 1/K0 extraction window; 0 = automatic, -1 = off.
+    /// Ion mobility on a diaPASEF run (window 1/K0 limits AND a per-peak 1/K0
+    /// array): full width of the 1/K0 extraction window. 0 = automatic, from
+    /// the ion-mobility calibration (im_window_padding x its residuals,
+    /// clamped to [im_window_min, im_window_max]); > 0 = this width; -1 = off:
+    /// the run is searched by m/z and RT only, as before M2, and the report
+    /// carries no 1/K0. Ignored on a run without ion mobility.
     double im_window = 0.0;
     /// MS1 traces and MS1 sub-scores.
     bool ms1 = true;
@@ -161,6 +166,12 @@ namespace ODIA::search
 
     /// Threads for extraction and the classifier's folds (TOPP -threads).
     int threads = 1;
+
+    /// Why the caller needs observed 1/K0 values (e.g. "-write_im"); empty =
+    /// it does not. When set, a run without ion mobility is refused right
+    /// after it is loaded, before anything is searched. How the tool was
+    /// asked, not how the search runs: not part of toJson.
+    std::string require_ion_mobility;
 
     // ---- constants of the method, not options --------------------------------
     /// The q-value an identification is counted at in every guard and log line.
@@ -218,6 +229,33 @@ namespace ODIA::search
     /// broken selection (pairs are kept whole, so it is exactly 1).
     static constexpr double candidate_ratio_low = 0.8;
     static constexpr double candidate_ratio_high = 1.25;
+
+    // ---- ion mobility (diaPASEF), recorded with the calibration --------------
+    /// search:im_window 0: the full 1/K0 extraction width is 2 x
+    /// im_window_padding x the larger of the 0.99 quantile of the calibration
+    /// residuals and im_window_normal_quantile robust SDs of them (the RT
+    /// window's rule), clamped to this range. The floor keeps a whole
+    /// ion-mobility peak (FWHM about 0.02 on a timsTOF) inside the window
+    /// whatever the calibration says; the cap keeps the window below the
+    /// width of one diaPASEF isolation window's 1/K0 range.
+    static constexpr double im_window_padding = 1.3;
+    static constexpr double im_window_normal_quantile = 2.5758;
+    static constexpr double im_window_min = 0.04;
+    static constexpr double im_window_max = 0.16;
+    /// The ion-mobility calibration (library 1/K0 -> run 1/K0, a robust line
+    /// through the RT calibration's seeds, each measured at its apex): at
+    /// least this many seeds must be measured, with at least
+    /// im_seed_min_fragments fragments each co-locating in 1/K0 ...
+    static constexpr std::size_t im_calibration_min_points = 20;
+    static constexpr std::size_t im_seed_min_fragments = 3;
+    /// ... and the line's slope must lie within this band: library and run
+    /// 1/K0 differ by a calibration, not by a factor.
+    static constexpr double im_slope_low = 0.8;
+    static constexpr double im_slope_high = 1.25;
+    /// The report's 1/K0 of a peak group is OpenSWATH's MS2 value (im_drift);
+    /// when the MS1 value (im_ms1_drift) exists and differs by more than this,
+    /// the report says NaN: the two looks at one precursor disagree.
+    static constexpr double im_ms1_agreement = 0.02;
 
     /// Throws std::invalid_argument naming the first bad setting.
     void validate() const;

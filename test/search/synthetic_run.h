@@ -24,7 +24,19 @@
 //     construction asymmetries -- identify_decoy_symmetry and the null-pair
 //     balance do. A background drawn from a shared pool of peptide-like ions
 //     would; it is not built yet;
-//   * uniform random noise peaks in every spectrum.
+//   * uniform random noise peaks in every spectrum;
+//   * ion mobility (Spec::im_bands > 0, off by default, and then nothing
+//     above changes): every precursor has a true 1/K0 (seeded, uniform over
+//     the mobility range), which its planted fragments and isotopes carry;
+//     the library's 1/K0 is a MIS-calibrated prediction of it (offset +
+//     slope x true + noise), so only a calibrated library 1/K0 finds the
+//     right band; each isolation window is acquired in im_bands abutting
+//     1/K0 bands, and a band's spectrum holds only the ions whose 1/K0 lies
+//     in it, each as three peaks across its mobility peak; background traces
+//     sit within +-0.03 of their precursor's 1/K0 (the same for a target and
+//     its decoy), noise peaks at random 1/K0. The MS2 spectra carry the window's
+//     1/K0 limits and every spectrum a per-peak 1/K0 array, as a diaPASEF
+//     mzML does.
 //
 // Everything is a function of the Spec and its seed: the random numbers come
 // from SplitMix64, not from <random>'s distributions, whose output the
@@ -69,6 +81,19 @@ namespace synthrun
     double background_spread_s = 25.0;   ///< interference apex: expected RT +- this
     int noise_ms2 = 40, noise_ms1 = 150;   ///< uniform noise peaks per spectrum
     double mz_error_ppm = 2.0;        ///< SD of every peak's m/z error
+    // ---- ion mobility: none unless im_bands > 0 -------------------------------
+    int im_bands = 0;                 ///< 1/K0 bands per isolation window, abutting on [im_low, im_high]
+    double im_low = 0.6, im_high = 1.4;
+    double im_sigma = 0.006;          ///< half-width of a mobility peak (the three peaks sit at -1, 0, +1 of it)
+    double im_library_offset = 0.0;   ///< library 1/K0 = offset + slope x true 1/K0 + noise
+    double im_library_slope = 1.0;
+    double im_library_noise = 0.004;  ///< SD
+    /// Every peak's 1/K0 lies on a scan grid of this step from im_low, as on a
+    /// timsTOF (0.0011 there, measured). It matters: stock OpenSWATH 3.5.0's
+    /// IonMobilityScoring throws (inside an OpenMP region: the process
+    /// aborts) when a spectrum's 1/K0 values lie closer than 1e-4 without
+    /// being equal, which continuous values do and scan-grid values never do.
+    double im_step = 0.0011;
   };
 
   /// One planted precursor: library index (targets only), apex and height.
@@ -79,12 +104,13 @@ namespace synthrun
     double height = 0.0;
   };
 
-  /// One Gaussian trace: m/z, apex, height, and the window it is acquired in
-  /// (-1 = MS1).
+  /// One Gaussian trace: m/z, apex, height, the window it is acquired in
+  /// (-1 = MS1), and its 1/K0 (-1 = none; ion mobility fixtures only).
   struct Trace
   {
     double mz, apex_s, height;
     int window;
+    double im = -1.0;
   };
 
   struct Fixture
@@ -152,6 +178,15 @@ namespace synthrun
     return std::min(99.0, std::max(1.0, 100.0 * minutes30 / 30.0));
   }
 
+  /// The TRUE 1/K0 of library precursor @p n (ion mobility fixtures): seeded,
+  /// uniform over the central 90 % of the mobility range.
+  inline double trueMobility(const Spec& spec, std::size_t n)
+  {
+    Rng r(mixKey(spec.seed + 5, n));
+    const double span = spec.im_high - spec.im_low;
+    return spec.im_low + 0.05 * span + 0.9 * span * r.uniform();
+  }
+
   inline int windowOf(const Spec& spec, double mz)
   {
     if (!(mz > spec.mz_low && mz < spec.mz_high)) { return -2; }
@@ -173,7 +208,13 @@ namespace synthrun
       // A prediction: the true position plus noise, the same for both charges.
       Rng predicted(mixKey(spec.seed + 4, n / 2));
       pre.irt.push_back(static_cast<float>(std::min(100.0, std::max(0.0, trueRt(p.sequence) + 1.5 * predicted.normal()))));
-      pre.im.push_back(std::nanf(""));
+      if (spec.im_bands > 0)
+      {
+        Rng r(mixKey(spec.seed + 6, n));
+        pre.im.push_back(static_cast<float>(spec.im_library_offset + spec.im_library_slope * trueMobility(spec, n) +
+                                            spec.im_library_noise * r.normal()));
+      }
+      else { pre.im.push_back(std::nanf("")); }
       pre.ccs.push_back(std::nanf(""));
       pre.charge.push_back(static_cast<std::uint8_t>(p.charge));
       pre.decoy.push_back(0);
@@ -234,13 +275,17 @@ namespace synthrun
       {
         const std::uint32_t j = pre.transition_begin[i] + f;
         fx.traces.push_back({ODIA::fromFixed(tr.product_mz[j]), apex,
-                             height * std::max(0.02, tr.library_intensity[j] * (1.0 + 0.15 * r.normal())), window});
+                             height * std::max(0.02, tr.library_intensity[j] * (1.0 + 0.15 * r.normal())), window,
+                             spec.im_bands > 0 ? trueMobility(spec, i) : -1.0});
       }
       const OpenMS::AASequence seq = OpenMS::AASequence::fromString(std::string(fx.library.strings().get(pre.modified_sequence[i])));
       const int z = pre.charge[i];
       const auto dist = seq.getFormula(OpenMS::Residue::Full, z).getIsotopeDistribution(OpenMS::CoarseIsotopePatternGenerator(3));
       for (std::size_t iso = 0; iso < dist.size(); ++iso)
-      { fx.traces.push_back({mz + static_cast<double>(iso) * 1.0033548378 / z, apex, 3.0 * height * dist[iso].getIntensity(), -1}); }
+      {
+        fx.traces.push_back({mz + static_cast<double>(iso) * 1.0033548378 / z, apex, 3.0 * height * dist[iso].getIntensity(), -1,
+                             spec.im_bands > 0 ? trueMobility(spec, i) : -1.0});
+      }
     }
 
     // Background for targets and their shuffle decoys alike: one independent
@@ -259,27 +304,43 @@ namespace synthrun
       const int window = windowOf(spec, mz);
       if (window < 0) { continue; }
       Rng r(mixKey(spec.seed + 3, i));
+      Rng rim(mixKey(spec.seed + 7, i));   // a stream of its own: the fixture without ion mobility is unchanged
       const double expected = apexOf(spec, ap.irt[i]);
       auto when = [&]() { return expected + spec.background_spread_s * (2.0 * r.uniform() - 1.0); };
+      // Ion mobility: near the precursor's own (true) 1/K0, within +-0.03, so
+      // an absent target and its decoy find interference inside their 1/K0
+      // window as they would on a real run; the same rule for both classes
+      // (a decoy carries its target's library 1/K0).
+      const double own = spec.im_bands > 0 ? (ap.im[i] - spec.im_library_offset) / spec.im_library_slope : -1.0;
+      auto where = [&]() { return spec.im_bands > 0 ? own + 0.03 * (2.0 * rim.uniform() - 1.0) : -1.0; };
       for (std::uint32_t f = 0; f < ap.transition_count[i]; ++f)
       {
         const std::uint32_t j = ap.transition_begin[i] + f;
-        fx.traces.push_back({ODIA::fromFixed(at.product_mz[j]), when(), std::exp(std::log(1500.0) + 0.7 * r.normal()), window});
+        const double at_time = when();
+        const double height = std::exp(std::log(1500.0) + 0.7 * r.normal());
+        fx.traces.push_back({ODIA::fromFixed(at.product_mz[j]), at_time, height, window, where()});
         ++fx.background_traces;
       }
-      fx.traces.push_back({mz, when(), std::exp(std::log(3000.0) + 0.7 * r.normal()), -1});
+      const double at_time = when();
+      const double height = std::exp(std::log(3000.0) + 0.7 * r.normal());
+      fx.traces.push_back({mz, at_time, height, -1, where()});
       ++fx.background_traces;
     }
     return fx;
   }
 
   /// Write the run as centroided mzML (32-bit, zlib). MS2 windows abut on
-  /// [mz_low, mz_high); each cycle is one MS1 spectrum and then every window.
+  /// [mz_low, mz_high); each cycle is one MS1 spectrum and then every window
+  /// (with ion mobility: every window in each of its 1/K0 bands).
   inline void writeMzML(const Spec& spec, const Fixture& fx, const std::string& path)
   {
     const double width = (spec.mz_high - spec.mz_low) / spec.windows;
     const int cycles = static_cast<int>(std::floor(spec.run_s / spec.cycle_s));
     const double reach = 4.0 * spec.peak_sigma_s;
+    const bool im = spec.im_bands > 0;
+    const int bands = im ? spec.im_bands : 1;
+    const double band_width = (spec.im_high - spec.im_low) / bands;
+    const int slots = 1 + spec.windows * bands;
 
     // Traces by acquisition channel (MS1 = 0, window w = w + 1), by apex.
     std::vector<std::vector<Trace>> channel(static_cast<std::size_t>(spec.windows) + 1);
@@ -289,6 +350,7 @@ namespace synthrun
 
     OpenMS::MSExperiment exp;
     Rng r(spec.seed ^ 0xD1AULL);
+    Rng rim(spec.seed ^ 0x1A2BULL);   // ion mobility only: the fixture without it draws exactly as before
     auto addPeak = [&](OpenMS::MSSpectrum& s, double mz, double intensity) {
       if (!(intensity > 0)) { return; }
       OpenMS::Peak1D p;
@@ -296,40 +358,93 @@ namespace synthrun
       p.setIntensity(static_cast<float>(intensity));
       s.push_back(p);
     };
+    // A peak at an m/z already drawn with its error, at 1/K0 @p k0.
+    auto addMobilityPeak = [&](OpenMS::MSSpectrum& s, double observed_mz, double intensity, double k0) {
+      if (!(intensity > 0)) { return; }
+      k0 = spec.im_low + spec.im_step * std::round((k0 - spec.im_low) / spec.im_step);   // the scan grid
+      OpenMS::Peak1D p;
+      p.setMZ(observed_mz);
+      p.setIntensity(static_cast<float>(intensity));
+      s.push_back(p);
+      s.getFloatDataArrays()[0].push_back(static_cast<float>(k0));
+    };
     int native = 0;
     for (int c = 0; c < cycles; ++c)
     {
       for (int w = -1; w < spec.windows; ++w)
       {
-        const double t = c * spec.cycle_s + (w + 1) * spec.cycle_s / (spec.windows + 1);
-        OpenMS::MSSpectrum s;
-        s.setRT(t);
-        s.setMSLevel(w < 0 ? 1 : 2);
-        s.setType(OpenMS::SpectrumSettings::SpectrumType::CENTROID);
-        s.setNativeID("scan=" + std::to_string(++native));
-        if (w >= 0)
+        for (int b = 0; b < (w < 0 ? 1 : bands); ++b)
         {
-          OpenMS::Precursor prec;
-          const double lo = spec.mz_low + w * width;
-          prec.setMZ(lo + width / 2);
-          prec.setIsolationWindowLowerOffset(width / 2);
-          prec.setIsolationWindowUpperOffset(width / 2);
-          s.setPrecursors({prec});
+          const int slot = w < 0 ? 0 : 1 + w * bands + b;
+          const double t = c * spec.cycle_s + slot * spec.cycle_s / slots;
+          OpenMS::MSSpectrum s;
+          s.setRT(t);
+          s.setMSLevel(w < 0 ? 1 : 2);
+          s.setType(OpenMS::SpectrumSettings::SpectrumType::CENTROID);
+          s.setNativeID("scan=" + std::to_string(++native));
+          // The band's 1/K0 range; MS1 takes every ion.
+          const double band_lo = w < 0 ? spec.im_low : spec.im_low + b * band_width;
+          const double band_hi = w < 0 ? spec.im_high : band_lo + band_width;
+          if (w >= 0)
+          {
+            OpenMS::Precursor prec;
+            const double lo = spec.mz_low + w * width;
+            prec.setMZ(lo + width / 2);
+            prec.setIsolationWindowLowerOffset(width / 2);
+            prec.setIsolationWindowUpperOffset(width / 2);
+            s.setPrecursors({prec});
+            if (im)
+            {
+              s.setMetaValue("ion mobility lower limit", band_lo);
+              s.setMetaValue("ion mobility upper limit", band_hi);
+            }
+          }
+          if (im)
+          {
+            s.getFloatDataArrays().resize(1);
+            s.getFloatDataArrays()[0].setName("mean inverse reduced ion mobility array");
+          }
+          const auto& traces = channel[static_cast<std::size_t>(w + 1)];
+          auto it = std::lower_bound(traces.begin(), traces.end(), t - reach,
+                                     [](const Trace& a, double v) { return a.apex_s < v; });
+          for (; it != traces.end() && it->apex_s <= t + reach; ++it)
+          {
+            const double elution = std::exp(-0.5 * std::pow((t - it->apex_s) / spec.peak_sigma_s, 2));
+            if (!im)
+            {
+              addPeak(s, it->mz, it->height * elution * (1.0 + 0.05 * r.normal()));
+              continue;
+            }
+            // Three peaks across the ion's mobility peak, at one observed m/z
+            // (the fixture tests ion mobility, not how an m/z window copes with
+            // several independent errors per ion); a band holds those inside it.
+            const double total = it->height * elution * (1.0 + 0.05 * r.normal());
+            const double observed_mz = it->mz * (1.0 + spec.mz_error_ppm * 1e-6 * r.normal());
+            for (int d = -1; d <= 1; ++d)
+            {
+              const double k0 = it->im + d * spec.im_sigma + 0.15 * spec.im_sigma * rim.normal();
+              if (!(k0 >= band_lo && k0 < band_hi)) { continue; }
+              addMobilityPeak(s, observed_mz, total * (d == 0 ? 1.0 : 0.6) / 2.2, k0);
+            }
+          }
+          const int n_noise = w < 0 ? spec.noise_ms1 : spec.noise_ms2;
+          const double nlo = w < 0 ? spec.mz_low : 100.0, nhi = w < 0 ? spec.mz_high : 1500.0;
+          for (int k = 0; k < n_noise; ++k)
+          {
+            if (!im)
+            {
+              // Unchanged from the fixture before ion mobility, argument order included.
+              addPeak(s, nlo + (nhi - nlo) * r.uniform(), std::exp(std::log(200.0) + r.normal()));
+              continue;
+            }
+            const double mz = nlo + (nhi - nlo) * r.uniform();
+            const double intensity = std::exp(std::log(200.0) + r.normal());
+            addMobilityPeak(s, mz * (1.0 + spec.mz_error_ppm * 1e-6 * r.normal()), intensity,
+                            band_lo + (band_hi - band_lo) * rim.uniform());
+          }
+          s.sortByPosition();
+          exp.addSpectrum(s);
         }
-        const auto& traces = channel[static_cast<std::size_t>(w + 1)];
-        auto it = std::lower_bound(traces.begin(), traces.end(), t - reach,
-                                   [](const Trace& a, double v) { return a.apex_s < v; });
-        for (; it != traces.end() && it->apex_s <= t + reach; ++it)
-        {
-          const double elution = std::exp(-0.5 * std::pow((t - it->apex_s) / spec.peak_sigma_s, 2));
-          addPeak(s, it->mz, it->height * elution * (1.0 + 0.05 * r.normal()));
-        }
-        const int n_noise = w < 0 ? spec.noise_ms1 : spec.noise_ms2;
-        const double nlo = w < 0 ? spec.mz_low : 100.0, nhi = w < 0 ? spec.mz_high : 1500.0;
-        for (int k = 0; k < n_noise; ++k)
-        { addPeak(s, nlo + (nhi - nlo) * r.uniform(), std::exp(std::log(200.0) + r.normal())); }
-        s.sortByPosition();
-        exp.addSpectrum(s);
       }
     }
     OpenMS::MzMLFile file;
@@ -340,18 +455,21 @@ namespace synthrun
   }
 
   /// Truth table: one line per planted precursor (library index, id, charge,
-  /// precursor m/z, apex seconds, height).
-  inline void writeTruth(const Fixture& fx, const std::string& path)
+  /// precursor m/z, apex seconds, height; with ion mobility also its true 1/K0).
+  inline void writeTruth(const Fixture& fx, const std::string& path, const Spec* spec = nullptr)
   {
+    const bool im = spec && spec->im_bands > 0;
     std::ofstream out(path);
-    out << "index\tprecursor_id\tcharge\tprecursor_mz\tapex_s\theight\n";
+    out << "index\tprecursor_id\tcharge\tprecursor_mz\tapex_s\theight" << (im ? "\tim" : "") << "\n";
     const auto& pre = fx.library.precursors();
     out.precision(10);
     for (const auto& p : fx.planted)
     {
       out << p.index << '\t' << fx.library.strings().get(pre.modified_sequence[p.index]) << static_cast<int>(pre.charge[p.index])
           << '\t' << static_cast<int>(pre.charge[p.index]) << '\t' << ODIA::fromFixed(pre.mz[p.index]) << '\t' << p.apex_s
-          << '\t' << p.height << '\n';
+          << '\t' << p.height;
+      if (im) { out << '\t' << trueMobility(*spec, p.index); }
+      out << '\n';
     }
   }
 }

@@ -114,12 +114,14 @@ bundles do not grow.
    library transition count, max(3, the fewer of the two members' fragments
    above 1e-4 of their base peak)). A pair the model cannot predict, whose
    decoy's chosen fragments all lie within 10 ppm of the target's, or with
-   fewer than 3 fragments leaves whole. For a library DIALibGen generated
-   with the same model, the target's assay is its library assay, cut to that
-   count (a test checks it with the real model); for a library from another
-   predictor, the search's targets are the built-in model's. Why: a decoy in
-   its target's fragment slots with its target's intensities (the M1-M3 rule,
-   still `search:intensities library` for comparison) is weaker than a null
+   fewer than 3 fragments leaves whole. BOTH members are predicted, always,
+   whatever the library holds: where the library is DIALibGen's own with the
+   same model, the target's assay comes OUT equal to its library assay cut to
+   that count (a test checks it with the real model), but it is never read
+   out of the library -- see "The library-assay shortcut, removed".
+   Why: a decoy in its target's fragment slots with its target's intensities
+   (the M1-M3 rule, still `search:intensities library` for comparison, which
+   now warns loudly on every run that selects it) is weaker than a null
    target. The slots were chosen by a predictor for the TARGET's sequence --
    the compositions real peptides fragment into, Pro-directed y2/y3 ions
    above all -- and the decoy puts random compositions into them. On the M3
@@ -130,14 +132,13 @@ bundles do not grow.
    1.4x too optimistic, the whole entrapment excess over nominal. The same
    slots chosen at random or from the bottom of the ranking shrank the
    imbalance; only each member's own prediction removes it by construction.
-   Cost: every eligible pair is predicted (about 7,000 peptides per second
-   at 16 CPU sessions), and the searched set once more. When a sample of
-   2,000 targets re-predicted by the model carries exactly its library
-   assays (a library DIALibGen generated with the same model, instrument and
-   NCE), the targets keep their library assays and only the decoys are
-   predicted -- half the work; otherwise (another predictor, rewritten
-   intensities) both members are. The check's result is logged and
-   recorded.
+   Cost: both members of every eligible pair are predicted (about 7,000
+   peptides per second at 16 CPU sessions), and the searched set once more --
+   24 minutes of a 3 h timsTOF run. Predicting a target whose assay the
+   library already holds is exactly that much work for the same answer, and
+   taking the library's assay instead is not the same answer: it puts the
+   library's own fragment cap into the pair's count rule ("The library-assay
+   shortcut, removed").
 2. **Run.** `SwathFile::loadMzML` (`normal` or `cache`). Ion-mobility window
    limits are normalised (lower/upper swapped where reversed, as in current
    mzpeak-convert output). diaPASEF is detected from window limits *and* a
@@ -559,7 +560,7 @@ points, but the "beat your own decoy" rule does not exclude them.
 
 | | M3 acceptance | predicted |
 |---|---|---|
-| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted |
+| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted (the shortcut, since removed; 0 of 99,931 of this library's pairs change assay without it, so the counts above stand) |
 | pairs searched / DIA-NN in the set | 100,728 / 7,698 (83.1 %) | 110,530 / 7,704 (83.2 %) |
 | calibration | 944 points from 1,927 seeds, linear, 317 s | 1,141 points from 2,143 seeds (99 of 100 bins), LOWESS (CV 2.16 against 2.54), 325 s |
 | target precursors at q <= 0.01 (decoys) | 4,755 (46) | 4,423 (43) |
@@ -602,6 +603,93 @@ optimistic. The timsTOF targets also lose their library's own predicted
 intensities (the built-in model's replace them), which the Astral runs do
 not.
 
+### The library-assay shortcut, removed
+
+A commit on this branch (`d0ec486`) gave `search:intensities predicted` a
+shortcut: a sample of 2,000 library targets was re-predicted, and when they
+all carried exactly the model's own top fragments -- a library DIALibGen
+generated with the same model, instrument and NCE -- the targets KEPT their
+library assays and only the decoys were predicted, half the model's work.
+It is gone. Both members are predicted, always, by the same model, from
+their own sequences, under the same rule.
+
+**What it broke.** The pair's count is min(the target's library transition
+count, max(3, the fewer of the two members' fragments above 1e-4 of their
+base peak)). Reading the target's assay out of the library puts the LIBRARY's
+fragment cap where the TARGET's above-floor count belongs: the count is then
+set by the decoy's above-floor count alone, and wherever the target's own
+prediction is the shorter of the two, the pair gets more fragments than the
+rule allows: the target's extra ones are library fragments its own
+prediction puts BELOW its floor, while the decoy's are all above its own.
+Why that ends up favouring the target is not settled; that it does is
+measured, below. Assays that agree fragment for fragment are not enough --
+the rule that CHOOSES how many has to read both members the same way.
+
+**The probe** (`probes/tims_counts.json` under `/scratch/kohlbach/bid4-label/`,
+99,921 pairs of the timsTOF entrapment library, targets and decoys predicted
+in one batch): 20,737 targets get a different assay under the shortcut than
+from their own prediction, and in EVERY one of them the shortcut's is the
+longer (count bigger 20,715 times, smaller 0). That library holds 12
+fragments per precursor (mean 12.0) where the model puts a mean 16.9 above
+the floor -- but fewer than 12 for 41,081 of the pairs, which is where the
+counts part: mean 10.05 fragments per pair with the shortcut against 9.31
+without. On the Astral whole-proteome library the same probe finds 0 of
+99,931 (mean 11.6 library fragments against 20.6 above the floor, never
+fewer), which is why no Astral run ever showed this.
+
+**The measurement.** Four `-mode tune -tune_heads rt` searches of the same
+timsTOF run against the same shuffled-twin entrapment library (200,000 pairs,
+`-search:entrapment_tag ENTRAP_`), two by two: the shortcut against both
+members predicted, crossed with the decoy rule that keeps one terminal
+residue against the two the branch settled on. Column three is the
+"predicted" column of the timsTOF table above. Every figure is the run's own
+in-product entrapment block, so the four are comparable with each other; the
+acceptance script quoted above differs in the last decimal (0.93 % here
+against its 0.91 % for the same run). The two new runs (columns one and
+four) ran side by side on one node, so their wall times are inflated alike.
+
+| | **both predicted, keep 2** (the rule) | shortcut, keep 2 | both predicted, keep 1 | shortcut, keep 1 |
+|---|---|---|---|---|
+| target precursors at q <= 0.01 (decoys) | 28,843 (287) | 25,930 (258) | 30,018 (299) | 27,210 (271) |
+| peptides / protein groups | 25,922 / 4,175 | 23,463 / 3,646 | 27,063 / 4,168 | 24,631 / 3,338 |
+| combined entrapment FDP | **0.74 %** | 1.30 % | 0.93 % | **3.04 %** |
+| E-pair winners, precursor q <= 0.01 | **107 : 126** (z -1.24) | 168 : 114 (z 3.22) | 140 : 159 (z -1.10) | **414 : 136** (z 11.85) |
+| E-pair winners, peptide / protein group, q <= 0.01 | 96 : 113 / 15 : 26 | 157 : 99 / 28 : 23 | 123 : 146 / 17 : 25 | 380 : 123 / 45 : 17 |
+| E-pair winners, precursor q <= 0.1 | 1,891 : 1,802 (z 1.46) | - | - | 3,663 : 2,119 (z 20.3) |
+| wall / peak RSS | 3:06 h / 19.0 GB | - | - | 2:50 h / 18.9 GB |
+
+Read along each row: with both members predicted the winner test is flat
+(|z| <= 1.3 at q <= 0.01, at every level) and the FDP sits below the nominal
+1 %, under either decoy rule. With the shortcut the targets win (z 3.2
+keeping two terminal residues, z 11.9 keeping one) and the FDP rises to
+1.30 % and 3.04 %. The shortcut is the cause; the two-residue decoy rule is
+not -- the winner test is flat with it and without it, and it has its own
+measurement (Architecture, decoys). Nor did the shortcut buy
+identifications: 25,930 against 28,843 at q <= 0.01 keeping two residues.
+What it bought was 16 minutes of a three-hour run (2:50 h against 3:06 h,
+the decoy rule differing too), for the entrapment gate.
+
+**The 2,000-target sample check was not evidence.** On this very library it
+reported 2,000 of 2,000 sampled targets carrying exactly the model's
+prediction, while 21 % of that library's pairs come out with a different
+assay. The check compares the library's fragment LIST against the model's
+top fragments; it passes whenever the library holds a prefix of the model's
+ranking, and says nothing about where the target's floor sits, which is what
+the count reads. A check that could see this would have to compare the
+target's above-floor count with its library count for every precursor -- and
+computing that count IS predicting the target, so there is nothing left to
+save. And a sample of 2,000 out of millions can only ever speak for the
+precursors in it: what it reports about a library is not a property the
+search may then rely on for every pair.
+
+What stays from that commit: the fixed-point fragment-range test (a double
+bound from `fromFixed` could sit a rounding above the library's own extreme
+fragment and drop it), the prediction progress log, and releasing the model
+once the searched set has its assays. `search:intensities library`, the old
+asymmetric rule, stays as the comparison the exchangeability test measures
+`predicted` against -- and only as that: every run that selects it is warned,
+before the run is read, in the log and in the report's `search.warnings`.
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged
@@ -624,7 +712,9 @@ an OpenMS upgrade), and `.mzpeak` on POSIX builds.
   (Resources). Its review added predicted decoys (`search:intensities
   predicted`), the entrapment winner test and the tag rule for UniProt ids,
   seeds from the central RT range that beat their decoy, and LOWESS chosen
-  by cross-validation (Resources, "After the M3 review").
+  by cross-validation (Resources, "After the M3 review"). The library-assay
+  shortcut that followed it was measured and removed (Resources, "The
+  library-assay shortcut, removed").
 - **M4** Streaming store with a memory budget; 16 GB / 8-core gate.
 - **M5** Honesty and purpose campaign: entrapment, concordance, tuning transfer.
 - **M6** Desktop app, README figure (identification becomes a DIALibGen step),
@@ -680,8 +770,11 @@ an OpenMS upgrade), and `.mzpeak` on POSIX builds.
    code is not ported.
 8. Both members of every search pair predicted by one MS2 model, each with
    its own most intense fragments (`search:intensities predicted`, M3
-   review). The decoy in its target's slots (`library`) stays as a
-   comparison setting and warns.
+   review) -- always, including targets whose library assay already IS that
+   prediction: keeping it instead reads the library's fragment cap into the
+   pair's count rule ("The library-assay shortcut, removed"). The decoy in
+   its target's slots (`library`) stays as the comparison the exchangeability
+   test measures against, and warns loudly on every run that selects it.
 
 ## Main risk
 

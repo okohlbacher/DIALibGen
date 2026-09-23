@@ -134,7 +134,7 @@ bundles do not grow.
    imbalance; only each member's own prediction removes it by construction.
    Cost: both members of every eligible pair are predicted (about 7,000
    peptides per second at 16 CPU sessions), and the searched set once more --
-   24 minutes of a 3 h timsTOF run. Predicting a target whose assay the
+   the prefilter that does it takes 22 minutes (1,333 s) of a 3 h timsTOF run. Predicting a target whose assay the
    library already holds is exactly that much work for the same answer, and
    taking the library's assay instead is not the same answer: it puts the
    library's own fragment cap into the pair's count rule ("The library-assay
@@ -560,7 +560,7 @@ points, but the "beat your own decoy" rule does not exclude them.
 
 | | M3 acceptance | predicted |
 |---|---|---|
-| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted -- the shortcut, which this column's run used and which is since removed. Without it this library's pairs choose the same fragments (0 of 99,931 assays differ) and this run's identifications move only at the q boundary: "The library-assay shortcut, removed" |
+| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted -- the shortcut, which this column's run used and which is since removed. Without it this library's pairs choose the same fragments (0 of 99,938 assays differ; the 0 of 99,931 first quoted here was measured on the Astral entrapment library) and this run's identifications move only at the q boundary: "The library-assay shortcut, removed" |
 | pairs searched / DIA-NN in the set | 100,728 / 7,698 (83.1 %) | 110,530 / 7,704 (83.2 %) |
 | calibration | 944 points from 1,927 seeds, linear, 317 s | 1,141 points from 2,143 seeds (99 of 100 bins), LOWESS (CV 2.16 against 2.54), 325 s |
 | target precursors at q <= 0.01 (decoys) | 4,755 (46) | 4,423 (43) |
@@ -591,8 +591,11 @@ is another predictor's, so both members are predicted:
 | tuning (RT): TEST calibrated SD | 2.161 -> 1.167 min | 2.149 -> 1.126 min |
 | wall / peak RSS | 2:04:42 / 17.6 GB | 3:15:40 / 25.6 GB (24 min predicting both members of 5.1 M pairs; extraction 9,140 s against 6,467 s at 2 to 4 times the node load, same 400,000 precursors) |
 
-The run that settled gate (a) is now the run that passes it: the entrapment
-winner test is flat at every level and every threshold (the largest |z| over
+This run (decoys keeping one terminal residue, since superseded by the
+two-residue rule) passes the two parts of gate (a) that this measurement
+covers, the winner test and the combined FDP, on unscreened shuffled-twin
+entrapment; the screened-entrapment requirement and the prefilter E-pair sign
+test are still open (M5). The entrapment winner test is flat at every level and every threshold (the largest |z| over
 precursors, peptides and protein groups at q <= 0.01, 0.02, 0.05 and 0.1 is
 2.2), and the three combined FDP figures fall from 1.49 / 1.54 / 1.83 % to
 0.91 / 0.89 / 0.82 %, below DIA-NN's on the same design. It costs
@@ -628,8 +631,9 @@ the rule that CHOOSES how many has to read both members the same way.
 **The probe** (`probes/tims_counts.json` under `/scratch/kohlbach/bid4-label/`,
 99,921 pairs of the timsTOF entrapment library, targets and decoys predicted
 in one batch): 20,737 targets get a different assay under the shortcut than
-from their own prediction, and in EVERY one of them the shortcut's is the
-longer (count bigger 20,715 times, smaller 0). That library holds 12
+from their own prediction: in 20,715 of them the shortcut's count is the
+bigger and in none the smaller; the other 22 differ only in which fragments,
+at equal count. That library holds 12
 fragments per precursor (mean 12.0) where the model puts a mean 16.9 above
 the floor -- but fewer than 12 for 41,081 of the pairs, which is where the
 counts part: mean 10.05 fragments per pair with the shortcut against 9.31
@@ -656,10 +660,10 @@ four) ran side by side on one node, so their wall times are inflated alike.
 | E-pair winners, precursor q <= 0.01 | **107 : 126** (z -1.24) | 168 : 114 (z 3.22) | 140 : 159 (z -1.10) | **414 : 136** (z 11.85) |
 | E-pair winners, peptide / protein group, q <= 0.01 | 96 : 113 / 15 : 26 | 157 : 99 / 28 : 23 | 123 : 146 / 17 : 25 | 380 : 123 / 45 : 17 |
 | E-pair winners, precursor q <= 0.1 | 1,891 : 1,802 (z 1.46) | - | - | 3,663 : 2,119 (z 20.3) |
-| wall / peak RSS | 3:06 h / 19.0 GB | - | - | 2:50 h / 18.9 GB |
+| wall / peak RSS | 3:06 h / 18.6 GB | - | - | 2:50 h / 18.5 GB |
 
 Read along each row: with both members predicted the winner test is flat
-(|z| <= 1.3 at q <= 0.01, at every level) and the FDP sits below the nominal
+(|z| <= 1.8 at q <= 0.01, at every level, every deviation in the decoy-favouring direction) and the FDP sits below the nominal
 1 %, under either decoy rule. With the shortcut the targets win (z 3.2
 keeping two terminal residues, z 11.9 keeping one) and the FDP rises to
 1.30 % and 3.04 %. The shortcut is the cause; the two-residue decoy rule is
@@ -683,7 +687,7 @@ precursors in it: what it reports about a library is not a property the
 search may then rely on for every pair.
 
 **The Astral confirmation.** The whole-proteome Astral run was searched again
-without the shortcut, against the same library the probe clears (`-mode tune
+without the shortcut, against a library an independent probe clears (0 of 99,938 assays differ, `probes/astral_wp.json` under `/scratch/kohlbach/bid5-verify/`) (`-mode tune
 -tune_heads rt`, 16 threads; `runs/astral_fix` under
 `/scratch/kohlbach/bid5-label/` against `runs/astral_tune_k2` under
 `/scratch/kohlbach/bid3r-m3r-fix/`). The pairs choose the same fragments, as
@@ -697,15 +701,15 @@ scale, 1,028 of the 4,067 shared identifications carry q > 0.005 in one run
 or the other, so a q-boundary shift of this size moves tens of precursors
 either way.
 
-It is not zero because the probe's "0 of 99,931" covers which fragments a
+It is not zero because the probe's "0 of 99,938" covers which fragments a
 pair takes -- ion, ordinal, charge -- and how many, not the intensity written
 beside them. Under the shortcut a target's intensities were its library's
 stored floats; now they are a fresh prediction, made in a batch of another
 composition (both members together, twice the peptides), and the two differ
 in their last bits. That is enough to swap a near-tie in the top six indexed
-fragments of a few pairs -- 10 of 104,267 -- and to move the semi-supervised
-scoring's boundary by the margin above. Cost on this run: 28:20 m wall
-against 21:18 m, the prediction 827 s against 474 s, peak RSS unchanged
+fragments of a few pairs (not counted) and to move the semi-supervised
+scoring's boundary by the margin above. Cost on this run: 28:21 m wall
+against 21:23 m, the prediction 827 s against 474 s, peak RSS unchanged
 (16.9 GB against 17.0 GB).
 
 What stays from that commit: the fixed-point fragment-range test (a double

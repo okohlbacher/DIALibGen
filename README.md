@@ -11,44 +11,53 @@ retention time, fragment intensities and ion mobility to look for. DIALibGen
 predicts such a library directly from a protein FASTA with the open
 AlphaPeptDeep models, as a scriptable TOPP tool that records how each library
 was made. It fills the role of a search engine's built-in predictor, outside
-the search engine. After a first search has identified peptides in your own
-data, DIALibGen can adapt the library to that run. `refine` writes the observed
-values into the library. `tune` retrains the RT and CCS predictors on the run
-and re-predicts the entire library, including the peptides that have not been
-identified yet.
+the search engine. DIALibGen can then adapt the library to one of your runs.
+It finds confidently identified peptides in the run itself, by targeted trace
+extraction and target-decoy error control (`-run`, experimental), or takes them
+from an external search's report (`-ids`). `refine` writes the observed values
+into the library. `tune` retrains the RT and CCS predictors on the run and
+re-predicts the entire library, including the peptides that have not been
+identified.
 
 ```mermaid
 flowchart LR
     fasta(["Protein FASTA"]) --> gen["<b>generate</b><br/>digest, then predict RT,<br/>fragments, CCS and 1/K0"]
     gen --> lib[("predicted<br/>library")]
-    lib --> s1{{"first DIA search<br/>of one run (DIA-NN)"}}
-    run(["DIA run"]) --> s1
-    s1 --> rep(["identification<br/>report"])
-    lib --> tune
-    rep --> tune["<b>tune</b><br/>retrain RT/CCS on the run,<br/>re-predict the whole library"]
-    lib --> refine
-    rep --> refine["<b>refine</b><br/>keep identified precursors,<br/>write observed RT, and 1/K0 with -write_im.<br/>With -tune it tunes first"]
-    tune --> tl[("tuned<br/>library")]
+    lib --> ident["<b>identify</b><br/>targeted trace extraction,<br/>scoring, target-decoy FDR"]
+    run(["DIA run<br/>(mzML)"]) -->|"-run"| ident
+    ident --> ids[("identifications<br/>of one run")]
+    rep(["external search<br/>report"]) -->|"-ids"| ids
+    lib --> tune["<b>tune</b><br/>retrain RT/CCS,<br/>re-predict every precursor"]
+    ids --> tune
+    lib --> refine["<b>refine</b><br/>keep identified precursors,<br/>write observed RT and 1/K0"]
+    ids --> refine
+    tune --> tl[("tuned library<br/>+ tuned models")]
     refine --> rl[("refined<br/>library")]
-    tl --> s2{{"final DIA search"}}
-    rl --> s2
-    classDef external stroke-dasharray:5 4
-    class fasta,run,s1,rep,s2 external
+    tl --> search{{"DIA search<br/>DIA-NN, OpenSWATH"}}
+    rl --> search
+    classDef step fill:#dbeafe,stroke:#1d4ed8,color:#0b1b3f
+    class gen,ident,tune,refine step
 ```
 
-Rectangles are DIALibGen modes. Dashed elements are outside DIALibGen: your
-files and the search engine. `tune` and `refine` can be used on their own or
-combined: `-mode refine -tune` retrains and re-predicts the library first and
-then writes the observed values, in one invocation; add `-no_filter` to keep
-the precursors that were not identified. Models saved with `-tune_out_models`
-can later be used by `generate`. A predicted library can also be searched as
-it is.
+Blue boxes are the steps of the one DIALibGen executable; the rounded boxes are
+your files and the hexagon is the search engine that uses the result.
+Cylinders are what the steps produce. `identify` is not a mode of its own: it
+runs inside `refine` and `tune` when they are given the raw run
+(`-run run.mzML`), and its report is kept (`-out_ids`). Given an external
+search's report instead (`-ids report.parquet`), they skip it. `-run` is
+experimental, and until ion-mobility support lands it adapts retention time
+only (`-tune_heads rt`, no `-write_im`). `tune` and `refine` can be used on
+their own or combined: `-mode refine -tune` retrains and re-predicts the
+library first and then writes the observed values, in one invocation; add
+`-no_filter` to keep the precursors that were not identified. Models saved
+with `-tune_out_models` can predict new libraries with `generate`. A predicted
+library can also be searched as it is.
 
 | Mode | Input | Result |
 |---|---|---|
 | `generate` (default) | Protein FASTA | Predicted RT, fragment intensities, CCS and 1/K0 derived from it |
-| `refine` | Library and one run's identification report | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
-| `tune` | Library and one run's identification report | RT/CCS models adapted to that run, then predictions for the complete input library |
+| `refine` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
+| `tune` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | RT/CCS models adapted to that run, then predictions for the complete input library |
 
 Version **0.11.0** incorporates library refinement and model training from
 DIALibRefine. See [usage and migration](docs/usage.md),
@@ -100,6 +109,7 @@ mode in depth; the [parameter reference](docs/parameters.md) lists all options.
 | Write observed values into a library | `refine` | `DIALibGen -mode refine -in predicted.tsv -ids report.parquet -out refined.tsv` |
 | Retrain RT/CCS on a run, re-predict the whole library | `tune` | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
 | Tune, then write observed values, in one call | `refine` with `-tune` | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
+| Tune on a raw run, no external search (experimental) | `tune` with `-run` | `DIALibGen -mode tune -tune_heads rt -in predicted.tsv -run run.mzML -out tuned.tsv` |
 
 Existing output files are never overwritten. Options that belong to a different
 mode are rejected when changed from their defaults.
@@ -195,6 +205,33 @@ DIALibGen -in other.fasta -out other_adapted.tsv -generation:instrument timsTOF 
 
 This library's RT is the tuned model's normalized output, not minutes; only
 `-mode tune` rescales to the reference run.
+
+### Built-in identification (experimental)
+
+With `-run`, `refine` and `tune` need no external search. DIALibGen finds
+candidate precursors whose predicted fragments co-occur in the run's spectra,
+extracts their traces with OpenSWATH (stock OpenMS), scores them with a
+semi-supervised discriminant and keeps those that pass target-decoy error
+control at 1 %. Decoys are built in memory; target and decoy are each
+predicted from their own sequence, so the two compete on equal terms.
+
+```bash
+DIALibGen -mode tune -tune_heads rt -in predicted.parquet -run run.mzML -out tuned.tsv -threads 8
+DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -run run.mzML -out adapted.tsv
+```
+
+- The run must be a centroided DIA mzML. For timsTOF diaPASEF, convert the
+  `.d` with a converter that writes a per-peak 1/K0 array and valid mzML 1.1
+  (`mzpeak-convert --to mzml`, from the release that includes its mzML fixes).
+- The identifications are written to `<out>.ids.parquet` (`-out_ids`), in the
+  columns an `-ids` report has, and can be reused with `-ids`.
+- Until ion-mobility support lands, `-run` adapts retention time only:
+  `-tune_heads ccs|both` and `-write_im` are refused.
+- Measured on an Orbitrap Astral and a timsTOF run: most identifications are
+  also found by DIA-NN (95-97 %), and entrapment estimates the error at
+  0.7-0.9 % at nominal 1 %. The option stays experimental until a screened
+  entrapment test confirms this; see the
+  [design document](docs/design/built-in-identification.md).
 
 ### Instruments
 

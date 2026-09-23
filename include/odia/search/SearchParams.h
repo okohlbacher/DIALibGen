@@ -42,6 +42,9 @@ namespace ODIA::search
     /// slots and intensities with recomputed m/z. Known to make decoys weaker
     /// than null targets (entrapment targets beat their own decoys about
     /// 1.4 : 1 at q <= 0.01): a comparison and test hook, not a way to search.
+    /// Kept because the exchangeability test measures Predicted against it,
+    /// and only so: every run that selects it is warned about, in the log and
+    /// in the report's search.warnings.
     Library
   };
 

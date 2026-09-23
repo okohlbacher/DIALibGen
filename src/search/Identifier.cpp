@@ -246,6 +246,15 @@ namespace ODIA::search
     (void)CandidateSelector::rtScale(library);
     (void)CandidateSelector::decoyRules(library, params_);
     const bool predicted = params_.intensities == Intensities::Predicted;
+    if (!predicted)
+    {
+      // The old asymmetric rule. It stays only as the comparison the fix is
+      // measured against, and it says so in the log and in the report.
+      warning("search:intensities library IS NOT A WAY TO SEARCH. The decoy re-uses its TARGET's fragment slots and "
+              "intensities, so it is weaker than a null target (entrapment targets beat their own decoys about 1.4 : 1 at "
+              "q <= 0.01) and the q-values below are too optimistic. Use search:intensities predicted, which predicts both "
+              "members of every pair from their own sequences.");
+    }
     if (predicted && !fragment_model_)
     {
       if (params_.ms2_model.empty())
@@ -299,15 +308,8 @@ namespace ODIA::search
       }
       intensities_json["model"] = model->describe();
       intensities_json["instrument_source"] = params_.instrument_source;
-      info("search intensities: every pair's decoy, and its target unless the library holds the model's own prediction, "
-           "predicted by " + model->describe() +
+      info("search intensities: both members of every pair predicted from their own sequences by " + model->describe() +
            (params_.instrument_source.empty() ? std::string() : " (instrument from " + params_.instrument_source + ")"));
-    }
-    else
-    {
-      warning("search:intensities library: every decoy re-uses its target's fragment slots and intensities, which makes "
-              "decoys weaker than null targets and the q-values optimistic (entrapment: about 1.4x at q <= 0.01); "
-              "a comparison setting, not a way to search");
     }
     t = Clock::now();
     const bool evidence = params_.candidates == "evidence";

@@ -19,6 +19,10 @@
 //     evidence is target-favoured (z > 3 here, as on the acceptance runs:
 //     81 and 79). With predicted intensities the decoy picks its own and the
 //     sign test is balanced (|z| < 3);
+//   * both members predicted even where the library already holds the model's
+//     own assays, and a library RICHER than its own prediction (a build with
+//     its own fragment cap) giving its targets no advantage: section 3b, the
+//     library-assay shortcut this branch removed;
 //   * the entrapment tag rule on UniProt-style ids (sp|ENTRAP_...|...).
 
 #include "synthetic_library.h"
@@ -75,29 +79,41 @@ namespace
     return s;
   }
 
-  /// A member's top @p n fragments by the toy model, the rule of the search.
-  std::vector<PredictedFragment> top(toy::ProlineModel& model, const std::string& sequence, int charge, std::size_t n,
-                                     double lo = 200.0, double hi = 1800.0)
+  /// A member's whole fragment universe by @p model, in the search's rank
+  /// order; @p above_floor receives how many of them are above the floor.
+  std::vector<PredictedFragment> ranked(FragmentModel& model, const std::string& sequence, int charge, std::size_t& above_floor,
+                                        double lo = 200.0, double hi = 1800.0)
   {
     const OpenMS::AASequence seq = OpenMS::AASequence::fromString(sequence);
     const auto spectra = model.predict({seq}, {charge});
-    std::vector<PredictedFragment> ranked;
-    std::size_t above = 0;
-    PredictedAssays::rank(seq, charge, spectra[0], lo, hi, ranked, above);
-    if (ranked.size() > n) { ranked.resize(n); }
-    return ranked;
+    std::vector<PredictedFragment> out;
+    above_floor = 0;
+    PredictedAssays::rank(seq, charge, spectra[0], lo, hi, out, above_floor);
+    return out;
   }
 
-  /// A library of @p sequences at charge 2, each with its top six fragments by
-  /// the toy model: what DIALibGen generate would write with that model.
-  ODIA::Library library(toy::ProlineModel& model, const std::vector<std::string>& sequences, const std::string& protein_prefix)
+  /// A member's top @p n fragments by the model, the rule of the search.
+  std::vector<PredictedFragment> top(FragmentModel& model, const std::string& sequence, int charge, std::size_t n,
+                                     double lo = 200.0, double hi = 1800.0)
+  {
+    std::size_t above = 0;
+    std::vector<PredictedFragment> out = ranked(model, sequence, charge, above, lo, hi);
+    if (out.size() > n) { out.resize(n); }
+    return out;
+  }
+
+  /// A library of @p sequences at charge 2, each with its top @p fragments
+  /// fragments by the model: what a generator would write with that model and
+  /// that fragment cap.
+  ODIA::Library library(FragmentModel& model, const std::vector<std::string>& sequences, const std::string& protein_prefix,
+                        std::size_t fragments = 6)
   {
     ODIA::Library lib;
     auto& pre = lib.precursors();
     auto& tr = lib.transitions();
     for (std::size_t k = 0; k < sequences.size(); ++k)
     {
-      const auto fragments = top(model, sequences[k], 2, 6);
+      const auto assay = top(model, sequences[k], 2, fragments);
       pre.mz.push_back(ODIA::toFixed(OpenMS::AASequence::fromString(sequences[k]).getMZ(2)));
       pre.irt.push_back(static_cast<float>(k % 100));
       pre.im.push_back(std::nanf(""));
@@ -107,7 +123,7 @@ namespace
       pre.modified_sequence.push_back(lib.strings().intern(sequences[k]));
       pre.protein_group.push_back(lib.strings().intern(protein_prefix + std::to_string(k / 3)));
       pre.transition_begin.push_back(static_cast<std::uint32_t>(tr.product_mz.size()));
-      for (const auto& f : fragments)
+      for (const auto& f : assay)
       {
         tr.product_mz.push_back(ODIA::toFixed(f.mz));
         tr.library_intensity.push_back(f.intensity);
@@ -116,9 +132,41 @@ namespace
         tr.charge.push_back(f.charge);
         tr.loss.push_back(ODIA::LossType::None);
       }
-      pre.transition_count.push_back(static_cast<std::uint32_t>(fragments.size()));
+      pre.transition_count.push_back(static_cast<std::uint32_t>(assay.size()));
     }
     return lib;
+  }
+
+  /// A synthetic run: 300 MS2 spectra, each holding the indexed fragments of a
+  /// dozen "real" peptides (the ones the library's null targets are NOT) and
+  /// 300 noise peaks.
+  std::vector<OpenSwath::SwathMap> syntheticRun(const std::vector<std::vector<PredictedFragment>>& real_top, Rng& rng)
+  {
+    auto experiment = std::make_shared<OpenMS::PeakMap>();
+    for (int s = 0; s < 300; ++s)
+    {
+      OpenMS::MSSpectrum spectrum;
+      spectrum.setMSLevel(2);
+      spectrum.setRT(static_cast<double>(s));
+      std::vector<std::pair<double, double>> peaks;
+      for (int r = 0; r < 12; ++r)
+      {
+        for (const auto& f : real_top[rng.next() % real_top.size()]) { peaks.emplace_back(f.mz, 1000.0); }
+      }
+      for (int q = 0; q < 300; ++q) { peaks.emplace_back(200.0 + 1300.0 * rng.uniform(), 10.0 + 490.0 * rng.uniform()); }
+      std::sort(peaks.begin(), peaks.end());
+      for (const auto& [mz, intensity] : peaks)
+      {
+        OpenMS::Peak1D p;
+        p.setMZ(mz);
+        p.setIntensity(static_cast<float>(intensity));
+        spectrum.push_back(p);
+      }
+      experiment->addSpectrum(spectrum);
+    }
+    OpenSwath::SwathMap map(250.0, 2000.0, 1125.0, false);
+    map.sptr = std::make_shared<OpenMS::SpectrumAccessOpenMS>(experiment);
+    return {map};
   }
 
   struct Sign
@@ -159,31 +207,7 @@ int main()
   std::vector<std::vector<PredictedFragment>> real_top;
   for (const auto& s : reals) { real_top.push_back(top(model, s, 2, 6)); }
 
-  auto experiment = std::make_shared<OpenMS::PeakMap>();
-  for (int s = 0; s < 300; ++s)
-  {
-    OpenMS::MSSpectrum spectrum;
-    spectrum.setMSLevel(2);
-    spectrum.setRT(static_cast<double>(s));
-    std::vector<std::pair<double, double>> peaks;
-    for (int r = 0; r < 12; ++r)
-    {
-      for (const auto& f : real_top[rng.next() % reals.size()]) { peaks.emplace_back(f.mz, 1000.0); }
-    }
-    for (int q = 0; q < 300; ++q) { peaks.emplace_back(200.0 + 1300.0 * rng.uniform(), 10.0 + 490.0 * rng.uniform()); }
-    std::sort(peaks.begin(), peaks.end());
-    for (const auto& [mz, intensity] : peaks)
-    {
-      OpenMS::Peak1D p;
-      p.setMZ(mz);
-      p.setIntensity(static_cast<float>(intensity));
-      spectrum.push_back(p);
-    }
-    experiment->addSpectrum(spectrum);
-  }
-  OpenSwath::SwathMap map(250.0, 2000.0, 1125.0, false);
-  map.sptr = std::make_shared<OpenMS::SpectrumAccessOpenMS>(experiment);
-  const std::vector<OpenSwath::SwathMap> maps = {map};
+  const std::vector<OpenSwath::SwathMap> maps = syntheticRun(real_top, rng);
   const std::vector<IsolationWindow> windows = {{250.0, 2000.0}};
 
   // ---- 3. library vs predicted: the null pairs' prefilter evidence ----------------------
@@ -200,14 +224,12 @@ int main()
     const PrefilterPairs universe = EvidencePrefilter::pairs(lib, p, windows, predicted ? &model : nullptr);
     if (predicted)
     {
-      // The library holds the toy model's own top six: the targets keep them,
-      // and only the decoys (and the check's sample) are predicted.
-      std::cout << "library check: " << universe.library_check_matched << " of " << universe.library_check_sample
-                << " sampled targets as the model predicts them\n";
-      CHECK(universe.library_targets && universe.library_check_matched == universe.library_check_sample);
-      const std::size_t predicted_now = model.peptides_seen - seen_before;   // the sample, then one decoy per pair
-      CHECK(predicted_now >= universe.library_check_sample + universe.size() &&
-            predicted_now <= universe.library_check_sample + universe.size() + universe.stats.no_decoy);
+      // Both members of every pair are predicted, on this library too: it
+      // carries the toy model's own top six, which changes nothing about the
+      // rule and so must not change what the search predicts.
+      const std::size_t predicted_now = model.peptides_seen - seen_before;
+      std::cout << "predicted " << predicted_now << " peptides for " << universe.size() << " pairs\n";
+      CHECK(predicted_now >= 2 * universe.size() && predicted_now <= 2 * universe.processed);
     }
     const std::vector<MemberEvidence> evidence = EvidencePrefilter::sweep(universe, maps, p);
     Sign& sign = by_mode[predicted ? 1 : 0];
@@ -257,23 +279,94 @@ int main()
   CHECK(by_mode[0].z() > 3.0);
   CHECK(std::fabs(by_mode[1].z()) < 3.0);
 
-  // ---- 3b. a library whose intensities are not the model's: both members predicted --------
+  // ---- 3b. a library richer than the model's own prediction ------------------------------
+  //
+  // The regression (docs/design/built-in-identification.md, "The
+  // library-assay shortcut, removed"): a library written by another build
+  // holds up to its own fragment cap per target -- MORE transitions than the
+  // model itself
+  // puts above the floor for that target. Letting such targets keep their
+  // library assays, and predicting only the decoys, reads the TARGET's
+  // library transition count where the pair's count rule must read the
+  // target's own above-floor count, so the pair comes out with more fragments
+  // than the rule allows, and the extra ones are the target's library's. On a
+  // timsTOF library whose sampled targets ALL carried exactly the model's
+  // prediction it changed 21 % of the pairs and the entrapment FDP went from
+  // 0.74 % to 1.30 %. So: both members' own predictions, the rule's count.
   {
-    ODIA::Library other = lib.subsetByIndex([&] {
-      std::vector<std::size_t> all(lib.precursorCount());
-      for (std::size_t k = 0; k < all.size(); ++k) { all[k] = k; }
-      return all;
-    }());
-    for (auto& v : other.transitions().library_intensity) { v = 1.0f / (1.0f + v); }   // reverses every ranking
+    toy::SteepProlineModel steep;
+    // Twelve fragments per target, a generator's fragment cap; the steep
+    // model puts fewer than that above the floor for most of these peptides.
+    const ODIA::Library rich = library(steep, nulls, "sp|ENTRAP_P", 12);
+    std::vector<std::vector<PredictedFragment>> steep_real;
+    for (const auto& s : reals) { steep_real.push_back(top(steep, s, 2, SearchParams::prefilter_fragments)); }
+    Rng run_rng{20260923};
+    const std::vector<OpenSwath::SwathMap> steep_maps = syntheticRun(steep_real, run_rng);
+
     SearchParams p;
     p.intensities = Intensities::Predicted;
     p.max_pairs = 0;
-    const std::size_t seen_before = model.peptides_seen;
-    const PrefilterPairs universe = EvidencePrefilter::pairs(other, p, windows, &model);
-    std::cout << "reordered library: " << universe.library_check_matched << " of " << universe.library_check_sample
-              << " sampled targets as the model predicts them; " << (model.peptides_seen - seen_before) << " peptides predicted\n";
-    CHECK(!universe.library_targets && universe.library_check_matched == 0);
-    CHECK(model.peptides_seen - seen_before >= universe.library_check_sample + 2 * universe.size());
+    p.prefilter_depth = 1;
+    p.threads = 2;
+    const PrefilterPairs universe = EvidencePrefilter::pairs(rich, p, windows, &steep);
+    const DecoyRules rules = CandidateSelector::decoyRules(rich, p);
+    const double lo = ODIA::fromFixed(rules.fragment_min), hi = ODIA::fromFixed(rules.fragment_max);
+    const auto& pre = rich.precursors();
+
+    std::size_t checked = 0, by_rule = 0, own_assays = 0, richer = 0, kept_differs = 0;
+    for (std::size_t k = 0; k < universe.size(); k += 7)
+    {
+      const std::size_t i = universe.targets[k].second;
+      const DecoyAssay a = searchDecoy(rich, i, rules);
+      CHECK(a.outcome == DecoyOutcome::Made && !a.sequence.empty());
+      std::size_t above_t = 0, above_d = 0;
+      const auto t = ranked(steep, nulls[i], 2, above_t, lo, hi);
+      const auto d = ranked(steep, a.sequence, 2, above_d, lo, hi);
+      const std::size_t lib_count = pre.transition_count[i];
+      // The rule, read from the two members' OWN predictions.
+      const std::size_t want =
+        PredictedAssays::pairCount(lib_count, above_t, above_d, t.size(), d.size(), SearchParams::min_assay_fragments);
+      // What keeping the target's library assay gives instead: the whole
+      // library assay counts as the target's above-floor fragments.
+      const std::size_t kept =
+        PredictedAssays::pairCount(lib_count, lib_count, above_d, lib_count, d.size(), SearchParams::min_assay_fragments);
+      richer += above_t < lib_count ? 1 : 0;
+      kept_differs += kept != want ? 1 : 0;
+      by_rule += universe.assay_fragments[k] == want ? 1 : 0;
+      // Both members' indexed fragments are the top of their own prediction.
+      const float* tm = universe.mz(2 * k);
+      const float* dm = universe.mz(2 * k + 1);
+      bool own = universe.fragments[k] == std::min<std::size_t>(SearchParams::prefilter_fragments, want);
+      for (std::size_t j = 0; own && j < universe.fragments[k]; ++j)
+      {
+        own = std::fabs(tm[j] - static_cast<float>(t[j].mz)) < 1e-3f && std::fabs(dm[j] - static_cast<float>(d[j].mz)) < 1e-3f;
+      }
+      own_assays += own ? 1 : 0;
+      ++checked;
+    }
+    std::cout << "rich library: " << checked << " of " << universe.size() << " pairs checked; " << richer
+              << " whose target's library assay holds more transitions than its own prediction has above the floor; "
+              << kept_differs << " whose count keeping it would change; " << by_rule << " with the rule's count, " << own_assays
+              << " with both members' own assays\n";
+    CHECK(checked > 200);
+    CHECK(richer > checked / 5);          // the library really is the longer list
+    CHECK(kept_differs > checked / 10);   // and keeping it really would change the count
+    CHECK(by_rule == checked);
+    CHECK(own_assays == checked);
+
+    // ... and the null pairs' prefilter evidence stays balanced.
+    const std::vector<MemberEvidence> evidence = EvidencePrefilter::sweep(universe, steep_maps, p);
+    auto strength = [](const MemberEvidence& e) { return (static_cast<std::uint64_t>(e.depth) << 32) | e.spectra; };
+    Sign sign;
+    for (std::size_t k = 0; k < universe.size(); ++k)
+    {
+      const auto t = strength(evidence[2 * k]), d = strength(evidence[2 * k + 1]);
+      if (t > d) { ++sign.target; }
+      else if (d > t) { ++sign.decoy; }
+    }
+    std::cout << "rich library: " << universe.size() << " null pairs; stronger target " << sign.target << ", stronger decoy "
+              << sign.decoy << " (z " << sign.z() << ")\n";
+    CHECK(std::fabs(sign.z()) < 3.0);
   }
 
   // ---- 4. the searched set's assays are the predicted ones -------------------------------

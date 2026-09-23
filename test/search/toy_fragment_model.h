@@ -14,6 +14,7 @@
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -68,5 +69,52 @@ namespace toy
     }
 
     std::string describe() const override { return "toy proline model"; }
+  };
+
+  /// The same Pro rule on a STEEP intensity scale: a fragment's intensity
+  /// spans twelve orders of magnitude, so most of a peptide's fragments fall
+  /// below the floor (PredictedAssays::predicted_floor of its base peak), as
+  /// a real MS2 model's do -- on a timsTOF library about 17 of a target's 40
+  /// fragments are above it. A library written with its own fragment cap then
+  /// holds MORE transitions for a target than the model puts above the floor
+  /// for it, which is the case the pair's count rule must not read out of the
+  /// library (identify_decoy_exchangeability, section 3b).
+  class SteepProlineModel : public ODIA::search::FragmentModel
+  {
+  public:
+    std::size_t peptides_seen = 0;
+
+    std::vector<ODIA::PeptDeepPredictor::Spectrum> predict(const std::vector<OpenMS::AASequence>& peptides,
+                                                           const std::vector<int>& charges) override
+    {
+      (void)charges;
+      peptides_seen += peptides.size();
+      std::vector<ODIA::PeptDeepPredictor::Spectrum> out(peptides.size());
+      for (std::size_t k = 0; k < peptides.size(); ++k)
+      {
+        const OpenMS::AASequence& p = peptides[k];
+        const std::size_t n = p.size();
+        if (n < 2) { continue; }
+        auto& s = out[k];
+        s.positions = n - 1;
+        s.intensities.assign(s.positions * ODIA::PeptDeepPredictor::Spectrum::CHANNELS, 0.0f);
+        for (std::size_t q = 0; q + 1 < n; ++q)
+        {
+          const char left = p[q].getOneLetterCode()[0], right = p[q + 1].getOneLetterCode()[0];
+          const std::uint64_t key = (static_cast<std::uint64_t>(static_cast<unsigned char>(left)) << 8) |
+                                    static_cast<unsigned char>(right);
+          const float y = right == 'P' ? 1.0f : static_cast<float>(std::pow(10.0, -12.0 * unit(key)));
+          const float b = static_cast<float>(0.3 * std::pow(10.0, -12.0 * unit(key + 7919)));
+          float* row = s.intensities.data() + q * ODIA::PeptDeepPredictor::Spectrum::CHANNELS;
+          row[0] = b;            // b z1
+          row[1] = 0.02f * b;    // b z2
+          row[2] = y;            // y z1
+          row[3] = 0.02f * y;    // y z2
+        }
+      }
+      return out;
+    }
+
+    std::string describe() const override { return "toy steep proline model"; }
   };
 }

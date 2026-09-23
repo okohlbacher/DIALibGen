@@ -78,13 +78,6 @@ namespace ODIA::search
     std::vector<std::uint8_t> charge;      ///< per pair
     SelectionStats stats;                  ///< eligibility and decoy counts
     std::size_t processed = 0;             ///< targets of the ordered input examined (all unless stopped early)
-    /// search:intensities predicted: whether the targets' library assays are
-    /// the model's own (PredictedAssays::libraryIsModel on a sample of
-    /// library_check_sample targets, library_check_matched of them identical),
-    /// so that only the decoys are predicted.
-    bool library_targets = false;
-    std::size_t library_check_sample = 0;
-    std::size_t library_check_matched = 0;
     double decoy_seconds = 0.0;
 
     std::size_t size() const { return targets.size(); }

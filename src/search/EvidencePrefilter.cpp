@@ -135,23 +135,6 @@ namespace ODIA::search
     std::vector<float> mz(n * 2 * F, std::numeric_limits<float>::quiet_NaN());
     std::string failure;
     const std::size_t block = predicted ? PredictedAssays::block_pairs : std::max<std::size_t>(1, n);
-    if (predicted && n > 0)
-    {
-      // Are the library's target assays the model's own? Then only the
-      // decoys need predicting. Checked on a sample spread over the draw.
-      std::vector<std::size_t> sample;
-      const std::size_t want = std::min(n, PredictedAssays::library_check_sample);
-      for (std::size_t j = 0; j < want; ++j) { sample.push_back(ordered[j * n / want].second); }
-      out.library_check_sample = sample.size();
-      out.library_targets = PredictedAssays::libraryIsModel(library, sample, rules, *model, &out.library_check_matched);
-      if (progress)
-      {
-        progress("search prefilter: " + std::to_string(out.library_check_matched) + " of " + std::to_string(sample.size()) +
-                 " sampled library targets carry exactly the model's prediction: " +
-                 (out.library_targets ? std::string("the targets keep their library assays, only the decoys are predicted")
-                                      : std::string("both members of every pair are predicted")));
-      }
-    }
     std::size_t processed = 0, made_so_far = 0;
     auto reported = Clock::now();
     for (std::size_t base = 0; base < n; base += block)
@@ -196,7 +179,7 @@ namespace ODIA::search
         targets.reserve(last - base);
         for (std::size_t k = base; k < last; ++k) { targets.push_back(ordered[k].second); }
         std::vector<PairPrediction> predictions;
-        PredictedAssays::predict(library, targets, sequences, rules, *model, predictions, nullptr, out.library_targets);
+        PredictedAssays::predict(library, targets, sequences, rules, *model, predictions);
         for (std::size_t k = base; k < last; ++k)
         {
           if (sequences[k - base].empty()) { continue; }   // no decoy: its outcome stands
@@ -687,7 +670,7 @@ namespace ODIA::search
         if (it == count_of.end()) { throw std::logic_error("search: a searched pair is not in the prefilter's universe"); }
         counts[k] = it->second;
       }
-      PredictedAssays::apply(set, library, CandidateSelector::decoyRules(library, params), model, counts, universe.library_targets);
+      PredictedAssays::apply(set, library, CandidateSelector::decoyRules(library, params), model, counts);
       set.stats.fragment_slots_dropped = 0;   // a library-slot notion; predicted assays drop none
     }
   }
@@ -725,8 +708,7 @@ namespace ODIA::search
     say("search prefilter: " + std::to_string(universe.size()) + " target-decoy pairs indexed from " + std::to_string(ps.eligible) +
         " eligible targets (" + std::to_string(ps.no_decoy) + " without a decoy; " + std::to_string(ps.ineligible_window) +
         " library targets outside the isolation windows); " +
-        (predicted ? (universe.library_targets ? "decoys predicted by " + model->describe() + ", targets as in the library (its own predictions)"
-                                                : "both members predicted by " + model->describe())
+        (predicted ? "both members predicted by " + model->describe()
                    : std::string("library intensities, decoys in their target's slots")) +
         " (" + fixed(universe.decoy_seconds, 1) + " s)");
 
@@ -800,11 +782,6 @@ namespace ODIA::search
                                  {"target_decoy_ratio", ratio(sel.kept_targets_passing, sel.kept_decoys_passing)}}}}},
       {"candidate_ratio_band", {SearchParams::candidate_ratio_low, SearchParams::candidate_ratio_high}},
       {"intensities", {{"source", toString(params.intensities)}, {"model", predicted ? json(model->describe()) : json(nullptr)},
-                       {"targets", predicted ? json(universe.library_targets ? "library assays (the model's own)" : "predicted") : json(nullptr)},
-                       {"library_check", predicted ? json({{"sampled", universe.library_check_sample},
-                                                           {"identical", universe.library_check_matched},
-                                                           {"share_required", PredictedAssays::library_match_share}})
-                                                   : json(nullptr)},
                        {"rule", predicted ? "both members predicted from their own sequences by one model; each takes its own most "
                                             "intense b/y fragments, the same number for both"
                                           : "the target's library assay; the decoy in its target's slots with its target's intensities"}}},

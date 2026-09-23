@@ -185,21 +185,24 @@ try:
         im_truth = {r['precursor_id']: float(r['im']) for r in rows(pasef / 'truth.tsv')}
         d = root / 'im'
         d.mkdir()
-        out, ids = d / 'out.tsv', d / 'ids.parquet'
-        log = run(tool, '-mode', 'refine', '-in', pasef / 'library.tsv', '-run', pasef / 'run.mzML', '-out', out,
-                  '-out_ids', ids, '-write_im', '-threads', 4)
-        prov = json.loads(Path(str(out) + '.refine.json').read_text())
-        cal = prov['search']['calibration']
-        mob = cal['detail'].get('ion_mobility') or {}
-        if not prov['search']['run']['ion_mobility'] or not cal['im_window'] or cal['im_window'] <= 0 or not mob:
+        im_out, im_ids = d / 'out.tsv', d / 'ids.parquet'
+        # -q_protein 1: at a fifth planted this fixture's protein groups are
+        # mostly mixed (planted and not) and none passes the protein gate;
+        # this check is about 1/K0, which refine writes per precursor.
+        log = run(tool, '-mode', 'refine', '-in', pasef / 'library.tsv', '-run', pasef / 'run.mzML', '-out', im_out,
+                  '-out_ids', im_ids, '-write_im', '-q_protein', 1, '-threads', 4)
+        im_prov = json.loads(Path(str(im_out) + '.refine.json').read_text())
+        im_cal = im_prov['search']['calibration']
+        mob = im_cal['detail'].get('ion_mobility') or {}
+        if not im_prov['search']['run']['ion_mobility'] or not im_cal['im_window'] or im_cal['im_window'] <= 0 or not mob:
             print(log, file=sys.stderr)
-            fail('the diaPASEF run was not searched with its ion mobility: %s' % json.dumps(cal))
-        written = prov['library']['im_written']
+            fail('the diaPASEF run was not searched with its ion mobility: %s' % json.dumps(im_cal))
+        written = im_prov['library']['im_written']
         print('ion mobility: 1/K0 window %.3f, calibration %s, %d observed 1/K0 written' %
-              (cal['im_window'], json.dumps({k: mob.get(k) for k in ('slope', 'intercept', 'inliers', 'window_assignment')}), written))
+              (im_cal['im_window'], json.dumps({k: mob.get(k) for k in ('slope', 'intercept', 'inliers', 'window_assignment')}), written))
         if written < 0.7 * len(im_truth):
             fail('%d observed 1/K0 written for %d planted precursors' % (written, len(im_truth)))
-        lib_im = {r['Precursor.Id']: float(r['IM']) for r in rows(out) if r['Decoy'] == '0'}
+        lib_im = {r['Precursor.Id']: float(r['IM']) for r in rows(im_out) if r['Decoy'] == '0'}
         errors = sorted(abs(lib_im[k] - v) for k, v in im_truth.items() if k in lib_im and not math.isnan(lib_im[k]))
         within = sum(1 for e in errors if e <= 0.01)
         print('ok   -write_im on the diaPASEF run: %d of %d planted precursors within 0.01 of their true 1/K0 (median %.4f)'

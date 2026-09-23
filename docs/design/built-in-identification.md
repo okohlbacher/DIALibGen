@@ -560,7 +560,7 @@ points, but the "beat your own decoy" rule does not exclude them.
 
 | | M3 acceptance | predicted |
 |---|---|---|
-| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted (the shortcut, since removed; 0 of 99,931 of this library's pairs change assay without it, so the counts above stand) |
+| library check | - | 2,000 of 2,000 sampled targets are the model's own prediction: decoys only predicted -- the shortcut, which this column's run used and which is since removed. Without it this library's pairs choose the same fragments (0 of 99,931 assays differ) and this run's identifications move only at the q boundary: "The library-assay shortcut, removed" |
 | pairs searched / DIA-NN in the set | 100,728 / 7,698 (83.1 %) | 110,530 / 7,704 (83.2 %) |
 | calibration | 944 points from 1,927 seeds, linear, 317 s | 1,141 points from 2,143 seeds (99 of 100 bins), LOWESS (CV 2.16 against 2.54), 325 s |
 | target precursors at q <= 0.01 (decoys) | 4,755 (46) | 4,423 (43) |
@@ -681,6 +681,32 @@ computing that count IS predicting the target, so there is nothing left to
 save. And a sample of 2,000 out of millions can only ever speak for the
 precursors in it: what it reports about a library is not a property the
 search may then rely on for every pair.
+
+**The Astral confirmation.** The whole-proteome Astral run was searched again
+without the shortcut, against the same library the probe clears (`-mode tune
+-tune_heads rt`, 16 threads; `runs/astral_fix` under
+`/scratch/kohlbach/bid5-label/` against `runs/astral_tune_k2` under
+`/scratch/kohlbach/bid3r-m3r-fix/`). The pairs choose the same fragments, as
+the probe says they must, and the identifications agree to within the
+q-boundary jitter: **4,122** target precursors at q <= 0.01 (40 decoys)
+against 4,094 (39), 104,257 pairs searched against 104,267, of which **4,067
+are the same precursors**. Of the 55 only the new run has, 54 sit in the old
+one just past the gate (median q 0.011) and 1 is absent; of the 27 only the
+old one has, 25 sit in the new one at median q 0.010 and 2 are absent. For
+scale, 1,028 of the 4,067 shared identifications carry q > 0.005 in one run
+or the other, so a q-boundary shift of this size moves tens of precursors
+either way.
+
+It is not zero because the probe's "0 of 99,931" covers which fragments a
+pair takes -- ion, ordinal, charge -- and how many, not the intensity written
+beside them. Under the shortcut a target's intensities were its library's
+stored floats; now they are a fresh prediction, made in a batch of another
+composition (both members together, twice the peptides), and the two differ
+in their last bits. That is enough to swap a near-tie in the top six indexed
+fragments of a few pairs -- 10 of 104,267 -- and to move the semi-supervised
+scoring's boundary by the margin above. Cost on this run: 28:20 m wall
+against 21:18 m, the prediction 827 s against 474 s, peak RSS unchanged
+(16.9 GB against 17.0 GB).
 
 What stays from that commit: the fixed-point fragment-range test (a double
 bound from `fromFixed` could sit a rounding above the library's own extreme

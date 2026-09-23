@@ -802,9 +802,17 @@ before the run is read, in the log and in the report's `search.warnings`.
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged
 mzML with a per-peak 1/K0 array (`mzpeak-convert --to mzml`; stock OpenMS 3.5.0
-has no Bruker reader). A file with window limits but no per-peak array is usable
-for RT only, with a warning. Later: native Bruker `.d` (opentims-based reader or
-an OpenMS upgrade), and `.mzpeak` on POSIX builds.
+has no Bruker reader) and window 1/K0 limits, which since M2 it is searched
+with. The limits must be on the same calibration as the per-peak values (the
+old converter wrote a linear approximation, and 8.9 % of a run's peaks fell
+outside their own window's limits; mzpeak-convert 0.13, PR #32, writes the
+vendor calibration for both), and the values on a scan grid (a timsTOF
+frame's are; stock `IonMobilityScoring` aborts the process on values closer
+than 1e-4 that are not equal). A file with window limits but no per-peak
+array is usable for RT only, with a warning; one whose sampled MS2 spectra
+lack the array in part is refused unless `search:im_window -1`. Later:
+native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
+`.mzpeak` on POSIX builds.
 
 ## Milestones
 

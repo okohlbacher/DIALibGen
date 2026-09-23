@@ -244,7 +244,7 @@ namespace ODIA
     // worth choosing for those two, and the NCE is worth choosing for everyone.
     //
     // timsTOF 30 is upstream's value, kept deliberately over the 40 we measured.
-    // On K562 diaPASEF, normalised spectral angle against the run's own observed
+    // On one timsTOF diaPASEF method, normalised spectral angle against the run's own observed
     // fragment areas was 0.8939 +/- 0.0011 at NCE 30 and 0.9041 +/- 0.0004 at 40
     // over three replicates -- a real difference, ten times the replicate
     // spread, and worth +1,028 precursors end to end. It is still not a default:

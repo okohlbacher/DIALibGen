@@ -7,9 +7,15 @@ The [parameter reference](parameters.md) is generated from its TOPP INI schema.
 
 | Task | Command |
 |---|---|
-| Predict from FASTA | `DIALibGen -in proteins.fasta -out predicted.parquet` |
-| Apply observed values | `DIALibGen -mode refine -in predicted.parquet -ids report.parquet -out refined.parquet` |
-| Learn RT/CCS and predict the full library | `DIALibGen -mode tune -in predicted.parquet -ids report.parquet -out tuned.parquet` |
+| Predict from FASTA | `DIALibGen -in proteins.fasta -out predicted.tsv` |
+| Apply observed values | `DIALibGen -mode refine -in predicted.tsv -ids report.parquet -out refined.tsv` |
+| Learn RT/CCS and predict the full library | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
+| Tune, then apply observed values, in one call | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
+
+The output format follows the extension. Write `.tsv` for a file a search
+engine reads; DIA-NN 2 does not read DIALibGen's `.parquet`. Write `.parquet`
+for a record that carries its own recipe, or for a library that only a later
+DIALibGen step reads. The examples below use `.parquet` in that second sense.
 
 Generation is the default. The [desktop app](../gui/README.md) exposes all three
 modes, including RT/CCS fine-tuning controls and optional model export.
@@ -38,6 +44,13 @@ Quote each modification containing spaces. Boolean generation options take
 modification list, for example `{"fixed_modifications": []}` for a
 non-alkylated preparation.
 
+Variable terminal modifications need `-generation:max_variable_modifications 2`
+or higher. With the default of `1`, `Acetyl (N-term)` or `Amidated (C-term)` is
+accepted but silently not applied, and `Acetyl (Protein N-term)` is never
+applied. Check the result, for example with `grep -c '(Acetyl)' library.tsv`.
+Raising the limit also allows two residue-specific variable modifications per
+peptide, so the library grows.
+
 ```bash
 DIALibGen -write_config defaults.json
 DIALibGen -config defaults.json -generation:nce 35 -write_config effective.json
@@ -60,8 +73,9 @@ its source; reusing that numeric value fixes NCE until it is changed or the
 native option is set back to -1.
 
 Predicted RT is normalized model output by default. Set
-`-generation:irt_rescale true` for iRT calibration with the bundled standards,
-or supply `-irt_standards standards.tsv`. CCS and derived 1/K0 are distinct
+`-generation:irt_rescale true` for iRT calibration. It uses the bundled
+standards unless you also pass `-irt_standards standards.tsv`; that option has
+no effect on its own. CCS and derived 1/K0 are distinct
 quantities; `-generation:derive_ion_mobility false` omits the conversion.
 
 ## Refinement
@@ -112,7 +126,9 @@ Tuning adapts RT and CCS with LibTorch and re-predicts the complete input
 library with ONNX Runtime. It preserves precursor keys, m/z and fragment
 intensities; it does not apply observed-value refinement to that output.
 Train on a representative reference run and evaluate transfer on separate
-runs.
+runs. Tuning needs at least 100 units in each of the protein-held-out
+validation and test cohorts, in practice several hundred identified precursors;
+smaller reports are refused.
 
 The bundled models are the default starting point. `-tune_models DIR` selects
 another model directory. `-tune_heads rt` or `ccs` selects one head;
@@ -149,8 +165,10 @@ result; these are not generic iRT models.
 
 ## Files and provenance
 
-Input libraries can be DIA-NN-dialect Parquet or TSV. Output format follows
-`-out`'s extension. Generation embeds the effective recipe and FASTA/model
+Input libraries can be DIALibGen Parquet or DIA-NN-dialect TSV. Output format
+follows `-out`'s extension. The Parquet layout (one row per precursor, fragments
+as lists, recipe in the metadata) is DIALibGen's own: DIA-NN 2 does not read it,
+so write `.tsv` for a search and `.parquet` for the record. Generation embeds the effective recipe and FASTA/model
 hashes in Parquet. Refinement and tuning additionally write JSON provenance
 sidecars beside their output, including input hashes and the selected mode.
 Each tuned head includes its full recipe, cohort counts, filtering, seed,
@@ -177,6 +195,101 @@ loading and validation; final evaluation and export can exceed that budget.
 Keep the provenance and any training sidecars with the library. A successful
 write does not establish that a library improves a downstream search; the
 [historical benchmark](benchmark.md) gives the evidence available so far.
+
+## Using a library with a search engine
+
+### DIA-NN
+
+Write the library as `.tsv`. The points below were checked with DIA-NN 2.0.
+
+```bash
+diann --f run01.d --lib predicted.tsv --fasta proteins.fasta --reannotate --met-excision \
+      --out first_pass.parquet --threads 16
+```
+
+- DIA-NN 2.0 refuses DIALibGen's Parquet; it expects its own Parquet layout.
+- DIA-NN loads the TSV's precursors but not its `Protein.Group` column ("0
+  protein groups"). `--fasta` with `--reannotate` restores the annotation.
+  Without it DIA-NN leaves `Protein.Group` empty and sets every protein q-value
+  to 1. `tune` holds its validation and test cohorts out by protein, drops rows
+  without a protein group and then stops with "no usable observations after
+  filtering"; `refine` stops at its protein q-value gate.
+- Reannotation matches library peptides against DIA-NN's own digest, so add
+  `--met-excision`: DIALibGen removes the initiator methionine by default
+  (`-generation:n_terminal_methionine_excision true`) and DIA-NN does not.
+  Without the flag those N-terminal precursors (1,132 of 47,801 in a
+  600-protein test library) stay without a protein group; `tune` counts them as
+  "no protein group" and `refine` drops them at the protein gate. A non-tryptic
+  `-generation:enzyme` additionally needs the matching `--cut`.
+- DIA-NN warns that reannotation should not be combined with a raw-data search.
+  The combined call is the form checked end to end here. The separate step is
+  `diann --lib predicted.tsv --fasta proteins.fasta --reannotate --met-excision
+  --gen-spec-lib --out-lib predicted.diann.parquet` (seconds, no raw data). Its
+  output is DIA-NN's own Parquet; DIA-NN filters fragments when it writes it (the
+  test library lost 9 precursors and 15 % of its transitions), and a search with
+  it was not checked. Keep `predicted.tsv` as the `-in` of `tune`/`refine`.
+- Pass one `--f` per run; DIA-NN does not take a shell glob after a single
+  `--f`. For timsTOF data DIA-NN advises `--mass-acc 15 --mass-acc-ms1 15`.
+- `refine` applies precursor, global and protein q-value gates of 0.01. If no
+  observation passes, for example because a small library gives DIA-NN too few
+  proteins for protein-level FDR, it stops with "no reference observation passed
+  the gates" instead of writing an empty library.
+- Libraries are generated without decoys by default; DIA-NN makes its own.
+
+### OpenSWATH
+
+OpenSWATH's `TargetedFileConverter` expects different column names. The mapping
+is one-to-one:
+
+| DIALibGen TSV | OpenSWATH TSV |
+|---|---|
+| `Precursor.Mz` | `PrecursorMz` |
+| `Product.Mz` | `ProductMz` |
+| `Relative.Intensity` | `LibraryIntensity` |
+| `RT` | `NormalizedRetentionTime` |
+| `IM` | `PrecursorIonMobility` |
+| `Modified.Sequence` | `ModifiedPeptideSequence`, and without the bracketed names `PeptideSequence` |
+| `Precursor.Charge` | `PrecursorCharge` |
+| `Protein.Group` | `ProteinId` |
+| `Precursor.Id` | `TransitionGroupId` |
+| `Fragment.Type`, `Fragment.Charge`, `Fragment.Series.Number` | `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber` |
+| `Decoy` | `Decoy` |
+
+[`scripts/to_openswath.py`](../scripts/to_openswath.py) applies it. The script
+is a helper in the source repository, not part of the release archives; it
+needs Python 3 with pandas:
+
+```bash
+DIALibGen -in proteins.fasta -out predicted.tsv -generation:irt_rescale true
+python3 scripts/to_openswath.py predicted.tsv openswath.tsv
+TargetedFileConverter -in openswath.tsv -out library.pqp
+OpenSwathDecoyGenerator -in library.pqp -out library_decoys.pqp
+```
+
+Checked with OpenMS 3.5 on a 47,810-precursor library: the PQP and TraML keep
+every precursor and all 497,895 transitions with RT and ion mobility, modification
+names become UniMod accessions, and decoy generation succeeds. This was checked with Carbamidomethyl (C) and Oxidation (M). OpenMS writes the
+mobility under the TraML term "ion mobility drift time" with unit millisecond;
+the number is still 1/K0 in Vs/cm². A search with `OpenSwathWorkflow` has not
+been tested; it also needs iRT assays (`-tr_irt`) for your sample, either the
+spiked iRT peptides or confidently identified endogenous ones. Use `-generation:irt_rescale true` so
+that `NormalizedRetentionTime` is on the iRT scale, and generate without decoys:
+a DIALibGen decoy carries its target's sequence with shifted fragment m/z, which
+is DIA-NN's convention and is misread by tools that recompute fragments from the
+sequence. `tune` reads DIA-NN reports only; `refine` also accepts a pre-filtered library
+with `-empirical_library`. Neither reads OpenSWATH result files.
+
+## Planned: one-step workflow
+
+Adapting a library to a run currently means `generate` followed by `tune`,
+`refine`, or `refine -tune`, which already tunes before writing observed values.
+A planned `-mode auto` takes a FASTA and a first-pass report and performs all
+of it with a small set of top-level options
+(`-instrument`, `-nce`, `-charges`, `-observed`, `-effort`). It is **not
+implemented yet**; the design, the simplified parameter set and the open
+questions are in the [backlog](../BACKLOG.md#one-step-mode-generate-tune-and-refine-in-one-invocation).
+Until then, [the README's full-cycle example](../README.md#examples) shows the
+explicit commands.
 
 ## Migration
 

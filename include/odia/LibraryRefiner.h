@@ -22,7 +22,7 @@
 ///
 /// **Fragment intensities are replaced only on request, and never blindly.**
 /// Until 0.3.0 `-write_intensity` was refused, on the paper's measurement that
-/// intensity replacement is a wash. On K562 diaPASEF (DIA-NN 2.0, three
+/// intensity replacement is a wash. On one diaPASEF dataset (DIA-NN 2.0, three
 /// replicates) the matched pair said otherwise: DIA-NN refining its OWN library
 /// against a run -- which does replace intensities -- reached 8,586 protein
 /// groups where this tool's reconstruction, identical in every other respect we

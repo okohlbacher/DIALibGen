@@ -55,7 +55,7 @@ namespace ODIA::tune
     /// the tool's own generalisation numbers: val and TEST are then in-sample
     /// and only ever improve. It exists because the honest check for a per-run
     /// model is not a held-out protein cohort of the same run but a SEARCH OF A
-    /// DIFFERENT RUN -- measured on K562 diaPASEF, a library tuned on its own run
+    /// DIFFERENT RUN -- measured on one diaPASEF dataset, a library tuned on its own run
     /// found 15,219 new precursors there and one tuned on a sibling run 19,996.
     /// Off by default, and the sidecar says when it was on.
     bool full_fit = false;

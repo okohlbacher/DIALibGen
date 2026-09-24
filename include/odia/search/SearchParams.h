@@ -252,10 +252,27 @@ namespace ODIA::search
     /// 1/K0 differ by a calibration, not by a factor.
     static constexpr double im_slope_low = 0.8;
     static constexpr double im_slope_high = 1.25;
-    /// The report's 1/K0 of a peak group is OpenSWATH's MS2 value (im_drift);
-    /// when the MS1 value (im_ms1_drift) exists and differs by more than this,
-    /// the report says NaN: the two looks at one precursor disagree.
+    /// OpenSWATH's 1/K0 of a peak group (reportedMobility, a diagnostic since
+    /// the M2 review) is its MS2 value (im_drift), NaN when the MS1 value
+    /// (im_ms1_drift) exists and differs by more than this. The REPORT's 1/K0
+    /// is re-measured over the windows' whole 1/K0 range instead (mobilityAt),
+    /// NaN with fewer than im_seed_min_fragments fragments at its apex.
     static constexpr double im_ms1_agreement = 0.02;
+    /// An ion-mobility search needs a library 1/K0 (an IM value or a CCS) for
+    /// most targets: each precursor is extracted at its calibrated library
+    /// 1/K0, and the 1/K0 calibration measures seeds that have one. Below this
+    /// share of the library's targets the search is refused before anything
+    /// is searched (search:im_window -1 searches without ion mobility).
+    static constexpr double im_library_min_share = 0.5;
+    /// The loader reads every spectrum of a diaPASEF run once: a peak whose
+    /// 1/K0 lies more than im_limits_tolerance outside its own isolation
+    /// window's 1/K0 limits counts against those limits, and above
+    /// im_limits_outside_warn of the MS2 peaks the limits are not on the
+    /// per-peak values' calibration (8.9 % in files of the converter that
+    /// wrote a linear approximation), which window assignment relies on: a
+    /// warning, and the share is recorded.
+    static constexpr double im_limits_tolerance = 0.001;
+    static constexpr double im_limits_outside_warn = 0.01;
 
     /// Throws std::invalid_argument naming the first bad setting.
     void validate() const;

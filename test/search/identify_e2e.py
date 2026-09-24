@@ -179,7 +179,13 @@ try:
         # with half of the searched targets present the run breaks the premise
         # of the run-level guards (search:max_target_fraction, and the label-
         # swap self-check, which then finds the decoys of present targets --
-        # measured: 901 "identifications" at 40 %, 0 at 20 % and 10 %).
+        # measured: 901 "identifications" at 40 %, 0 at 20 % and 10 %). How
+        # many the swap check finds at 40 % depends on the 1/K0 window's
+        # width, not on an FDR fault: 446 at the automatic 0.040, 373 at 0.1,
+        # 0 at 0.3 and 0 without ion mobility, while the product's own scores
+        # let no present target's decoy win its pair (0 of 885; M2 review).
+        # The design document, "Scoring and FDR", says what that means for
+        # rich, clean diaPASEF candidate sets.
         pasef = root / 'pasef'
         print(run(synth, pasef, peptides, '0.2', '20260921', 'im').strip())
         im_truth = {r['precursor_id']: float(r['im']) for r in rows(pasef / 'truth.tsv')}
@@ -209,6 +215,83 @@ try:
               % (within, len(errors), errors[len(errors) // 2] if errors else float('nan')))
         if not errors or within < 0.9 * len(errors):
             fail('the written 1/K0 is not the planted one')
+
+        # A library with no 1/K0 at all (no IM, no CCS) on a diaPASEF run is
+        # refused once the run is read, before anything is searched, with a
+        # message that names search:im_window -1 -- not by an RT calibration
+        # that fails for want of seeds and points at search:allow_bootstrap.
+        d = root / 'im-no-library-im'
+        d.mkdir()
+        with open(pasef / 'library.tsv') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            fields, lib_rows = reader.fieldnames, list(reader)
+        with open(d / 'library.tsv', 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=[c for c in fields if c != 'IM'], delimiter='\t', lineterminator='\n',
+                                    extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(lib_rows)
+        log = run(tool, '-mode', 'refine', '-in', d / 'library.tsv', '-run', pasef / 'run.mzML', '-out', d / 'out.tsv',
+                  '-out_ids', d / 'ids.parquet', '-threads', 4, ok=False)
+        if 'library targets have a 1/K0' not in log or 'search:im_window -1' not in log or 'search candidates' in log:
+            print(log, file=sys.stderr)
+            fail('a library without 1/K0 on a diaPASEF run must be refused before the search, naming search:im_window -1')
+        print('ok   a library without 1/K0 is refused on a diaPASEF run before anything is searched')
+
+        # The written 1/K0 is a MEASUREMENT of where each precursor is, not the
+        # prediction it was searched with pulled a little way towards the
+        # truth. On the fixture above every precursor sits at its calibrated
+        # library 1/K0 (the library is off by a constant only), where any
+        # estimate looks right. Here the library's 1/K0 is also off by a
+        # per-precursor error (SD 0.025), and the search uses a 0.06-wide
+        # 1/K0 window: the written deviation from the calibrated library 1/K0
+        # must follow the planted one with slope 1. A 1/K0 read INSIDE the
+        # extraction window (OpenSWATH's im_drift, which the report carried
+        # until the M2 review) is pulled towards the window's centre: slope
+        # well below 1, and dependent on the window width.
+        scatter = root / 'pasef-scatter'
+        print(run(synth, scatter, peptides, '0.2', '20260921', 'im-scatter').strip())
+        s_truth = {r['precursor_id']: float(r['im']) for r in rows(scatter / 'truth.tsv')}
+        s_library = {r['Precursor.Id']: float(r['IM']) for r in rows(scatter / 'library.tsv')}
+        d = root / 'im-scatter'
+        d.mkdir()
+        s_out = d / 'out.tsv'
+        log = run(tool, '-mode', 'refine', '-in', scatter / 'library.tsv', '-run', scatter / 'run.mzML', '-out', s_out,
+                  '-out_ids', d / 'ids.parquet', '-write_im', '-q_protein', 1, '-threads', 4, '-search:im_window', 0.06)
+        s_prov = json.loads(Path(str(s_out) + '.refine.json').read_text())
+        s_mob = s_prov['search']['calibration']['detail']['ion_mobility']
+        a, b = s_mob['intercept'], s_mob['slope']
+        # Observed values only: a precursor refine wrote no 1/K0 for keeps its
+        # library's. One point per precursor (the TSV has a row per fragment).
+        pts = []
+        s_written = {r['Precursor.Id']: float(r['IM']) for r in rows(s_out) if r['Decoy'] == '0'}
+        for k, written in sorted(s_written.items()):
+            if k not in s_truth or k not in s_library:
+                continue
+            if math.isnan(written) or abs(written - s_library[k]) < 1e-6:
+                continue
+            centre = a + b * s_library[k]
+            pts.append((s_truth[k] - centre, written - centre, abs(written - s_truth[k])))
+        if len(pts) < 100:
+            print(log, file=sys.stderr)
+            fail('%d observed 1/K0 written on the scattered-library fixture' % len(pts))
+        mx = sum(p[0] for p in pts) / len(pts)
+        my = sum(p[1] for p in pts) / len(pts)
+        sxx = sum((p[0] - mx) ** 2 for p in pts)
+        slope = sum((p[0] - mx) * (p[1] - my) for p in pts) / sxx
+        spread = math.sqrt(sxx / len(pts))
+        err = sorted(p[2] for p in pts)
+        print('     1/K0 on the scattered-library fixture: %d written; planted deviation from the calibrated library 1/K0 '
+              'SD %.4f; slope of the written on the planted deviation %.3f; |written - planted| median %.4f, p90 %.4f'
+              % (len(pts), spread, slope, err[len(err) // 2], err[int(0.9 * (len(err) - 1))]))
+        if spread < 0.012:
+            fail('the fixture does not scatter the library 1/K0 (SD %.4f)' % spread)
+        # Measured before the fix (the report's value was im_drift): slope
+        # 0.893, |error| p90 0.0055; after it: 1.000 and 0.0003.
+        if not 0.95 <= slope <= 1.05:
+            fail('the written 1/K0 is pulled towards the prediction: slope %.3f against the planted deviation' % slope)
+        if err[len(err) // 2] > 0.002 or err[int(0.9 * (len(err) - 1))] > 0.003:
+            fail('the written 1/K0 is not the planted one (|error| median %.4f, p90 %.4f)'
+                 % (err[len(err) // 2], err[int(0.9 * (len(err) - 1))]))
 
         try:
             import pyarrow.parquet as pq

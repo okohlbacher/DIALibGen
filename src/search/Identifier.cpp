@@ -4,6 +4,7 @@
 #include <odia/search/Identifier.h>
 
 #include <odia/search/EvidencePrefilter.h>
+#include <odia/search/IonMobility.h>
 
 #include <nlohmann/json.hpp>
 
@@ -141,16 +142,26 @@ namespace ODIA::search
     return output_dir_.empty() ? std::filesystem::temp_directory_path() : output_dir_;
   }
 
+  std::vector<std::size_t> Identifier::reportedGroups(const ScoringOutcome& outcome, const SearchParams& params)
+  {
+    std::vector<std::size_t> out;
+    const auto& result = outcome.scored.groups;
+    for (std::size_t g = 0; g < result.size(); ++g)
+    {
+      if (result[g].winner && result[g].qvalue <= params.report_max_q) { out.push_back(g); }
+    }
+    return out;
+  }
+
   std::vector<ReportRow> Identifier::reportRows(const SearchSet& set, const PeakGroups& groups,
                                                 const ScoringOutcome& outcome, const SearchParams& params)
   {
     const auto& p = set.library.precursors();
     const auto& result = outcome.scored.groups;
     std::vector<ReportRow> rows;
-    for (std::size_t g = 0; g < result.size(); ++g)
+    for (const std::size_t g : reportedGroups(outcome, params))
     {
       const auto& gr = result[g];
-      if (!gr.winner || gr.qvalue > params.report_max_q) { continue; }
       const auto i = static_cast<std::size_t>(gr.group);
       const std::size_t r = gr.best_row;
       ReportRow row;
@@ -287,6 +298,29 @@ namespace ODIA::search
            (run.ion_mobility ? "diaPASEF (ion mobility)" : "no ion mobility") + ", read " +
            (run.read_mode.empty() ? std::string("?") : run.read_mode) + " (" + seconds(timing["load"].get<double>()) + ")");
     }
+    // An ion-mobility search extracts each precursor at its calibrated library
+    // 1/K0 and calibrates on seeds that have one: a library that mostly has
+    // none is refused here, before anything is searched, not by a calibration
+    // that fails for want of seeds.
+    if (run.ion_mobility && params_.im_window != -1.0)
+    {
+      const auto& pre = library.precursors();
+      std::size_t targets = 0, with = 0;
+      for (std::size_t i = 0; i < library.precursorCount(); ++i)
+      {
+        if (pre.decoy[i]) { continue; }
+        ++targets;
+        with += std::isfinite(libraryMobility(library, i)) ? 1 : 0;
+      }
+      if (targets > 0 && static_cast<double>(with) < SearchParams::im_library_min_share * static_cast<double>(targets))
+      {
+        throw SearchAbort("search: the run " + run_path + " is diaPASEF and is searched with its ion mobility, but only " +
+                          std::to_string(with) + " of " + std::to_string(targets) + " library targets have a 1/K0 (an IM "
+                          "value or a CCS): each precursor is extracted at its calibrated library 1/K0, and the 1/K0 "
+                          "calibration needs seeds that have one; search:im_window -1 searches the run by m/z and RT "
+                          "only; nothing was searched");
+      }
+    }
     // A caller that needs observed 1/K0 (-write_im, the CCS head) learns
     // before anything is searched that this run cannot give it any.
     if (!params_.require_ion_mobility.empty() && !(run.ion_mobility && params_.im_window != -1.0))
@@ -391,9 +425,15 @@ namespace ODIA::search
       extract(set, run, calibration, groups);
       timing["extract"] = since(t);
     }
-    // The run's memory and its cache files are not needed for scoring.
-    run.maps.clear();
-    scratch.remove();
+    // The run's memory and its cache files are not needed for scoring. On an
+    // ion-mobility search the report's 1/K0 is re-measured in the run after
+    // scoring (only the reported peak groups), so the run stays until then.
+    const bool im_search = run.ion_mobility && calibration.im_window > 0;
+    if (!im_search)
+    {
+      run.maps.clear();
+      scratch.remove();
+    }
 
     groups.validate(set);
     checkExtraction(set, groups, params_);
@@ -440,7 +480,31 @@ namespace ODIA::search
 
     // 6. The report.
     t = Clock::now();
-    const std::vector<ReportRow> rows = reportRows(set, groups, outcome, params_);
+    std::vector<ReportRow> rows = reportRows(set, groups, outcome, params_);
+    json mobility_json;
+    if (im_search)
+    {
+      // Where each reported peak group IS in 1/K0, measured over its windows'
+      // whole 1/K0 range at its apex, not OpenSWATH's value from inside the
+      // extraction window (pulled towards the calibrated library 1/K0 at its
+      // centre, by a factor that depends on the window width).
+      const std::vector<std::size_t> reported = reportedGroups(outcome, params_);
+      std::vector<std::size_t> precursors;
+      std::vector<double> apex;
+      precursors.reserve(reported.size());
+      apex.reserve(reported.size());
+      for (const std::size_t g : reported)
+      {
+        const auto& gr = outcome.scored.groups[g];
+        precursors.push_back(static_cast<std::size_t>(gr.group));
+        apex.push_back(groups.apex_rt[gr.best_row]);
+      }
+      const auto measured = Clock::now();
+      mobility_json = json::parse(measureReportedMobility(set, run, calibration, precursors, apex, rows));
+      timing["report_mobility"] = since(measured);
+      run.maps.clear();
+      scratch.remove();
+    }
     IdentificationResult result;
     result.report = out_ids;
     result.run_name = run.name;
@@ -462,6 +526,8 @@ namespace ODIA::search
       {"identifications", identificationsJson(outcome)},
       {"entrapment", entrapmentJson(outcome)},
       {"selftest", selftestJson(outcome)}};
+    // Only on ion-mobility searches: every other report embeds exactly what it did before.
+    if (im_search) { search["report_mobility"] = mobility_json; }
     if (too_few)
     {
       search["aborted"] = {{"guard", "search:min_ids"}, {"min_ids", params_.min_ids}, {"identified", d.targets_at_q}};

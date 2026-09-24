@@ -5,11 +5,15 @@
 // tests: <dir>/library.tsv (a DIA-NN TSV library of targets), <dir>/run.mzML
 // and <dir>/truth.tsv (the planted precursors).
 //
-//   identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im]
+//   identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im|im-scatter]
 //
 // "im": a diaPASEF run -- two 1/K0 bands per isolation window, the library's
 // 1/K0 reading 0.08 high (identify_ion_mobility's fixture) -- and the true
-// 1/K0 in truth.tsv.
+// 1/K0 in truth.tsv. "im-scatter": the same, but the library's 1/K0 is also
+// off by a per-precursor error (SD 0.025 around the offset, as a predictor's
+// is), so the calibrated library 1/K0 is NOT where each precursor is: the
+// fixture on which a 1/K0 read inside the extraction window would come out
+// pulled towards the prediction.
 
 #include "synthetic_run.h"
 
@@ -24,7 +28,7 @@ int main(int argc, char** argv)
 {
   if (argc < 2)
   {
-    std::cerr << "usage: identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im]\n";
+    std::cerr << "usage: identify_synth_run <dir> [peptides] [planted_fraction] [seed] [im|im-scatter]\n";
     return 2;
   }
   try
@@ -35,10 +39,17 @@ int main(int argc, char** argv)
     if (argc > 2) { spec.peptides = std::stoul(argv[2]); }
     if (argc > 3) { spec.planted_fraction = std::stod(argv[3]); }
     if (argc > 4) { spec.seed = std::stoull(argv[4]); }
-    if (argc > 5 && std::string(argv[5]) == "im")
+    const std::string im = argc > 5 ? argv[5] : "";
+    if (im == "im" || im == "im-scatter")
     {
       spec.im_bands = 2;
       spec.im_library_offset = 0.08;
+      if (im == "im-scatter") { spec.im_library_noise = 0.025; }
+    }
+    else if (!im.empty())
+    {
+      std::cerr << "identify_synth_run: unknown run kind '" << im << "' (im or im-scatter)\n";
+      return 2;
     }
     const synthrun::Fixture fx = synthrun::make(spec);
     ODIA::DIANNLibraryFile::storeTSV((dir / "library.tsv").string(), fx.library);

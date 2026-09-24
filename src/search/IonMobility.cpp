@@ -114,6 +114,27 @@ namespace ODIA::search
     return out;
   }
 
+  MobilityApex mobilityAt(const std::vector<OpenSwath::SwathMap>& maps, double mz, double rt_s,
+                          const std::vector<double>& fragment_mz, double ppm_half)
+  {
+    std::vector<OpenSwath::SpectrumPtr> spectra;
+    double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+    std::size_t windows = 0;
+    for (const auto& m : maps)
+    {
+      if (m.ms1 || !m.sptr || !(m.lower < mz && mz < m.upper)) { continue; }
+      ++windows;
+      lo = std::min(lo, m.imLower);
+      hi = std::max(hi, m.imUpper);
+      if (m.sptr->getNrSpectra() == 0) { continue; }
+      for (auto& sp : m.sptr->getMultipleSpectra(rt_s, mobility_probe_spectra)) { spectra.push_back(std::move(sp)); }
+    }
+    MobilityApex out;
+    if (!spectra.empty() && hi > lo) { out = mobilityApex(spectra, fragment_mz, ppm_half, lo, hi); }
+    out.windows = windows;
+    return out;
+  }
+
   double libraryMobility(const Library& library, std::size_t i)
   {
     const auto& p = library.precursors();
@@ -154,5 +175,28 @@ namespace ODIA::search
       if (std::fabs((b.imLower + b.imUpper) / 2 - im) > std::fabs((m.imLower + m.imUpper) / 2 - im)) { best = static_cast<int>(i); }
     }
     return best;
+  }
+
+  int assignWindow(const std::vector<OpenSwath::SwathMap>& maps, double mz, double im, double half_width, double& assign_im)
+  {
+    assign_im = im;
+    const int held = windowOf(maps, mz, im);
+    if (held >= 0 || !std::isfinite(im)) { return held; }
+    int best = -1;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < maps.size(); ++i)
+    {
+      const auto& m = maps[i];
+      if (m.ms1 || !(m.lower < mz && mz < m.upper) || !(m.imUpper > m.imLower)) { continue; }
+      const double distance = im <= m.imLower ? m.imLower - im : im - m.imUpper;
+      if (distance < best_distance) { best_distance = distance; best = static_cast<int>(i); }
+    }
+    if (best < 0 || !(best_distance < half_width)) { return -1; }
+    const auto& m = maps[static_cast<std::size_t>(best)];
+    // Strictly inside, as OpenSWATH's pasef assignment requires, and by less
+    // than any 1/K0 scan step, so no other window's range is entered.
+    const double nudge = std::min(1e-6, (m.imUpper - m.imLower) / 4);
+    assign_im = im <= m.imLower ? m.imLower + nudge : m.imUpper - nudge;
+    return windowOf(maps, mz, assign_im);
   }
 }

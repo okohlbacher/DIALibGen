@@ -12,10 +12,12 @@
 ///   extract                          chunked performExtraction -> PeakGroups                 [seam]
 ///   checkExtraction                  decoy:target band
 ///   scorePeakGroups, checkGuards     odia-core LDA + competition + roll-ups; run-level guards
+///   measureReportedMobility          ion mobility only: the reported peak groups' 1/K0,      [seam]
+///                                    re-measured over their windows' whole 1/K0 range
 ///   ReportWriter                     -out_ids
 ///
-/// The three seams are virtual so tests can replace the run with a synthetic
-/// one; their product implementations live in src/search/RunStages.cpp. Every
+/// The seams are virtual so tests can replace the run with a synthetic one;
+/// their product implementations live in src/search/RunStages.cpp. Every
 /// guard aborts with counts (SearchAbort); nothing falls back silently.
 #pragma once
 
@@ -136,6 +138,8 @@ namespace ODIA::search
     /// decoy, at precursor q <= search:report_max_q, in SearchSet order.
     static std::vector<ReportRow> reportRows(const SearchSet& set, const PeakGroups& groups,
                                              const ScoringOutcome& outcome, const SearchParams& params);
+    /// The scored groups (indices into outcome.scored.groups) behind reportRows, in its order.
+    static std::vector<std::size_t> reportedGroups(const ScoringOutcome& outcome, const SearchParams& params);
 
     /// The MS2 isolation windows of a loaded run (its non-MS1 maps), by lower bound.
     static std::vector<IsolationWindow> isolationWindows(const RunData& run);
@@ -181,6 +185,20 @@ namespace ODIA::search
     /// search:chunk, search:batch_size) and append one row per reported peak
     /// group to @p out (PeakGroups::add), freeing each chunk's features.
     virtual void extract(const SearchSet& set, RunData& run, const Calibration& calibration, PeakGroups& out);
+    /// Ion mobility only (a diaPASEF run searched with a 1/K0 window): the
+    /// report's 1/K0. Row k of @p rows is precursor @p precursors[k] of @p set,
+    /// whose reported peak group has its apex at run time @p apex_s[k]; on
+    /// entry rows[k].im holds OpenSWATH's value (reportedMobility, read inside
+    /// the 1/K0 extraction window and so pulled towards the calibrated library
+    /// 1/K0), on return the re-measured one: mobilityAt over the windows
+    /// holding the precursor's m/z at its apex, over their WHOLE 1/K0 range,
+    /// with its assay's fragments -- the calibration's own estimator, which
+    /// never reads the library's or the calibrated 1/K0 nor the extraction
+    /// window -- NaN with fewer than im_seed_min_fragments fragments at the
+    /// apex. Targets and decoys alike. Returns the provenance record (JSON).
+    virtual std::string measureReportedMobility(const SearchSet& set, const RunData& run, const Calibration& calibration,
+                                                const std::vector<std::size_t>& precursors, const std::vector<double>& apex_s,
+                                                std::vector<ReportRow>& rows);
 
     void info(const std::string& message) const;
     void warn(const std::string& message) const;

@@ -18,10 +18,15 @@
 //     about as often as targets; the extraction does not depend on search:chunk;
 //   * search:im_window -1 searches without ion mobility (no 1/K0, no IM
 //     sub-scores), and a fixed width is used as given;
+//   * the report's 1/K0 (measureReportedMobility) recovers the planted one;
+//   * the loader reads every spectrum: one scan cycle of MS2 spectra without
+//     a 1/K0 array (which stock extraction would abort the process on, hours
+//     later) is refused with counts, and window limits off the per-peak
+//     values' calibration are counted and warned about;
 //   * a run WITHOUT ion mobility gives bitwise the same peak groups whatever
 //     search:im_window says;
-//   * mobilityApex, reportedMobility, windowOf and automaticImWindow on
-//     hand-made input.
+//   * mobilityApex, reportedMobility, windowOf, assignWindow and
+//     automaticImWindow on hand-made input.
 
 #include "synthetic_run.h"
 
@@ -29,6 +34,10 @@
 #include <odia/search/EvidencePrefilter.h>
 #include <odia/search/Identifier.h>
 #include <odia/search/IonMobility.h>
+#include <odia/search/ReportWriter.h>
+
+#include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 
 #include <algorithm>
 #include <cmath>
@@ -55,6 +64,7 @@ namespace
     using Identifier::calibrate;
     using Identifier::extract;
     using Identifier::loadRun;
+    using Identifier::measureReportedMobility;
   };
 
   SearchParams params(double im_window = 0.0, std::size_t chunk = 20000)
@@ -117,6 +127,7 @@ namespace
     std::vector<std::string> missed;                    ///< the first few planted targets not recovered, described
     std::size_t planted = 0, found = 0;                 ///< planted targets in the set, and with a peak group at the apex
     std::size_t wrong_band = 0, wrong_band_found = 0;   ///< ... whose LIBRARY 1/K0 is in another band or none
+    std::size_t other_band = 0, other_band_found = 0;   ///< ... in the OTHER band (not beyond every band)
     std::vector<double> im_error;                       ///< |peak group 1/K0 - true 1/K0| of the found
     std::vector<double> apex_error;                     ///< |apex - planted apex| of the nearest peak group, every planted target with one
     std::size_t im_missing = 0;                         ///< found, but the peak group reports no 1/K0
@@ -148,8 +159,11 @@ namespace
       ++out.planted;
       if (std::isfinite(nearest[k])) { out.apex_error.push_back(nearest[k]); }
       const double truth = synthrun::trueMobility(spec, set.source[k]);
-      const bool wrong = bandOf(spec, fx.library.precursors().im[set.source[k]]) != bandOf(spec, truth);
+      const int library_band = bandOf(spec, fx.library.precursors().im[set.source[k]]);
+      const bool wrong = library_band != bandOf(spec, truth);
+      const bool other = wrong && library_band >= 0;
       out.wrong_band += wrong ? 1 : 0;
+      out.other_band += other ? 1 : 0;
       if (best[k] < 0)
       {
         if (out.missed.size() < 12)
@@ -173,6 +187,7 @@ namespace
       }
       ++out.found;
       out.wrong_band_found += wrong ? 1 : 0;
+      out.other_band_found += other ? 1 : 0;
       const float im = g.im[static_cast<std::size_t>(best[k])];
       if (std::isnan(im)) { ++out.im_missing; } else { out.im_error.push_back(std::fabs(im - truth)); }
     }
@@ -231,6 +246,15 @@ int main(int argc, char** argv)
     maps[2].lower = 400; maps[2].upper = 425; maps[2].imLower = 0.9; maps[2].imUpper = 1.3;
     CHECK(windowOf(maps, 410, 0.7) == 1 && windowOf(maps, 410, 1.2) == 2 && windowOf(maps, 410, 1.4) == -1);
     CHECK(windowOf(maps, 410, 0.94) == 1 && windowOf(maps, 410, 0.96) == 2 && windowOf(maps, 430, 0.8) == -1);
+    // assignWindow: held -> as windowOf; just outside -> the nearest window,
+    // with a transition 1/K0 inside it; out of reach or at no window's m/z -> -1.
+    double assigned = 0;
+    CHECK(assignWindow(maps, 410, 0.7, 0.05, assigned) == 1 && assigned == 0.7);
+    CHECK(assignWindow(maps, 410, 1.33, 0.05, assigned) == 2 && assigned < 1.3 && assigned > 1.29);
+    CHECK(windowOf(maps, 410, assigned) == 2);
+    CHECK(assignWindow(maps, 410, 0.58, 0.05, assigned) == 1 && assigned > 0.6 && assigned < 0.61);
+    CHECK(assignWindow(maps, 410, 1.36, 0.05, assigned) == -1);
+    CHECK(assignWindow(maps, 430, 0.8, 0.05, assigned) == -1);
   }
 
   // ---- 1. the diaPASEF fixture -----------------------------------------------------
@@ -300,6 +324,48 @@ int main(int argc, char** argv)
           static_cast<double>(decoys_with) <= 1.25 * static_cast<double>(targets_with));
   }
   {
+    // The report's 1/K0: every planted target's peak group nearest its apex,
+    // re-measured over its windows' whole 1/K0 range. (identify_e2e checks
+    // the same on a library whose 1/K0 scatters around the truth, where a
+    // value read inside the extraction window would be pulled towards it.)
+    std::map<std::size_t, double> apex_of;
+    for (const auto& p : fx.planted) { apex_of[p.index] = p.apex_s; }
+    std::map<std::size_t, std::size_t> nearest;
+    for (std::size_t r = 0; r < g.rows(); ++r)
+    {
+      const auto i = static_cast<std::size_t>(g.scores.group[r]);
+      if (set.isDecoy(i) || !apex_of.count(set.source[i])) { continue; }
+      const double d = std::fabs(g.apex_rt[r] - apex_of[set.source[i]]);
+      const auto it = nearest.find(i);
+      if (d <= spec.cycle_s && (it == nearest.end() || d < std::fabs(g.apex_rt[it->second] - apex_of[set.source[i]]))) { nearest[i] = r; }
+    }
+    std::vector<std::size_t> precursors;
+    std::vector<double> apex;
+    std::vector<ReportRow> rows;
+    for (const auto& [i, r] : nearest)
+    {
+      precursors.push_back(i);
+      apex.push_back(g.apex_rt[r]);
+      ReportRow row;
+      row.im = g.im[r];
+      rows.push_back(row);
+    }
+    const std::string record = stages.measureReportedMobility(set, run, cal, precursors, apex, rows);
+    std::vector<double> error;
+    std::size_t missing = 0;
+    for (std::size_t k = 0; k < rows.size(); ++k)
+    {
+      if (std::isnan(rows[k].im)) { ++missing; continue; }
+      error.push_back(std::fabs(rows[k].im - synthrun::trueMobility(spec, set.source[precursors[k]])));
+    }
+    std::sort(error.begin(), error.end());
+    std::cout << "report 1/K0: " << rows.size() << " planted peak groups re-measured, " << missing << " NaN; error median "
+              << at(error, 0.5) << ", p95 " << at(error, 0.95) << "\n  " << record << "\n";
+    CHECK(rows.size() >= 300 && static_cast<double>(missing) <= 0.02 * static_cast<double>(rows.size()));
+    CHECK(at(error, 0.5) < 0.003 && at(error, 0.95) < 0.01);
+    CHECK(record.find("\"measured\"") != std::string::npos);
+  }
+  {
     // Both members of every pair: the same drift time and precursor 1/K0, so
     // the same window and the same 1/K0 range.
     AssayOptions o;
@@ -331,9 +397,10 @@ int main(int argc, char** argv)
     // The assay's 1/K0 is what assigns the band. With the library's own 1/K0
     // (an identity map) and a window wide enough to hold its 0.08 error, the
     // precursors whose library 1/K0 lies in their true band are found and
-    // those whose library 1/K0 points at the other band (or none) are lost:
-    // they are extracted where their signal is not. With the calibrated 1/K0
-    // (above) both kinds are found.
+    // those whose library 1/K0 points at the OTHER band are lost: they are
+    // extracted where their signal is not. (A library 1/K0 beyond every band
+    // goes to the nearest band, assignWindow, which is where those are.)
+    // With the calibrated 1/K0 (above) every kind is found.
     Calibration uncalibrated = cal;
     uncalibrated.im = OpenMS::TransformationDescription();
     uncalibrated.im_window = 0.2;
@@ -342,9 +409,11 @@ int main(int argc, char** argv)
     const Recovery r = recover(spec, fx, set, u);
     const std::size_t right = r.planted - r.wrong_band, right_found = r.found - r.wrong_band_found;
     std::cout << "with the library's 1/K0 and a 0.2 window: recovered " << right_found << " of " << right
-              << " in their band, " << r.wrong_band_found << " of " << r.wrong_band << " in the wrong band\n";
+              << " in their band, " << r.other_band_found << " of " << r.other_band << " in the other band, "
+              << r.wrong_band_found - r.other_band_found << " of " << r.wrong_band - r.other_band << " beyond every band\n";
     CHECK(static_cast<double>(right_found) >= 0.9 * static_cast<double>(right));
-    CHECK(static_cast<double>(r.wrong_band_found) <= 0.2 * static_cast<double>(r.wrong_band));
+    CHECK(r.other_band >= 20);
+    CHECK(static_cast<double>(r.other_band_found) <= 0.2 * static_cast<double>(r.other_band));
   }
   {
     // Chunking changes nothing.
@@ -379,6 +448,56 @@ int main(int argc, char** argv)
     r.maps.clear();
   }
   run.maps.clear();
+
+  // ---- 4b. the loader reads every spectrum's 1/K0 array ----------------------------------
+  {
+    CHECK(run.provenance_json.find("\"im_spectra_checked\"") != std::string::npos);
+    CHECK(run.provenance_json.find("\"im_spectra_without_array\":0") != std::string::npos);
+    {
+      const auto j = run.provenance_json.find("\"share\":");
+      CHECK(j != std::string::npos && std::stod(run.provenance_json.substr(j + 8)) < SearchParams::im_limits_outside_warn);
+    }
+    OpenMS::MSExperiment exp;
+    OpenMS::MzMLFile().load(mzml, exp);
+    // One scan cycle in the middle of the run, every MS2 spectrum of it
+    // without its 1/K0 array: no window's first, middle or last spectrum,
+    // which is all a sampling loader looked at.
+    std::size_t stripped = 0;
+    for (auto& sp : exp.getSpectra())
+    {
+      if (sp.getMSLevel() == 2 && sp.getRT() >= 100.2 && sp.getRT() < 100.7) { sp.getFloatDataArrays().clear(); ++stripped; }
+    }
+    const std::string partial = (dir / "pasef-partial.mzML").string();
+    OpenMS::MzMLFile().store(partial, exp);
+    std::string refused;
+    try { Stages(params()).loadRun(partial); }
+    catch (const SearchAbort& e) { refused = e.what(); }
+    std::cout << "partial 1/K0 arrays (" << stripped << " MS2 spectra stripped): " << (refused.empty() ? std::string("loaded") : refused) << "\n";
+    CHECK(stripped == static_cast<std::size_t>(spec.windows * spec.im_bands));
+    CHECK(refused.find(std::to_string(stripped) + " of ") != std::string::npos && refused.find("search:im_window -1") != std::string::npos);
+    {
+      RunData r = Stages(params(-1.0)).loadRun(partial);   // searched without ion mobility, nothing reads the arrays
+      CHECK(r.ion_mobility);
+      r.maps.clear();
+    }
+    // Window limits 0.05 above where the peaks are.
+    OpenMS::MSExperiment moved;
+    OpenMS::MzMLFile().load(mzml, moved);
+    for (auto& sp : moved.getSpectra())
+    {
+      if (sp.getMSLevel() != 2) { continue; }
+      sp.setMetaValue("ion mobility lower limit", static_cast<double>(sp.getMetaValue("ion mobility lower limit")) + 0.05);
+      sp.setMetaValue("ion mobility upper limit", static_cast<double>(sp.getMetaValue("ion mobility upper limit")) + 0.05);
+    }
+    const std::string shifted = (dir / "pasef-shifted-limits.mzML").string();
+    OpenMS::MzMLFile().store(shifted, moved);
+    RunData r = Stages(params()).loadRun(shifted);
+    const auto j = r.provenance_json.find("\"share\":");
+    const double share = j == std::string::npos ? -1.0 : std::stod(r.provenance_json.substr(j + 8));
+    std::cout << "window limits shifted by 0.05: " << 100.0 * share << " % of the MS2 peaks outside them\n";
+    CHECK(share > SearchParams::im_limits_outside_warn);
+    r.maps.clear();
+  }
 
   // ---- 5. a run without ion mobility: search:im_window changes nothing --------------------
   {

@@ -15,7 +15,9 @@ refine: -mode refine -run completes, writes the identification report and a
         read, before anything is searched) and, on a synthetic diaPASEF run
         (two 1/K0 bands per window, the library's 1/K0 mis-calibrated), writes
         the observed 1/K0 of the identified precursors, within 0.01 of the
-        planted one.
+        planted one; a library with 1/K0 for too few targets is refused, one
+        with 1/K0 for most searched with the loss counted; the report is
+        byte-identical at -threads 1 and 4 and two search:chunk sizes.
 tune:   -mode tune -run and the documented -mode refine -tune -no_filter -run
         complete with the RT head (the synthetic run has no ion mobility),
         write their reports and tuned libraries of the full library size.
@@ -340,6 +342,26 @@ try:
         if err[len(err) // 2] > 0.002 or err[int(0.9 * (len(err) - 1))] > 0.003:
             fail('the written 1/K0 is not the planted one (|error| median %.4f, p90 %.4f)'
                  % (err[len(err) // 2], err[int(0.9 * (len(err) - 1))]))
+
+        # Determinism with ion mobility, on this fixture at this window, where
+        # reported apexes lie outside the extraction window: -threads 1 and 4
+        # and two search:chunk sizes write the same report, byte for byte --
+        # the re-measured 1/K0 and its record (search.report_mobility)
+        # included. (No pair of this fixture lies beyond every window;
+        # identify_ion_mobility checks the nearest-window rule's extraction at
+        # 1 and 2 threads and two chunk sizes.)
+        s_rm = s_prov['search'].get('report_mobility') or {}
+        print('     report 1/K0: %s' % json.dumps({k: s_rm.get(k) for k in ('rows', 'measured', 'outside_extraction_window')}))
+        if not s_rm or s_rm['measured'] < 100 or s_rm['outside_extraction_window'] == 0:
+            fail('the determinism check below would not cover the re-measurement and apexes outside the window')
+        for name, threads, extra in (('im-scatter-t1', 1, ()), ('im-scatter-t4-chunk', 4, ('-search:chunk', 600))):
+            dd = root / name
+            dd.mkdir()
+            run(tool, '-mode', 'refine', '-in', scatter / 'library.tsv', '-run', scatter / 'run.mzML', '-out', dd / 'out.tsv',
+                '-out_ids', dd / 'ids.parquet', '-write_im', '-q_protein', 1, '-threads', threads, '-search:im_window', 0.06, *extra)
+            if not filecmp.cmp(d / 'ids.parquet', dd / 'ids.parquet', shallow=False):
+                fail('with ion mobility the report of %s differs from that at -threads 4, search:chunk 20000' % name)
+        print('ok   with ion mobility the report is byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
 
         # 40 % planted with ion mobility, where the run-level guards' premise
         # (most candidates null) fails -- max_target_fraction and the label-

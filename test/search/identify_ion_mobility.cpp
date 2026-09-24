@@ -12,6 +12,10 @@
 //   * band assignment: planted precursors whose LIBRARY 1/K0 points at the
 //     wrong band (or at none) are recovered, because extraction assigns by
 //     the calibrated 1/K0 -- and with an identity map in its place they are not;
+//   * the nearest-window rule in extraction: a calibrated 1/K0 just beyond
+//     every band is extracted from the band its range reaches into (and the
+//     planted ones found there), one beyond reach not at all; the same at 1
+//     and 2 threads and in chunks;
 //   * the planted 1/K0 is recovered within 0.01 from the peak group's 1/K0;
 //   * both members of every pair get the same drift time and precursor 1/K0,
 //     hence the same band and the same 1/K0 range; decoys have peak groups
@@ -48,6 +52,7 @@
 #include <map>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ODIA::search;
@@ -58,8 +63,13 @@ namespace
   class Stages : public Identifier
   {
   public:
-    explicit Stages(SearchParams p)
-      : Identifier(std::move(p), [](const std::string& m) { std::cout << "  info: " << m << "\n"; },
+    /// With @p said, every info line is also kept there.
+    explicit Stages(SearchParams p, std::vector<std::string>* said = nullptr)
+      : Identifier(std::move(p),
+                   [said](const std::string& m) {
+                     std::cout << "  info: " << m << "\n";
+                     if (said) { said->push_back(m); }
+                   },
                    [](const std::string& m) { std::cout << "  warn: " << m << "\n"; }) {}
     using Identifier::calibrate;
     using Identifier::extract;
@@ -420,6 +430,99 @@ int main(int argc, char** argv)
     CHECK(static_cast<double>(right_found) >= 0.9 * static_cast<double>(right));
     CHECK(r.other_band >= 20);
     CHECK(static_cast<double>(r.other_band_found) <= 0.2 * static_cast<double>(r.other_band));
+  }
+  {
+    // The nearest-window rule, in extraction (assignWindow above checks the
+    // rule itself): a calibrated 1/K0 just beyond every band at its m/z is
+    // extracted from the band its range reaches into; one beyond reach is
+    // not extracted at all. The calibrated map stretched by 1.25 about 1.0
+    // (where the bands abut, so no precursor changes band) puts the
+    // precursors whose true 1/K0 lies within 0.032 of either end of the
+    // mobility range (0.64 .. 1.36) up to 0.05 beyond the bands (0.6 .. 1.4).
+    // With a 0.2 window (reach 0.1, a range that still holds the true 1/K0)
+    // every one of them is within reach, and the planted ones are found in
+    // the band their signal is in; without the rule stock pasef assignment
+    // gives them no window, and not one would be. With a 0.06 window
+    // (reach 0.03) those more than 0.03 beyond are lost: no peak group for
+    // either member.
+    const auto stretched = [&cal](double window) {
+      Calibration c = cal;
+      std::vector<std::pair<double, double>> points;
+      for (const double x : {0.5, 1.0, 1.5}) { points.emplace_back(x, 1.0 + 1.25 * (cal.im.apply(x) - 1.0)); }
+      c.im = OpenMS::TransformationDescription();
+      c.im.setDataPoints(points);
+      c.im.fitModel("linear", OpenMS::Param());
+      c.im_window = window;
+      return c;
+    };
+    std::map<std::size_t, double> apex_of;
+    for (const auto& p : fx.planted) { apex_of[p.index] = p.apex_s; }
+    for (const double window : {0.2, 0.06})
+    {
+      const Calibration c = stretched(window);
+      std::vector<std::string> said;
+      Stages s(params(), &said);
+      PeakGroups sg;
+      s.extract(set, run, c, sg);
+      std::vector<std::size_t> rows_of(set.size(), 0);
+      std::vector<char> found(set.size(), 0);
+      for (std::size_t r = 0; r < sg.rows(); ++r)
+      {
+        const auto i = static_cast<std::size_t>(sg.scores.group[r]);
+        ++rows_of[i];
+        const auto it = set.isDecoy(i) ? apex_of.end() : apex_of.find(set.source[i]);
+        if (it != apex_of.end() && std::fabs(sg.apex_rt[r] - it->second) <= spec.cycle_s) { found[i] = 1; }
+      }
+      std::size_t moved = 0, lost = 0, lost_with_rows = 0, planted_moved = 0, planted_moved_found = 0;
+      for (std::size_t i = 0; i < set.size(); ++i)
+      {
+        const double k0 = libraryMobility(set.library, i);
+        if (!std::isfinite(k0)) { continue; }
+        const double mz = ODIA::fromFixed(set.library.precursors().mz[i]), calibrated = c.im.apply(k0);
+        if (windowOf(run.maps, mz, calibrated) >= 0) { continue; }
+        double assigned = calibrated;
+        if (assignWindow(run.maps, mz, calibrated, window / 2, assigned) >= 0)
+        {
+          ++moved;
+          if (!set.isDecoy(i) && apex_of.count(set.source[i]))
+          {
+            ++planted_moved;
+            planted_moved_found += found[i];
+          }
+        }
+        else
+        {
+          ++lost;
+          lost_with_rows += rows_of[i] > 0 ? 1 : 0;
+        }
+      }
+      // The count extraction reports: the rule applied to exactly these.
+      std::size_t reported = 0;
+      for (const auto& m : said)
+      {
+        const auto j = m.find(" precursors whose calibrated 1/K0 lies just outside every window");
+        if (j != std::string::npos) { reported = std::stoul(m.substr(std::string("search extraction: ").size(), j)); }
+      }
+      std::cout << "calibrated 1/K0 stretched by 1.25, window " << window << ": " << moved << " precursors beyond every band within reach ("
+                << reported << " moved by extraction), planted " << planted_moved << " of them, found " << planted_moved_found << "; "
+                << lost << " beyond reach, " << lost_with_rows << " of them with peak groups\n";
+      CHECK(reported == moved);
+      CHECK(lost_with_rows == 0);
+      if (window > 0.1)
+      {
+        CHECK(lost == 0 && moved >= 50 && planted_moved >= 15);
+        CHECK(static_cast<double>(planted_moved_found) >= 0.9 * static_cast<double>(planted_moved));
+        // ... and it is the same at one thread and in chunks of 300.
+        SearchParams p1 = params(0.0, 300);
+        p1.threads = 1;
+        Stages one(p1);
+        PeakGroups og;
+        one.extract(set, run, c, og);
+        std::cout << "  the same at 1 thread, chunk 300: " << og.rows() << " peak groups\n";
+        CHECK(identical(sg, og));
+      }
+      else { CHECK(lost >= 20 && moved >= 20); }
+    }
   }
   {
     // Chunking changes nothing.

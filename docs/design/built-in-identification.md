@@ -18,8 +18,9 @@ DIALibGen -mode refine -in predicted.parquet -ids report.parquet -out refined.ts
 ```
 
 On an ion-mobility (diaPASEF) run the search measures each identification's
-1/K0 (M2), so the CCS head (`-tune_heads ccs|both`) and `-write_im` work with
-`-run`. On a run without ion mobility they are refused once the run is read and
+1/K0 (M2) at its elution apex over its isolation window's whole 1/K0 range,
+so the CCS head (`-tune_heads ccs|both`) and `-write_im` work with `-run`.
+On a run without ion mobility they are refused once the run is read and
 before anything is searched, and with `search:im_window -1` before the run is
 read.
 
@@ -150,14 +151,28 @@ bundles do not grow.
    limits are normalised (lower/upper swapped where reversed, as in current
    mzpeak-convert output). diaPASEF is detected from window limits *and* a
    per-peak 1/K0 array. On a diaPASEF run searched with its ion mobility
-   (M2; not with `search:im_window -1`) the loader samples every MS2 window
-   at its first, middle and last spectrum and aborts if one of them has no
-   1/K0 array (stock extraction throws on such a spectrum once a 1/K0
-   window is set), and records whether the MS1 spectra carry one (MS1
-   traces and scores then read the precursor's 1/K0 range too). A diaPASEF
+   (M2; not with `search:im_window -1`) the loader reads EVERY spectrum once,
+   before anything is searched, and aborts with counts when a non-empty MS2
+   spectrum -- or, when MS1 traces read 1/K0, an MS1 spectrum -- has no
+   1/K0 array: stock extraction throws on such a spectrum inside an OpenMP
+   region once a 1/K0 window is set, and the process dies without a message,
+   hours into the search. (Until the M2 review the loader sampled the first,
+   middle and last spectrum of each window: a run with the arrays stripped
+   from one scan cycle passed it and aborted after calibration.) Whether the
+   MS1 spectra carry an array decides whether MS1 traces and scores read the
+   precursor's 1/K0 range too. The same read counts the MS2 peaks whose 1/K0
+   lies more than 0.001 outside their own window's 1/K0 limits: window
+   assignment relies on those limits, and above 1 % of the peaks they are
+   not on the per-peak values' calibration; the loader warns and records the
+   share. A diaPASEF
    mzML converted by mzpeak-convert from 0.13 (PR #32) carries window 1/K0
    limits on the vendor calibration, the same as its per-peak values, and
-   in the right order; files with reversed limits still load. The per-window cache files hold every peak
+   in the right order; files with reversed limits still load. On such a
+   file of the timsTOF run none of its 2.2 billion MS2 peaks lies more than
+   0.001 outside its window's limits; on the old converter's file of the
+   same run (a linear approximation) 3.78 % do, and the loader warns. The
+   read takes 1.5 s there (16 threads, the cache files just written).
+   The per-window cache files hold every peak
    uncompressed: 1.45x the mzML on an Orbitrap Astral run and 2.56x on a
    diaPASEF run (whose 1/K0 array is cached too); the log quotes that range
    before the read and the measured size after it. Later (M4): a
@@ -259,7 +274,8 @@ bundles do not grow.
    so one intense interference cannot outvote the other fragments; the apex
    refined to the intensity-weighted mean within +-0.01; kept with at least
    3 fragments there). A robust line (RobustLine.h, 3 robust SDs, scale
-   floor 0.002) maps library to run 1/K0. It aborts with fewer than 20
+   floor 0.002) maps library to run 1/K0. The same estimator
+   (`mobilityAt`) measures the report's 1/K0 (6). It aborts with fewer than 20
    inliers, a slope outside [0.8, 1.25] or an r^2 below
    `search:calibration_min_rsq` (`search:im_window -1` searches without ion
    mobility), and `search:allow_bootstrap` does not stand in for a failed RT
@@ -272,7 +288,15 @@ bundles do not grow.
    the window and its rule, how many measured seeds the library's own 1/K0
    and the calibrated one put in the window their measured 1/K0 is in, and
    how many searched pairs have a calibrated 1/K0 in no window at their m/z
-   (OpenSWATH extracts neither member of those).
+   (extraction assigns them to the nearest window, 6; those farther than half
+   the 1/K0 window from every window are never extracted, a loss the log
+   warns about). One residual scale and one window width serve every
+   charge, although charge 3 and 4 residuals are about 1.8x wider than
+   charge 2 (robust SD 0.0136 / 0.0247 / 0.0263 against DIA-NN's 1/K0 on the
+   timsTOF run): at the automatic width 0.111, 0.05 % of charge 2 but
+   0.74 % of charge 3 and 1.40 % of charge 4 precursors lie outside
+   +-w/2. Stock extraction takes one `im_extraction_window` per call; a
+   per-charge width would need one call per charge and is not built.
 6. **Extraction.** `OpenSwathWorkflow::performExtraction` (stock 13-argument form)
    per chunk, with an inactive OSW writer and in-memory features. After each
    chunk the features become compact score rows and are freed. Stock OpenSWATH
@@ -295,10 +319,83 @@ bundles do not grow.
    its 32 isolation windows in two overlapping 1/K0 ranges, 64 maps);
    `im_extraction_window` is the calibrated width in MS2 and, when the MS1
    spectra carry 1/K0 too, in MS1 (`use_ms1_ion_mobility`); and
-   `Scores:use_ion_mobility_scores` is on. The peak group's 1/K0 is stock
-   `im_drift` (the mean over fragments of each fragment's intensity-weighted
-   1/K0 inside the window), NaN when `im_ms1_drift` exists and differs by
-   more than 0.02 (`reportedMobility`). A spectrum's 1/K0 values must lie on
+   `Scores:use_ion_mobility_scores` is on. A pair whose calibrated 1/K0
+   lies in no window at its m/z (1.3 % of the timsTOF search's pairs; of
+   DIA-NN's identifications 367 have a calibrated 1/K0 in no window, 325
+   of them charge 3, but only 5 an observed one) is assigned to the nearest
+   window its 1/K0 range reaches into (`assignWindow`): its transitions
+   carry a 1/K0 just inside that window's limits, which is all stock
+   `pasef` assignment reads, while the compound keeps the calibrated value
+   that centres the range. Target and decoy share m/z and 1/K0, so both
+   move together.
+   **The report's 1/K0 is re-measured** (`measureReportedMobility`), not
+   read from the extraction. Stock `im_drift` (the mean over fragments of
+   each fragment's intensity-weighted 1/K0) is computed INSIDE the 1/K0
+   extraction window around the calibrated library value: every background
+   peak and every truncated mobility peak in it pulls the value towards the
+   centre, and the MS1 value (`im_ms1_drift`) is read in the same window,
+   so it cannot catch it. Until the M2 review the report carried `im_drift`
+   (NaN when `im_ms1_drift` differed by more than 0.02). Against DIA-NN's
+   1/K0 of the same precursors in the two sibling runs its deviation from
+   the calibrated library value had slope 0.747 (charge 2 0.764, 3 0.726,
+   4 0.715; DIA-NN's own run gives 0.969), and the slope depended on the
+   window the user picks: 0.540 at 0.05, 0.731 at the automatic 0.103,
+   0.763 at 0.16 (a sub-library). It is the estimator the calibration
+   (5) rejects for its seeds, and -write_im and the CCS head read it. Now
+   every reported peak group, target or decoy, is measured once more after
+   scoring, at its apex RT: `mobilityAt`, the calibration's estimator --
+   the three spectra closest to the apex in every window holding the
+   precursor's m/z, over those windows' WHOLE 1/K0 range, each assay
+   fragment one vote -- which never reads the library's or the calibrated
+   1/K0 nor the extraction window. NaN with fewer than 3 fragments at the
+   apex -- a rule that rarely fires, since in frame-merged diaPASEF spectra
+   nearly every fragment m/z has some peak at every 1/K0 (265 of the
+   timsTOF search's 43,003 report rows, 116 of them decoys; 1 of its
+   30,949 identifications). On an ion-mobility search the run therefore
+   stays loaded (its cache on disk) through scoring, and only the reported
+   peak groups are read again (1.7 s for those 43,003 rows). OpenSWATH's
+   own value stays a diagnostic
+   (`reportedMobility`, compared in the record `search.report_mobility`).
+   On a 10 % sub-library of the timsTOF search (2,985 identifications at
+   the automatic window, 2,821 at 0.05) the re-measured value's slope
+   against the sibling runs is 0.985 and 0.975 (was 0.731 and 0.540;
+   DIA-NN's own run 0.975), the same identifications carry the same value
+   at both widths (slope 0.98, median difference 0; was 0.70), 97.9 % lie
+   within 0.01 of DIA-NN's value in the same run (88.6 %; median |difference|
+   0.0012 against 0.0031), and no identified target is NaN (54 were). It
+   has a tail the in-window value could not have: 40 of 2,914 (1.4 %) lie
+   more than 0.03 from DIA-NN's value (19 before), 27 of them charge 3. In
+   those the fragments co-locate at TWO places -- a median 12 of 12 fragments
+   at the reported apex, and in 30 of the 40 DIA-NN's value is exactly our
+   second place: most likely a second gas-phase conformer (or an isobaric
+   co-eluting species) that is the stronger one at the apex, while DIA-NN's
+   report carries the one nearer the prediction. The apex is reported. A rule that made such
+   ambiguous rows NaN (second place >= 0.5 of the apex's votes: 147 of
+   2,914 rows, 29 of the 40) would drop 3.4 % of the precursors within 0.01
+   of the prediction but 19 % of those 0.04-0.056 away -- the selection by
+   deviation this re-measurement exists to avoid; the count is recorded
+   instead (`second_colocation`). On the full timsTOF search (Resources,
+   "M2: ion mobility on the timsTOF run"): slope 0.979 (was 0.747), 97.95 %
+   within 0.01 of DIA-NN's value (89.5 %), one NaN among 30,949
+   identifications (547), and 344 (1.15 %) more than 0.03 away (149).
+   What the re-measurement cannot undo: the window SELECTS what is
+   identified. By |DIA-NN 1/K0 - calibrated library 1/K0| in bins 0-0.01 /
+   0.01-0.02 / 0.02-0.03 / 0.03-0.04 / 0.04-0.056 / > 0.056, the share of
+   DIA-NN's precursors in the searched set that are identified is 73.6 /
+   73.1 / 71.4 / 70.6 / 72.1 / 77.8 % without ion mobility and 81.7 / 79.9 /
+   74.5 / 68.2 / 63.3 / 55.6 % with the automatic window (the same with
+   `search:rt_im_scores false`, so the window does it, not the deviation
+   score). The CCS head is trained and evaluated mostly on precursors
+   whose library 1/K0 was already close -- not the ones tuning exists to
+   correct -- so the tuner's TEST SD, measured on the report's own values,
+   flatters it. Before the review (values shrunk too) it read 0.01375 ->
+   0.01204; the same tuned model against DIA-NN's 1/K0 of 81,690 precursors
+   outside every cohort scored 0.01808 -> 0.01613 (sibling runs 0.01809 ->
+   0.01619 and 0.01831 -> 0.01628): the improvement is real, its size is
+   overstated about 20 %. On the re-measured values it reads 0.01875 ->
+   0.01707 (the values no longer shrunk, the conformer tail included).
+   Label symmetry is not affected: a target and its decoy share the
+   window. A spectrum's 1/K0 values must lie on
    a scan grid: stock 3.5.0's `IonMobilityScoring` throws inside an OpenMP
    region -- the process aborts -- when two of them lie closer than 1e-4
    without being equal (`alignToGrid_`). A timsTOF frame's values do (every
@@ -395,6 +492,22 @@ patched-OpenMS prefilter are not ported.
   (whole pairs: exactly 1), and the self-checks (`search:selftest`, on by default):
   scoring with swapped labels and with each pair's labels exchanged on a coin
   must identify (almost) nothing. They catch a classifier that leaks labels.
+  Their premise, that most candidates are null, fails sooner on clean
+  diaPASEF data: once a 1/K0 window strips the background, the decoy of a
+  present target carries clean partial signal (the fixed termini's shared
+  fragments), and the classifier with swapped labels ranks such decoys
+  confidently. On the synthetic diaPASEF fixture at 40 % planted the
+  label-swap check found 446 "identifications" at the automatic window
+  (0.040), 373 at 0.1, 119 at 0.040 with `search:rt_im_scores false`, and
+  0 at 0.3, without ion mobility, or at 20 % planted -- while the product's
+  own scores let no present target's decoy win its pair (0 of 885; the
+  end-to-end test now searches that fixture with both guards off and
+  checks exactly that: 890 of 890 planted targets reported win their
+  pair). On the timsTOF run both checks stay at 0 with the 0.111 and the
+  0.05 window. A
+  rich, clean diaPASEF candidate set can therefore abort on this guard
+  without an FDR fault; restricting the swap check to pairs whose real
+  target does not pass would keep it meaningful there (not built).
   They do NOT catch decoys built weaker than null targets -- random pair labels
   symmetrise the construction away (reverse decoys, whose null pairs won 1.66:1
   by the target, passed both with 0 and 0). Only known nulls do: the
@@ -528,7 +641,11 @@ With M1's contiguous chunks at the default `chunk 20000`, chunk 1 took 857 s
 over 1-2 maps (projected 4.8 h in all); the dealt-out chunks take 231-330 s
 over 40-56 maps, as fast per precursor as M1's 100,000-precursor chunks at a
 fifth of their size. Extraction dominates: 8 OpenSWATH threads at 12-15 ms
-per precursor, twice over for the two 1/K0 halves (M2). The prefilter took
+per precursor. (The design expected ion mobility to halve that, each
+precursor then being extracted from one of the two 1/K0 halves of its
+window. It does not: stock extraction reads every peak of a window's
+spectra whatever the 1/K0 window, and MS1 dominates; see "M2: ion mobility
+on the timsTOF run".) The prefilter took
 25.8 s (decoys 6.9 s, index 0.5 s and 514 MB for 61.6 M fragments, sweep
 17.0 s over 236,052 spectra); the cache took 78.1 GB, 2.56x the mzML.
 The entrapment numbers are a quick look with the entrapment design's
@@ -798,6 +915,113 @@ asymmetric rule, stays as the comparison the exchangeability test measures
 `predicted` against -- and only as that: every run that selects it is warned,
 before the run is read, in the log and in the report's `search.warnings`.
 
+### M2: ion mobility on the timsTOF run
+
+The timsTOF run converted by mzpeak-convert 0.13 (window 1/K0 limits on the
+vendor calibration), the whole-proteome library with shuffled-twin
+entrapment, `-mode tune -search:entrapment_tag ENTRAP_ -threads 16`, 200,000
+pairs. Column one is the search without ion mobility (`search:im_window -1`,
+`-tune_heads rt`: identical, report row for report row, to the "both
+predicted, keep 2" column above); column two M2 as first built, whose report
+carried OpenSWATH's `im_drift`; column three after the M2 review (report
+1/K0 re-measured, nearest-window rule), `-tune_heads both` in both. 1/K0
+accuracy is measured against DIA-NN 2.0's 1/K0 of the same precursors in
+the two sibling runs (the mean of runs 2 and 3: independent measurements),
+as the slope of our deviation from the calibrated library 1/K0 on theirs (1
+= a measurement, below 1 = pulled towards the prediction; DIA-NN's own value
+in this run gives 0.969).
+
+| | without ion mobility (`search:im_window -1`) | M2 as first built | after the M2 review |
+|---|---|---|---|
+| target precursors at q <= 0.01 (decoys) | 28,843 (287) | 30,940 (308) | 30,949 (308) |
+| peptides / protein groups | 25,922 / 4,175 | 28,164 / 4,510 | 28,133 / 4,504 |
+| 1/K0 calibration | - | 1,524 of 1,591 seeds; run = 0.0256 + 0.9831 x library; residual robust SD 0.0155, p99 0.0429; r^2 0.985 | the same |
+| 1/K0 window (automatic) | - | 0.111 | the same |
+| pairs with a calibrated 1/K0 in no window | - | 2,591 of 200,000: neither member extracted | 2,591: 2,186 extracted from the nearest window, 405 lost (warned) |
+| combined entrapment FDP, precursors / peptides / protein groups | 0.74 / 0.74 / 0.72 % | 0.81 / 0.77 / 0.71 % | 0.78 / 0.74 / 0.76 % |
+| E-pair winners at q <= 0.01, precursor / peptide / protein group | 107 : 126 / 96 : 113 / 15 : 26 | 125 : 146 / 108 : 132 / 16 : 32 | 121 : 145 / 104 : 132 / 17 : 32 (largest \|z\| over the three levels and q from 0.001 to 0.1: 2.5, decoy-favoured) |
+| self-checks (label swap, random labels) | 0, 0 | 0, 0 | 0, 0 |
+| report 1/K0: slope on DIA-NN's (sibling mean) | - | 0.747 | 0.979 (charge 2 / 3 / 4: 0.971 / 0.996 / 0.895) |
+| report 1/K0 against DIA-NN's in this run (precursors both identify, DIA-NN in all three runs): within 0.01; median \|difference\| | - | 89.5 %; 0.0031 | 97.95 %; 0.0012 |
+| report 1/K0: NaN among the identifications; > 0.03 from DIA-NN's | - | 547; 149 | 1; 344 (1.15 %, the conformer tail) |
+| CCS head: TEST calibrated SD on the report's own values (stock -> tuned) | - | 0.01375 -> 0.01204 | 0.01875 -> 0.01707 |
+| CCS head: held-out proteins against DIA-NN's 1/K0 in the sibling runs (stock 0.01785 / 0.01804; tuned on DIA-NN's report 0.01560 / 0.01560) | - | 0.01604 / 0.01610 | 0.01623 / 0.01627 |
+| extraction / whole invocation / peak RSS | 8,638 s / 3:07:52 / 18.9 GB | 7,447 s / 2:54:02 / 18.4 GB | 7,763 s / 2:58:55 / 18.6 GB (five searches on the node at once) |
+
+The CCS head tuned on the re-measured values is no better -- about 1 %
+worse -- than the one tuned on the shrunk values when both are scored
+against DIA-NN's 1/K0 in the sibling runs on held-out proteins (0.01623 /
+0.01627 against 0.01604 / 0.01610; stock 0.01785 / 0.01804; tuned on
+DIA-NN's own report 0.01560 / 0.01560, so 4 % from it where gate (c) asks
+10 %). The yardstick is not neutral: where a precursor's fragments
+co-locate at two 1/K0 values, DIA-NN's report carries the one nearer the
+library's prediction (30 of the 40 sub-library cases above), the
+re-measurement the stronger one, and the tuner's loss sees that tail. The
+tuner's TEST SD on the
+report's own values rose (stock 0.01375 -> 0.01875) because those values are
+no longer shrunk; the two columns' TEST figures are not comparable.
+
+The 1/K0 calibration (the seeds' apexes, a robust line) agrees with a
+least-squares line through all 116,267 DIA-NN identifications of the run
+(0.0268 + 0.9830 x) to within 0.0011 over 0.7-1.3; its residual medians by
+charge are +0.0003 / +0.0009 / +0.0007 (2 / 3 / 4). Ion mobility adds
+identifications on the same pairs (after the review 3,309 gained, 93.5 % of
+them in DIA-NN's report and 1.7 % entrapment; 1,203 lost, 73.2 % and 3.5 %)
+at an unchanged error rate. Measured by the review on column two: every IM
+sub-score is exchangeable over all 79,854 complete
+entrapment pairs (|z| <= 1.35), the winner test is flat at every level and
+threshold (largest |z| 2.5, decoy-favoured), and the decoy-favoured strict
+tail (4 : 12 at q <= 0.001) comes from entrapment pairs that co-locate with
+an identified real isomer -- conservative, an artefact of the shuffled-twin
+design. With the calibrated 1/K0 moved by +-0.13 (a probe, not the product)
+the IM machinery still treats target and decoy alike (d-score 16,381 :
+16,359 over 32,740 complete entrapment pairs).
+
+**Where the time goes, and why the 1/K0 window does not save it.** The
+window was expected to halve extraction (each precursor extracted from one
+of the two 1/K0 halves of its window, over a fraction of its 1/K0 range).
+Measured by the review on the same node:
+
+- Extraction work does not depend on the window: stock
+  `ChromatogramExtractorAlgorithm::extractChromatograms` fetches every
+  spectrum of a map for every batch and walks every peak in the m/z window,
+  testing 1/K0 peak by peak. Extraction took 9,927 s at a 0.05 window,
+  9,444 s at the automatic 0.111 and 9,871 s without ion mobility (three
+  runs at the same time); on a 10 % sub-library (43,012 precursors, eight
+  runs at once) 2,562 / 2,600 / 2,555 s at 0.05 / 0.103 / 0.16. It follows
+  the number of precursors extracted (the +-0.13 probe, 46 % of the pairs
+  extracted: 4,893 s).
+- The ion-mobility sub-scores cost about 40 % of extraction. On the
+  sub-library (four runs started together): 1,159 s without ion mobility
+  (2,741 identifications), 1,239 s with it (3,023), 735 s with the window
+  but without the ion-mobility scores (2,831; a diagnostic build). The
+  scores buy 6.8 % more identifications.
+- MS1 dominates: without MS1 (`search:ms1 false`) the same extraction took
+  198 s (2,779 identifications). The MS1 map is 24.4 GB of the 78 GB cache
+  (frame-merged spectra of about 6.6 MB) and is read per batch: about
+  12.5 TB of reads per chunk with MS1, 0.46 TB without.
+- Peak memory is set by the prefilter's prediction (17.4 GB without ion
+  mobility, 15.1 GB with) and the tuner (18.3 / 16.6 GB), not by extraction
+  (9.8 / 6.9 GB).
+
+A narrower window is honest (at 0.05: 30,213 identifications, combined FDP
+0.80 / 0.77 / 1.09 %, winner test max |z| 2.31, self-checks 0 and 0) but
+neither faster nor better: 2.4 % fewer identifications than the automatic
+width. Gate (d) therefore needs the resource work of M4 aimed at MS1 access
+(restrict it to a chunk's precursor 1/K0 ranges, or extract MS1 traces once
+per map and chunk) and at the prefilter's prediction memory, not at the
+1/K0 window.
+
+**The old converter's file** (window limits on a linear approximation, 8.9 %
+of its peaks outside their own window's limits) is searched with a warning
+since the review (3.78 % of its MS2 peaks lie more than 0.001 outside their
+window's limits). On the sub-library it gave 2,982 identifications against
+2,985 on the corrected file (before the review, without the nearest-window
+rule: 2,969 against 3,023); assigning DIA-NN's
+116,267 identifications to windows by the linear limits puts 1.75 % in no
+window or in one whose true limits exclude their 1/K0, against 1.07 % with
+the vendor limits.
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged
@@ -806,11 +1030,13 @@ has no Bruker reader) and window 1/K0 limits, which since M2 it is searched
 with. The limits must be on the same calibration as the per-peak values (the
 old converter wrote a linear approximation, and 8.9 % of a run's peaks fell
 outside their own window's limits; mzpeak-convert 0.13, PR #32, writes the
-vendor calibration for both), and the values on a scan grid (a timsTOF
-frame's are; stock `IonMobilityScoring` aborts the process on values closer
-than 1e-4 that are not equal). A file with window limits but no per-peak
-array is usable for RT only, with a warning; one whose sampled MS2 spectra
-lack the array in part is refused unless `search:im_window -1`. Later:
+vendor calibration for both; the loader counts such peaks and warns above
+1 %), and the values on a scan grid (a timsTOF frame's are; stock
+`IonMobilityScoring` aborts the process on values closer than 1e-4 that are
+not equal). A file with window limits but no per-peak array is usable for
+RT only, with a warning; one in which any non-empty spectrum lacks the
+array is refused unless `search:im_window -1`, and so is a library of which
+fewer than half the targets have a 1/K0 (IM or CCS). Later:
 native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
 `.mzpeak` on POSIX builds.
 
@@ -821,6 +1047,14 @@ native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
   extraction, LDA/FDR port with the fixes, report hand-off; synthetic-run
   tests. Cluster check against a DIA-NN report of the same run.
 - **M2** diaPASEF through mzML: ion-mobility window, scores and calibration.
+  Done: 1/K0 calibration from the seeds' apexes, window assignment by the
+  calibrated 1/K0, the 1/K0 extraction window and sub-scores, the report's
+  1/K0 re-measured over the whole 1/K0 range, `-write_im` and the CCS head
+  with `-run`; measured on the timsTOF run (Resources, "M2: ion mobility on
+  the timsTOF run"). Its review re-measured the report's 1/K0 (it had been
+  read inside the window), made the loader read every spectrum, and added
+  the nearest-window rule and the library and window-limit checks. It did
+  not bring the resource saving it was expected to (M4).
 - **M3** Evidence prefilter and evidence-seeded calibration. Done: the
   prefilter (default), evidence seeds with a LOWESS second fit, chunks spread
   over the windows, OpenMS's own parse errors, the report kept on
@@ -901,8 +1135,7 @@ unknown until M2 and M5; on the Astral run above, the M1 default clears the
 cohort floor 4.5-fold with a FASTA-subset library, and with M3 a whole-proteome
 library clears it too (Astral: test 887 / val 329 units, 58 % of DIA-NN's
 precursors in the searched set recovered where gate (b) asks 60 %, 54 % with
-predicted decoys; timsTOF, ion mobility still ignored: 5,936 / 3,554 units,
-81 % recovered). The prefilter is the one selection step that reads the run
+predicted decoys; timsTOF with ion mobility (M2): 30,949 identifications, RT test 5,755 / val 3,467 units, CCS test 6,242 / val 3,776 units). The prefilter is the one selection step that reads the run
 before the decoys are scored: it is label-symmetric by construction and by
 test -- but label symmetry of the SELECTION is not enough: the M3 review
 found the decoys themselves weaker than null targets (their inherited

@@ -162,9 +162,10 @@ namespace ODIA::search
     /// The report's 1/K0: a measured peak group whose fragments co-locate
     /// elsewhere (mobility_separation or more from the apex) with at least
     /// this share of the apex's votes is counted in the record. Reported
-    /// anyway: on the timsTOF run such second places are mostly a second
-    /// conformer of the same ion, and a rule that dropped them would drop
-    /// the precursors furthest from the library's 1/K0 most often.
+    /// anyway: on the timsTOF run such second places look like a second
+    /// conformer of the same ion (every fragment co-locates at both), and a
+    /// rule that dropped them would drop the precursors furthest from the
+    /// library's 1/K0 most often.
     constexpr double second_colocation = 0.5;
 
     /// A standard stream silenced while a stock call runs: OpenSWATH prints

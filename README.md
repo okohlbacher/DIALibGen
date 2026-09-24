@@ -228,10 +228,14 @@ DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -ru
 - A diaPASEF run is searched with its ion mobility: the library's 1/K0 is
   calibrated to the run, each precursor is extracted from its one diaPASEF
   window within a 1/K0 window (`-search:im_window`, automatic by default), and
-  the report carries each identification's observed 1/K0. `-tune_heads
+  the report carries each identification's observed 1/K0, measured at its
+  elution apex over the window's whole 1/K0 range (a value read inside the
+  1/K0 window would be pulled towards the prediction). `-tune_heads
   ccs|both` and `-write_im` therefore work with such a run; on a run without
   ion mobility (or with `-search:im_window -1`) they are refused before
-  anything is searched.
+  anything is searched. The CCS head is then tuned on the precursors the
+  1/K0 window let through, which favours those the library already
+  predicted well.
 - Measured on an Orbitrap Astral and a timsTOF run: most identifications are
   also found by DIA-NN (95-97 %), and entrapment estimates the error at
   0.7-0.9 % at nominal 1 %. The option stays experimental until a screened

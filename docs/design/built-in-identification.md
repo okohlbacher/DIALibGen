@@ -344,12 +344,14 @@ bundles do not grow.
    that the targets and the searched pairs without one are warned about
    with their numbers and recorded in the provenance's `search.warnings`.
    The 95 % (half until the M2 acceptance review, which let a library lose
-   up to half its pairs with a log line) is where ion mobility still pays:
-   it added 7.3 % identifications on the timsTOF run (30,949 against
-   28,843) and 10.3 % on a sub-library of it, so a library lacking a 1/K0
-   for 5 % of its targets still gains (0.95 x 1.073 = 1.02) while one
-   lacking it for 10 % finds fewer than the search without ion mobility
-   would (0.90 x 1.073 = 0.97).
+   up to half its pairs with a log line) is a margin above where ion
+   mobility stops paying: it added 7.3 % identifications on the timsTOF run
+   (30,949 against 28,843) and 8.9 % on a sub-library of it (2,985 against
+   2,741), so if identifications scale with the extractable targets the
+   break-even lies near 93 % (1 / 1.073). A library lacking a 1/K0 for 5 %
+   of its targets still gains (0.95 x 1.073 = 1.02); one lacking it for
+   10 % finds fewer than the search without ion mobility would
+   (0.90 x 1.073 = 0.97).
    **The report's 1/K0 is re-measured** (`measureReportedMobility`), not
    read from the extraction. Stock `im_drift` (the mean over fragments of
    each fragment's intensity-weighted 1/K0) is computed INSIDE the 1/K0
@@ -1008,8 +1010,9 @@ at an unchanged error rate. Measured by the review on column two: every IM
 sub-score is exchangeable over all 79,854 complete
 entrapment pairs (|z| <= 1.35), the winner test is flat at every level and
 threshold (largest |z| 2.5: peptides, 2 : 11 at q <= 0.001, decoy-favoured;
-the acceptance's external scorer finds 2.71, 1 : 10, on the same report),
-and the decoy-favoured strict tail (4 : 12 precursors at q <= 0.001) comes
+the acceptance's external scorer finds 2.71 for peptides, 1 : 10, on the
+same report), and the decoy-favoured strict tail (4 : 12 precursors at
+q <= 0.001; 3 : 11 by the external scorer) comes
 from entrapment pairs that co-locate with an identified real isomer -- conservative, an artefact of the shuffled-twin
 design. With the calibrated 1/K0 moved by +-0.13 (a probe, not the product)
 the IM machinery still treats target and decoy alike (d-score 16,381 :
@@ -1069,7 +1072,7 @@ their outputs.
 
 | gate | verdict on this run | evidence |
 |---|---|---|
-| (a) honesty | pass | combined entrapment FDP 0.78 / 0.73 / 0.76 % (lower bounds 0.39 / 0.37 / 0.38 %) for precursors / peptides / protein groups; E-pair winner test largest \|z\| 2.14 at q <= 0.01, 1.21 at q <= 0.1, 2.71 over q 0.001-0.1 (precursor, 1 : 10 at 0.001, decoy-favoured); prefilter sign test z -0.34. The gate in full needs the test runs 2 / 3, an Astral entrapment run and screened entrapment (M5) |
+| (a) honesty | pass | combined entrapment FDP 0.78 / 0.73 / 0.76 % (external scorer; the M2 table's scorer gives 0.74 % for peptides) (lower bounds 0.39 / 0.37 / 0.38 %) for precursors / peptides / protein groups; E-pair winner test largest \|z\| 2.14 at q <= 0.01, 1.21 at q <= 0.1, 2.71 over q 0.001-0.1 (precursor, 1 : 10 at 0.001, decoy-favoured); prefilter sign test z -0.34. The gate in full needs the test runs 2 / 3, an Astral entrapment run and screened entrapment (M5) |
 | (b) concordance | pass | 78.7 % of DIA-NN's precursors in the searched set recovered; median \|dRT\| 0.019 min, median \|d1/K0\| 0.0012 |
 | (c) purpose | CCS head pass, **RT head FAIL** | held-out proteins in sibling runs 2 / 3, against the library tuned on DIA-NN's report: 1/K0 SD 0.01623 / 0.01627 against 0.01560 / 0.01560 (+4.0 / +4.3 %; stock 0.01785 / 0.01804); RT SD 1.195 / 1.203 min against 1.053 / 1.058 min (+13.5 / +13.7 %; stock 2.263 / 2.273), within 10 % only on peptides neither training saw (+9.5 / +9.8 %) |
 | (d) resources | fail (M4's gate) | 3:02:38 h and 18.6 GB at 16 threads; 3:07:08 h and 11.8 GB at 8 threads with `-search:chunk 10000` |
@@ -1138,13 +1141,13 @@ held-out proteins, 22,920 / 23,372 precursors:
 | stock (not tuned) | 0.01785 | 0.01804 | |
 | (i) the report as it is (the acceptance's CCS head, reproduced exactly) | 0.01623 | 0.01627 | |
 | (ii) values outside the extraction window NaN | 0.01613 | 0.01616 | -0.67 / -0.68 % |
-| (iii) eight placebos, mean (range) | 0.01620 (0.01613-0.01629) | 0.01624 (0.01616-0.01633) | -0.19 / -0.22 % (-0.62 to +0.33 / -0.71 to +0.33 %) |
+| (iii) eight placebos, mean (range) | 0.01620 (0.01613-0.01629) | 0.01624 (0.01616-0.01633) | -0.19 / -0.22 % (-0.62 to +0.33 / -0.71 to +0.34 %) |
 | DIA-NN's report | 0.01560 | 0.01560 | |
 
 (ii) is 0.67 / 0.68 % better than (i), but removing as many random values
-does anything from 0.71 % better to 0.33 % worse, and two of the eight
-placebos nearly match it (-0.62 and -0.55 % in run 2, -0.71 and -0.67 % in
-run 3): (ii) lies 1.3 / 1.1 placebo SDs from the placebos' mean,
+does anything from 0.71 % better to 0.34 % worse; two of the eight
+placebos nearly match it in run 2 (-0.62 and -0.55 %), and in run 3 one
+beats it (-0.71 %) and another nearly matches it (-0.67 %): (ii) lies 1.3 / 1.1 placebo SDs from the placebos' mean,
 within the noise of which labels the tuner happens to get. The tuner is
 deterministic -- (i) run twice gives md5-identical libraries and exactly
 the acceptance's 0.01623 / 0.01627 -- so this noise is the training set's,

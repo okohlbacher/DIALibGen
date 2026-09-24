@@ -268,10 +268,11 @@ namespace ODIA::search
     /// pairs that are never extracted are warned about, with their numbers,
     /// in the log and in the provenance's search.warnings. Why 0.95 (0.5 until
     /// the M2 acceptance review): ion mobility added 7.3 % identifications
-    /// on the timsTOF run (30,949 against 28,843 without it) and 10.3 % on a
-    /// sub-library of it (3,023 against 2,741). If identifications scale
-    /// with the targets that can be extracted, a library lacking 1/K0 for
-    /// 5 % of its targets still gains (0.95 x 1.073 = 1.02), one lacking it
+    /// on the timsTOF run (30,949 against 28,843 without it) and 8.9 % on a
+    /// sub-library of it (2,985 against 2,741). If identifications scale
+    /// with the targets that can be extracted, the break-even lies near
+    /// 0.93 (1 / 1.073) and 0.95 keeps a margin above it: a library lacking
+    /// 1/K0 for 5 % of its targets still gains (0.95 x 1.073 = 1.02), one lacking it
     /// for 10 % already finds fewer than the search without ion mobility
     /// would (0.90 x 1.073 = 0.97) -- at 0.5 up to half of the pairs were
     /// lost with a log line only. A library with 1/K0 for most but not all

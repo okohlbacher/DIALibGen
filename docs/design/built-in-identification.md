@@ -321,13 +321,35 @@ bundles do not grow.
    spectra carry 1/K0 too, in MS1 (`use_ms1_ion_mobility`); and
    `Scores:use_ion_mobility_scores` is on. A pair whose calibrated 1/K0
    lies in no window at its m/z (1.3 % of the timsTOF search's pairs; of
-   DIA-NN's identifications 367 have a calibrated 1/K0 in no window, 325
-   of them charge 3, but only 5 an observed one) is assigned to the nearest
+   DIA-NN's 116,267 run-1 identifications 361 have a calibrated 1/K0 in no
+   window at their m/z, 324 of them charge 3 -- runs 2 and 3: 363 and 357
+   -- and none an observed one) is assigned to the nearest
    window its 1/K0 range reaches into (`assignWindow`): its transitions
    carry a 1/K0 just inside that window's limits, which is all stock
    `pasef` assignment reads, while the compound keeps the calibrated value
    that centres the range. Target and decoy share m/z and 1/K0, so both
-   move together.
+   move together. This rule (the M2 review's) changes what is searched,
+   not only what is reported: on the timsTOF run 2,186 more pairs were
+   extracted, every q-value and Evidence moved with them (the
+   semi-supervised classifier trains on the whole table; of 42,614 report
+   rows common to both searches 4 kept their q-value and none its
+   Evidence), and the identifications changed by +112 / -103 targets (93
+   of the gained are pairs the rule extracted) and +9 / -9 decoys: net +9
+   targets, the decoys unchanged in number. A pair farther than half the
+   1/K0 window from every window is never extracted (405 of 200,000, a
+   warning). A library target without any 1/K0 (no IM, no CCS) is never
+   extracted either: a library with a 1/K0 for fewer than 95 % of its
+   targets is refused on a diaPASEF run before anything is searched
+   (`search:im_window -1` searches it without ion mobility), and above
+   that the targets and the searched pairs without one are warned about
+   with their numbers and recorded in the provenance's `search.warnings`.
+   The 95 % (half until the M2 acceptance review, which let a library lose
+   up to half its pairs with a log line) is where ion mobility still pays:
+   it added 7.3 % identifications on the timsTOF run (30,949 against
+   28,843) and 10.3 % on a sub-library of it, so a library lacking a 1/K0
+   for 5 % of its targets still gains (0.95 x 1.073 = 1.02) while one
+   lacking it for 10 % finds fewer than the search without ion mobility
+   would (0.90 x 1.073 = 0.97).
    **The report's 1/K0 is re-measured** (`measureReportedMobility`), not
    read from the extraction. Stock `im_drift` (the mean over fragments of
    each fragment's intensity-weighted 1/K0) is computed INSIDE the 1/K0
@@ -378,6 +400,14 @@ bundles do not grow.
    "M2: ion mobility on the timsTOF run"): slope 0.979 (was 0.747), 97.95 %
    within 0.01 of DIA-NN's value (89.5 %), one NaN among 30,949
    identifications (547), and 344 (1.15 %) more than 0.03 away (149).
+   For 869 of the 43,003 report rows (410 identifications) the re-measured
+   apex lies outside the 1/K0 extraction window the peak group was scored
+   in (`outside_extraction_window`): the identification is no evidence for
+   that 1/K0. It is reported and trained on all the same: tuning the CCS
+   head with those values blanked was measured (Resources, "M2
+   acceptance") and gains no more than blanking as many random values
+   does, and what it gains is on precursors the library already predicted
+   well -- the selection by deviation again.
    What the re-measurement cannot undo: the window SELECTS what is
    identified. By |DIA-NN 1/K0 - calibrated library 1/K0| in bins 0-0.01 /
    0.01-0.02 / 0.02-0.03 / 0.03-0.04 / 0.04-0.056 / > 0.056, the share of
@@ -924,7 +954,11 @@ pairs. Column one is the search without ion mobility (`search:im_window -1`,
 `-tune_heads rt`: identical, report row for report row, to the "both
 predicted, keep 2" column above); column two M2 as first built, whose report
 carried OpenSWATH's `im_drift`; column three after the M2 review (report
-1/K0 re-measured, nearest-window rule), `-tune_heads both` in both. 1/K0
+1/K0 re-measured, nearest-window rule), `-tune_heads both` in both. Of the
+review's two changes only the re-measurement is confined to reported
+values; the nearest-window rule changes what is searched (2,186 more pairs
+extracted), and with it every q-value, the Evidence and the
+identifications (+112 / -103 targets, +9 / -9 decoys). 1/K0
 accuracy is measured against DIA-NN 2.0's 1/K0 of the same precursors in
 the two sibling runs (the mean of runs 2 and 3: independent measurements),
 as the slope of our deviation from the calibrated library 1/K0 on theirs (1
@@ -939,7 +973,7 @@ in this run gives 0.969).
 | 1/K0 window (automatic) | - | 0.111 | the same |
 | pairs with a calibrated 1/K0 in no window | - | 2,591 of 200,000: neither member extracted | 2,591: 2,186 extracted from the nearest window, 405 lost (warned) |
 | combined entrapment FDP, precursors / peptides / protein groups | 0.74 / 0.74 / 0.72 % | 0.81 / 0.77 / 0.71 % | 0.78 / 0.74 / 0.76 % |
-| E-pair winners at q <= 0.01, precursor / peptide / protein group | 107 : 126 / 96 : 113 / 15 : 26 | 125 : 146 / 108 : 132 / 16 : 32 | 121 : 145 / 104 : 132 / 17 : 32 (largest \|z\| over the three levels and q from 0.001 to 0.1: 2.5, decoy-favoured) |
+| E-pair winners at q <= 0.01, precursor / peptide / protein group | 107 : 126 / 96 : 113 / 15 : 26 | 125 : 146 / 108 : 132 / 16 : 32 | 121 : 145 / 104 : 132 / 17 : 32 (largest \|z\| over the three levels and q from 0.001 to 0.1: 2.71, precursor, q <= 0.001, 1 : 10, decoy-favoured; M2 acceptance, external scorer, which counts 120 : 143 / 103 : 128 / 17 : 32 at q <= 0.01) |
 | self-checks (label swap, random labels) | 0, 0 | 0, 0 | 0, 0 |
 | report 1/K0: slope on DIA-NN's (sibling mean) | - | 0.747 | 0.979 (charge 2 / 3 / 4: 0.971 / 0.996 / 0.895) |
 | report 1/K0 against DIA-NN's in this run (precursors both identify, DIA-NN in all three runs): within 0.01; median \|difference\| | - | 89.5 %; 0.0031 | 97.95 %; 0.0012 |
@@ -948,8 +982,9 @@ in this run gives 0.969).
 | CCS head: held-out proteins against DIA-NN's 1/K0 in the sibling runs (stock 0.01785 / 0.01804; tuned on DIA-NN's report 0.01560 / 0.01560) | - | 0.01604 / 0.01610 | 0.01623 / 0.01627 |
 | extraction / whole invocation / peak RSS | 8,638 s / 3:07:52 / 18.9 GB | 7,447 s / 2:54:02 / 18.4 GB | 7,763 s / 2:58:55 / 18.6 GB (five searches on the node at once) |
 
-The CCS head tuned on the re-measured values is no better -- about 1 %
-worse -- than the one tuned on the shrunk values when both are scored
+The CCS head tuned on the re-measured values (and on column three's
+identifications, which the nearest-window rule changed too) is no better --
+about 1 % worse -- than the one tuned on the shrunk values when both are scored
 against DIA-NN's 1/K0 in the sibling runs on held-out proteins (0.01623 /
 0.01627 against 0.01604 / 0.01610; stock 0.01785 / 0.01804; tuned on
 DIA-NN's own report 0.01560 / 0.01560, so 4 % from it where gate (c) asks
@@ -963,16 +998,19 @@ no longer shrunk; the two columns' TEST figures are not comparable.
 
 The 1/K0 calibration (the seeds' apexes, a robust line) agrees with a
 least-squares line through all 116,267 DIA-NN identifications of the run
-(0.0268 + 0.9830 x) to within 0.0011 over 0.7-1.3; its residual medians by
-charge are +0.0003 / +0.0009 / +0.0007 (2 / 3 / 4). Ion mobility adds
+(0.0268 + 0.9830 x) to within 0.0011 over 0.7-1.3; DIA-NN's run-1
+identifications lie a median +0.0008 / +0.0012 / +0.0038 (charge 2 / 3 / 4)
+above it (above their own least-squares line -0.0003 / +0.0001 / +0.0026;
+runs 2 and 3 sit a further 0.001-0.002 higher). Ion mobility adds
 identifications on the same pairs (after the review 3,309 gained, 93.5 % of
 them in DIA-NN's report and 1.7 % entrapment; 1,203 lost, 73.2 % and 3.5 %)
 at an unchanged error rate. Measured by the review on column two: every IM
 sub-score is exchangeable over all 79,854 complete
 entrapment pairs (|z| <= 1.35), the winner test is flat at every level and
-threshold (largest |z| 2.5, decoy-favoured), and the decoy-favoured strict
-tail (4 : 12 at q <= 0.001) comes from entrapment pairs that co-locate with
-an identified real isomer -- conservative, an artefact of the shuffled-twin
+threshold (largest |z| 2.5: peptides, 2 : 11 at q <= 0.001, decoy-favoured;
+the acceptance's external scorer finds 2.71, 1 : 10, on the same report),
+and the decoy-favoured strict tail (4 : 12 precursors at q <= 0.001) comes
+from entrapment pairs that co-locate with an identified real isomer -- conservative, an artefact of the shuffled-twin
 design. With the calibrated 1/K0 moved by +-0.13 (a probe, not the product)
 the IM machinery still treats target and decoy alike (d-score 16,381 :
 16,359 over 32,740 complete entrapment pairs).
@@ -1022,6 +1060,107 @@ rule: 2,969 against 3,023); assigning DIA-NN's
 window or in one whose true limits exclude their 1/K0, against 1.07 % with
 the vendor limits.
 
+### M2 acceptance (fa0d62e)
+
+Build fa0d62e on the timsTOF run and library above (200,000 pairs, 16
+threads, on a shared node) and, for the no-ion-mobility regression, the
+Astral run; every figure comes from the acceptance's runs or analyses of
+their outputs.
+
+| gate | verdict on this run | evidence |
+|---|---|---|
+| (a) honesty | pass | combined entrapment FDP 0.78 / 0.73 / 0.76 % (lower bounds 0.39 / 0.37 / 0.38 %) for precursors / peptides / protein groups; E-pair winner test largest \|z\| 2.14 at q <= 0.01, 1.21 at q <= 0.1, 2.71 over q 0.001-0.1 (precursor, 1 : 10 at 0.001, decoy-favoured); prefilter sign test z -0.34. The gate in full needs the test runs 2 / 3, an Astral entrapment run and screened entrapment (M5) |
+| (b) concordance | pass | 78.7 % of DIA-NN's precursors in the searched set recovered; median \|dRT\| 0.019 min, median \|d1/K0\| 0.0012 |
+| (c) purpose | CCS head pass, **RT head FAIL** | held-out proteins in sibling runs 2 / 3, against the library tuned on DIA-NN's report: 1/K0 SD 0.01623 / 0.01627 against 0.01560 / 0.01560 (+4.0 / +4.3 %; stock 0.01785 / 0.01804); RT SD 1.195 / 1.203 min against 1.053 / 1.058 min (+13.5 / +13.7 %; stock 2.263 / 2.273), within 10 % only on peptides neither training saw (+9.5 / +9.8 %) |
+| (d) resources | fail (M4's gate) | 3:02:38 h and 18.6 GB at 16 threads; 3:07:08 h and 11.8 GB at 8 threads with `-search:chunk 10000` |
+| (e) self-checks | pass | label swap 0, random labels 0 on all seven runs |
+| (f) determinism, `-ids` | pass | report byte-identical over 16 / 8 threads, chunk 20,000 / 10,000, batch 500 / 2,000, tune / refine and under another load; the `-ids` route's outputs byte-identical to 0.11.0 |
+
+Tuning on the built-in identifications recovers 88 % of the RT and 72 % of
+the CCS improvement that tuning on DIA-NN's report achieves (run 2), from
+3.6 times fewer RT training units (19,206 against 68,755): more
+identifications to train on (more pairs, a second pass) are the obvious
+lever for the RT head. On Astral the output is md5-identical to the
+pre-M2 build; its 50.75 % of DIA-NN's precursors in the searched set
+recovered (gate (b) asks 60 %) predates M2. `-search:im_window 0.05`
+against the automatic 0.111, started together: honest (0.79 / 0.77 /
+1.10 %) but 2.2 % fewer precursors, 11 % more extraction time and 1,096
+more pairs lost -- the window is no lever for gate (d).
+
+**Where the three hours go** (the tuning run profiled from its logs, from
+/proc sampling of two refine runs, and on a reduced 30,000-pair matrix with
+gdb samples). Extraction is 73 % of the 10,958 s (8,030 s), and nearly all
+of it is the kernel copying memory: 300 TB through `read()` out of the run's
+cache files, all of it from the page cache (nothing from disk), 33.4k of
+the run's 33.8k system seconds. 97 % of those bytes are whole diaPASEF MS1
+frames (one merged spectrum of 6.6-7.6 MB each) copied out of the 24.4 GB
+MS1 cache file: twice per scored peak group -- the precursor sub-scores
+and the 1/K0 MS1 sub-scores each fetch the apex frame, and OpenSWATH scores
+41.4 peak groups per precursor to report 5 -- and in one whole-file pass
+per OpenSWATH batch (a third of them empty). The rest: PeptDeep prediction
+of both members of every pair 1,464 s (13 %), tuning and writing about
+760 s, calibration 279 s and loading 246 s (each on one thread). The
+fixes, ranked by saving per effort (none measured yet): (1) the MS1 map
+held in memory as shared spectra (`SpectrumAccessOpenMSInMemory`: a
+pointer per access, not a copy), an estimated -4,000 to -5,200 s of
+extraction (3.0 h to 1.6-1.9 h) for about +25 GB, results identical by
+construction; (2) the heaviest map split (it gets 15-17 % of every chunk's
+compounds and runs alone at the chunk's end, 12-17 % of the 8 threads
+idle), -650 to -1,200 s; (3) a node without co-running searches, 0-25 %;
+(4) PeptDeep predictions reused per library, -1,400 s on every repeat;
+(5) fewer peak groups scored per precursor, -1,500 to -2,000 s after (1)
+but results change; (6) calibration peak picking in parallel, about
+-200 s; (7) more OpenSWATH threads once (1) makes extraction compute-bound,
+unmeasured; (8) M4's store, the saving of (1) with bounded memory, which
+gate (d)'s 16 GB needs. `search:ms1 false` saves 70-84 % of extraction
+today but costs identifications (0.7-8 %) and needs re-validation. Gate
+(d)'s 60 minutes on 8 cores needs a cheaper prediction too: at 8 threads
+everything before extraction already takes about 55 minutes.
+
+**Labels outside the extraction window, measured (the acceptance's
+review).** For 869 of the report's 43,003 rows (1.3 %; 410 of the 30,948
+identifications with a 1/K0, 322 of them charge 3, 329 above the window)
+the re-measured apex lies outside the 1/K0 extraction window the peak
+group was scored in (`search.report_mobility.outside_extraction_window`):
+the identification is no evidence for that 1/K0, yet `-write_im` writes it
+and the CCS head trains on it. Against blanking them (NaN) stood that it
+selects the labels by their distance from the prediction -- the bias the
+re-measurement removed. Measured, not argued: the CCS head tuned from the SAME
+report (`-mode tune -tune_heads ccs -ids <report> -in <library>`, no new
+search) (i) as it is, (ii) with the 869 values NaN, and, as the control
+for merely having fewer labels, (iii) eight placebos with as many random
+values inside the window NaN (matched by decoy, identified and charge).
+Scored as gate (c) scores it -- DIA-NN's 1/K0 in the sibling runs 2 / 3,
+held-out proteins, 22,920 / 23,372 precursors:
+
+| CCS head tuned on | run 2 | run 3 | against (i), run 2 / run 3 |
+|---|---|---|---|
+| stock (not tuned) | 0.01785 | 0.01804 | |
+| (i) the report as it is (the acceptance's CCS head, reproduced exactly) | 0.01623 | 0.01627 | |
+| (ii) values outside the extraction window NaN | 0.01613 | 0.01616 | -0.67 / -0.68 % |
+| (iii) eight placebos, mean (range) | 0.01620 (0.01613-0.01629) | 0.01624 (0.01616-0.01633) | -0.19 / -0.22 % (-0.62 to +0.33 / -0.71 to +0.33 %) |
+| DIA-NN's report | 0.01560 | 0.01560 | |
+
+(ii) is 0.67 / 0.68 % better than (i), but removing as many random values
+does anything from 0.71 % better to 0.33 % worse, and two of the eight
+placebos nearly match it (-0.62 and -0.55 % in run 2, -0.71 and -0.67 % in
+run 3): (ii) lies 1.3 / 1.1 placebo SDs from the placebos' mean,
+within the noise of which labels the tuner happens to get. The tuner is
+deterministic -- (i) run twice gives md5-identical libraries and exactly
+the acceptance's 0.01623 / 0.01627 -- so this noise is the training set's,
+not the training's. Where (ii)'s gain comes from is the bias the
+counter-argument predicted. Binned by |DIA-NN 1/K0 - stock calibrated
+library 1/K0|, against the placebos (ii) gains where the library was
+already right (< 0.01: SD 0.00771 / 0.00765 against 0.00802-0.00826 /
+0.00792-0.00822) and nothing where it was far off (0.03-0.04 and
+0.04-0.056: 0.02913 / 0.02921 and 0.03887 / 0.03832, the same as (i) and
+worse than every placebo) -- the precursors tuning exists to correct.
+**Decision: the behaviour stays** -- the re-measured apex is reported and
+trained on wherever it lies, and the rows outside the window are counted
+(`outside_extraction_window`), not blanked. The tuner's own TEST SD cannot
+decide this: for (ii) it reads 0.01548 (stock 0.01720) against 0.01709
+(0.01888) for (i), because the same far values leave its test cohort too.
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged
@@ -1036,7 +1175,7 @@ vendor calibration for both; the loader counts such peaks and warns above
 not equal). A file with window limits but no per-peak array is usable for
 RT only, with a warning; one in which any non-empty spectrum lacks the
 array is refused unless `search:im_window -1`, and so is a library of which
-fewer than half the targets have a 1/K0 (IM or CCS). Later:
+fewer than 95 % of the targets have a 1/K0 (IM or CCS). Later:
 native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
 `.mzpeak` on POSIX builds.
 
@@ -1053,8 +1192,16 @@ native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
   with `-run`; measured on the timsTOF run (Resources, "M2: ion mobility on
   the timsTOF run"). Its review re-measured the report's 1/K0 (it had been
   read inside the window), made the loader read every spectrum, and added
-  the nearest-window rule and the library and window-limit checks. It did
-  not bring the resource saving it was expected to (M4).
+  the nearest-window rule (which changes what is searched, not only what
+  is reported) and the library and window-limit checks. It did not bring
+  the resource saving it was expected to (M4). Accepted at fa0d62e
+  (Resources, "M2 acceptance"): gates (a), (b), (e) and (f) pass on the
+  timsTOF run, (c) passes for the CCS head and FAILS for the RT head
+  (+13.5 / +13.7 % against DIA-NN-report tuning on held-out proteins), (d)
+  is M4's. Its review added the stricter library check (95 %) and the
+  nearest-window and ion-mobility determinism tests, and measured that
+  blanking the reported 1/K0 that lie outside the extraction window gains
+  the CCS head nothing beyond noise (it stays reported).
 - **M3** Evidence prefilter and evidence-seeded calibration. Done: the
   prefilter (default), evidence seeds with a LOWESS second fit, chunks spread
   over the windows, OpenMS's own parse errors, the report kept on

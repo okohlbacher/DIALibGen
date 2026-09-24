@@ -96,6 +96,19 @@ namespace ODIA::search
     std::size_t apex = 0;
     for (std::size_t b = 1; b < bins; ++b) { if (votes[b] > votes[apex]) { apex = b; } }
     const double centre = im_low + (static_cast<double>(apex) + 0.5) * mobility_bin;
+    out.votes = votes[apex];
+    for (std::size_t b = 0; b < bins; ++b)
+    {
+      const double at = im_low + (static_cast<double>(b) + 0.5) * mobility_bin;
+      if (std::fabs(at - centre) < mobility_separation || !(votes[b] > out.second_votes)) { continue; }
+      out.second_votes = votes[b];
+      out.second_im = at;
+    }
+    {
+      std::vector<char> any(fragment_mz.size(), 0);
+      for (const Hit& h : hits) { any[h.fragment] = 1; }
+      out.hit_fragments = static_cast<std::size_t>(std::count(any.begin(), any.end(), 1));
+    }
 
     // Refine: the intensity-weighted mean of the peaks at the apex.
     double sum = 0.0, weighted = 0.0;

@@ -232,6 +232,12 @@ int main(int argc, char** argv)
     const MobilityApex a = mobilityApex({spectrum}, fragments, 10.0, 0.6, 1.4);
     std::cout << "mobilityApex: " << a.im << " from " << a.fragments << " fragments\n";
     CHECK(std::fabs(a.im - 0.90) < 0.002 && a.fragments == 6);
+    // The interference is a second place where one fragment's votes go:
+    // about 5 votes at the apex, 1 at 1.10, 6 fragments with signal.
+    std::cout << "  votes " << a.votes << ", second " << a.second_votes << " at " << a.second_im << ", fragments with signal "
+              << a.hit_fragments << "\n";
+    CHECK(a.hit_fragments == 6 && a.votes > 4.5 && a.votes < 6.0);
+    CHECK(std::fabs(a.second_im - 1.10) < 0.005 && a.second_votes > 0.9 && a.second_votes < 1.1);
     CHECK(std::isnan(mobilityApex({spectrum}, {1234.5}, 10.0, 0.6, 1.4).im));
     CHECK(std::isnan(reportedMobility(-1.0, 0.9)) && std::isnan(reportedMobility(0.9, 0.95)));
     CHECK(reportedMobility(0.9, 0.91) == 0.9 && reportedMobility(0.9, -1.0) == 0.9 && reportedMobility(0.9, std::nan("")) == 0.9);

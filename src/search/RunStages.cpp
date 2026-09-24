@@ -159,6 +159,13 @@ namespace ODIA::search
     /// so a near-perfect fit does not reject points for tiny residuals. (The
     /// spectra it reads per window are IonMobility.h's mobility_probe_spectra.)
     constexpr double im_robust_min_scale = 0.002;
+    /// The report's 1/K0: a measured peak group whose fragments co-locate
+    /// elsewhere (mobility_separation or more from the apex) with at least
+    /// this share of the apex's votes is counted in the record. Reported
+    /// anyway: on the timsTOF run such second places are mostly a second
+    /// conformer of the same ion, and a rule that dropped them would drop
+    /// the precursors furthest from the library's 1/K0 most often.
+    constexpr double second_colocation = 0.5;
 
     /// A standard stream silenced while a stock call runs: OpenSWATH prints
     /// one line per window and batch to std::cout ("Thread 3_0 will analyze
@@ -1869,6 +1876,7 @@ namespace ODIA::search
     for (const auto& g : by_maps) { tasks.push_back(&g); }
     std::vector<double> measured(n, nan);
     std::vector<std::size_t> fragments_at(n, 0), windows(n, 0);
+    std::vector<char> second(n, 0);   // the fragments co-locate strongly at a second 1/K0 too
     std::string failure;
     const auto T = static_cast<std::ptrdiff_t>(tasks.size());
 #pragma omp parallel for schedule(dynamic, 1)
@@ -1894,6 +1902,7 @@ namespace ODIA::search
           windows[k] = apex.windows;
           fragments_at[k] = apex.fragments;
           if (std::isfinite(apex.im) && apex.fragments >= SearchParams::im_seed_min_fragments) { measured[k] = apex.im; }
+          second[k] = apex.votes > 0 && apex.second_votes >= second_colocation * apex.votes ? 1 : 0;
         }
       }
       catch (const std::exception& e)
@@ -1907,7 +1916,7 @@ namespace ODIA::search
     // The record: how many were measured, how the measurement compares with
     // OpenSWATH's own value and with the calibrated library 1/K0 the
     // extraction window was centred on.
-    std::size_t with = 0, no_window = 0, weak = 0, outside = 0, both = 0;
+    std::size_t with = 0, no_window = 0, weak = 0, outside = 0, both = 0, second_places = 0;
     std::vector<double> vs_openswath, from_calibrated;
     for (std::size_t k = 0; k < n; ++k)
     {
@@ -1916,6 +1925,7 @@ namespace ODIA::search
       if (windows[k] == 0) { ++no_window; continue; }
       if (!std::isfinite(measured[k])) { ++weak; continue; }
       ++with;
+      second_places += second[k] ? 1 : 0;
       const double k0 = libraryMobility(set.library, precursors[k]);
       if (std::isfinite(k0) && !calibration.im.getDataPoints().empty())
       {
@@ -1941,12 +1951,17 @@ namespace ODIA::search
       {"abs_deviation_from_calibrated", {{"median", num(quantile(from_calibrated, 0.5))}, {"p90", num(quantile(from_calibrated, 0.9))},
                                          {"p99", num(quantile(from_calibrated, 0.99))}}},
       {"outside_extraction_window", outside},
+      {"second_colocation", {{"rule", "the fragments also co-locate at least " + fixed(mobility_separation, 2) + " from the apex "
+                                      "with at least " + fixed(second_colocation, 1) + " of its votes (another conformer or an "
+                                      "isobaric co-eluting species); the apex is reported, not NaN"},
+                             {"rows", second_places}}},
       {"vs_openswath_im_drift", {{"both", both}, {"median_abs_difference", num(quantile(vs_openswath, 0.5))},
                                  {"p90_abs_difference", num(quantile(vs_openswath, 0.9))}}}};
     info("search report: 1/K0 of " + std::to_string(n) + " reported peak groups re-measured over their windows' whole 1/K0 range: " +
          std::to_string(with) + " measured, " + std::to_string(weak) + " with fewer than " +
          std::to_string(SearchParams::im_seed_min_fragments) + " fragments at one 1/K0 (NaN); " + std::to_string(outside) +
-         " lie outside the 1/K0 extraction window; median |re-measured - OpenSWATH's im_drift| " +
+         " lie outside the 1/K0 extraction window, " + std::to_string(second_places) + " have a second strong co-location; "
+         "median |re-measured - OpenSWATH's im_drift| " +
          fixed(quantile(vs_openswath, 0.5), 4) + " over " + std::to_string(both) + " (" + fixed(seconds, 1) + " s)");
     return record.dump();
   }

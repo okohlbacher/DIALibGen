@@ -47,12 +47,19 @@ namespace ODIA::search
     std::size_t fragments = 0;   ///< fragments with signal within mobility_support of the apex
     double intensity = 0.0;      ///< summed intensity within mobility_support of the apex
     std::size_t windows = 0;     ///< mobilityAt: isolation windows read (0 = none holds the m/z)
+    std::size_t hit_fragments = 0;   ///< fragments with a matched peak anywhere in the 1/K0 range
+    double votes = 0.0;              ///< summed votes at the apex (at most one per fragment)
+    /// The most votes at least mobility_separation from the apex, and where:
+    /// a second place where the fragments co-locate.
+    double second_votes = 0.0;
+    double second_im = std::numeric_limits<double>::quiet_NaN();
   };
 
   /// Bin width, smoothing and support of mobilityApex, 1/K0 units.
   constexpr double mobility_bin = 0.002;
   constexpr double mobility_smoothing = 0.004;   ///< Gaussian SD of the per-fragment mobilograms
   constexpr double mobility_support = 0.01;      ///< half-width around the apex that counts as "at the apex"
+  constexpr double mobility_separation = 0.03;   ///< how far from the apex a second co-location counts as another place
   /// Spectra per window mobilityAt reads: the one closest to the run time and one on each side.
   constexpr int mobility_probe_spectra = 3;
 

@@ -684,7 +684,10 @@ namespace ODIA::search
     run.read_mode = cache ? "cache" : "normal";
 
     // Cache files go to a private directory, which identify() removes once
-    // extraction is over. OpenMS never deletes its cache files itself.
+    // nothing reads the run any more: after extraction, or on an ion-mobility
+    // search after the report's 1/K0 is re-measured in it (after scoring,
+    // just before the report is written). OpenMS never deletes its cache
+    // files itself.
     std::string tmp;
     if (cache)
     {
@@ -709,7 +712,9 @@ namespace ODIA::search
     info("search run: reading " + path + " (" + std::to_string(bytes / 1000000) + " MB) " +
          (cache ? "into per-window cache files in " + run.scratch.string() + " (typically " + fixed(cache_ratio_low, 1) +
                   " to " + fixed(cache_ratio_high, 1) + " times the run, here " + gb(cache_ratio_low * static_cast<double>(bytes)) +
-                  " to " + gb(cache_ratio_high * static_cast<double>(bytes)) + " GB; removed after extraction)"
+                  " to " + gb(cache_ratio_high * static_cast<double>(bytes)) +
+                  " GB; removed once the run is no longer read: after extraction, or with ion mobility after the "
+                  "report's 1/K0 is measured)"
                 : std::string("into memory")));
     std::ostringstream said;
     try
@@ -1614,11 +1619,8 @@ namespace ODIA::search
            "calibrated 1/K0 lies farther than half the 1/K0 window (" + fixed(cal.im_window / 2, 3) + ") from every window at "
            "their m/z, so neither member is extracted");
     }
-    if (missing > 0)
-    {
-      warn("search: " + std::to_string(missing) + " of " + std::to_string(set.pairs()) + " searched pairs have no library 1/K0 "
-           "(no IM, no CCS): OpenSWATH extracts neither member on an ion-mobility run");
-    }
+    // Searched pairs without a library 1/K0 (never extracted either) are
+    // warned about, and recorded, by identify() once they are chosen.
     return im.dump();
   }
 

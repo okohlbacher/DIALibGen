@@ -37,13 +37,21 @@ namespace ODIA::search
 
     json num(double v) { return std::isfinite(v) ? json(v) : json(nullptr); }
 
-    std::string fixed2(double v)
+    std::string fixed(double v, int digits)
     {
       std::ostringstream o;
       o.setf(std::ios::fixed);
-      o.precision(2);
+      o.precision(digits);
       o << v;
       return o.str();
+    }
+
+    std::string fixed2(double v) { return fixed(v, 2); }
+
+    /// "12.3 %" of @p n in @p of.
+    std::string percent(std::size_t n, std::size_t of)
+    {
+      return fixed(of ? 100.0 * static_cast<double>(n) / static_cast<double>(of) : 0.0, 1) + " %";
     }
 
     json object(const std::string& text) { return text.empty() ? json::object() : json::parse(text); }
@@ -315,10 +323,18 @@ namespace ODIA::search
       if (targets > 0 && static_cast<double>(with) < SearchParams::im_library_min_share * static_cast<double>(targets))
       {
         throw SearchAbort("search: the run " + run_path + " is diaPASEF and is searched with its ion mobility, but only " +
-                          std::to_string(with) + " of " + std::to_string(targets) + " library targets have a 1/K0 (an IM "
-                          "value or a CCS): each precursor is extracted at its calibrated library 1/K0, and the 1/K0 "
-                          "calibration needs seeds that have one; search:im_window -1 searches the run by m/z and RT "
-                          "only; nothing was searched");
+                          std::to_string(with) + " of " + std::to_string(targets) + " library targets (" + percent(with, targets) +
+                          ") have a 1/K0 (an IM value or a CCS), fewer than " + fixed(100.0 * SearchParams::im_library_min_share, 0) +
+                          " %: each precursor is extracted at its calibrated library 1/K0, so the pairs of the other " +
+                          std::to_string(targets - with) + " targets (" + percent(targets - with, targets) + ") would never be "
+                          "extracted -- more than ion mobility gains -- and the 1/K0 calibration needs seeds that have one; "
+                          "give those targets a 1/K0, or search the run by m/z and RT only with search:im_window -1; nothing "
+                          "was searched");
+      }
+      if (with < targets)
+      {
+        warning(std::to_string(targets - with) + " of " + std::to_string(targets) + " library targets (" + percent(targets - with, targets) +
+                ") have no 1/K0 (no IM, no CCS): on this ion-mobility search their pairs are never extracted (neither member)");
       }
     }
     // A caller that needs observed 1/K0 (-write_im, the CCS head) learns
@@ -384,6 +400,22 @@ namespace ODIA::search
          " duplicate keys; " + std::to_string(st.library_decoys_ignored) + " library decoys not searched (" +
          seconds(timing["candidates"].get<double>()) + ")");
     if (st.windows == 0) { warning("the run reported no isolation windows; candidates were not checked against them"); }
+    // On an ion-mobility search a pair without a library 1/K0 takes a place
+    // in the searched set but is never extracted: said with its number, and
+    // recorded in the provenance's warnings, not only logged (a library with
+    // a 1/K0 for fewer than SearchParams::im_library_min_share of its
+    // targets was refused above).
+    if (run.ion_mobility && params_.im_window != -1.0)
+    {
+      std::size_t missing = 0;
+      for (std::size_t k = 0; k < set.pairs(); ++k) { missing += std::isfinite(libraryMobility(set.library, k)) ? 0 : 1; }
+      if (missing > 0)
+      {
+        warning(std::to_string(missing) + " of " + std::to_string(set.pairs()) + " searched pairs (" + percent(missing, set.pairs()) +
+                ") have no library 1/K0 (no IM, no CCS) and are never extracted, neither member: " + std::to_string(set.pairs() - missing) +
+                " pairs are searched");
+      }
+    }
     if (evidence && params_.subset != 0)
     { warning("search:subset " + std::to_string(params_.subset) + " applies to search:candidates random only and was ignored"); }
     if (st.pairs == 0)

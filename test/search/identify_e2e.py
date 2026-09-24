@@ -232,10 +232,58 @@ try:
             writer.writerows(lib_rows)
         log = run(tool, '-mode', 'refine', '-in', d / 'library.tsv', '-run', pasef / 'run.mzML', '-out', d / 'out.tsv',
                   '-out_ids', d / 'ids.parquet', '-threads', 4, ok=False)
-        if 'library targets have a 1/K0' not in log or 'search:im_window -1' not in log or 'search candidates' in log:
+        if ('but only 0 of %d library targets (0.0 %%) have a 1/K0' % len({r['Precursor.Id'] for r in lib_rows}) not in log
+                or 'search:im_window -1' not in log or 'search candidates' in log):
             print(log, file=sys.stderr)
             fail('a library without 1/K0 on a diaPASEF run must be refused before the search, naming search:im_window -1')
         print('ok   a library without 1/K0 is refused on a diaPASEF run before anything is searched')
+
+        # A library with a 1/K0 for most but not all of its targets: below
+        # 95 % of them (SearchParams::im_library_min_share) refused before
+        # anything is searched, with the numbers; above it searched, and the
+        # targets and the searched pairs that are never extracted are warned
+        # about with their numbers and recorded in the provenance.
+        targets = sorted({r['Precursor.Id'] for r in lib_rows if r.get('Decoy', '0') in ('0', '')})
+
+        def partial(name, every):
+            dropped = set(targets[::every])
+            dd = root / name
+            dd.mkdir()
+            with open(dd / 'library.tsv', 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fields, delimiter='\t', lineterminator='\n')
+                writer.writeheader()
+                for r in lib_rows:
+                    if r['Precursor.Id'] in dropped:
+                        r = dict(r, IM='', **({'CCS': ''} if 'CCS' in r else {}))
+                    writer.writerow(r)
+            return dd, len(dropped)
+
+        dd, n = partial('im-partial-refused', 12)
+        log = run(tool, '-mode', 'refine', '-in', dd / 'library.tsv', '-run', pasef / 'run.mzML', '-out', dd / 'out.tsv',
+                  '-out_ids', dd / 'ids.parquet', '-threads', 4, ok=False)
+        if ('%d of %d library targets' % (len(targets) - n, len(targets)) not in log or 'fewer than 95 %' not in log
+                or 'search:im_window -1' not in log or 'search candidates' in log):
+            print(log, file=sys.stderr)
+            fail('a library with 1/K0 for %d of %d targets must be refused before the search, with the numbers'
+                 % (len(targets) - n, len(targets)))
+        print('ok   a library with 1/K0 for %d of %d targets (%.1f %%) is refused before anything is searched'
+              % (len(targets) - n, len(targets), 100.0 * (len(targets) - n) / len(targets)))
+        dd, n = partial('im-partial-searched', 40)
+        log = run(tool, '-mode', 'refine', '-in', dd / 'library.tsv', '-run', pasef / 'run.mzML', '-out', dd / 'out.tsv',
+                  '-out_ids', dd / 'ids.parquet', '-q_protein', 1, '-threads', 4)
+        p_prov = json.loads(Path(str(dd / 'out.tsv') + '.refine.json').read_text())
+        p_pairs = p_prov['search']['calibration']['detail']['ion_mobility']['pairs']
+        p_warn = p_prov['search']['warnings']
+        library_warned = [w for w in p_warn if w.startswith('%d of %d library targets' % (n, len(targets)))]
+        pairs_warned = [w for w in p_warn if w.startswith('%d of %d searched pairs' % (p_pairs['no_library_im'], p_pairs['searched']))]
+        print('     %d of %d targets without 1/K0: %d of %d searched pairs never extracted; warnings %s'
+              % (n, len(targets), p_pairs['no_library_im'], p_pairs['searched'], json.dumps(p_warn)))
+        if p_pairs['no_library_im'] == 0 or not library_warned or not pairs_warned:
+            print(log, file=sys.stderr)
+            fail('a library with 1/K0 for %d of %d targets: the targets and the searched pairs without one must be warned '
+                 'about with their numbers' % (len(targets) - n, len(targets)))
+        print('ok   ... and one with 1/K0 for %d of %d is searched, the pairs never extracted counted and recorded'
+              % (len(targets) - n, len(targets)))
 
         # The written 1/K0 is a MEASUREMENT of where each precursor is, not the
         # prediction it was searched with pulled a little way towards the

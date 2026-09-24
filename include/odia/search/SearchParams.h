@@ -259,11 +259,25 @@ namespace ODIA::search
     /// NaN with fewer than im_seed_min_fragments fragments at its apex.
     static constexpr double im_ms1_agreement = 0.02;
     /// An ion-mobility search needs a library 1/K0 (an IM value or a CCS) for
-    /// most targets: each precursor is extracted at its calibrated library
-    /// 1/K0, and the 1/K0 calibration measures seeds that have one. Below this
-    /// share of the library's targets the search is refused before anything
-    /// is searched (search:im_window -1 searches without ion mobility).
-    static constexpr double im_library_min_share = 0.5;
+    /// its targets: each precursor is extracted at its calibrated library
+    /// 1/K0, so a pair without one is never extracted (neither member), and
+    /// the 1/K0 calibration measures seeds that have one. Below this share of
+    /// the library's targets the search is refused before anything is
+    /// searched (search:im_window -1 searches without ion mobility); above
+    /// it, but short of all, the targets without a 1/K0 and the searched
+    /// pairs that are never extracted are warned about, with their numbers,
+    /// in the log and in the provenance's search.warnings. Why 0.95 (0.5 until
+    /// the M2 acceptance review): ion mobility added 7.3 % identifications
+    /// on the timsTOF run (30,949 against 28,843 without it) and 10.3 % on a
+    /// sub-library of it (3,023 against 2,741). If identifications scale
+    /// with the targets that can be extracted, a library lacking 1/K0 for
+    /// 5 % of its targets still gains (0.95 x 1.073 = 1.02), one lacking it
+    /// for 10 % already finds fewer than the search without ion mobility
+    /// would (0.90 x 1.073 = 0.97) -- at 0.5 up to half of the pairs were
+    /// lost with a log line only. A library with 1/K0 for most but not all
+    /// targets is a merge of sources; completing it (predicting the missing
+    /// 1/K0) keeps every target searchable.
+    static constexpr double im_library_min_share = 0.95;
     /// The loader reads every spectrum of a diaPASEF run once: a peak whose
     /// 1/K0 lies more than im_limits_tolerance outside its own isolation
     /// window's 1/K0 limits counts against those limits, and above

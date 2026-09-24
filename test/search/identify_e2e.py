@@ -293,6 +293,35 @@ try:
             fail('the written 1/K0 is not the planted one (|error| median %.4f, p90 %.4f)'
                  % (err[len(err) // 2], err[int(0.9 * (len(err) - 1))]))
 
+        # 40 % planted with ion mobility, where the run-level guards' premise
+        # (most candidates null) fails -- max_target_fraction and the label-
+        # swap self-check would abort (above) -- so they are off here, and
+        # the product's own pair competition is checked instead: no planted,
+        # present target may lose its pair to its own decoy (the M2 review
+        # counted 0 of 885 on this fixture).
+        try:
+            import pyarrow.parquet as pq_rich
+        except ImportError:
+            print('pyarrow unavailable: the 40 % pair-winner check is skipped')
+        else:
+            rich = root / 'pasef-rich'
+            print(run(synth, rich, peptides, '0.4', '20260921', 'im').strip())
+            rich_truth = {r['precursor_id'] for r in rows(rich / 'truth.tsv')}
+            d = root / 'im-rich'
+            d.mkdir()
+            run(tool, '-mode', 'refine', '-in', rich / 'library.tsv', '-run', rich / 'run.mzML', '-out', d / 'out.tsv',
+                '-out_ids', d / 'ids.parquet', '-q_protein', 1, '-threads', 4, '-search:max_target_fraction', 1,
+                '-search:selftest', 'false')
+            rep = pq_rich.read_table(d / 'ids.parquet').to_pylist()
+            won = sum(1 for x in rep if not x['Decoy'] and x['Precursor.Id'] in rich_truth)
+            lost = [x['Precursor.Id'] for x in rep if x['Decoy'] and x['Precursor.Id'][:-len('_decoy')] in rich_truth]
+            print('     40 %% planted with ion mobility: %d of %d planted targets won their pair in the report, %d lost it to '
+                  'their own decoy' % (won, len(rich_truth), len(lost)))
+            if won < 0.8 * len(rich_truth):
+                fail('40 %% planted: only %d of %d planted targets reported' % (won, len(rich_truth)))
+            if len(lost) > max(2, 0.01 * len(rich_truth)):
+                fail('40 %% planted: %d present targets lost their pair to their own decoy: %s' % (len(lost), lost[:5]))
+
         try:
             import pyarrow.parquet as pq
         except ImportError:

@@ -81,7 +81,7 @@ namespace ODIA
     /// modification is confounded with the residue and free cysteine cannot be
     /// represented. Free cysteine is more hydrophobic than CAM-cysteine, so it
     /// elutes later than either model predicts -- by +0.90 min per cysteine on
-    /// Astral and +0.74 min on S08, and DIA-NN's own predictor misses it by
+    /// Astral and +0.74 min on IH1, and DIA-NN's own predictor misses it by
     /// +0.90 and +1.03 min on the same peptides. Not an ODIA defect, but ODIA
     /// pays for it because it windows on the library RT.
     ///
@@ -97,7 +97,7 @@ namespace ODIA
     /// timsTOF would report for it. Off means the library carries angstroms
     /// only, which is what ODIA did before and which costs a diaPASEF consumer
     /// the entire mobility dimension -- DIA-NN saw `iIM` = 0 for 100% of its
-    /// identifications when searching our library against S08.
+    /// identifications when searching our library against IH1.
     bool derive_ion_mobility = true;
 
     /// Digest the sequence again with the initiator methionine removed.
@@ -133,7 +133,7 @@ namespace ODIA
     /// that may enter the library.
     ///
     /// The guard used to be `intensity > 0`, which admits denormals. Measured
-    /// on the shipped S08 library: 1,980 of 5,000 precursors' transitions had a
+    /// on the shipped IH1 library: 1,980 of 5,000 precursors' transitions had a
     /// stored intensity of median 2.0e-07 against a library median of 0.255 --
     /// six orders of magnitude down, i.e. numerical noise. Only 13.6% of them
     /// were ever observed, against 81.8% for ordinary picks, and 1,081 of them
@@ -224,10 +224,10 @@ namespace ODIA
     ///
     /// Bucketed rather than linear because the effect saturates, and stated in
     /// rt_norm rather than minutes because minutes are gradient-dependent.
-    /// Fitted on Astral (Orbitrap, 8.5-37.9 min) and S08 (timsTOF, 7-30 min)
-    /// and cross-validated by holding each out: fitting on S08 and applying to
+    /// Fitted on Astral (Orbitrap, 8.5-37.9 min) and IH1 (timsTOF, 7-30 min)
+    /// and cross-validated by holding each out: fitting on IH1 and applying to
     /// Astral takes the cysteine-peptide residual p95 from 3.193 to 2.416 min,
-    /// and the reverse takes S08 from 3.327 to 2.678 min.
+    /// and the reverse takes IH1 from 3.327 to 2.678 min.
     static float freeCysteineRtOffset(std::size_t free_cysteines);
 
     /// Replace placeholder intensities with predicted ones, and re-choose the

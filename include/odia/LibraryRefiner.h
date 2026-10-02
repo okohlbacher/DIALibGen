@@ -53,7 +53,7 @@ namespace ODIA
   ///
   /// NOT cosmetic. DIA-NN writes `C(UniMod:4)`; a library generated through
   /// OpenMS writes `C(Carbamidomethyl)`. On an alkylated sample that is every
-  /// cysteine-containing precursor -- measured: 3,444 of 37,193 on S08, exactly
+  /// cysteine-containing precursor -- measured: 3,444 of 37,193 on IH1, exactly
   /// the cysteine population -- and a verbatim join drops all of them silently.
   ///
   /// Brackets are parsed BALANCED, so `K(Label:13C(6)15N(2))` is one token.
@@ -215,7 +215,7 @@ namespace ODIA
 
     /// Charge states below this never receive an observed 1/K0.
     ///
-    /// Charge 1 is censored on a timsTOF diaPASEF method: 78% of S08's z1
+    /// Charge 1 is censored on a timsTOF diaPASEF method: 78% of IH1's z1
     /// precursors sit within 0.02 of the ramp top and their observed value is
     /// the edge of the scan window, not the ion. Writing it into a library
     /// propagates an instrument setting as if it were data.

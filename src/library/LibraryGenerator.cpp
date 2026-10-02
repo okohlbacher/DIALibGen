@@ -396,7 +396,7 @@ namespace ODIA
   float LibraryGenerator::freeCysteineRtOffset(std::size_t free_cysteines)
   {
     // Pooled medians of (observed - predicted)/slope over the two benchmarks.
-    // Nothing beyond three: 3+ carried 58 peptides on Astral and none on S08,
+    // Nothing beyond three: 3+ carried 58 peptides on Astral and none on IH1,
     // and the effect has plainly saturated by then.
     switch (free_cysteines)
     {
@@ -652,7 +652,7 @@ namespace ODIA
         // The same bar `enumerateFragments` applied BEFORE prediction. The
         // base-peak intensity floor above can prune a precursor below it, and
         // until now nothing re-checked, so the count committed here was
-        // whatever survived. That is where the S08 library's 366,084 targets
+        // whatever survived. That is where the IH1 library's 366,084 targets
         // with 0-2 fragments came from -- and `appendDecoys` then refused to
         // build decoys for them, because it does apply the bar. The result was
         // 7.3% of targets competing against a null that contained nothing like

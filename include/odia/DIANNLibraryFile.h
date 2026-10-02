@@ -40,7 +40,7 @@ namespace ODIA
       /// Both are now written and both are read. A library carrying only one
       /// gets the other filled by `completeMobility` on load, so a consumer
       /// never has to know which the producer chose. Verified against 37,193
-      /// MEASURED 1/K0 values on S08: our derived mobility sits at 2.8%
+      /// MEASURED 1/K0 values on IH1: our derived mobility sits at 2.8%
       /// relative error, and the fitted coefficient is within 2.0% of the
       /// textbook constant, which is what establishes the units agree with
       /// DIA-NN's.

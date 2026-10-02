@@ -66,7 +66,7 @@ namespace ODIA
   /// and stop for exactly that reason. It now emits both, because the
   /// alternative measured worse: shipping no mobility at all costs a diaPASEF
   /// consumer the entire mobility dimension, whereas the derived value is good
-  /// to 2.9% against 37,193 measured 1/K0 values on S08 -- and every consumer
+  /// to 2.9% against 37,193 measured 1/K0 values on IH1 -- and every consumer
   /// recalibrates mobility against its own run regardless.
   ///
   /// Fitted against those measurements, the coefficient comes out 1039.07

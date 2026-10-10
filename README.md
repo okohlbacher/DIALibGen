@@ -132,7 +132,7 @@ separate.
 
 ## Evidence and limitations
 
-A completed K562 benchmark of **DIALibGen 0.10.1 / DIALibRefine 0.3.0-dev**
+A completed benchmark of **DIALibGen 0.10.1 / DIALibRefine 0.3.0-dev**
 found tuned DIALibGen within the registered whole-run margins of tuned DIA-NN,
 with 0.79% / 0.34% fewer precursor identifications on two exposed technical
 replicates. This is descriptive evidence, not equivalence or independent

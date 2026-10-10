@@ -1,8 +1,11 @@
 #include <odia/DIANNLibraryFile.h>
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 
 using namespace ODIA;
@@ -26,6 +29,40 @@ Library fixture()
   t.charge = {1, 2, 1, 2, 1}; t.ordinal = {2, 4, 2, 4, 3};
   t.loss = {LossType::Water, LossType::None, LossType::Ammonia, LossType::None, LossType::None};
   return lib;
+}
+// One precursor per row and a 2^20-row writer chunk: n = 2^20 + 1 puts the
+// last precursor alone in a second row group. Unique ids, as in a real library.
+Library chunked(std::size_t n)
+{
+  Library lib;
+  auto& p = lib.precursors(); auto& t = lib.transitions();
+  const std::string residues = "ACDEFGHIKLMNPQRSTVWY";
+  for (std::size_t i = 0; i < n; ++i)
+  {
+    std::string seq = "PEP";
+    for (std::size_t k = i; k > 0; k /= residues.size()) { seq += residues[k % residues.size()]; }
+    seq += 'K';
+    p.modified_sequence.push_back(lib.strings().intern(seq));
+    p.protein_group.push_back(lib.strings().intern("P" + std::to_string(i % 5000)));
+    p.mz.push_back(toFixed(400.0 + 0.001 * static_cast<double>(i % 100000)));
+    p.irt.push_back(i % 7 == 0 ? std::nanf("") : static_cast<float>(i % 1000) / 10.0f);
+    // IM and CCS absent together: load() derives either one from the other.
+    p.im.push_back(i % 11 == 0 ? std::nanf("") : 0.8f + static_cast<float>(i % 500) / 1000.0f);
+    p.ccs.push_back(i % 11 == 0 ? std::nanf("") : 300.0f + static_cast<float>(i % 400));
+    p.charge.push_back(static_cast<std::uint8_t>(2 + i % 3)); p.decoy.push_back(static_cast<std::uint8_t>(i % 2));
+    p.transition_begin.push_back(static_cast<std::uint32_t>(i)); p.transition_count.push_back(1);
+    t.product_mz.push_back(toFixed(200.0 + 0.25 * static_cast<double>(i % 997)));
+    t.library_intensity.push_back(1.0f); t.type.push_back(FragmentType::Y);
+    t.charge.push_back(1); t.ordinal.push_back(1); t.loss.push_back(LossType::None);
+  }
+  return lib;
+}
+std::vector<std::int64_t> rowGroups(const fs::path& path)
+{
+  const auto metadata = parquet::ParquetFileReader::OpenFile(path.string())->metadata();
+  std::vector<std::int64_t> rows;
+  for (int g = 0; g < metadata->num_row_groups(); ++g) { rows.push_back(metadata->RowGroup(g)->num_rows()); }
+  return rows;
 }
 void compare(const Library& actual, const Library& expected)
 {
@@ -59,6 +96,20 @@ int main(int argc, char** argv)
       Library lib; DIANNLibraryFile::load(path.string(), lib);
       std::cout << lib.precursorCount() << ' ' << lib.transitionCount() << ' ' << lib.decoyCount() << ' '
                 << lib.invalidMzCount() << ' ' << lib.invalidMzTransitionCount() << '\n';
+      return 0;
+    }
+    // The compact writer itself, not pyarrow, across its chunk boundary and empty.
+    if (mode == "compact-chunks" || mode == "compact-empty")
+    {
+      const auto expected = chunked(mode == "compact-chunks" ? (std::size_t(1) << 20) + 1 : 0);
+      DIANNLibraryFile::storeParquetCompact(path.string(), expected, {});
+      const auto rows = rowGroups(path);
+      if (mode == "compact-chunks")
+      { check(rows == std::vector<std::int64_t>{1 << 20, 1}, "compact row groups are not [1048576, 1]"); }
+      else { check(std::accumulate(rows.begin(), rows.end(), std::int64_t{0}) == 0, "empty compact library has rows"); }
+      Library loaded; DIANNLibraryFile::load(path.string(), loaded);
+      check(loaded.precursorCount() == expected.precursorCount(), "compact precursor count changed");
+      compare(loaded, expected);
       return 0;
     }
     auto original = fixture();

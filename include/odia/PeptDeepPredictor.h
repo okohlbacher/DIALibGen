@@ -5,6 +5,7 @@
 
 #include <odia/PeptDeepEncoder.h>
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -167,6 +168,11 @@ namespace ODIA
     void forEachChunk_(const std::vector<OpenMS::AASequence>& peptides,
                        const std::function<void(std::size_t session,
                                                 const std::vector<std::size_t>& group)>& body);
+
+    /// Hands the float weights of the optimised graph at @p optimized to
+    /// every later session as one shared, read-only copy. False if they could
+    /// not be read, in which case nothing is shared.
+    bool shareWeights_(const std::filesystem::path& optimized);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

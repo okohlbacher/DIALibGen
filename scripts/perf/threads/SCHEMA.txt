@@ -1,0 +1,39 @@
+bid10-threads results (kim:/scratch/kohlbach/bid10-threads/results/). All files tab-separated, one header line.
+Inputs: runs/<label>/ (this agent, knob build bin/DIALibGen-knobs-ba7d248 = branch perf/threads-analysis ba7d248) and
+kim:/scratch/kohlbach/bid10-instrument/runs/{full_t*,sub_t*} (trace build e82ce88). Scripts: scripts/perf/threads/ on the branch.
+Times in s from the trace's monotonic clock unless noted; "cores" = CPU-s per wall-s.
+
+occupancy_timeline.tsv  (threads_analysis.py; plot: occupancy_*.png)  one row per 100-ms sampler tick of proc.tsv
+  run, t_s, phase (level-0 phase open at t; gap = between phases), dt_s, cores (process CPU-s / dt), n_run (threads in
+  state R, incl. the sampler), threads, vcsw_per_s, nvcsw_per_s (process voluntary / involuntary context switches), rss_gib
+phase_cores.tsv  per run x level-0 phase
+  run, threads (-threads), sessions, intra_op, phase, wall_s, cpu_s, mean_cores, p05/p25/p50/p75/p95 (time-weighted
+  quantiles of cores), frac_le_1p5 (share of phase time at <= 1.5 cores), frac_ge_cap (share at >= 0.9 x sessions x
+  intra_op), vcsw, nvcsw (process counters across the phase), vcsw_per_s, nvcsw_per_s, runq_wait_s (schedstat run-queue
+  delay summed over all threads), runq_wait_per_cpu_s, threads_max
+serial_sections.tsv  per run x single-threaded section
+  run, threads, section, kind, wall_s, cpu_s, share_wall (of /usr/bin/time elapsed), n (occurrences)
+dispatch_calls.tsv  per run x predictor call (level-3 dispatch event)
+  run, model, call, workers (threads given work), chunks, rows, wall_s, busy_s (sum of chunk wall), max_chunk_s, tail_s
+  (dispatch end - first worker end), util (busy / workers x wall)       plot: ms2_calls.png
+dispatch_balance.tsv  per run x model: sums over calls
+  calls, workers_mean, chunks_mean, dispatch_wall_s, chunk_busy_s, capacity_core_s (workers x wall), idle_core_s,
+  start_lag_core_s (thread start after dispatch start), tail_idle_core_s (worker end to dispatch end), balanced_wall_s
+  (sum over calls of max(busy/workers, largest chunk)), tail_wall_s, util
+chunk_sizes.tsv  run, model, rows_bin, chunks, rows_sum, busy_s
+thread_classes.tsv  run, cls (thread class by name), threads, cpu_s, vcsw, nvcsw, runq_wait_s (per-tid sums; recycled
+  tids can merge two threads)
+experiments.tsv  one row per run (experiments_table.py; plots experiments.png, ms2_cost_per_row.png)
+  label, input (sub10/proteome/tiny), binary, threads, sessions, intra_op, spin, batch_rows, ms2_block, prefix, elapsed_s,
+  user_s, sys_s, cpu_s, mean_cores, maxrss_gib, vcsw, nvcsw (/usr/bin/time), out_md5, same_as_ref (md5 equals the
+  trace-build reference of that input and format), rt_s, ms2_s, ccs_s, write_s, serial_pre_s (fasta_read+digest+
+  enumerate+release), ms2_cpu_ms_per_row (summed MS2 chunk wall / rows = session-ms per row), ms2_util,
+  ms2_workers_mean, ms2_busy_workers (= workers_mean x util), rt_util, ccs_util, load1_max, other_cores_mean
+  (DIA-NN rows: knob columns '-')
+scaling_phases.tsv  series, run, threads, sessions, phase, wall_s, speedup_vs_t4, efficiency_vs_t4, speedup_vs_t8,
+  efficiency_vs_t8        plot: scaling.png
+amdahl_fit.tsv  series, phase, n_points, serial_s (a), parallel_s_at_1 (b) for T(n) = a + b/n, serial_fraction_at_t4,
+  serial_fraction_at_t8, serial_fraction_at_1, max_speedup_vs_t4, r2
+gdb_states.tsv  diag, phase, samples (gdb stops in the phase), category, thread_obs, threads_per_stop, share
+pqdiff_*.tsv  (pqdiff.py from bid10-memory-cache) column, kind, n_compared, n_differ, max_abs_diff, median_abs_diff, note
+diann_speclib_md5.txt  md5 of DIA-NN's .predicted.speclib at 8/16/32/96 threads

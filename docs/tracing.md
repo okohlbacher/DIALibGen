@@ -17,6 +17,19 @@ ODIA_TRACE=trace-dir DIALibGen -in proteins.fasta -config cfg.json -out lib.parq
 | `ODIA_TRACE_SNAPSHOT_MIN_S` | 30 | least time between two phase-boundary snapshots (`numa.tsv`, `smaps.tsv`, `mallocinfo.tsv`); 0 takes one at every phase start, `off` or a negative value none |
 | `ODIA_ORT_PROFILE` | unset | path prefix; every ONNX Runtime session writes its per-operator profile to `<prefix>_<model>_i<instance>_s<session>_<time>.json` |
 
+Measurement knobs (branch perf/threads-analysis; unset, each leaves behaviour unchanged; recorded in `meta.tsv`):
+
+| variable | default | effect |
+|---|---|---|
+| `ODIA_MAX_SESSIONS` | 16 | cap on ONNX sessions per predictor (sessions = min(-threads, cap)) |
+| `ODIA_BATCH_ROWS` | 2048 | rows per chunk (`MAX_BATCH_ROWS`) |
+| `ODIA_MS2_BLOCK` | 20000 | precursors per MS2 block (one predictor call each) |
+| `ODIA_INTRA_OP` | 1 | ONNX Runtime intra-op threads per session |
+| `ODIA_SPIN` | ORT default (1) | 0 or 1: `session.intra_op.allow_spinning` and `session.inter_op.allow_spinning` |
+
+`ODIA_BATCH_ROWS`, `ODIA_MS2_BLOCK` and `ODIA_INTRA_OP` can change the last bit of some RT/CCS/IM values; see
+`scripts/perf/threads/` for the analysis scripts that use them.
+
 `ODIA_ORT_PROFILE` works without `ODIA_TRACE`. It keeps every operator call in
 memory until the predictor is destroyed, so use it on small inputs.
 

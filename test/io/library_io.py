@@ -44,6 +44,53 @@ for name, table in (('flat', flat), ('compact', compact)):
     pq.write_table(table.slice(0, 0), path)
     assert run('load', path) == '0 0 0 0 0'
 
+# The TSV is DIA-NN's dialect: the undotted names are the only ones DIA-NN 1.7
+# reads, and DIA-NN 2.x reads them too. Protein.Group alone gives DIA-NN no
+# proteins, so the accessions, entry names and proteotypicity are separate.
+DIANN_COLUMNS = ['Precursor.Id', 'ModifiedPeptide', 'PrecursorCharge', 'Decoy', 'iRT', 'IonMobility',
+                 'PrecursorMz', 'ProductMz', 'LibraryIntensity', 'FragmentType', 'FragmentCharge',
+                 'FragmentSeriesNumber', 'FragmentLossType', 'UniprotID', 'ProteinName',
+                 'Proteotypic', 'Protein.Group', 'CCS']
+header = (work / 'library.tsv').read_text().splitlines()[0].split('\t')
+assert header == DIANN_COLUMNS, header
+named = work / 'openms-names.tsv'
+run('openms-names', named)
+rows = list(csv.DictReader(named.read_text().splitlines(), delimiter='\t'))
+first = {}
+for r in rows:
+    first.setdefault(r['Precursor.Id'], r)
+assert list(first) == ['AC(UniMod:4)DEFGK2', 'AC(UniMod:4)DEFGK2_decoy', '(UniMod:1)PEPM(UniMod:35)TIDER3'], list(first)
+target, decoy, other = first.values()
+assert target['ModifiedPeptide'] == 'AC(UniMod:4)DEFGK' and other['ModifiedPeptide'] == '(UniMod:1)PEPM(UniMod:35)TIDER'
+assert target['UniprotID'] == 'P00001;P00002' and target['ProteinName'] == 'ONE_HUMAN;TWO_HUMAN'
+assert target['Proteotypic'] == '0' and other['Proteotypic'] == '1'
+assert target['Protein.Group'] == 'sp|P00001|ONE_HUMAN;tr|P00002|TWO_HUMAN'
+assert other['UniprotID'] == 'P003' and other['ProteinName'] == 'P003'
+assert target['Decoy'] == '0' and decoy['Decoy'] == '1' and decoy['ModifiedPeptide'] == target['ModifiedPeptide']
+assert run('load', named) == '3 5 1 0 0'
+# A library written before the TSV became DIA-NN's dialect still loads.
+LEGACY = {'ModifiedPeptide': 'Modified.Sequence', 'PrecursorCharge': 'Precursor.Charge', 'iRT': 'RT',
+          'IonMobility': 'IM', 'PrecursorMz': 'Precursor.Mz', 'ProductMz': 'Product.Mz',
+          'LibraryIntensity': 'Relative.Intensity', 'FragmentType': 'Fragment.Type',
+          'FragmentCharge': 'Fragment.Charge', 'FragmentSeriesNumber': 'Fragment.Series.Number',
+          'FragmentLossType': 'Fragment.Loss.Type'}
+def rewrite(name, columns, rename=None):
+    source = list(csv.DictReader((work / 'library.tsv').read_text().splitlines(), delimiter='\t'))
+    path = work / name
+    with path.open('w', newline='') as f:
+        writer = csv.writer(f, delimiter='\t', lineterminator='\n')
+        writer.writerow([(rename or {}).get(c, c) for c in columns])
+        writer.writerows([[r[c] for c in columns] for r in source])
+    return path
+legacy_columns = ['Precursor.Id', 'ModifiedPeptide', 'PrecursorCharge', 'Decoy', 'iRT', 'IonMobility',
+                  'PrecursorMz', 'ProductMz', 'LibraryIntensity', 'FragmentType', 'FragmentCharge',
+                  'FragmentSeriesNumber', 'FragmentLossType', 'Protein.Group', 'CCS']
+run('roundtrip', rewrite('legacy-0.11.1.tsv', legacy_columns, LEGACY))
+# A DIA-NN-style TSV without DIALibGen's own columns: ids come from sequence,
+# charge and decoy flag, the protein group from the accessions.
+run('roundtrip', rewrite('no-dialibgen-columns.tsv',
+                         [c for c in DIANN_COLUMNS if c not in ('Precursor.Id', 'Protein.Group')]))
+
 # CRLF and numeric storage variations must preserve the same library.
 tsv = (work / 'library.tsv').read_text()
 (work / 'header-only.tsv').write_text(tsv.splitlines()[0] + '\n')
@@ -63,7 +110,7 @@ run('load', path, 'duplicate TSV column')
 rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
 path = work / 'missing-sequence.tsv'
 with path.open('w', newline='') as f:
-    writer = csv.DictWriter(f, [key for key in rows[0] if key != 'Modified.Sequence'],
+    writer = csv.DictWriter(f, [key for key in rows[0] if key != 'ModifiedPeptide'],
                             delimiter='\t', extrasaction='ignore')
     writer.writeheader(); writer.writerows(rows)
 run('load', path, 'missing Modified.Sequence')
@@ -71,14 +118,14 @@ pq.write_table(flat.drop(['Modified.Sequence']), work / 'missing-sequence.parque
 run('load', work / 'missing-sequence.parquet', 'missing Modified.Sequence')
 for token in ('1.5garbage', 'inf', '0x1p2', '+-5', '++5', '--5', '-+5', ' 5', '5 ', '9' * 500):
     rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
-    rows[0]['RT'] = token
+    rows[0]['iRT'] = token
     path = work / 'invalid-numeric.tsv'
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
     run('load', path, 'invalid numeric value')
 for token in ('+-2', '++2', '--2', '-+2', ' 2', '2 ', '0x2'):
     rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
-    rows[0]['Precursor.Charge'] = token
+    rows[0]['PrecursorCharge'] = token
     path = work / 'invalid-integer.tsv'
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
@@ -86,9 +133,9 @@ for token in ('+-2', '++2', '--2', '-+2', ' 2', '2 ', '0x2'):
 # Explicit single plus signs remain valid in decimal numbers and integers.
 rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
 for row in rows:
-    row['Precursor.Charge'] = '+' + row['Precursor.Charge']
-    if row['RT'] and not row['RT'].startswith('-'):
-        row['RT'] = '+' + row['RT']
+    row['PrecursorCharge'] = '+' + row['PrecursorCharge']
+    if row['iRT'] and not row['iRT'].startswith('-'):
+        row['iRT'] = '+' + row['iRT']
 path = work / 'explicit-plus.tsv'
 with path.open('w', newline='') as f:
     writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
@@ -124,7 +171,7 @@ assert run('load', work / 'optional-columns.parquet') == '3 5 0 0 0'
 (work / 'empty.tsv').write_text('')
 run('load', work / 'empty.tsv', 'empty library')
 (work / 'missing.tsv').write_text('Wrong\tColumns\n1\t2\n')
-run('load', work / 'missing.tsv', 'missing Precursor.Id')
+run('load', work / 'missing.tsv', 'not a DIA-NN library')
 (work / 'corrupt.parquet').write_bytes(b'not parquet')
 run('load', work / 'corrupt.parquet', 'not a Parquet file')
 run('load', work / 'nonexistent.tsv', 'cannot open library')
@@ -164,7 +211,7 @@ for value in (0, -1, 2.5, 258, float('nan')):
         pq.write_table(changed, path)
         run('load', path, 'charge')
     rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
-    rows[0]['Precursor.Charge'] = str(value)
+    rows[0]['PrecursorCharge'] = str(value)
     path = work / f'tsv-bad-charge-{value}.tsv'
     with path.open('w', newline='') as f:
         writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
@@ -177,9 +224,9 @@ for kind, table in (('flat', flat), ('compact', compact)):
 
 # Invalid m/z is represented by the documented sentinel, not a wrapped integer.
 rows = list(csv.DictReader(tsv.splitlines(), delimiter='\t'))
-rows[0]['Precursor.Mz'] = '-1'
-rows[0]['Product.Mz'] = '1e100'
-rows[1]['Product.Mz'] = 'nan'
+rows[0]['PrecursorMz'] = '-1'
+rows[0]['ProductMz'] = '1e100'
+rows[1]['ProductMz'] = 'nan'
 path = work / 'invalid-mz.tsv'
 with path.open('w', newline='') as f:
     writer = csv.DictWriter(f, rows[0].keys(), delimiter='\t'); writer.writeheader(); writer.writerows(rows)
@@ -188,7 +235,7 @@ assert run('load', path) == '3 5 1 1 2'
 missing = work / 'missing-values.tsv'
 run('missing-values', missing)
 rows = list(csv.DictReader(missing.read_text().splitlines(), delimiter='\t'))
-assert rows[0]['Relative.Intensity'] == '' and all(r['IM'] == '' for r in rows)
+assert rows[0]['LibraryIntensity'] == '' and all(r['IonMobility'] == '' for r in rows)
 existing = work / 'preserved.tsv'
 existing.write_text('original content\n')
 run('invalid-text', existing, 'tab, newline or NUL')

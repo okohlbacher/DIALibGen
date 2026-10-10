@@ -16,3 +16,7 @@ if(ODIA_PYTHON)
     $<TARGET_FILE:dialibgen_library_io> "${CMAKE_CURRENT_BINARY_DIR}/library-io")
   set_tests_properties(library_io_contract PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+if(ODIA_PYTHON AND TARGET DIALibGen)
+  add_test(NAME library_convert_contract COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/convert_contract.py"
+    $<TARGET_FILE:dialibgen_library_io> $<TARGET_FILE:DIALibGen> "${CMAKE_CURRENT_BINARY_DIR}/convert")
+endif()

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/DIANNLibraryFile.h>
+#include <odia/ModifiedSequence.h>
 #include <odia/AtomicFile.h>
 #include <odia/TextWriter.h>
 
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <cmath>
 #include <fstream>
+#include <initializer_list>
 #include <cstdio>
 #include <iostream>
 #include <locale>
@@ -292,36 +294,49 @@ namespace ODIA
       }
     }
 
-    auto col = [&](const char* name) {
-      const auto it = index.find(name);
-      return it == index.end() ? -1 : it->second;
+    // First present name wins. The TSVColumns spelling comes first for what
+    // storeTSV writes now, the dotted Columns spelling for what it wrote up to
+    // 0.11.1, then DIA-NN's other aliases for libraries from elsewhere.
+    auto col = [&](std::initializer_list<const char*> names) {
+      for (const char* name : names)
+      {
+        const auto it = index.find(name);
+        if (it != index.end()) { return it->second; }
+      }
+      return -1;
     };
+    using T = TSVColumns;
+    const int c_id = col({T::PRECURSOR_ID});
+    const int c_seq = col({T::MODIFIED_PEPTIDE, Columns::MODIFIED_SEQUENCE,
+                           "FullUniModPeptideName", "ModifiedPeptideSequence"});
+    // Protein.Group holds DIALibGen's verbatim group; a library from elsewhere
+    // names its proteins only in DIA-NN's accession column.
+    const int c_pg = col({T::PROTEIN_GROUP, "Protein.Ids", T::PROTEIN_IDS, "UniprotId",
+                          "UniProtIds", "ProteinId", "ProteinID"});
+    const int c_pmz = col({T::PRECURSOR_MZ, Columns::PRECURSOR_MZ, "Q1"});
+    const int c_qmz = col({T::PRODUCT_MZ, Columns::PRODUCT_MZ, "FragmentMz", "Q3"});
+    const int c_rt = col({T::RT, Columns::RT, "Tr_recalibrated", "NormalizedRetentionTime",
+                          "RetentionTime"});
+    const int c_im = col({T::IM, Columns::IM, "PrecursorIonMobility", "Ion.Mobility"});
+    const int c_ccs = col({T::CCS});
+    const int c_int = col({T::RELATIVE_INTENSITY, Columns::RELATIVE_INTENSITY,
+                           "RelativeIntensity", "RelativeFragmentIntensity"});
+    const int c_z = col({T::PRECURSOR_CHARGE, Columns::PRECURSOR_CHARGE});
+    const int c_fz = col({T::FRAGMENT_CHARGE, Columns::FRAGMENT_CHARGE});
+    const int c_ord = col({T::FRAGMENT_SERIES_NUMBER, Columns::FRAGMENT_SERIES_NUMBER,
+                           "FragmentNumber"});
+    const int c_dec = col({T::DECOY, "decoy"});
+    const int c_ft = col({T::FRAGMENT_TYPE, Columns::FRAGMENT_TYPE});
+    const int c_lt = col({T::FRAGMENT_LOSS_TYPE, Columns::FRAGMENT_LOSS_TYPE});
 
-    const int c_id = col(Columns::PRECURSOR_ID);
-    const int c_seq = col(Columns::MODIFIED_SEQUENCE);
-    const int c_pg = col(Columns::PROTEIN_GROUP);
-    const int c_pmz = col(Columns::PRECURSOR_MZ);
-    const int c_qmz = col(Columns::PRODUCT_MZ);
-    const int c_rt = col(Columns::RT);
-    const int c_im = col(Columns::IM);
-    const int c_ccs = col(Columns::CCS);
-    const int c_int = col(Columns::RELATIVE_INTENSITY);
-    const int c_z = col(Columns::PRECURSOR_CHARGE);
-    const int c_fz = col(Columns::FRAGMENT_CHARGE);
-    const int c_ord = col(Columns::FRAGMENT_SERIES_NUMBER);
-    const int c_dec = col(Columns::DECOY);
-    const int c_ft = col(Columns::FRAGMENT_TYPE);
-    const int c_lt = col(Columns::FRAGMENT_LOSS_TYPE);
-
-    if (c_id < 0 || c_pmz < 0 || c_qmz < 0)
+    if (c_pmz < 0 || c_qmz < 0)
     {
-      throw std::runtime_error("not a DIA-NN library (missing Precursor.Id / Precursor.Mz / "
-                               "Product.Mz): " + filename);
+      throw std::runtime_error("not a DIA-NN library (missing PrecursorMz / ProductMz): " + filename);
     }
-    if (c_seq < 0) { throw std::runtime_error("missing Modified.Sequence in library: " + filename); }
+    if (c_seq < 0) { throw std::runtime_error("missing Modified.Sequence (or ModifiedPeptide) in library: " + filename); }
 
     Builder builder(library);
-    std::string line;
+    std::string line, synthesized_id;
     std::vector<std::string_view> f;
     std::size_t line_number = 1;
     while (std::getline(in, line))
@@ -348,7 +363,6 @@ namespace ODIA
       };
 
       Row r;
-      r.precursor_id = get(c_id);
       r.modified_sequence = get(c_seq);
       r.protein_group = get(c_pg);
       r.precursor_mz = toDouble(get(c_pmz), Columns::PRECURSOR_MZ);
@@ -360,9 +374,25 @@ namespace ODIA
       r.precursor_charge = toLong(get(c_z), "precursor charge");
       r.fragment_charge = toLong(get(c_fz), "fragment charge");
       r.ordinal = toLong(get(c_ord), Columns::FRAGMENT_SERIES_NUMBER);
-      r.decoy = toLong(get(c_dec), Columns::DECOY);
+      {
+        // DIA-NN also writes and accepts True/False here.
+        const auto d = get(c_dec);
+        if (!d.empty() && (d[0] == 't' || d[0] == 'T')) { r.decoy = 1; }
+        else if (!d.empty() && (d[0] == 'f' || d[0] == 'F')) { r.decoy = 0; }
+        else { r.decoy = toLong(d, Columns::DECOY); }
+      }
       r.fragment_type = get(c_ft);
       r.loss_type = get(c_lt);
+      if (c_id >= 0) { r.precursor_id = get(c_id); }
+      else
+      {
+        // The id storeTSV would have written, so a library without the column
+        // groups its rows exactly as one with it.
+        synthesized_id.assign(r.modified_sequence);
+        synthesized_id += std::to_string(r.precursor_charge);
+        if (r.decoy != 0) { synthesized_id += "_decoy"; }
+        r.precursor_id = synthesized_id;
+      }
       builder.append(r);
     }
     if (in.bad()) { throw std::runtime_error("error reading library: " + filename); }
@@ -1130,30 +1160,66 @@ namespace ODIA
     AtomicFile output(filename);
     TextWriter out(output.temporaryPath().string());
 
-    for (const char* column : {Columns::PRECURSOR_ID, Columns::MODIFIED_SEQUENCE,
-                               Columns::PRECURSOR_CHARGE, Columns::DECOY,
-                               Columns::RT, Columns::IM,
-                               Columns::PRECURSOR_MZ, Columns::PRODUCT_MZ,
-                               Columns::RELATIVE_INTENSITY, Columns::FRAGMENT_TYPE,
-                               Columns::FRAGMENT_CHARGE, Columns::FRAGMENT_SERIES_NUMBER,
-                               Columns::FRAGMENT_LOSS_TYPE, Columns::PROTEIN_GROUP})
+    using T = TSVColumns;
+    bool first = true;
+    for (const char* column : {T::PRECURSOR_ID, T::MODIFIED_PEPTIDE, T::PRECURSOR_CHARGE, T::DECOY,
+                               T::RT, T::IM, T::PRECURSOR_MZ, T::PRODUCT_MZ,
+                               T::RELATIVE_INTENSITY, T::FRAGMENT_TYPE, T::FRAGMENT_CHARGE,
+                               T::FRAGMENT_SERIES_NUMBER, T::FRAGMENT_LOSS_TYPE,
+                               T::PROTEIN_IDS, T::PROTEIN_NAMES, T::PROTEOTYPIC,
+                               T::PROTEIN_GROUP, T::CCS})
     {
+      if (!first) { out.put('\t'); }
       out.put(column);
-      out.put('\t');
+      first = false;
     }
-    out.put(Columns::CCS);
     out.put('\n');
 
+    // DIA-NN's protein columns from DIALibGen's group "sp|P1|N1_HUMAN;sp|P2|N2_HUMAN":
+    // accessions "P1;P2", entry names "N1_HUMAN;N2_HUMAN". A member without the
+    // db|accession|name form stands for itself in both.
+    std::string ids, names;
+    auto proteins = [&](std::string_view group) -> std::size_t {
+      ids.clear(); names.clear();
+      std::size_t members = 0;
+      std::size_t pos = 0;
+      while (pos < group.size())
+      {
+        std::size_t end = group.find(';', pos);
+        if (end == std::string_view::npos) { end = group.size(); }
+        const auto member = group.substr(pos, end - pos);
+        pos = end + 1;
+        if (member.empty()) { continue; }
+        std::string_view accession = member, name = member;
+        const auto bar1 = member.find('|');
+        const auto bar2 = bar1 == std::string_view::npos ? bar1 : member.find('|', bar1 + 1);
+        if (bar2 != std::string_view::npos)
+        {
+          accession = member.substr(bar1 + 1, bar2 - bar1 - 1);
+          name = member.substr(bar2 + 1);
+        }
+        if (members++) { ids += ';'; names += ';'; }
+        ids += accession; names += name;
+      }
+      return members;
+    };
+
+    std::size_t unknown_mods = 0;
+    std::string seq;
     const auto& p = library.precursors();
     const auto& t = library.transitions();
     for (std::size_t i = 0; i < library.precursorCount(); ++i)
     {
-      const auto seq = library.strings().get(p.modified_sequence[i]);
+      const auto stored = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
-      const int z = p.charge[i];
-      if (seq.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos ||
+      if (stored.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos ||
           pg.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos)
       { throw std::runtime_error("TSV sequence or protein group contains a tab, newline or NUL"); }
+      // DIA-NN parses UniMod accessions; OpenMS names such as Carbamidomethyl
+      // are not what either version expects.
+      seq = canonicalModifiedSequence(stored, &unknown_mods);
+      const std::size_t members = proteins(pg);
+      const int z = p.charge[i];
       const bool has_im = i < p.im.size() && !std::isnan(p.im[i]);
       const bool has_ccs = i < p.ccs.size() && !std::isnan(p.ccs[i]);
       const std::uint32_t begin = p.transition_begin[i];
@@ -1183,6 +1249,9 @@ namespace ODIA
         out.integer(t.charge[j]); out.put('\t');
         out.integer(t.ordinal[j]); out.put('\t');
         out.put(toString(t.loss[j])); out.put('\t');
+        out.put(ids); out.put('\t');
+        out.put(names); out.put('\t');
+        out.put(members == 1 ? "1" : "0"); out.put('\t');
         out.put(pg); out.put('\t');
         // Empty rather than "nan" when absent, as for RT: no TSV consumer
         // accepts the latter, and a 0 here would read as a real cross-section.
@@ -1195,6 +1264,11 @@ namespace ODIA
     // quota or a broken mount, leaving a truncated library behind.
     out.close();
     output.commit();
+    if (unknown_mods)
+    {
+      std::cerr << "warning: " << unknown_mods << " modification tokens have no UniMod accession and "
+                   "were written verbatim; DIA-NN may not read those precursors\n";
+    }
   }
 
 } // namespace ODIA

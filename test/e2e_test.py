@@ -136,7 +136,9 @@ def main(binary, fasta, model_dir, workdir):
     with open("strict.tsv") as handle:
         tsv_ids = {r["Precursor.Id"] for r in csv.DictReader(handle, delimiter="\t")}
     strict_data = pq.read_table("strict.parquet").to_pydict()
-    check(tsv_ids == set(strict_data["Precursor.Id"]), "strict MS2 floor preserves identical TSV/Parquet precursor sets")
+    # The TSV spells modifications as DIA-NN does, by UniMod accession.
+    unimod = lambda s: s.replace("(Carbamidomethyl)", "(UniMod:4)").replace("(Oxidation)", "(UniMod:35)")
+    check(tsv_ids == {unimod(i) for i in strict_data["Precursor.Id"]}, "strict MS2 floor preserves identical TSV/Parquet precursor sets")
     check(all(len(v) > 0 for v in strict_data["Product.Mz"]), "strict floor never writes empty assays")
 
     # Cache keys include calibration data and the decoy precursor mass policy.
@@ -196,7 +198,7 @@ def main(binary, fasta, model_dir, workdir):
     with open("lib.tsv") as fh:
         header = fh.readline().rstrip("\n").split("\t")
         rows = sum(1 for _ in fh)
-    check(rows > 0 and "Precursor.Mz" in header and "Product.Mz" in header,
+    check(rows > 0 and {"ModifiedPeptide", "PrecursorMz", "ProductMz", "UniprotID", "ProteinName"} <= set(header),
           f"the TSV is the DIA-NN dialect with {rows} rows")
 
     print()

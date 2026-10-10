@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The `.tsv` library is now DIA-NN's TSV format under the column names that
+  both DIA-NN 1.7 and 2.x read: `ModifiedPeptide`, `PrecursorCharge`,
+  `PrecursorMz`, `iRT`, `IonMobility`, `ProductMz`, `LibraryIntensity`,
+  `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber`,
+  `FragmentLossType`, `Decoy`. DIA-NN 1.7 could not read the dotted names at
+  all. New columns `UniprotID` (accessions), `ProteinName` (entry names) and
+  `Proteotypic` give DIA-NN its protein groups; with `Protein.Group` alone both
+  versions reported "0 protein groups" unless searched with `--fasta
+  --reannotate`. Modifications are written as UniMod accessions
+  (`C(UniMod:4)`) instead of OpenMS names. `Precursor.Id`, `Protein.Group`
+  and `CCS` stay. Scripts that read DIALibGen TSVs by the dotted names must
+  switch to the new ones; DIALibGen itself reads both.
+- The `-out` help text says what each format is: `.tsv` is DIA-NN's TSV
+  format, `.parquet` DIALibGen's own layout, which DIA-NN does not read.
+
+### Added
+
+- `-mode convert` rewrites a library in the format of `-out` without
+  changing its content, e.g. Parquet to DIA-NN TSV.
+
 ## [0.11.1] — 2026-10-10
 
 First published 0.11 release. 0.11.0 was validated but not published; its

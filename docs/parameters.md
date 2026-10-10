@@ -6,9 +6,9 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 
 | Option | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `-mode` | string | `generate` | generate,refine,tune | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library. |
-| `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune). |
-| `-out` | output-file | (empty) |  | DIA-NN spectral library; Parquet embeds provenance. |
+| `-mode` | string | `generate` | generate,refine,tune,convert | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged. |
+| `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune/convert). |
+| `-out` | output-file | (empty) |  | Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. |
 | `-config` | input-file | (empty) |  | Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON. |
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |

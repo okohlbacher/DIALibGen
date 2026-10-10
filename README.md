@@ -71,7 +71,9 @@ DIALibGen -in proteins.fasta -config generation.json -out predicted.tsv
 ```
 
 `.parquet` preserves the effective recipe and input/model hashes in metadata.
-`.tsv` exports DIA-NN's library dialect; retain the config separately. With
+`.tsv` is DIA-NN's TSV library format, which DIA-NN 1.7 and 2.x read
+completely, protein groups included (see [the column list](docs/usage.md#the-tsv-library));
+retain the config separately. `-mode convert` turns an existing `.parquet` into a `.tsv`. With
 `irt_rescale=false`, predicted RT is the model's normalized output, not iRT.
 
 ## Refine or tune a library

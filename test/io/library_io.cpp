@@ -126,6 +126,18 @@ int main(int argc, char** argv)
       original.transitions().library_intensity[0] = std::nanf("");
       DIANNLibraryFile::storeTSV(path.string(), original); return 0;
     }
+    // OpenMS modification names and UniProt-style protein groups, as a
+    // generated library holds them; the TSV must carry DIA-NN's spelling.
+    if (mode == "openms-names")
+    {
+      auto& p = original.precursors();
+      p.modified_sequence = {original.strings().intern("AC(Carbamidomethyl)DEFGK"),
+                             original.strings().intern("AC(Carbamidomethyl)DEFGK"),
+                             original.strings().intern(".(Acetyl)PEPM(Oxidation)TIDER")};
+      const auto group = original.strings().intern("sp|P00001|ONE_HUMAN;tr|P00002|TWO_HUMAN");
+      p.protein_group[0] = group; p.protein_group[1] = group;
+      DIANNLibraryFile::storeTSV(path.string(), original); return 0;
+    }
     if (mode == "invalid-text")
     {
       original.precursors().protein_group[1] = original.strings().intern("bad\tgroup\n");

@@ -11,12 +11,13 @@
 namespace ODIA
 {
 
-  /// Reads and writes assay libraries in DIA-NN's dialect.
+  /// Reads and writes assay libraries: DIA-NN's TSV dialect, and DIALibGen's
+  /// own Parquet layout.
   ///
-  /// DIA-NN's TSV and Parquet libraries share column names, so one column map
-  /// serves both. Both are fully denormalised -- one row per transition, with
-  /// every precursor field repeated -- which is exactly the redundancy the CSR
-  /// layout in Library collapses on load.
+  /// The TSV is one row per transition, with every precursor field repeated --
+  /// exactly the redundancy the CSR layout in Library collapses on load. Its
+  /// column names are `TSVColumns`, chosen so that DIA-NN 1.7 and 2.x both read
+  /// the whole file; the Parquet layouts use `Columns`.
   class DIANNLibraryFile
   {
   public:
@@ -55,10 +56,64 @@ namespace ODIA
       static constexpr const char* PROTEIN_GROUP = "Protein.Group";
     };
 
+    /// Column names of the TSV that `storeTSV` writes.
+    ///
+    /// DIA-NN matches a library TSV's header against fixed lists of accepted
+    /// names. DIA-NN 2.x accepts both its own dotted names (`Precursor.Mz`) and
+    /// the older undotted ones; DIA-NN 1.7 accepts ONLY the undotted ones and
+    /// refuses a file that lacks any of sequence, charge, precursor m/z, RT,
+    /// product m/z or intensity. So the undotted names are the only spelling
+    /// both read. Verified by loading libraries in DIA-NN 1.7.12 and 2.0.
+    ///
+    /// Protein identity: neither version reads `Protein.Group` from a library
+    /// TSV -- with it alone both report "0 protein groups". Both read the
+    /// accessions from `UniprotID` (2.x: `Protein.Ids`), entry names from
+    /// `ProteinName` and the flag from `Proteotypic`. `Precursor.Id`,
+    /// `Protein.Group` and `CCS` are not DIA-NN columns; DIA-NN ignores them,
+    /// and they carry DIALibGen's own id, verbatim protein group and
+    /// cross-section so that `loadTSV` reads back exactly what was written.
+    struct TSVColumns
+    {
+      static constexpr const char* PRECURSOR_ID = "Precursor.Id";
+      static constexpr const char* MODIFIED_PEPTIDE = "ModifiedPeptide";
+      static constexpr const char* PRECURSOR_CHARGE = "PrecursorCharge";
+      static constexpr const char* DECOY = "Decoy";
+      /// DIA-NN treats library RT as a reference scale and fits its own map
+      /// to the run, so the unit is whatever the library holds: a generated
+      /// library's normalised 0..1 prediction, or a tuned/refined library's
+      /// run minutes. Written as stored, never rescaled.
+      static constexpr const char* RT = "iRT";
+      static constexpr const char* IM = "IonMobility";
+      static constexpr const char* PRECURSOR_MZ = "PrecursorMz";
+      static constexpr const char* PRODUCT_MZ = "ProductMz";
+      static constexpr const char* RELATIVE_INTENSITY = "LibraryIntensity";
+      static constexpr const char* FRAGMENT_TYPE = "FragmentType";
+      static constexpr const char* FRAGMENT_CHARGE = "FragmentCharge";
+      static constexpr const char* FRAGMENT_SERIES_NUMBER = "FragmentSeriesNumber";
+      static constexpr const char* FRAGMENT_LOSS_TYPE = "FragmentLossType";
+      /// Protein.Group's members' accessions, ';'-separated: `P02768` from
+      /// `sp|P02768|ALBU_HUMAN`, the whole member when it has no `db|acc|name` form.
+      static constexpr const char* PROTEIN_IDS = "UniprotID";
+      /// The members' entry names, `ALBU_HUMAN`, by the same rule.
+      static constexpr const char* PROTEIN_NAMES = "ProteinName";
+      /// 1 when the precursor maps to exactly one protein, else 0 -- the rule
+      /// DIA-NN itself applies when the column is absent.
+      static constexpr const char* PROTEOTYPIC = "Proteotypic";
+      static constexpr const char* PROTEIN_GROUP = "Protein.Group";
+      static constexpr const char* CCS = "CCS";
+    };
+
     /// Load a library. Accepts .parquet or .tsv (case insensitive).
     ///
     /// Rows are grouped into precursors by a change in Precursor.Id, so the
     /// input must keep a precursor's transitions together -- which DIA-NN does.
+    ///
+    /// A TSV may use either spelling of a column: the `TSVColumns` names that
+    /// `storeTSV` writes now, the dotted `Columns` names that 0.11.1 and earlier wrote,
+    /// or DIA-NN's other common aliases (`Tr_recalibrated`, `FragmentMz`,
+    /// `RelativeIntensity`, ...). Without a Precursor.Id column the id is
+    /// built from sequence, charge and decoy flag; without Protein.Group the
+    /// protein group is taken from Protein.Ids/UniprotID.
     static void load(const std::string& filename, Library& library);
 
     /// Fill in whichever of 1/K0 and CCS the file omitted, from the other.
@@ -71,14 +126,16 @@ namespace ODIA
     static void loadTSV(const std::string& filename, Library& library);
     static void loadParquet(const std::string& filename, Library& library);
 
-    /// Write in DIA-NN's TSV dialect.
+    /// Write in DIA-NN's TSV dialect, with the `TSVColumns` header.
     ///
-    /// Precursor.Id is synthesised as <Modified.Sequence><charge>, matching
-    /// DIA-NN, since ODIA does not store per-transition identifiers.
+    /// The sequence is written in UniMod notation (`C(UniMod:4)`), which is
+    /// what DIA-NN parses; a modification without a UniMod accession is
+    /// written verbatim and counted in a warning. Precursor.Id is synthesised
+    /// as <sequence><charge>, with `_decoy` appended for a decoy.
     static void storeTSV(const std::string& filename, const Library& library);
 
-    /// Write the library as Parquet. Same columns as `storeTSV`, same names,
-    /// so `loadParquet` reads back what this writes.
+    /// Write the library as flat Parquet, one row per transition, with the
+    /// `Columns` names, so `loadParquet` reads back what this writes.
     ///
     /// Worth having because the TSV is one row per TRANSITION with the sequence
     /// and protein group repeated 12 times: a proteome library is 12.35 GiB of

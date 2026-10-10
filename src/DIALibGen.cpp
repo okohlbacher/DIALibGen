@@ -6,6 +6,7 @@
 #include <OpenMS/FORMAT/ParamXMLFile.h>
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
+#include <odia/DIANNLibraryFile.h>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -25,11 +26,11 @@ DIALibGen::DIALibGen()
 
 void DIALibGen::registerOptionsAndFlags_()
 {
-  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library.", false);
-  setValidStrings_("mode", {"generate", "refine", "tune"});
-  registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune).", false);
+  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged.", false);
+  setValidStrings_("mode", {"generate", "refine", "tune", "convert"});
+  registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
-  registerOutputFile_("out", "<file>", "", "DIA-NN spectral library; Parquet embeds provenance.", false);
+  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it.", false);
   setValidFormats_("out", {"parquet", "tsv"}, false);
   registerInputFile_("config", "<file>", "", "Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON.", false);
   setValidFormats_("config", {"json"}, false);
@@ -71,7 +72,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
     const bool refinement = refinement_options_.count(option) || training;
-    bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
+    const bool generation = option.starts_with("generation:") || option == "irt_standards";
+    bool wrong_mode = mode == "generate" ? refinement : generation;
+    if (mode == "convert") { wrong_mode = refinement || generation || option == "config" || option == "write_config"; }
     if (mode == "refine" && training && !getFlag_("tune")) { wrong_mode = true; }
     if (mode == "tune" && refinement && !training && option != "ids" && option != "out_report" &&
         option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
@@ -88,7 +91,34 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
       return ILLEGAL_PARAMETERS;
     }
   }
+  if (mode == "convert") { return convert_(); }
   return mode == "generate" ? generate_() : refine_(mode == "tune");
+}
+
+OpenMS::TOPPBase::ExitCodes DIALibGen::convert_()
+{
+  // Read the raw path, as refine does: TOPP's writable-file probe would follow
+  // and then remove a dangling symlink before it could be refused.
+  const std::string in = getStringOption_("in");
+  const std::string out = getParam_().getValue("out").toString();
+  if (in.empty() || out.empty()) { writeLogError_("-mode convert needs -in and -out"); return ILLEGAL_PARAMETERS; }
+  if (fs::exists(out) || fs::is_symlink(out))
+  { writeLogError_("refusing to overwrite existing output: " + out); return CANNOT_WRITE_OUTPUT_FILE; }
+  ODIA::Library library;
+  try
+  {
+    ODIA::DIANNLibraryFile::load(in, library);
+    // Parquet output is the compact layout every other mode writes; it carries
+    // no recipe, because conversion changes none.
+    if (out.ends_with(".parquet"))
+    { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, ODIA::DIANNLibraryFile::Fingerprint{}); }
+    else { ODIA::DIANNLibraryFile::store(out, library); }
+  }
+  catch (const std::exception& e) { writeLogError_(e.what()); return INPUT_FILE_CORRUPT; }
+  writeLogInfo_("converted " + std::to_string(library.precursorCount()) + " precursors (" +
+                std::to_string(library.decoyCount()) + " decoys) and " +
+                std::to_string(library.transitionCount()) + " transitions: " + in + " -> " + out);
+  return EXECUTION_OK;
 }
 
 namespace

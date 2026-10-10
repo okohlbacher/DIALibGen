@@ -149,7 +149,7 @@ result; these are not generic iRT models.
 
 ## Files and provenance
 
-Input libraries can be DIA-NN-dialect Parquet or TSV. Output format follows
+Input libraries can be DIALibGen Parquet or DIA-NN TSV. Output format follows
 `-out`'s extension. Generation embeds the effective recipe and FASTA/model
 hashes in Parquet. Refinement and tuning additionally write JSON provenance
 sidecars beside their output, including input hashes and the selected mode.
@@ -159,6 +159,50 @@ Model digests are SHA-256; library, report and FASTA cache digests are explicitl
 labelled FNV-1a64. These cache fingerprints are not cryptographic integrity checks.
 Parquet embeds the same provenance under `odia.config_json`; plain TSV has no
 schema metadata.
+
+### The TSV library
+
+`.parquet` is DIALibGen's own layout; DIA-NN does not read it. `.tsv` is
+DIA-NN's TSV library format, and DIA-NN 1.7 and 2.x both read the whole
+file: precursors, fragments, RT, ion mobility, decoy flags, protein
+accessions and entry names, and proteotypicity. No `--fasta --reannotate`
+is needed to get protein groups. The columns:
+
+| column | content | read by DIA-NN as |
+|---|---|---|
+| `Precursor.Id` | `<sequence><charge>`, `_decoy` appended for a decoy | not read (DIALibGen's own key) |
+| `ModifiedPeptide` | sequence with modifications as UniMod accessions, e.g. `C(UniMod:4)`, `(UniMod:1)` for an N-terminal one | precursor sequence |
+| `PrecursorCharge`, `PrecursorMz` | | charge, m/z |
+| `Decoy` | 0 or 1; a decoy carries its target's sequence | decoy flag |
+| `iRT` | library RT, as stored (see below) | reference RT |
+| `IonMobility` | predicted or observed 1/K0 | ion mobility (2.x; 1.7 has none) |
+| `ProductMz`, `LibraryIntensity` | | fragment m/z, relative intensity |
+| `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber`, `FragmentLossType` | `b`/`y`, charge, ordinal, `noloss`/`H2O`/`NH3` | fragment annotation |
+| `UniprotID` | accessions of the protein group, `P1;P2` | protein ids (2.x: `Protein.Ids`) |
+| `ProteinName` | entry names, `NAME1_HUMAN;NAME2_HUMAN` | protein names |
+| `Proteotypic` | 1 if the group has exactly one protein | proteotypicity |
+| `Protein.Group` | the group verbatim, `sp\|P1\|NAME1_HUMAN;...` | not read |
+| `CCS` | collision cross-section | not read |
+
+The undotted names are deliberate: DIA-NN 1.7 reads only those, and DIA-NN
+2.x accepts them as well. DIA-NN reads neither `Protein.Group` nor the CCS;
+they are there so that DIALibGen reads back exactly what it wrote.
+DIALibGen still reads the dotted TSVs (`Modified.Sequence`, `Precursor.Mz`,
+`Protein.Group` only, ...) that 0.11.1 and earlier wrote, and DIA-NN-style
+TSVs without the two DIALibGen columns. The library records no gene names,
+so there is no `Genes` column; for gene-level protein groups, search with
+`--fasta` and `--reannotate`.
+
+RT is written as stored. DIA-NN fits its own map from library RT to the
+run's retention time, so the unit does not matter to it: a generated
+library's RT is the model's normalised 0..1 output (or iRT with
+`irt_rescale`), a tuned or refined library's is the reference run's
+minutes. A DIA-NN 1.7.12 search of an Astral run with a generated library
+found 84,076 precursors with RT scaled to 0..100 and 84,161 with it left
+at 0..1.
+
+`-mode convert -in lib.parquet -out lib.tsv` writes an existing library in
+the other format, content unchanged, and works in either direction.
 
 Existing library outputs are refused. Writers stage complete files in a private
 directory beside the destination and rename them into place only after a

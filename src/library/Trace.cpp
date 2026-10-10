@@ -871,9 +871,13 @@ namespace ODIA::trace
     }
     if (Snapshots* snap = snapshots())
     {
-      const std::lock_guard<std::mutex> lock(snap->mutex);
-      for (FILE* f : {snap->numa, snap->smaps, snap->minfo}) { if (f) { std::fclose(f); } }
-      snapshots() = nullptr;
+      {
+        // Released before the delete: unlocking a freed mutex writes into
+        // freed heap memory.
+        const std::lock_guard<std::mutex> lock(snap->mutex);
+        for (FILE* f : {snap->numa, snap->smaps, snap->minfo}) { if (f) { std::fclose(f); } }
+        snapshots() = nullptr;
+      }
       delete snap;
     }
 #endif

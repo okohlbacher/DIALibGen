@@ -294,6 +294,17 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/threads_identical.cmake")
 endif()
 
+# On a machine with a usable GPU: the default (TF32 off) GPU library equals the
+# CPU library to float rounding, and 1 and 4 CUDA sessions write the same
+# bytes. Skips (77) without one -- the CPU CTest run hides the GPUs.
+if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
+  add_test(NAME gpu_matches_cpu
+           COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/gpu_matches_cpu.py" $<TARGET_FILE:DIALibGen>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta" "${CMAKE_CURRENT_BINARY_DIR}/gpu_matches_cpu")
+  set_tests_properties(gpu_matches_cpu PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.

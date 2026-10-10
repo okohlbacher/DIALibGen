@@ -73,6 +73,11 @@ namespace
     const char* values[] = {id.c_str(), tf32 ? "1" : "0"};
     Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda.get(), keys, values, 2));
     options.AppendExecutionProvider_CUDA_V2(*cuda);
+    // Every CUDA session (probes included) otherwise logs, at warning level,
+    // that ONNX Runtime keeps the shape operators on the CPU -- by design --
+    // and with four sessions per model those lines bury a real WARNING.
+    // Errors still print.
+    options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
   }
 
   std::string fallbackFix(const std::string& reason)

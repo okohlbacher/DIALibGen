@@ -7,12 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Compact Parquet libraries store `Precursor.Id`, `Modified.Sequence` and `Protein.Group` as plain
-  strings, dictionary-encoded per row group by Parquet, instead of one global Arrow dictionary that was
-  repeated as the dictionary page of every row group. On a 3.49 M-precursor human library: 570 -> 458 MB,
-  identical content, and readers no longer decode every string once per row group (a parallel reader
-  loads it in 1.2 s instead of 2.0 s). Readers that accept dictionary or plain string columns are
-  unaffected; the flat writer keeps its dictionary builders.
+- Compact Parquet libraries store `Precursor.Id`, `Modified.Sequence` and
+  `Protein.Group` as plain strings instead of one global Arrow dictionary.
+  Parquet repeated that dictionary as the dictionary page of every row group,
+  so readers decoded every string of the library once per row group. Parquet
+  now dictionary-encodes each row group until its dictionary page reaches
+  1 MiB and writes the rest plain. On a 5.81 M-precursor library the file
+  shrinks from 1,038 to 765 MB with identical content; DIALibGen loads it in
+  9.9 s instead of 21.0 s and writes it in 13.0 s instead of 24.6 s. pyarrow
+  and pandas now see `string` instead of `dictionary<string>` (pandas: `str`
+  or `object` instead of `category`); DIALibGen 0.10.1 and 0.11.0 read old
+  and new files alike. The flat writer keeps its dictionary builders.
 
 ## [0.11.0] — 2026-09-20
 

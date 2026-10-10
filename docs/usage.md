@@ -126,7 +126,13 @@ the tool reports rejection and fallback decisions. Options such as
 `-cohort:full_fit` or `-cohort:no_inner_val` change the hold-out contract and
 must be reported when presenting accuracy results. CPU is the portable
 release configuration. Source builds can request `-machine:device cuda:0`
-when linked to a compatible CUDA LibTorch installation.
+when linked to a compatible CUDA LibTorch installation (see
+[building](building.md#cpu-and-cuda)); add `-tune_predict_gpu` to run the
+re-prediction on the GPU as well. On one H100, tuning the RT head on an Astral
+run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
+took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
+(TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
+CPU training.
 
 Tune mode uses training filters such as `-filter:q_value`. Refinement-only
 settings such as `-q_precursor`, `-q_global`, `-q_protein` and observed-value
@@ -184,13 +190,19 @@ spreads the sessions over several GPUs, round robin; by default the first
 visible GPU that works is used. Neither changes the output. CPU runs use up to
 16 sessions (`-threads`), as before.
 
+With the models on a GPU, most of the remaining time is host work: digestion,
+precursor enumeration, fragment selection and writing. These run on `-threads`
+threads (the output does not depend on the count); fragment selection overlaps
+the prediction of the next block. On one H100 a whole human-sized proteome
+(5.8 M precursors) took 106 s at `-threads 16`, on two 76 s.
+
 `-machine:tf32` controls TensorFloat-32 math on the GPU, for prediction and
 for `-machine:device cuda` training. It is **off** by default, so a GPU library
 agrees with the CPU library to float rounding (measured on a whole proteome:
 RT within 2e-6 normalised units, CCS within 6e-4 A^2, identical fragment sets;
 spectra cosine >= 0.9998). `-machine:tf32 true` rounds matmul and convolution
-inputs to 10 mantissa bits: one H100 builds a whole proteome about 26 s faster
-(146 s instead of 172 s with four sessions), but about 1 % of precursors then
+inputs to 10 mantissa bits: one H100 builds a whole proteome about 25 s faster
+(82 s instead of 106 s; two H100s 69 s instead of 76 s), but about 1 % of precursors then
 select a different fragment set, the worst informative spectrum has cosine
 0.955 against the CPU, and CCS moves by up to ~1.9 A^2 (median 0.02 A^2).
 Either way, GPU output is deterministic for a given setting: it does not depend

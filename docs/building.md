@@ -41,6 +41,23 @@ built for CUDA 12) and, at run time, cuDNN 9 for CUDA 12 with the unversioned
 warning (see [GPU](usage.md#gpu)). The standard CPU archive is not a CUDA
 bundle, and no package bundles cuDNN.
 
+A tested CUDA build on Linux x86_64 (H100, driver 580, CUDA 12.8 toolkit):
+pytorch.org's `libtorch-shared-with-deps-2.10.0+cu128` (the same LibTorch API
+as the CPU release) with
+
+```bash
+cmake ... -DTorch_DIR=$LIBTORCH/share/cmake/Torch \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+  -DTORCH_CUDA_ARCH_LIST=9.0 -DCMAKE_CUDA_STANDARD=17
+```
+
+`TORCH_CUDA_ARCH_LIST` skips LibTorch's GPU-detection test project, which
+otherwise inherits this project's C++23 setting as a CUDA dialect nvcc does not
+know. That LibTorch ships the complete cuDNN 9 for CUDA 12 (`lib/libcudnn*.so.9`),
+so cuDNN stays on for training. ONNX Runtime can use the same copy: put a
+`libcudnn.so -> $LIBTORCH/lib/libcudnn.so.9` link in a directory on
+`LD_LIBRARY_PATH`, and both libraries share one loaded cuDNN.
+
 Linux ARM64 and Windows use different native runtime packages. The
 [release checks](testing.md#release-verification) require actual CPU training
 on each platform; a successful compilation does not establish that it works.

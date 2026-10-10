@@ -5,6 +5,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `-mode convert` rewrites a library in the format of `-out` without
+  changing its content, e.g. Parquet to DIA-NN TSV.
+- `-machine:require_gpu`: fail instead of running a model on the CPU when its
+  CUDA session cannot be created.
+- `-machine:tf32 true|false` (default `false`): TensorFloat-32 on NVIDIA GPUs,
+  for prediction and CUDA training. Off, a GPU library matches the CPU library
+  to float rounding; on is faster but changes ~1 % of fragment sets.
+- `-machine:gpu_sessions` (default 4) CUDA sessions per GPU and model, and
+  `-machine:gpu_devices` to spread them over several GPUs.
+
 ### Changed
 
 - The `.tsv` library is now DIA-NN's TSV format under the column names that
@@ -21,11 +33,26 @@ This project follows [Semantic Versioning](https://semver.org/).
   switch to the new ones; DIALibGen itself reads both.
 - The `-out` help text says what each format is: `.tsv` is DIA-NN's TSV
   format, `.parquet` DIALibGen's own layout, which DIA-NN does not read.
+- A model requested on CUDA that falls back to the CPU on a machine with a GPU
+  (typically: cuDNN 9 for CUDA 12 is missing, so RT and CCS cannot use the GPU)
+  now prints a `WARNING` with the reason and the fix, and Parquet output records
+  it as `odia.warnings`. Previously the only sign was `[RT] provider CPU`.
+- GPU prediction no longer uses TF32 by default (ONNX Runtime's CUDA provider
+  enabled it). GPU libraries now equal CPU libraries to float rounding.
+- Digestion, precursor enumeration, MS2 fragment selection (now overlapped with
+  the next block's prediction) and the Parquet and TSV writers run on `-threads`
+  host threads. Output is byte-identical to 0.11.1 at any thread count. One
+  H100 builds a whole-proteome library in 106 s instead of 154 s (0.11.1 with
+  cuDNN, TF32 on), two H100s in 76 s. Refine and tune write their output on
+  `-threads` threads as well.
 
-### Added
+### Documentation
 
-- `-mode convert` rewrites a library in the format of `-out` without
-  changing its content, e.g. Parquet to DIA-NN TSV.
+- GPU section in the usage guide (cuDNN 9 for CUDA 12, fallback warnings,
+  TF32, sessions); a tested CUDA LibTorch build recipe. On one H100, tuning the
+  RT head and re-predicting a 3.5 M-precursor library takes about a minute
+  instead of 12.5 min on 64 CPU threads, with the same held-out accuracy.
+
 
 ## [0.11.1] — 2026-10-10
 

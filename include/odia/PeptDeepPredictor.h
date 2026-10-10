@@ -22,6 +22,12 @@ namespace ODIA
     /// CUDA session could be created (missing cuDNN, no visible GPU, a
     /// CPU-only ONNX Runtime).
     bool require = false;
+    /// TensorFloat-32 math in the CUDA provider. Off by default: TF32 rounds
+    /// matmul and convolution inputs to 10 mantissa bits, so a TF32 library
+    /// differs from the CPU library (about 1 % of fragment sets, CCS by up
+    /// to ~1.9 A^2), while with it off the GPU agrees with the CPU to float
+    /// rounding. On is faster (one H100, whole proteome: ~26 s less).
+    bool tf32 = false;
     /// Where callers collect "requested CUDA, got the CPU" warnings for the
     /// output's provenance; may be null. The predictor itself only reports
     /// them through fallbackReason().

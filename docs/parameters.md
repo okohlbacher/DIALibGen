@@ -99,4 +99,5 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:threads` | int | `4` | 1: | CPU threads used for training |
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
+| `-machine:tf32` | bool | `false` |  | TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU libraries to float rounding. On: faster (one H100, whole proteome: ~26 s less), but about 1 % of precursors select a different fragment set and CCS moves by up to ~1.9 A^2. |
 | `-machine:require_gpu` | bool | `false` |  | Fail instead of running a model on the CPU when its CUDA session cannot be created (missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a fallback is a WARNING in the log and in the output's provenance. |

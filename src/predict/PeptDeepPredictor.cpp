@@ -58,6 +58,23 @@ namespace
     return last == std::string::npos ? what : what.substr(last + 3);
   }
 
+  /// Registers the CUDA provider for one device. Through the V2 options,
+  /// because the legacy struct cannot switch TF32 off: ONNX Runtime's CUDA
+  /// provider enables it by default.
+  void appendCuda(Ort::SessionOptions& options, int device, bool tf32)
+  {
+    const OrtApi& api = Ort::GetApi();
+    OrtCUDAProviderOptionsV2* raw = nullptr;
+    Ort::ThrowOnError(api.CreateCUDAProviderOptions(&raw));
+    const std::unique_ptr<OrtCUDAProviderOptionsV2, void (*)(OrtCUDAProviderOptionsV2*)> cuda(
+      raw, [](OrtCUDAProviderOptionsV2* o) { Ort::GetApi().ReleaseCUDAProviderOptions(o); });
+    const std::string id = std::to_string(device);
+    const char* keys[] = {"device_id", "use_tf32"};
+    const char* values[] = {id.c_str(), tf32 ? "1" : "0"};
+    Ort::ThrowOnError(api.UpdateCUDAProviderOptions(cuda.get(), keys, values, 2));
+    options.AppendExecutionProvider_CUDA_V2(*cuda);
+  }
+
   std::string fallbackFix(const std::string& reason)
   {
     std::string lower = reason;
@@ -139,13 +156,9 @@ namespace ODIA
           {
             Ort::SessionOptions probe;
             probe.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            OrtCUDAProviderOptions cuda{};
-            cuda.device_id = dev;
-            probe.AppendExecutionProvider_CUDA(cuda);
+            appendCuda(probe, dev, gpu.tf32);
             Ort::Session test(impl_->env, ortPath(model_path).c_str(), probe);   // the real check
-            OrtCUDAProviderOptions keep{};
-            keep.device_id = dev;
-            impl_->options.AppendExecutionProvider_CUDA(keep);
+            appendCuda(impl_->options, dev, gpu.tf32);
             impl_->provider = Provider::CUDA;
             impl_->device = dev;
             break;

@@ -176,6 +176,18 @@ CPU-only ONNX Runtime, runs on the CPU without a warning.
 `-machine:require_gpu` turns every CPU fallback, that case included, into an
 error.
 
+`-machine:tf32` controls TensorFloat-32 math on the GPU, for prediction and
+for `-machine:device cuda` training. It is **off** by default, so a GPU library
+agrees with the CPU library to float rounding (measured on a whole proteome:
+RT within 2e-6 normalised units, CCS within 6e-4 A^2, identical fragment sets;
+spectra cosine >= 0.9998). `-machine:tf32 true` rounds matmul and convolution
+inputs to 10 mantissa bits: one H100 builds a whole proteome about 26 s faster
+(146 s instead of 172 s with four sessions), but about 1 % of precursors then
+select a different fragment set, the worst informative spectrum has cosine
+0.955 against the CPU, and CCS moves by up to ~1.9 A^2 (median 0.02 A^2).
+Either way, GPU output is deterministic for a given setting: it does not depend
+on `-threads`, the number of sessions or the number of GPUs.
+
 ## Files and provenance
 
 Input libraries can be DIALibGen Parquet or DIA-NN TSV. Output format follows

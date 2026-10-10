@@ -75,6 +75,7 @@ namespace ODIA::tune
     // machine
     std::string device = "cpu";  ///< "cpu" or "cuda[:N]"
     bool cudnn = true;           ///< CUDA: let libtorch use cuDNN for the LSTM/conv (needs the full cuDNN 9 library set)
+    bool tf32 = false;           ///< CUDA: TensorFloat-32 in cuBLAS matmuls and cuDNN convolutions/RNNs
     int threads = 4;
     std::uint32_t seed = 20260803;
   };

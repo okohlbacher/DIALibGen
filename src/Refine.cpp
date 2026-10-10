@@ -267,6 +267,11 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+    registerStringOption_("machine:tf32", "<true/false>", "false",
+                          "TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU "
+                          "libraries to float rounding. On: faster (one H100, whole proteome: ~26 s less), but about 1 % "
+                          "of precursors select a different fragment set and CCS moves by up to ~1.9 A^2.", false);
+    setValidStrings_("machine:tf32", {"true", "false"});
     registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
                                          "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
                                          "fallback is a WARNING in the log and in the output's provenance.");
@@ -499,6 +504,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         tp.device = getStringOption_("machine:device");
         tp.threads = getIntOption_("machine:threads");
         tp.cudnn = !getFlag_("machine:no_cudnn");
+        tp.tf32 = getStringOption_("machine:tf32") == "true";
         tp.seed = static_cast<std::uint32_t>(getIntOption_("machine:seed"));
         if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
         { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }

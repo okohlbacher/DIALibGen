@@ -11,6 +11,8 @@
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
 #include <OpenMS/CHEMISTRY/ProteaseDigestion.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
+#include <OpenMS/CHEMISTRY/ResidueDB.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CHEMISTRY/ResidueModification.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 
@@ -103,6 +105,67 @@ namespace ODIA
       std::int8_t charge;
     };
 
+    /// b and y ion m/z of one peptide, bit for bit what
+    /// peptide.getPrefix(i).getMZ(z, Residue::BIon) and
+    /// peptide.getSuffix(i).getMZ(z, Residue::YIon) return.
+    ///
+    /// Those build a prefix and a suffix sequence per ordinal (a heap
+    /// allocation each), and every call re-derives the b and y terminal
+    /// offsets from their empirical formulas. Here the offsets are computed
+    /// once per process and shared read-only, and the residue masses once per
+    /// peptide. The sums are formed with the same terms in the same order as
+    /// AASequence::getMonoWeight -- proton mass times charge, terminal
+    /// modification, residues first to last, ion offset, then the division --
+    /// so the result does not change by a bit. In particular a y ion is summed
+    /// from its own first residue, not as a running suffix sum, whose different
+    /// association would change the last bit.
+    class IonLadder
+    {
+    public:
+      explicit IonLadder(const AASequence& peptide)
+      {
+        static const Residue* const unknown = ResidueDB::getInstance()->getResidue("X");
+        mass_.reserve(peptide.size());
+        for (Size k = 0; k < peptide.size(); ++k)
+        {
+          // An X has no mass; OpenMS throws for it, so keep OpenMS's path.
+          if (&peptide[k] == unknown) { exact_ = false; }
+          mass_.push_back(peptide[k].getMonoWeight(Residue::Internal));
+        }
+      }
+
+      double b(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getPrefix(i).getMZ(z, Residue::BIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getNTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = 0; k < i; ++k) { m += mass_[k]; }
+        return (m + offsets().b) / z;
+      }
+
+      double y(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getSuffix(i).getMZ(z, Residue::YIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getCTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = mass_.size() - i; k < mass_.size(); ++k) { m += mass_[k]; }
+        return (m + offsets().y) / z;
+      }
+
+    private:
+      struct Offsets { double b, y; };
+      /// Built once, thread-safely, then only read.
+      static const Offsets& offsets()
+      {
+        static const Offsets o{Residue::getInternalToBIon().getMonoWeight(),
+                               Residue::getInternalToYIon().getMonoWeight()};
+        return o;
+      }
+
+      std::vector<double> mass_;
+      bool exact_ = true;
+    };
+
     void enumerateAllFragments(const AASequence& peptide, const DigestParams& p,
                                int precursor_charge, std::vector<Fragment>& out)
     {
@@ -122,17 +185,18 @@ namespace ODIA
       // z2 channels for every precursor charge, so the restriction was ours
       // alone.
       const int max_z = std::min(p.max_fragment_charge, std::max(1, precursor_charge));
+      const IonLadder ladder(peptide);
       for (int z = 1; z <= max_z; ++z)
       {
         for (Size i = 1; i < n; ++i)
         {
-          const double b = peptide.getPrefix(i).getMZ(z, Residue::BIon);
+          const double b = ladder.b(peptide, i, z);
           if (b >= p.fragment_mz_min && b <= p.fragment_mz_max)
           {
             out.push_back({b, FragmentType::B, static_cast<std::uint8_t>(i),
                            static_cast<std::int8_t>(z)});
           }
-          const double y = peptide.getSuffix(i).getMZ(z, Residue::YIon);
+          const double y = ladder.y(peptide, i, z);
           if (y >= p.fragment_mz_min && y <= p.fragment_mz_max)
           {
             out.push_back({y, FragmentType::Y, static_cast<std::uint8_t>(i),

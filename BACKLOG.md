@@ -113,3 +113,27 @@ column names. [Usage](docs/usage.md#openswath) documents a column mapping. A
 native `-out library.pqp` or an OpenSWATH-dialect TSV would remove that step;
 it is not done because decoy semantics differ (see the note in usage) and
 the export needs its own round-trip test against OpenMS.
+
+## `generate` is several times slower than DIA-NN's predictor
+
+The same whole-proteome FASTA and digest (20,431 proteins and as many shuffled
+entrapment twins; 2.65 M peptides, 5.75 M precursors at charge 2-4, 69 M
+transitions), on one 192-core node with 96 threads each:
+
+| Tool | Wall | CPU | Peak memory | Output |
+|---|---|---|---|---|
+| DIALibGen 0.10.1 `generate`, timsTOF, NCE 30 | 18 min 26 s | 3 h 47 min | 14.5 GB | TSV |
+| DIA-NN 2.0 `--predictor --gen-spec-lib` | 2 min 43 s | | | `.speclib` |
+
+About 7 x. Not yet a fair measurement: the two builds started together and
+shared the node for DIA-NN's 2.7 minutes, DIALibGen wrote a 69 M-row TSV while
+DIA-NN wrote its binary library, and the models differ (AlphaPeptDeep RT, MS2
+and CCS against DIA-NN's own). The same predictor is also `-run`'s largest step
+after extraction (1,464 s for 5.14 M targets and their decoys at 16 threads),
+so it counts against the 60-minute resource gate as well.
+
+Why it matters: `generate` is the first thing every user runs, and its cost
+grows with every variable modification, charge state and missed cleavage.
+
+Why it is here rather than done: where the 18 minutes go (digest, the three
+models, writing) has not been measured.

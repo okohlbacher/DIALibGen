@@ -18,7 +18,10 @@ phase_table.tsv columns
   cpu_src      'process' or 'thread', as above
   cores        cpu_s / wall_s = mean active cores
   run_threads  mean number of threads in state R at the samples inside the phase, the sampler excluded
-  peak_rss_gb  largest VmRSS sample inside the phase (GiB, 100 ms resolution)
+  peak_rss_gb  largest VmRSS sample inside the phase (GiB, 100 ms resolution); when the process
+               high-water mark (VmHWM) rose between the last sample before the phase and the first one
+               after it, that VmHWM if larger, so a spike between two samples is not missed (the
+               window is then up to one sample wider than the phase)
   share_wall   wall_s / TOTAL wall_s
 predictor_table.tsv columns (one row per model)
   model, sessions (max worker index + 1), calls (predict calls = dispatches), chunks, rows,
@@ -72,6 +75,7 @@ def analyse(run):
     ts = [float(r["t_s"]) for r in pr]
     cpu = [float(r["utime_s"]) + float(r["stime_s"]) for r in pr]
     rss = [int(r["rss_kb"]) for r in pr]
+    hwm = [int(r["hwm_kb"]) for r in pr]
     nrun = [int(r["n_run"]) - 1 for r in pr]   # the sampler is running while it samples
 
     def cpu_at(t):
@@ -91,6 +95,15 @@ def analyse(run):
             j = min(i0, len(ts) - 1)
             return [arr[j]]
         return arr[i0:i1]
+
+    def peak(t0, t1):
+        p = max(window(t0, t1, rss))
+        i0 = bisect.bisect_right(ts, t0) - 1        # last sample at or before the start
+        i1 = min(bisect.bisect_left(ts, t1), len(ts) - 1)   # first sample at or after the end
+        before = hwm[i0] if i0 >= 0 else 0
+        if hwm[i1] > before:
+            p = max(p, hwm[i1])
+        return p
 
     start = float(meta.get("process_start_s", 0.0))
     end = float(meta.get("end_s", ts[-1]))
@@ -126,7 +139,7 @@ def analyse(run):
         rows.append(dict(phase=name, t0_s=t0, t1_s=t1, wall_s=wall, cpu_s=c, cpu_src=src,
                          cores=c / wall if wall > 0 else 0.0,
                          run_threads=sum(nr) / len(nr),
-                         peak_rss_gb=max(window(t0, t1, rss)) / 1048576.0,
+                         peak_rss_gb=peak(t0, t1) / 1048576.0,
                          share_wall=wall / total_wall))
     # merge the gaps into one row, keep order of first appearance
     merged, gap = [], None
@@ -153,7 +166,7 @@ def analyse(run):
     nr_all = window(start, end, nrun)
     merged.append(dict(phase="TOTAL", t0_s=start, t1_s=end, wall_s=total_wall, cpu_s=cpu_at(end), cpu_src="process",
                        cores=cpu_at(end) / total_wall, run_threads=sum(nr_all) / len(nr_all),
-                       peak_rss_gb=max(rss) / 1048576.0, share_wall=1.0))
+                       peak_rss_gb=max(max(rss), max(hwm)) / 1048576.0, share_wall=1.0))
 
     # predictor efficiency
     pred = []

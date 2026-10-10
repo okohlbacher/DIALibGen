@@ -582,6 +582,13 @@ namespace ODIA
       // Fragment annotation, base-peak floor, ranking and the cap.
       trace::Scope post_step("post", 2);
       post_step.fields().rows = static_cast<std::int64_t>(last - base);
+      // Tracing only: the step's four parts, each summed over the block's
+      // precursors (four clock reads per precursor, ~2 % of the step).
+      const bool split_post = post_step.active();
+      const double post_t0 = split_post ? trace::now() : 0.0;
+      double part[4] = {0.0, 0.0, 0.0, 0.0};   // enumerate, rank, select, emit
+      double mark = 0.0;
+      const auto lap = [&](int k) { const double now = trace::now(); part[k] += now - mark; mark = now; };
       for (std::size_t i = base; i < last; ++i)
       {
         const auto& spectrum = spectra[i - base];
@@ -609,7 +616,9 @@ namespace ODIA
         }
 
         // Re-enumerate without the m/z cap: the cap is what has to be redone.
+        if (split_post) { mark = trace::now(); }
         enumerateAllFragments(peptides[i - base], params, charges[i - base], fragments);
+        if (split_post) { lap(0); }
 
         const std::size_t residues = peptides[i - base].size();
         // Base-peak relative, so one absolute threshold cannot be right for a
@@ -648,6 +657,7 @@ namespace ODIA
           if (!(intensity > floor)) { continue; }
           ranked.emplace_back(intensity, f);
         }
+        if (split_post) { lap(1); }
 
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b) {
@@ -700,6 +710,7 @@ namespace ODIA
         // would have to clear is not searchable, and `-min_library_fragments`
         // drops it symmetrically at load.
         if (ranked.size() < params.min_fragments) { ranked.clear(); }
+        if (split_post) { lap(2); }
 
         Library::checkTransitionCapacity(built.product_mz.size(), ranked.size());
         for (const auto& [intensity, f] : ranked)
@@ -712,6 +723,18 @@ namespace ODIA
           built.loss.push_back(LossType::None);
         }
         count[i] = static_cast<std::uint32_t>(ranked.size());
+        if (split_post) { lap(3); }
+      }
+      if (split_post)
+      {
+        // Aggregates, not intervals: t0 is the start of the post step and
+        // t1 - t0 the summed time (docs/tracing.md).
+        static const char* const names[4] = {"post_enumerate", "post_rank", "post_select", "post_emit"};
+        trace::Fields f;
+        f.model = "MS2";
+        f.idx = static_cast<std::int64_t>(base / BLOCK);
+        f.rows = static_cast<std::int64_t>(last - base);
+        for (int k = 0; k < 4; ++k) { trace::record(names[k], 3, post_t0, post_t0 + part[k], -1.0, f); }
       }
     }
 

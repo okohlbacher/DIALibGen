@@ -65,8 +65,18 @@ Regions recorded by `generate`:
 | 0 | `setup`, `fasta_read`, `digest`, `enumerate`, `rt`, `irt_fit`, `ms2`, `ccs`, `decoys`, `fingerprint`, `write`, `teardown` |
 | 1 | `rt`: `unique_parse`, `sessions`, `predict`, `assign`; `ms2`: `sessions`, `reserve`, `block`, `finalize`; `ccs`: `sessions`, `block`; `fingerprint`: `hash_fasta`, `hash_model`; `write`: `build_arrays`, `finish_arrays`, `write_table`, `commit` (Parquet) or `format_rows`, `close`, `commit` (TSV) |
 | 2 | inside each `block`: `parse` (AASequence::fromString), `predict`, `post` (fragment enumeration, base-peak floor, ranking and cap for MS2; ion mobility for CCS) |
-| 3 | `session_create`, `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch) |
+| 3 | `session_create`, `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch); inside each MS2 `post`: `post_enumerate`, `post_rank`, `post_select`, `post_emit` (aggregates, below) |
 | 4 | `encode` (tokenisation and tensors), `ort_run` (ONNX Runtime `Run`), `unpack` (validation and copy-out) |
+
+The four `post_*` rows of an MS2 block are sums, not intervals: the post step
+loops over precursors, so each part is timed per precursor and summed over the
+block. `t0_s` is the start of the block's `post` step, `dur_s` the summed time,
+`t1_s = t0_s + dur_s`, and `cpu_s` is -1. `post_enumerate` is the fragment
+enumeration without the m/z cap; `post_rank` the base-peak floor and the
+lookup of each fragment's predicted intensity; `post_select` the sort, the
+doubly-charged quota, the cap and the minimum-fragment check; `post_emit`
+appending the transitions. Precursors whose prediction failed are copied
+unchanged and fall in none of the four.
 
 Phases follow one another on the main thread. Time between them (log output)
 belongs to no phase. A phase ends when its function returns, so the part of a

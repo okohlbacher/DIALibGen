@@ -182,7 +182,7 @@ namespace ODIA
     std::string namedAccession(std::string_view token, char residue, bool n_term, bool c_term)
     {
       using Mod = OpenMS::ResidueModification;
-      const OpenMS::String name{std::string(token)};
+      const std::string name{token};
       const auto* database = OpenMS::ModificationsDB::getInstance();
       // Avoid the database's per-token warning for unknown names; the caller counts them.
       if (!database->has(name)) { return {}; }

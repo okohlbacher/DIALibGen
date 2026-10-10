@@ -263,7 +263,7 @@ namespace ODIA
     }
     stats.peptides = peptide_to_proteins.size();
 
-    // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
+    // In OpenMS 3.5, StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
     // the two are distinct types and no implicit conversion exists between the
     // vectors even though String converts to and from std::string element-wise.
     // Built explicitly so this compiles against a stock OpenMS release and not

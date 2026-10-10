@@ -57,7 +57,8 @@ if(TARGET DIALibGen)
   add_test(NAME write_ctd
            COMMAND ${CMAKE_COMMAND} -E env bash
                    "${CMAKE_CURRENT_SOURCE_DIR}/write_ctd_test.sh"
-                   $<TARGET_FILE:DIALibGen>)
+                   $<TARGET_FILE:DIALibGen>
+                   $<IF:$<BOOL:${DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG}>,0,1>)
   set_tests_properties(write_ctd PROPERTIES SKIP_RETURN_CODE 77)
 
   # -write_config must emit the EFFECTIVE config: every default materialised, so

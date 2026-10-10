@@ -53,8 +53,25 @@ text = ("# Parameter reference\n\nGenerated from DIALibGen " + label +
         "| Option | Type | Default | Constraints | Description |\n"
         "|---|---|---|---|---|\n" + "\n".join(rows(instance)) + "\n")
 target = Path(__file__).resolve().parents[1] / "docs" / "parameters.md"
+
+# TOPPBase's common options are described by OpenMS, whose wording changes between
+# releases (3.6 added "(0 = all available cores)" to -threads). The check therefore
+# ignores their description, so one reference serves every supported OpenMS; name,
+# type, default and constraints still have to match.
+OPENMS_COMMON = ("log", "debug", "threads", "no_progress", "force", "test")
+
+
+def comparable(markdown):
+    lines = []
+    for line in markdown.splitlines():
+        if any(line.startswith("| `-" + name + "` |") for name in OPENMS_COMMON):
+            line = line.rsplit(" | ", 1)[0]
+        lines.append(line)
+    return lines
+
+
 if args.check:
-    if not target.exists() or target.read_text() != text:
+    if not target.exists() or comparable(target.read_text()) != comparable(text):
         raise SystemExit("Parameter reference is stale; run scripts/update-parameters.py BINARY")
 else:
     target.write_text(text)

@@ -50,6 +50,32 @@ if(NOT OpenMS_VERSION OR OpenMS_VERSION VERSION_LESS 3.5)
 endif()
 message(STATUS "OpenMS: ${OpenMS_VERSION} (${OpenMS_DIR})")
 
+# OpenMS 3.6 moved TOPPBase into its own library, OpenMS_CLI, and dropped the
+# constructor's `official` flag. Probe the header rather than OpenMS_VERSION:
+# the pinned Windows build of OpenMS 3.5.0 reports version 3.6.0.
+include(CheckCXXSourceCompiles)
+set(CMAKE_REQUIRED_LIBRARIES OpenMS)
+if(TARGET OpenMS_CLI)
+  list(APPEND CMAKE_REQUIRED_LIBRARIES OpenMS_CLI)
+endif()
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+check_cxx_source_compiles([[
+  #include <OpenMS/APPLICATIONS/TOPPBase.h>
+  struct Probe : OpenMS::TOPPBase
+  {
+    Probe() : TOPPBase("p", "p", std::vector<OpenMS::Citation>{}) {}
+    void registerOptionsAndFlags_() override {}
+    ExitCodes main_(int, const char**) override { return EXECUTION_OK; }
+  };
+  void probe() { Probe p; }
+]] DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG)
+unset(CMAKE_REQUIRED_LIBRARIES)
+unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+if(DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG AND NOT TARGET OpenMS_CLI)
+  message(FATAL_ERROR "This OpenMS installation lacks the TOPP tool framework library "
+                      "OpenMS_CLI (bioconda: install 'openms', not only 'libopenms').")
+endif()
+
 find_package(Arrow CONFIG REQUIRED)
 find_package(Parquet CONFIG REQUIRED)
 if(Arrow_VERSION VERSION_LESS 19)
@@ -171,6 +197,12 @@ if(DIALIBGEN_BUILD_TOOL)
   add_executable(DIALibGen src/DIALibGen.cpp src/Generate.cpp src/Refine.cpp)
   target_link_libraries(DIALibGen PRIVATE
     odia_refine nlohmann_json::nlohmann_json)
+  if(TARGET OpenMS_CLI)
+    target_link_libraries(DIALibGen PRIVATE OpenMS_CLI)
+  endif()
+  if(DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG)
+    target_compile_definitions(DIALibGen PRIVATE DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG)
+  endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Retain ELF identity when AppImage packaging rewrites RPATHs.
     target_link_options(DIALibGen PRIVATE "-Wl,--build-id=sha1")

@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Builds against OpenMS 3.6.0 as well as 3.5.0. OpenMS 3.6 moved `TOPPBase`
+  into the `OpenMS_CLI` library, dropped its `official` constructor flag and
+  `OpenMS::String`, and writes tool descriptions without the tool-registry
+  shim, which is now used with OpenMS 3.5 only. Libraries generated with
+  either OpenMS are identical.
+
 ## [0.11.1] — 2026-10-10
 
 First published 0.11 release. 0.11.0 was validated but not published; its

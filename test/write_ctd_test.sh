@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Tool description export (-write_ctd / -write_cwl / -write_json) against the
 # real binary. DIALibGen is not in OpenMS's hard-coded ToolHandler
-# registry, so TOPPBase's descriptor writers die with "Requested tool
+# registry, so OpenMS 3.5's descriptor writers die with "Requested tool
 # 'DIALibGen' does not exist!" and exit 8 while -write_ini works;
 # src/DIALibGen.cpp registers the tool with ToolHandler for the
-# duration of a descriptor run.
+# duration of a descriptor run. OpenMS 3.6 describes unregistered tools.
 #
 # What this has to prove, beyond "a file appeared":
 #   - the CTD carries this tool's OWN version and its REAL parameter set, which
@@ -20,6 +20,9 @@
 # Exits 77 (ctest SKIP) when python3 is unavailable or the binary cannot start.
 set -u
 BIN="$1"
+# 1: the OpenMS (3.5) writes descriptors only for registered tools, so
+# src/DIALibGen.cpp registers the tool; 0: it (3.6+) needs no registration.
+NEEDS_SHIM="${2:-1}"
 
 PY=""
 for c in python3 python; do command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }; done
@@ -139,10 +142,16 @@ cmp -s "$TMP/help_off.txt" "$TMP/help_mixed.txt" \
 env OPENMS_TTD_INTERNAL_PATH="$NOSHIM" "$BIN" -write_ini "$TMP/off.ini" >/dev/null 2>&1
 cmp -s "$TMP/off.ini" "$TMP/ref.ini" || fail "-write_ini output changed"
 
-# A user-set OPENMS_TTD_INTERNAL_PATH must win over the shim, so a bogus one
-# leaves the stock OpenMS failure in place rather than being silently replaced.
-if env OPENMS_TTD_INTERNAL_PATH="$NOSHIM" "$BIN" -write_ctd "$TMP/out" >/dev/null 2>&1; then
-  fail "the shim overrode a user-set OPENMS_TTD_INTERNAL_PATH"
+if [ "$NEEDS_SHIM" = 1 ]; then
+  # A user-set OPENMS_TTD_INTERNAL_PATH must win over the shim, so a bogus one
+  # leaves the stock OpenMS failure in place rather than being silently replaced.
+  if env OPENMS_TTD_INTERNAL_PATH="$NOSHIM" "$BIN" -write_ctd "$TMP/out" >/dev/null 2>&1; then
+    fail "the shim overrode a user-set OPENMS_TTD_INTERNAL_PATH"
+  fi
+else
+  # Without a shim, an unrelated registry path must not get in the way.
+  env OPENMS_TTD_INTERNAL_PATH="$NOSHIM" "$BIN" -write_ctd "$TMP/out" >/dev/null 2>&1 \
+    || fail "-write_ctd failed with OPENMS_TTD_INTERNAL_PATH set"
 fi
 
 # ------------------------------------------------------------- CWL and JSON

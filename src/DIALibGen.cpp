@@ -14,13 +14,24 @@
 #include <memory>
 namespace fs = std::filesystem;
 
+namespace
+{
+  const std::vector<OpenMS::Citation> citations{
+    {"Zeng WF et al.", "AlphaPeptDeep: a modular deep learning framework to predict peptide properties for proteomics",
+     "Nat Commun 2022; 13: 7238", "10.1038/s41467-022-34904-3"}};
+}
+
 DIALibGen::DIALibGen()
-  : TOPPBase("DIALibGen", "Generate, refine and tune DIA spectral libraries.", false,
-      {{"Zeng WF et al.", "AlphaPeptDeep: a modular deep learning framework to predict peptide properties for proteomics",
-        "Nat Commun 2022; 13: 7238", "10.1038/s41467-022-34904-3"}})
+// Not an official OpenMS tool, so not in OpenMS's tool registry.
+#ifdef DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG  // OpenMS >= 3.6
+  : TOPPBase("DIALibGen", "Generate, refine and tune DIA spectral libraries.", citations,
+             /*toolhandler_test=*/false)
+#else  // OpenMS 3.5
+  : TOPPBase("DIALibGen", "Generate, refine and tune DIA spectral libraries.", /*official=*/false, citations)
+#endif
 {
   version_ = DIALIBGEN_VERSION;
-  verboseVersion_ = OpenMS::String(DIALIBGEN_VERSION) + " (OpenMS " + OpenMS::VersionInfo::getVersion() + ")";
+  verboseVersion_ = std::string(DIALIBGEN_VERSION) + " (OpenMS " + OpenMS::VersionInfo::getVersion() + ")";
 }
 
 void DIALibGen::registerOptionsAndFlags_()
@@ -183,7 +194,10 @@ int main(int argc, const char** argv)
 #endif
 
   std::unique_ptr<ToolHandlerRegistration> ttd;
+#ifndef DIALIBGEN_TOPPBASE_WITHOUT_OFFICIAL_FLAG
+  // OpenMS 3.5 writes descriptors only for registered tools; 3.6 also for unregistered ones.
   if (want_descriptor) { ttd = std::make_unique<ToolHandlerRegistration>(); }
+#endif
 
   DIALibGen tool;
   OpenMS::TOPPBase::ExitCodes rc;

@@ -1,8 +1,10 @@
 # Build from source
 
 DIALibGen requires CMake 3.21+, a C++23 compiler compatible with the installed
-OpenMS, OpenMS 3.5, Arrow/Parquet 19+, ONNX Runtime and nlohmann/json. OpenMS's
-public headers also require Boost, Eigen and its other exported dependencies.
+OpenMS, OpenMS 3.5 or 3.6, Arrow/Parquet 19+, ONNX Runtime and nlohmann/json.
+OpenMS's public headers also require Boost, Eigen and its other exported
+dependencies. OpenMS 3.6 also needs its TOPP tool framework library,
+`OpenMS_CLI` (bioconda: the `openms` package, not `libopenms` alone).
 LibTorch and Qt6 Core enable RT/CCS training and are enabled by default.
 
 Point `CMAKE_PREFIX_PATH` at your installed dependency prefixes. On macOS,

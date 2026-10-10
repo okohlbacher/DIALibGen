@@ -769,7 +769,8 @@ namespace ODIA::trace
     note("argv", sanitize(cmd));
     note("hardware_concurrency", std::to_string(std::thread::hardware_concurrency()));
     for (const char* var : {"ODIA_TRACE", "ODIA_TRACE_INTERVAL_MS", "ODIA_TRACE_SNAPSHOT_MIN_S",
-                            "ODIA_ORT_PROFILE", "OMP_NUM_THREADS", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES"})
+                            "ODIA_ORT_PROFILE", "ODIA_MAX_SESSIONS", "ODIA_INTRA_OP", "ODIA_SPIN",
+                            "ODIA_BATCH_ROWS", "ODIA_MS2_BLOCK", "OMP_NUM_THREADS", "OMP_WAIT_POLICY", "GOMP_SPINCOUNT", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES"})
     {
       if (const char* v = std::getenv(var)) { note(std::string("env.") + var, sanitize(v)); }
     }

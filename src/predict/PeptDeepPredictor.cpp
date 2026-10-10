@@ -42,6 +42,30 @@ namespace
   /// Numbers predictor calls and predictor instances in the trace (tracing only).
   std::atomic<std::int64_t> g_trace_calls{0};
   std::atomic<std::int64_t> g_trace_instances{0};
+
+  /// Measurement knobs (perf/threads-analysis). Unset, each one leaves the
+  /// behaviour exactly as it was. Read once per process.
+  long perfKnob(const char* name, long fallback)
+  {
+    const char* v = std::getenv(name);
+    if (v == nullptr || *v == '\0') { return fallback; }
+    char* end = nullptr;
+    const long x = std::strtol(v, &end, 10);
+    return (end != v && x >= 0) ? x : fallback;
+  }
+  /// ODIA_INTRA_OP: intra-op threads per session, replacing the caller's value.
+  long knobIntraOp() { static const long v = perfKnob("ODIA_INTRA_OP", -1); return v; }
+  /// ODIA_SPIN: 0 or 1, ONNX Runtime's session.intra_op.allow_spinning (and inter_op).
+  long knobSpin() { static const long v = perfKnob("ODIA_SPIN", -1); return v; }
+  /// ODIA_BATCH_ROWS: rows per chunk instead of MAX_BATCH_ROWS.
+  std::size_t knobBatchRows()
+  {
+    static const std::size_t v = [] {
+      const long x = perfKnob("ODIA_BATCH_ROWS", -1);
+      return x > 0 ? static_cast<std::size_t>(x) : ODIA::PeptDeepPredictor::MAX_BATCH_ROWS;
+    }();
+    return v;
+  }
 }
 
 namespace ODIA
@@ -87,7 +111,14 @@ namespace ODIA
                                        int sessions, int gpu_device)
     : impl_(std::make_unique<Impl>())
   {
+    if (knobIntraOp() > 0) { intra_op_threads = static_cast<int>(knobIntraOp()); }
     if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
+    if (knobSpin() == 0 || knobSpin() == 1)
+    {
+      const char* spin = knobSpin() == 1 ? "1" : "0";
+      impl_->options.AddConfigEntry("session.intra_op.allow_spinning", spin);
+      impl_->options.AddConfigEntry("session.inter_op.allow_spinning", spin);
+    }
     impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     // ODIA_ORT_PROFILE=<prefix>: ONNX Runtime's own per-operator profile, one
@@ -180,6 +211,12 @@ namespace ODIA
         impl_->options = Ort::SessionOptions{};
         impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
+        if (knobSpin() == 0 || knobSpin() == 1)
+        {
+          const char* spin = knobSpin() == 1 ? "1" : "0";
+          impl_->options.AddConfigEntry("session.intra_op.allow_spinning", spin);
+          impl_->options.AddConfigEntry("session.inter_op.allow_spinning", spin);
+        }
         try
         {
           impl_->session = makeSession(0);
@@ -251,6 +288,9 @@ namespace ODIA
     {
       trace::note(std::string("ort_version"), Ort::GetVersionString());
       trace::note(std::string("predictor.") + impl_->kind + ".sessions", std::to_string(sessionCount()));
+      trace::note(std::string("predictor.") + impl_->kind + ".intra_op", std::to_string(intra_op_threads));
+      trace::note(std::string("predictor.") + impl_->kind + ".spin", std::to_string(knobSpin()));
+      trace::note(std::string("predictor.") + impl_->kind + ".batch_rows", std::to_string(knobBatchRows()));
     }
   }
 
@@ -272,12 +312,13 @@ namespace ODIA
     std::vector<std::vector<std::size_t>> chunks;
     for (const auto& whole_group : PeptDeepEncoder::groupByLength(peptides))
     {
-      for (std::size_t offset = 0; offset < whole_group.size(); offset += MAX_BATCH_ROWS)
+      const std::size_t batch_rows = knobBatchRows();
+      for (std::size_t offset = 0; offset < whole_group.size(); offset += batch_rows)
       {
         chunks.emplace_back(
           whole_group.begin() + static_cast<std::ptrdiff_t>(offset),
           whole_group.begin() + static_cast<std::ptrdiff_t>(
-            std::min(offset + MAX_BATCH_ROWS, whole_group.size())));
+            std::min(offset + batch_rows, whole_group.size())));
       }
     }
     // Tracing: one "dispatch" event per call, one "worker" per thread and one

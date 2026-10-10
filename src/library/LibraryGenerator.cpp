@@ -14,6 +14,7 @@
 #include <OpenMS/CHEMISTRY/ResidueModification.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 
+#include <cstdlib>
 #include <iostream>
 #include <algorithm>
 #include <iomanip>
@@ -402,11 +403,30 @@ namespace ODIA
                 << " sessions " << p.sessionCount() << "\n";
     }
 
+    /// Measurement knob (perf/threads-analysis); unset leaves the default.
+    long perfKnob(const char* name, long fallback)
+    {
+      const char* v = std::getenv(name);
+      if (v == nullptr || *v == '\0') { return fallback; }
+      char* end = nullptr;
+      const long x = std::strtol(v, &end, 10);
+      return (end != v && x > 0) ? x : fallback;
+    }
+
     int inferenceSessions(unsigned requested)
     {
       const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
       const unsigned want = requested == 0 ? hardware : requested;
-      return static_cast<int>(std::min(want, 16u));
+      // ODIA_MAX_SESSIONS replaces the cap of 16 (measurement only).
+      static const unsigned cap = static_cast<unsigned>(perfKnob("ODIA_MAX_SESSIONS", 16));
+      return static_cast<int>(std::min(want, cap));
+    }
+
+    /// ODIA_MS2_BLOCK: precursors per MS2 block instead of 20000 (measurement only).
+    std::size_t ms2Block()
+    {
+      static const std::size_t v = static_cast<std::size_t>(perfKnob("ODIA_MS2_BLOCK", 20000));
+      return v;
     }
   } // namespace
 
@@ -553,7 +573,7 @@ namespace ODIA
     reserve_step.end();
 
     // Blocked so that peak memory is set by the block, not by the proteome.
-    constexpr std::size_t BLOCK = 20000;
+    const std::size_t BLOCK = ms2Block();
     std::size_t unpredicted = 0;
     std::vector<Fragment> fragments;
     std::vector<std::pair<float, Fragment>> ranked;

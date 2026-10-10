@@ -16,7 +16,6 @@
 #include <functional>
 #include <limits>
 #include <map>
-#include <unordered_map>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -32,7 +31,6 @@
 #endif
 #if defined(__linux__)
 #include <dirent.h>
-#include <dlfcn.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <sys/syscall.h>
@@ -132,6 +130,18 @@ namespace ODIA::trace
       return (end != v && x >= 0) ? x : fallback;
     }
 
+    /// A number of seconds; "off" or a negative value give -1 (disabled).
+    [[maybe_unused]] double envSeconds(const char* name, double fallback)
+    {
+      const char* v = std::getenv(name);
+      if (v == nullptr || *v == '\0') { return fallback; }
+      if (std::strcmp(v, "off") == 0) { return -1.0; }
+      char* end = nullptr;
+      const double x = std::strtod(v, &end);
+      if (end == v) { return fallback; }
+      return x < 0.0 ? -1.0 : x;
+    }
+
     std::string sanitize(std::string s)
     {
       for (char& c : s) { if (c == '\t' || c == '\n' || c == '\r') { c = ' '; } }
@@ -150,7 +160,8 @@ namespace ODIA::trace
 #if defined(__linux__)
     // ---------------------------------------------------------------- /proc
 
-    /// Whole file into @p out with plain read(2): no stdio, no locale.
+    /// Whole file into @p out with plain read(2): no stdio, no locale. Used
+    /// for files of unbounded size (numa_maps) at phase boundaries only.
     bool slurp(const char* path, std::string& out)
     {
       out.clear();
@@ -168,19 +179,38 @@ namespace ODIA::trace
       return true;
     }
 
-    /// Value of "Key:   123 kB" lines (the number only).
-    long long field(const std::string& text, const char* key)
+    /// A small /proc file into a caller's buffer, NUL-terminated; no allocation.
+    /// Returns the length, or -1. Truncates at @p cap - 1 bytes.
+    ssize_t readSmall(const char* path, char* buf, std::size_t cap)
+    {
+      const int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+      if (fd < 0) { return -1; }
+      std::size_t len = 0;
+      while (len + 1 < cap)
+      {
+        const ssize_t got = ::read(fd, buf + len, cap - 1 - len);
+        if (got < 0) { ::close(fd); return -1; }
+        if (got == 0) { break; }
+        len += static_cast<std::size_t>(got);
+      }
+      ::close(fd);
+      buf[len] = '\0';
+      return static_cast<ssize_t>(len);
+    }
+
+    /// Value of "Key:   123 kB" or "key 123" lines (the number only), -1 if absent.
+    long long field(std::string_view text, const char* key)
     {
       const std::size_t klen = std::strlen(key);
       std::size_t pos = 0;
-      while ((pos = text.find(key, pos)) != std::string::npos)
+      while ((pos = text.find(key, pos)) != std::string_view::npos)
       {
         const char after = pos + klen < text.size() ? text[pos + klen] : '\0';
         if ((pos == 0 || text[pos - 1] == '\n') && (after == ':' || after == ' ' || after == '\t'))
         {
           std::size_t p = pos + klen;
           while (p < text.size() && (text[p] == ' ' || text[p] == '\t' || text[p] == ':')) { ++p; }
-          return std::strtoll(text.c_str() + p, nullptr, 10);
+          return std::strtoll(text.data() + p, nullptr, 10);
         }
         pos += klen;
       }
@@ -192,28 +222,42 @@ namespace ODIA::trace
       return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
     }
 
-    struct MallInfo2   // glibc >= 2.33 layout; looked up at run time
+    double traceSeconds()
     {
-      std::size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost;
-    };
-    using MallInfo2Fn = MallInfo2 (*)();
+      return std::chrono::duration<double>(Clock::now() - state().epoch).count();
+    }
 
+    /// The per-thread values whose change makes a thread worth a row.
+    struct ThreadRec
+    {
+      long tid = 0;
+      char state = '?';
+      long long minflt = 0, majflt = 0, utime = 0, stime = 0, cpu = -1;
+      bool same(const ThreadRec& o) const
+      {
+        return state == o.state && minflt == o.minflt && majflt == o.majflt &&
+               utime == o.utime && stime == o.stime && cpu == o.cpu;
+      }
+    };
+
+    /// The periodic sampler. It reads only counters that the kernel hands out
+    /// without taking the allocator's arena locks or the process's mmap lock:
+    /// /proc/self/status and /proc/self/io, getrusage(), /proc/vmstat, and per
+    /// thread task/<tid>/stat, task/<tid>/schedstat and task/<tid>/status. In
+    /// the steady state it allocates nothing: buffers are fixed or reused.
     struct Sampler
     {
-      std::thread fast, slow;
+      std::thread fast;
       std::mutex mutex;
       std::condition_variable cv;
       bool stop = false;
-      long fast_ms = 100, numa_ms = 2000, smaps_ms = 10000, mallocinfo_ms = 2000;
+      long fast_ms = 100;
       double tck = 100.0;
-      MallInfo2Fn mallinfo2 = nullptr;
-      std::size_t fast_samples = 0, slow_samples = 0;
-      /// Per thread: state, faults, CPU times and last CPU at its previous row.
-      /// A thread whose values have not changed gets no row and no further
-      /// reads -- an idle OpenMP pool of 128 threads otherwise costs ~10 ms a tick.
-      std::unordered_map<std::string, std::string> last_seen;
-
-      double t() const { return std::chrono::duration<double>(Clock::now() - state().epoch).count(); }
+      std::size_t fast_samples = 0;
+      double sample_ms_max = 0.0, sample_ms_sum = 0.0;
+      std::vector<ThreadRec> prev, cur;   // sorted by tid
+      char buf[16384];
+      char tbuf[4096];
 
       bool sleepUntil(Clock::time_point when)
       {
@@ -232,13 +276,16 @@ namespace ODIA::trace
           if (threads) { std::fclose(threads); }
           return;
         }
+        prev.reserve(4096);
+        cur.reserve(4096);
         std::fputs("t_s\tphase\tsample_ms\tutime_s\tstime_s\tthreads\tn_run\tn_sleep\tn_disk\tn_other\t"
                    "rss_kb\trss_anon_kb\trss_file_kb\trss_shmem_kb\thwm_kb\tvm_kb\t"
                    "minflt\tmajflt\tvcsw\tnvcsw\tinblock\toublock\t"
                    "rchar\twchar\tsyscr\tsyscw\tread_bytes\twrite_bytes\t"
-                   "mi_arena_b\tmi_mmap_b\tmi_inuse_b\tmi_free_b\tmi_keepcost_b\tmallinfo_ms\n", proc);
+                   "sys_numa_hit\tsys_numa_miss\tsys_numa_local\tsys_numa_other\t"
+                   "sys_numa_hint_faults\tsys_numa_hint_faults_local\tsys_numa_pages_migrated\n", proc);
         std::fputs("t_s\ttid\tcomm\tstate\tcpu\tutime_s\tstime_s\trun_s\twait_s\tslices\t"
-                   "vcsw\tnvcsw\tmigrations\tminflt\tmajflt\n", threads);
+                   "vcsw\tnvcsw\tminflt\tmajflt\n", threads);
         auto next = Clock::now();
         for (;;)
         {
@@ -256,291 +303,136 @@ namespace ODIA::trace
       void sampleFast(FILE* proc, FILE* threads, bool every_thread)
       {
         const auto c0 = Clock::now();
-        const double ts = t();
+        const double ts = traceSeconds();
         const char* phase = state().phase.load(std::memory_order_relaxed);
-        std::string text;
 
         rusage ru{};
-        ::getrusage(RUSAGE_SELF, &ru);
+        ::getrusage(RUSAGE_SELF, &ru);   // sums the thread group under the signal lock only
 
         long long rss = -1, anon = -1, file = -1, shmem = -1, hwm = -1, vm = -1;
-        if (slurp("/proc/self/status", text))
+        if (readSmall("/proc/self/status", buf, sizeof buf) > 0)
         {
+          const std::string_view text(buf);
           rss = field(text, "VmRSS"); anon = field(text, "RssAnon"); file = field(text, "RssFile");
           shmem = field(text, "RssShmem"); hwm = field(text, "VmHWM"); vm = field(text, "VmSize");
         }
         long long rchar = -1, wchar = -1, syscr = -1, syscw = -1, rbytes = -1, wbytes = -1;
-        if (slurp("/proc/self/io", text))
+        if (readSmall("/proc/self/io", buf, sizeof buf) > 0)
         {
+          const std::string_view text(buf);
           rchar = field(text, "rchar"); wchar = field(text, "wchar"); syscr = field(text, "syscr");
           syscw = field(text, "syscw"); rbytes = field(text, "read_bytes"); wbytes = field(text, "write_bytes");
         }
-
-        double mi_ms = -1.0;
-        MallInfo2 mi{};
-        bool have_mi = false;
-        if (mallinfo2 != nullptr)
+        // System-wide page-allocation and NUMA-balancing counters (not per
+        // process): on an otherwise idle node their rate is this run's.
+        long long nh = -1, nm = -1, nl = -1, no = -1, hf = -1, hfl = -1, mig = -1;
+        if (readSmall("/proc/vmstat", buf, sizeof buf) > 0)
         {
-          const auto m0 = Clock::now();
-          mi = mallinfo2();
-          mi_ms = msSince(m0);
-          have_mi = true;
+          const std::string_view text(buf);
+          nh = field(text, "numa_hit"); nm = field(text, "numa_miss"); nl = field(text, "numa_local");
+          no = field(text, "numa_other"); hf = field(text, "numa_hint_faults");
+          hfl = field(text, "numa_hint_faults_local"); mig = field(text, "numa_pages_migrated");
         }
 
-        // Per thread.
+        // Per thread. A thread whose state, faults, CPU times and last CPU are
+        // unchanged since its previous row gets no row and no further reads.
         int n_run = 0, n_sleep = 0, n_disk = 0, n_other = 0, n_threads = 0;
-        std::string stat, sched, schedstat, path;
-        std::unordered_map<std::string, std::string> seen;
-        seen.reserve(last_seen.size() + 16);
+        cur.clear();
+        char path[64];
         if (DIR* d = ::opendir("/proc/self/task"))
         {
           while (dirent* entry = ::readdir(d))
           {
             if (entry->d_name[0] < '0' || entry->d_name[0] > '9') { continue; }
-            const std::string base = std::string("/proc/self/task/") + entry->d_name;
-            if (!slurp((base + "/stat").c_str(), stat)) { continue; }   // exited meanwhile
-            const auto open_paren = stat.find('(');
-            const auto close_paren = stat.rfind(')');
-            if (open_paren == std::string::npos || close_paren == std::string::npos) { continue; }
-            std::string comm = sanitize(stat.substr(open_paren + 1, close_paren - open_paren - 1));
+            const long tid = std::strtol(entry->d_name, nullptr, 10);
+            std::snprintf(path, sizeof path, "/proc/self/task/%ld/stat", tid);
+            const ssize_t len = readSmall(path, tbuf, sizeof tbuf);
+            if (len <= 0) { continue; }   // exited meanwhile
+            char* open_paren = std::strchr(tbuf, '(');
+            char* close_paren = std::strrchr(tbuf, ')');
+            if (open_paren == nullptr || close_paren == nullptr || close_paren + 2 >= tbuf + len) { continue; }
             // Fields after the command, numbered as in proc(5) from 3 (state).
-            std::vector<const char*> f;
-            f.reserve(50);
-            for (std::size_t p = close_paren + 2; p < stat.size();)
+            const char* f[40];
+            std::size_t nf = 0;
+            for (char* p = close_paren + 2; p < tbuf + len && nf < 40;)
             {
-              f.push_back(stat.c_str() + p);
-              const auto sp = stat.find(' ', p);
-              if (sp == std::string::npos) { break; }
+              f[nf++] = p;
+              char* sp = std::strchr(p, ' ');
+              if (sp == nullptr) { break; }
               p = sp + 1;
             }
-            if (f.size() < 37) { continue; }
-            const char state_c = *f[0];
-            const long long minflt = std::strtoll(f[7], nullptr, 10);
-            const long long majflt = std::strtoll(f[9], nullptr, 10);
-            const double utime = static_cast<double>(std::strtoll(f[11], nullptr, 10)) / tck;
-            const double stime = static_cast<double>(std::strtoll(f[12], nullptr, 10)) / tck;
-            const long long cpu = std::strtoll(f[36], nullptr, 10);
+            if (nf < 37) { continue; }
+            ThreadRec r;
+            r.tid = tid;
+            r.state = *f[0];
+            r.minflt = std::strtoll(f[7], nullptr, 10);
+            r.majflt = std::strtoll(f[9], nullptr, 10);
+            r.utime = std::strtoll(f[11], nullptr, 10);
+            r.stime = std::strtoll(f[12], nullptr, 10);
+            r.cpu = std::strtoll(f[36], nullptr, 10);
             ++n_threads;
-            switch (state_c)
+            switch (r.state)
             {
               case 'R': ++n_run; break;
               case 'S': ++n_sleep; break;
               case 'D': ++n_disk; break;
               default: ++n_other; break;
             }
-            // Only the per-thread fields: num_threads, vsize and rss in the
-            // same line are process-wide and change all the time.
-            std::string key(1, state_c);
-            for (const int k : {7, 9, 11, 12, 36})
-            {
-              key += ' ';
-              key.append(f[static_cast<std::size_t>(k)], std::strcspn(f[static_cast<std::size_t>(k)], " "));
-            }
-            const auto prev = last_seen.find(entry->d_name);
-            const bool changed = prev == last_seen.end() || prev->second != key;
-            seen.emplace(entry->d_name, std::move(key));
+            cur.push_back(r);
+            const auto it = std::lower_bound(prev.begin(), prev.end(), r.tid,
+                                             [](const ThreadRec& a, long t) { return a.tid < t; });
+            const bool changed = it == prev.end() || it->tid != r.tid || !it->same(r);
             if (!changed && !every_thread) { continue; }
+
+            char comm[32];
+            const std::size_t clen = std::min<std::size_t>(sizeof comm - 1,
+                                                           static_cast<std::size_t>(close_paren - open_paren - 1));
+            std::memcpy(comm, open_paren + 1, clen);
+            comm[clen] = '\0';
+            for (char* c = comm; *c; ++c) { if (*c == '\t' || *c == '\n') { *c = ' '; } }
+
             double run_s = -1.0, wait_s = -1.0;
             long long slices = -1;
-            if (slurp((base + "/schedstat").c_str(), schedstat))
+            std::snprintf(path, sizeof path, "/proc/self/task/%ld/schedstat", tid);
+            if (readSmall(path, tbuf, sizeof tbuf) > 0)
             {
-              char* end = nullptr;
-              run_s = static_cast<double>(std::strtoull(schedstat.c_str(), &end, 10)) * 1e-9;
-              wait_s = static_cast<double>(std::strtoull(end, &end, 10)) * 1e-9;
-              slices = std::strtoll(end, nullptr, 10);
+              char* e = nullptr;
+              run_s = static_cast<double>(std::strtoull(tbuf, &e, 10)) * 1e-9;
+              wait_s = static_cast<double>(std::strtoull(e, &e, 10)) * 1e-9;
+              slices = std::strtoll(e, nullptr, 10);
             }
-            long long vcsw = -1, nvcsw = -1, migrations = -1;
-            if (slurp((base + "/sched").c_str(), sched))
+            long long vcsw = -1, nvcsw = -1;
+            std::snprintf(path, sizeof path, "/proc/self/task/%ld/status", tid);
+            if (readSmall(path, tbuf, sizeof tbuf) > 0)
             {
-              // "name   :   value" lines; the keys are unique prefixes.
-              auto value = [&](const char* key) -> long long {
-                const auto p = sched.find(key);
-                if (p == std::string::npos) { return -1; }
-                const auto colon = sched.find(':', p);
-                return colon == std::string::npos ? -1 : std::strtoll(sched.c_str() + colon + 1, nullptr, 10);
-              };
-              vcsw = value("\nnr_voluntary_switches");
-              nvcsw = value("\nnr_involuntary_switches");
-              migrations = value("\nse.nr_migrations");
+              const std::string_view text(tbuf);
+              vcsw = field(text, "voluntary_ctxt_switches");
+              nvcsw = field(text, "nonvoluntary_ctxt_switches");
             }
-            else if (slurp((base + "/status").c_str(), sched))
-            {
-              vcsw = field(sched, "voluntary_ctxt_switches");
-              nvcsw = field(sched, "nonvoluntary_ctxt_switches");
-            }
-            std::fprintf(threads, "%.3f\t%s\t%s\t%c\t%lld\t%.2f\t%.2f\t%.6f\t%.6f\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
-                         ts, entry->d_name, comm.c_str(), state_c, cpu, utime, stime, run_s, wait_s,
-                         slices, vcsw, nvcsw, migrations, minflt, majflt);
+            std::fprintf(threads, "%.3f\t%ld\t%s\t%c\t%lld\t%.2f\t%.2f\t%.6f\t%.6f\t%lld\t%lld\t%lld\t%lld\t%lld\n",
+                         ts, r.tid, comm, r.state, r.cpu, static_cast<double>(r.utime) / tck,
+                         static_cast<double>(r.stime) / tck, run_s, wait_s, slices, vcsw, nvcsw,
+                         r.minflt, r.majflt);
           }
           ::closedir(d);
         }
-        last_seen.swap(seen);
+        std::sort(cur.begin(), cur.end(), [](const ThreadRec& a, const ThreadRec& b) { return a.tid < b.tid; });
+        prev.swap(cur);
 
         const double sample_ms = msSince(c0);
+        sample_ms_sum += sample_ms;
+        sample_ms_max = std::max(sample_ms_max, sample_ms);
         std::fprintf(proc,
                      "%.3f\t%s\t%.3f\t%.3f\t%.3f\t%d\t%d\t%d\t%d\t%d\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t"
-                     "%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t",
+                     "%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t"
+                     "%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
                      ts, phase, sample_ms,
                      static_cast<double>(ru.ru_utime.tv_sec) + static_cast<double>(ru.ru_utime.tv_usec) * 1e-6,
                      static_cast<double>(ru.ru_stime.tv_sec) + static_cast<double>(ru.ru_stime.tv_usec) * 1e-6,
                      n_threads, n_run, n_sleep, n_disk, n_other, rss, anon, file, shmem, hwm, vm,
                      ru.ru_minflt, ru.ru_majflt, ru.ru_nvcsw, ru.ru_nivcsw, ru.ru_inblock, ru.ru_oublock,
-                     rchar, wchar, syscr, syscw, rbytes, wbytes);
-        if (have_mi)
-        {
-          std::fprintf(proc, "%zu\t%zu\t%zu\t%zu\t%zu\t%.3f\n", mi.arena, mi.hblkhd, mi.uordblks,
-                       mi.fordblks, mi.keepcost, mi_ms);
-        }
-        else { std::fputs("-1\t-1\t-1\t-1\t-1\t-1\n", proc); }
+                     rchar, wchar, syscr, syscw, rbytes, wbytes, nh, nm, nl, no, hf, hfl, mig);
         ++fast_samples;
-      }
-
-      void slowLoop()
-      {
-        pthread_setname_np(pthread_self(), "odia-sampler2");
-        FILE* numa = numa_ms > 0 ? openOut("numa.tsv") : nullptr;
-        FILE* smaps = smaps_ms > 0 ? openOut("smaps.tsv") : nullptr;
-        FILE* minfo = mallocinfo_ms > 0 ? openOut("mallocinfo.tsv") : nullptr;
-        if (numa) { std::fputs("t_s\tphase\tcost_ms\tnode\ttotal_kb\tanon_kb\tfile_kb\thuge_kb\n", numa); }
-        if (smaps)
-        {
-          std::fputs("t_s\tphase\tcost_ms\trss_kb\tpss_kb\tpss_anon_kb\tpss_file_kb\tpss_dirty_kb\t"
-                     "anonymous_kb\tanon_huge_kb\tprivate_dirty_kb\tprivate_clean_kb\tshared_clean_kb\tswap_kb\n", smaps);
-        }
-        if (minfo)
-        {
-          std::fputs("t_s\tphase\tcost_ms\tarenas\tfast_free_b\trest_free_b\tmmap_count\tmmap_b\t"
-                     "system_current_b\tsystem_max_b\taspace_total_b\taspace_mprotect_b\n", minfo);
-        }
-        if (!numa && !smaps && !minfo) { return; }
-
-        // Staggered so the expensive page-table walks do not coincide.
-        const auto start = Clock::now();
-        auto due_numa = start + std::chrono::milliseconds(numa_ms > 0 ? numa_ms / 2 : 0);
-        auto due_smaps = start + std::chrono::milliseconds(smaps_ms > 0 ? smaps_ms / 4 : 0);
-        auto due_minfo = start + std::chrono::milliseconds(mallocinfo_ms > 0 ? mallocinfo_ms / 3 : 0);
-        for (;;)
-        {
-          auto next = Clock::time_point::max();
-          if (numa) { next = std::min(next, due_numa); }
-          if (smaps) { next = std::min(next, due_smaps); }
-          if (minfo) { next = std::min(next, due_minfo); }
-          if (sleepUntil(next)) { break; }
-          const auto now_tp = Clock::now();
-          if (numa && now_tp >= due_numa)
-          {
-            sampleNuma(numa);
-            due_numa = std::max(due_numa + std::chrono::milliseconds(numa_ms), Clock::now());
-          }
-          if (smaps && now_tp >= due_smaps)
-          {
-            sampleSmaps(smaps);
-            due_smaps = std::max(due_smaps + std::chrono::milliseconds(smaps_ms), Clock::now());
-          }
-          if (minfo && now_tp >= due_minfo)
-          {
-            sampleMallocInfo(minfo);
-            due_minfo = std::max(due_minfo + std::chrono::milliseconds(mallocinfo_ms), Clock::now());
-          }
-          ++slow_samples;
-          for (FILE* f : {numa, smaps, minfo}) { if (f) { std::fflush(f); } }
-        }
-        for (FILE* f : {numa, smaps, minfo}) { if (f) { std::fclose(f); } }
-      }
-
-      void sampleNuma(FILE* out)
-      {
-        const auto c0 = Clock::now();
-        const double ts = t();
-        const char* phase = state().phase.load(std::memory_order_relaxed);
-        std::string text;
-        if (!slurp("/proc/self/numa_maps", text)) { return; }
-        struct Node { long long total = 0, anon = 0, file = 0, huge = 0; };
-        std::map<int, Node> nodes;
-        std::size_t line_start = 0;
-        while (line_start < text.size())
-        {
-          std::size_t line_end = text.find('\n', line_start);
-          if (line_end == std::string::npos) { line_end = text.size(); }
-          const std::string_view line(text.data() + line_start, line_end - line_start);
-          long long kps = 4;
-          if (const auto k = line.find(" kernelpagesize_kB="); k != std::string_view::npos)
-          { kps = std::strtoll(line.data() + k + 19, nullptr, 10); }
-          const bool is_file = line.find(" file=") != std::string_view::npos;
-          for (std::size_t p = line.find(" N"); p != std::string_view::npos; p = line.find(" N", p + 2))
-          {
-            char* end = nullptr;
-            const long node = std::strtol(line.data() + p + 2, &end, 10);
-            if (end == line.data() + p + 2 || *end != '=') { continue; }
-            const long long kb = std::strtoll(end + 1, nullptr, 10) * kps;
-            auto& n = nodes[static_cast<int>(node)];
-            n.total += kb;
-            (is_file ? n.file : n.anon) += kb;
-            if (kps > 4) { n.huge += kb; }
-          }
-          line_start = line_end + 1;
-        }
-        const double cost = msSince(c0);
-        for (const auto& [node, n] : nodes)
-        {
-          std::fprintf(out, "%.3f\t%s\t%.3f\t%d\t%lld\t%lld\t%lld\t%lld\n", ts, phase, cost, node,
-                       n.total, n.anon, n.file, n.huge);
-        }
-      }
-
-      void sampleSmaps(FILE* out)
-      {
-        const auto c0 = Clock::now();
-        const double ts = t();
-        const char* phase = state().phase.load(std::memory_order_relaxed);
-        std::string text;
-        if (!slurp("/proc/self/smaps_rollup", text)) { return; }
-        const double cost = msSince(c0);
-        std::fprintf(out, "%.3f\t%s\t%.3f\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
-                     ts, phase, cost, field(text, "Rss"), field(text, "Pss"), field(text, "Pss_Anon"),
-                     field(text, "Pss_File"), field(text, "Pss_Dirty"), field(text, "Anonymous"),
-                     field(text, "AnonHugePages"), field(text, "Private_Dirty"),
-                     field(text, "Private_Clean"), field(text, "Shared_Clean"), field(text, "Swap"));
-      }
-
-      void sampleMallocInfo(FILE* out)
-      {
-#if defined(__GLIBC__)
-        const auto c0 = Clock::now();
-        const double ts = t();
-        const char* phase = state().phase.load(std::memory_order_relaxed);
-        char* data = nullptr;
-        std::size_t size = 0;
-        FILE* mem = ::open_memstream(&data, &size);
-        if (mem == nullptr) { return; }
-        const int rc = ::malloc_info(0, mem);
-        std::fclose(mem);
-        const double cost = msSince(c0);
-        if (rc != 0 || data == nullptr) { std::free(data); return; }
-        const std::string xml(data, size);
-        std::free(data);
-        long long arenas = 0;
-        for (std::size_t p = xml.find("<heap nr="); p != std::string::npos; p = xml.find("<heap nr=", p + 1)) { ++arenas; }
-        // The process-wide totals follow the last </heap>.
-        const std::size_t tail = xml.rfind("</heap>");
-        const std::string totals = tail == std::string::npos ? xml : xml.substr(tail);
-        auto attr = [&](const char* tag, const char* name) -> long long {
-          const auto p = totals.find(tag);
-          if (p == std::string::npos) { return -1; }
-          const auto close = totals.find("/>", p);
-          const auto q = totals.find(name, p);
-          if (q == std::string::npos || (close != std::string::npos && q > close)) { return -1; }
-          return std::strtoll(totals.c_str() + q + std::strlen(name), nullptr, 10);
-        };
-        std::fprintf(out, "%.3f\t%s\t%.3f\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
-                     ts, phase, cost, arenas,
-                     attr("<total type=\"fast\"", "size=\""), attr("<total type=\"rest\"", "size=\""),
-                     attr("<total type=\"mmap\"", "count=\""), attr("<total type=\"mmap\"", "size=\""),
-                     attr("<system type=\"current\"", "size=\""), attr("<system type=\"max\"", "size=\""),
-                     attr("<aspace type=\"total\"", "size=\""), attr("<aspace type=\"mprotect\"", "size=\""));
-#else
-        (void)out;
-#endif
       }
     };
 
@@ -548,6 +440,159 @@ namespace ODIA::trace
     {
       static Sampler* s = nullptr;
       return s;
+    }
+
+    /// The views that walk the heap or the page tables while holding a lock
+    /// every other thread may need -- malloc_info (each arena's lock, and it
+    /// visits every free chunk), numa_maps and smaps_rollup (the mmap lock,
+    /// every page). Taken synchronously when a phase begins, i.e. while the
+    /// worker threads of the previous phase are idle, and at most once per
+    /// min_interval_s; never periodically. The whole snapshot is a level-0
+    /// event of its own ("trace_snapshot"), so its cost is visible and kept
+    /// out of the phases.
+    struct Snapshots
+    {
+      std::mutex mutex;
+      double min_interval_s = 30.0;
+      double last_s = -1e300;
+      FILE* numa = nullptr;
+      FILE* smaps = nullptr;
+      FILE* minfo = nullptr;
+      std::size_t taken = 0, skipped = 0;
+      double total_ms = 0.0;
+      std::string text;   // reused
+
+      void take(const char* at)
+      {
+        const double ts = traceSeconds();
+        if (numa)
+        {
+          const auto c0 = Clock::now();
+          if (slurp("/proc/self/numa_maps", text))
+          {
+            struct Node { long long total = 0, anon = 0, file = 0, huge = 0; };
+            std::map<int, Node> nodes;
+            std::size_t line_start = 0;
+            while (line_start < text.size())
+            {
+              std::size_t line_end = text.find('\n', line_start);
+              if (line_end == std::string::npos) { line_end = text.size(); }
+              const std::string_view line(text.data() + line_start, line_end - line_start);
+              long long kps = 4;
+              if (const auto k = line.find(" kernelpagesize_kB="); k != std::string_view::npos)
+              { kps = std::strtoll(line.data() + k + 19, nullptr, 10); }
+              const bool is_file = line.find(" file=") != std::string_view::npos;
+              for (std::size_t p = line.find(" N"); p != std::string_view::npos; p = line.find(" N", p + 2))
+              {
+                char* e = nullptr;
+                const long node = std::strtol(line.data() + p + 2, &e, 10);
+                if (e == line.data() + p + 2 || *e != '=') { continue; }
+                const long long kb = std::strtoll(e + 1, nullptr, 10) * kps;
+                auto& n = nodes[static_cast<int>(node)];
+                n.total += kb;
+                (is_file ? n.file : n.anon) += kb;
+                if (kps > 4) { n.huge += kb; }
+              }
+              line_start = line_end + 1;
+            }
+            const double cost = msSince(c0);
+            for (const auto& [node, n] : nodes)
+            {
+              std::fprintf(numa, "%.3f\t%s\t%.3f\t%d\t%lld\t%lld\t%lld\t%lld\n", ts, at, cost, node,
+                           n.total, n.anon, n.file, n.huge);
+            }
+          }
+        }
+        if (smaps)
+        {
+          const auto c0 = Clock::now();
+          if (slurp("/proc/self/smaps_rollup", text))
+          {
+            const double cost = msSince(c0);
+            const std::string_view t(text);
+            std::fprintf(smaps, "%.3f\t%s\t%.3f\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
+                         ts, at, cost, field(t, "Rss"), field(t, "Pss"), field(t, "Pss_Anon"),
+                         field(t, "Pss_File"), field(t, "Pss_Dirty"), field(t, "Anonymous"),
+                         field(t, "AnonHugePages"), field(t, "Private_Dirty"),
+                         field(t, "Private_Clean"), field(t, "Shared_Clean"), field(t, "Swap"));
+          }
+        }
+#if defined(__GLIBC__)
+        if (minfo)
+        {
+          const auto c0 = Clock::now();
+          char* data = nullptr;
+          std::size_t size = 0;
+          if (FILE* mem = ::open_memstream(&data, &size))
+          {
+            const int rc = ::malloc_info(0, mem);
+            std::fclose(mem);
+            const double cost = msSince(c0);
+            if (rc == 0 && data != nullptr)
+            {
+              const std::string_view xml(data, size);
+              long long arenas = 0;
+              for (std::size_t p = xml.find("<heap nr="); p != std::string_view::npos; p = xml.find("<heap nr=", p + 1))
+              { ++arenas; }
+              // The process-wide totals follow the last </heap>.
+              const std::size_t tail = xml.rfind("</heap>");
+              const std::string_view totals = tail == std::string_view::npos ? xml : xml.substr(tail);
+              auto attr = [&](const char* tag, const char* name) -> long long {
+                const auto p = totals.find(tag);
+                if (p == std::string_view::npos) { return -1; }
+                const auto close = totals.find("/>", p);
+                const auto q = totals.find(name, p);
+                if (q == std::string_view::npos || (close != std::string_view::npos && q > close)) { return -1; }
+                return std::strtoll(totals.data() + q + std::strlen(name), nullptr, 10);
+              };
+              const long long fast = attr("<total type=\"fast\"", "size=\"");
+              const long long rest = attr("<total type=\"rest\"", "size=\"");
+              const long long current = attr("<system type=\"current\"", "size=\"");
+              const long long mmap_b = attr("<total type=\"mmap\"", "size=\"");
+              const long long inuse = (current >= 0 && fast >= 0 && rest >= 0) ? current - fast - rest : -1;
+              std::fprintf(minfo, "%.3f\t%s\t%.3f\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\t%lld\n",
+                           ts, at, cost, arenas, fast, rest,
+                           attr("<total type=\"mmap\"", "count=\""), mmap_b, current,
+                           attr("<system type=\"max\"", "size=\""),
+                           attr("<aspace type=\"total\"", "size=\""), attr("<aspace type=\"mprotect\"", "size=\""),
+                           inuse);
+            }
+          }
+          std::free(data);
+        }
+#endif
+        for (FILE* f : {numa, smaps, minfo}) { if (f) { std::fflush(f); } }
+      }
+    };
+
+    Snapshots*& snapshots()
+    {
+      static Snapshots* s = nullptr;
+      return s;
+    }
+
+    /// At the start of a phase: a snapshot if one is due (see Snapshots).
+    void boundarySnapshot(const char* at, bool force) noexcept
+    {
+      Snapshots* snap = snapshots();
+      if (snap == nullptr) { return; }
+      std::unique_lock<std::mutex> lock(snap->mutex, std::try_to_lock);
+      if (!lock.owns_lock()) { return; }   // another thread is taking one
+      const double t0 = traceSeconds();
+      if (!force && t0 - snap->last_s < snap->min_interval_s) { ++snap->skipped; return; }
+      snap->last_s = t0;
+      auto& s = state();
+      const char* outer = s.phase.exchange("trace_snapshot");
+      const double cpu0 = threadCpu();
+      try { snap->take(at); }
+      catch (...) {}
+      const double t1 = traceSeconds();
+      Fields f;
+      f.idx = static_cast<std::int64_t>(snap->taken);
+      push({t0, t1, threadCpu() - cpu0, currentTid(), 0, "trace_snapshot", "trace_snapshot", f});
+      s.phase.store(outer != nullptr ? outer : "-");
+      snap->total_ms += (t1 - t0) * 1e3;
+      ++snap->taken;
     }
 
     /// cpu, node, package, core, L3 instance and whether the affinity mask allows it.
@@ -644,6 +689,10 @@ namespace ODIA::trace
 
   void Scope::begin_(const char* name, int level) noexcept
   {
+#if defined(__linux__)
+    // Before the phase opens, so that the snapshot's cost is not the phase's.
+    if (level == 0) { boundarySnapshot(name, false); }
+#endif
     active_ = true;
     level_ = level;
     name_ = name;
@@ -712,16 +761,15 @@ namespace ODIA::trace
 
     std::string cmd;
     for (int i = 0; i < argc; ++i) { cmd += (i ? " " : ""); cmd += argv[i]; }
-    note("trace_format", "1");
+    note("trace_format", "2");
     note("start_utc", isoUtc(std::time(nullptr)));
     note("start_epoch_s", std::to_string(std::chrono::duration<double>(
                             std::chrono::system_clock::now().time_since_epoch()).count()));
     note("session_start_s", std::to_string(now()));
     note("argv", sanitize(cmd));
     note("hardware_concurrency", std::to_string(std::thread::hardware_concurrency()));
-    for (const char* var : {"ODIA_TRACE", "ODIA_TRACE_INTERVAL_MS", "ODIA_TRACE_NUMA_MS",
-                            "ODIA_TRACE_SMAPS_MS", "ODIA_TRACE_MALLOCINFO_MS", "ODIA_ORT_PROFILE",
-                            "OMP_NUM_THREADS", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES"})
+    for (const char* var : {"ODIA_TRACE", "ODIA_TRACE_INTERVAL_MS", "ODIA_TRACE_SNAPSHOT_MIN_S",
+                            "ODIA_ORT_PROFILE", "OMP_NUM_THREADS", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES"})
     {
       if (const char* v = std::getenv(var)) { note(std::string("env.") + var, sanitize(v)); }
     }
@@ -760,18 +808,33 @@ namespace ODIA::trace
     auto* smp = new Sampler;
     smp->tck = static_cast<double>(::sysconf(_SC_CLK_TCK));
     smp->fast_ms = std::max(10L, envLong("ODIA_TRACE_INTERVAL_MS", 100));
-    smp->numa_ms = envLong("ODIA_TRACE_NUMA_MS", 2000);
-    smp->smaps_ms = envLong("ODIA_TRACE_SMAPS_MS", 10000);
-    smp->mallocinfo_ms = envLong("ODIA_TRACE_MALLOCINFO_MS", 2000);
-    smp->mallinfo2 = reinterpret_cast<MallInfo2Fn>(::dlsym(RTLD_DEFAULT, "mallinfo2"));
     note("interval_ms", std::to_string(smp->fast_ms));
-    note("numa_ms", std::to_string(smp->numa_ms));
-    note("smaps_ms", std::to_string(smp->smaps_ms));
-    note("mallocinfo_ms", std::to_string(smp->mallocinfo_ms));
-    note("mallinfo2", smp->mallinfo2 != nullptr ? "yes" : "no");
     sampler() = smp;
     smp->fast = std::thread([smp] { smp->fastLoop(); });
-    smp->slow = std::thread([smp] { smp->slowLoop(); });
+
+    const double snapshot_s = envSeconds("ODIA_TRACE_SNAPSHOT_MIN_S", 30.0);
+    note("snapshot_min_s", std::to_string(snapshot_s));
+    if (snapshot_s >= 0.0)
+    {
+      auto* snap = new Snapshots;
+      snap->min_interval_s = snapshot_s;
+      snap->numa = openOut("numa.tsv");
+      snap->smaps = openOut("smaps.tsv");
+      snap->minfo = openOut("mallocinfo.tsv");
+      if (snap->numa) { std::fputs("t_s\tat\tcost_ms\tnode\ttotal_kb\tanon_kb\tfile_kb\thuge_kb\n", snap->numa); }
+      if (snap->smaps)
+      {
+        std::fputs("t_s\tat\tcost_ms\trss_kb\tpss_kb\tpss_anon_kb\tpss_file_kb\tpss_dirty_kb\t"
+                   "anonymous_kb\tanon_huge_kb\tprivate_dirty_kb\tprivate_clean_kb\tshared_clean_kb\tswap_kb\n",
+                   snap->smaps);
+      }
+      if (snap->minfo)
+      {
+        std::fputs("t_s\tat\tcost_ms\tarenas\tfast_free_b\trest_free_b\tmmap_count\tmmap_b\t"
+                   "system_current_b\tsystem_max_b\taspace_total_b\taspace_mprotect_b\tinuse_b\n", snap->minfo);
+      }
+      snapshots() = snap;
+    }
 #endif
     std::fprintf(stderr, "[trace] writing to %s\n", s.dir.c_str());
   }
@@ -780,6 +843,16 @@ namespace ODIA::trace
   {
     if (!owner_) { return; }
     auto& s = state();
+#if defined(__linux__)
+    // The state the run leaves behind, whatever the interval.
+    boundarySnapshot("end", true);
+    if (Snapshots* snap = snapshots())
+    {
+      note("snapshots_taken", std::to_string(snap->taken));
+      note("snapshots_skipped", std::to_string(snap->skipped));
+      note("snapshots_total_ms", std::to_string(snap->total_ms));
+    }
+#endif
     const double end_s = now();
 #if defined(__linux__)
     if (Sampler* smp = sampler())
@@ -790,11 +863,18 @@ namespace ODIA::trace
       }
       smp->cv.notify_all();
       if (smp->fast.joinable()) { smp->fast.join(); }
-      if (smp->slow.joinable()) { smp->slow.join(); }
       note("fast_samples", std::to_string(smp->fast_samples));
-      note("slow_samples", std::to_string(smp->slow_samples));
+      note("sample_ms_mean", std::to_string(smp->fast_samples ? smp->sample_ms_sum / static_cast<double>(smp->fast_samples) : 0.0));
+      note("sample_ms_max", std::to_string(smp->sample_ms_max));
       sampler() = nullptr;
       delete smp;
+    }
+    if (Snapshots* snap = snapshots())
+    {
+      const std::lock_guard<std::mutex> lock(snap->mutex);
+      for (FILE* f : {snap->numa, snap->smaps, snap->minfo}) { if (f) { std::fclose(f); } }
+      snapshots() = nullptr;
+      delete snap;
     }
 #endif
     buffer().flush();

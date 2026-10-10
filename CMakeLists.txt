@@ -144,10 +144,6 @@ target_link_libraries(odia_library PUBLIC
 if(OpenMP_CXX_FOUND)
   target_link_libraries(odia_library PUBLIC OpenMP::OpenMP_CXX)
 endif()
-# dlsym, for glibc's mallinfo2 in the opt-in tracer (src/library/Trace.cpp).
-if(CMAKE_DL_LIBS)
-  target_link_libraries(odia_library PRIVATE ${CMAKE_DL_LIBS})
-endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # The classifier and FDR core vendored from OpenDIAlyzer: dependency-free C++17

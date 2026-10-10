@@ -197,6 +197,10 @@ namespace ODIA
     { throw std::invalid_argument("precursor_charges must be distinct integers between 1 and 8"); }
     Stats stats;
 
+    // Started on the way out (below) and declared before every local of the
+    // digest, so it ends after their destructors have run: freeing the
+    // peptide map and the parsed sequences is a phase of its own.
+    trace::Scope release_phase;
     trace::Scope fasta_phase("fasta_read", 0);
     std::vector<FASTAFile::FASTAEntry> entries;
     FASTAFile().load(fasta_file, entries);
@@ -366,6 +370,8 @@ namespace ODIA
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
     enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
+    enumerate_phase.end();
+    release_phase.start("release", 0);
     return stats;
   }
 

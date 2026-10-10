@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """trace_phase_table.py RUNDIR [RUNDIR...] -- first per-phase table of a traced DIALibGen run.
 
-Reads RUNDIR/trace/{events,proc,meta}.tsv (ODIA_TRACE output, schema in docs/tracing.md) and
-RUNDIR/time.txt (/usr/bin/time -v). Writes RUNDIR/phase_table.tsv and RUNDIR/predictor_table.tsv
-and prints both as Markdown.
+Reads RUNDIR/trace/{events,proc,threads,meta}.tsv (ODIA_TRACE output, schema in docs/tracing.md) and
+RUNDIR/time.txt (/usr/bin/time -v). Writes RUNDIR/phase_table.tsv, RUNDIR/predictor_table.tsv and
+RUNDIR/tracer_cost.tsv and prints them as Markdown.
 
 phase_table.tsv columns
   run          run label (directory name)
   phase        level-0 trace phase; 'startup' = process start -> first phase (TOPP/OpenMS init,
                option parsing), 'gap' = time between phases not covered by any phase (log lines),
-               'exit' = last phase end -> trace end, 'TOTAL' = process start -> trace end
+               'exit' = last phase end -> trace end, 'TOTAL' = process start -> trace end;
+               'trace_snapshot (n)' = the tracer's n phase-boundary snapshots (malloc_info, numa_maps,
+               smaps_rollup), summed: tracer cost, not work of the run; 'gap (n)' likewise summed
   t0_s, t1_s   phase bounds on the trace clock (s)
   wall_s       t1 - t0
   cpu_s        process user+system CPU in the phase (getrusage, interpolated between 100 ms samples;
@@ -32,6 +34,10 @@ predictor_table.tsv columns (one row per model)
   chunk_busy_s (sum of chunk spans over all workers), ort_run_s, encode_s, unpack_s (sums),
   util (chunk_busy / sum over calls of dispatch span x workers in that call),
   eff_cores (chunk_busy / phase wall)
+tracer_cost.tsv columns (one row)
+  run, snapshots (count), snapshot_wall_s (their summed wall time, on the phase thread, between phases),
+  sampler_cpu_s (CPU of the odia-sampler thread, last threads.tsv row), fast_samples, sample_ms_mean,
+  sample_ms_max (meta.tsv), sampler_share_core (sampler_cpu_s / TOTAL wall: mean fraction of one core)
 """
 import bisect
 
@@ -148,28 +154,34 @@ def analyse(run):
                          run_threads=sum(nr) / len(nr),
                          peak_rss_gb=peak(t0, t1) / 1048576.0,
                          share_wall=wall / total_wall))
-    # merge the gaps into one row, keep order of first appearance
-    merged, gap = [], None
+    # merge the gaps, and the tracer's snapshots, into one row each, after the phases
+    merged, pooled = [], {}
     for r in rows:
-        if r["phase"] == "gap":
-            if gap is None:
-                gap = dict(r)
-                gap["n"] = 1
-                gap["rt_sum"] = r["run_threads"] * r["wall_s"]
+        if r["phase"] in ("gap", "trace_snapshot"):
+            g = pooled.get(r["phase"])
+            if g is None:
+                g = pooled[r["phase"]] = dict(r)
+                g["n"] = 1
+                g["rt_sum"] = r["run_threads"] * r["wall_s"]
+                g["srcs"] = {r["cpu_src"]}
             else:
-                gap["wall_s"] += r["wall_s"]; gap["cpu_s"] += r["cpu_s"]
-                gap["peak_rss_gb"] = max(gap["peak_rss_gb"], r["peak_rss_gb"])
-                gap["rt_sum"] += r["run_threads"] * r["wall_s"]; gap["n"] += 1
+                g["wall_s"] += r["wall_s"]; g["cpu_s"] += r["cpu_s"]
+                g["peak_rss_gb"] = max(g["peak_rss_gb"], r["peak_rss_gb"])
+                g["rt_sum"] += r["run_threads"] * r["wall_s"]; g["n"] += 1
+                g["srcs"].add(r["cpu_src"])
         else:
             merged.append(r)
-    if gap:
-        gap["cores"] = gap["cpu_s"] / gap["wall_s"]
-        gap["run_threads"] = gap["rt_sum"] / gap["wall_s"]
-        gap["share_wall"] = gap["wall_s"] / total_wall
-        gap["phase"] = "gap (%d)" % gap["n"]
-        gap["cpu_src"] = "process"
-        gap["t0_s"] = float("nan"); gap["t1_s"] = float("nan")
-        merged.append(gap)
+    for name in ("trace_snapshot", "gap"):
+        g = pooled.get(name)
+        if not g:
+            continue
+        g["cores"] = g["cpu_s"] / g["wall_s"] if g["wall_s"] > 0 else 0.0
+        g["run_threads"] = g["rt_sum"] / g["wall_s"] if g["wall_s"] > 0 else 0.0
+        g["share_wall"] = g["wall_s"] / total_wall
+        g["phase"] = "%s (%d)" % (name, g["n"])
+        g["cpu_src"] = "+".join(sorted(g["srcs"]))
+        g["t0_s"] = float("nan"); g["t1_s"] = float("nan")
+        merged.append(g)
     nr_all = window(start, end, nrun)
     merged.append(dict(phase="TOTAL", t0_s=start, t1_s=end, wall_s=total_wall, cpu_s=cpu_at(end), cpu_src="process",
                        cores=cpu_at(end) / total_wall, run_threads=sum(nr_all) / len(nr_all),
@@ -195,7 +207,20 @@ def analyse(run):
                          chunk_busy_s=busy, ort_run_s=s("ort_run"), encode_s=s("encode"),
                          unpack_s=s("unpack"), util=busy / cap if cap > 0 else float("nan"),
                          eff_cores=busy / pw if pw > 0 else float("nan")))
-    return meta, merged, pred
+    # the tracer's own cost
+    snaps = [e for e in ev if e["level"] == "0" and e["name"] == "trace_snapshot"]
+    sampler_cpu = float("nan")
+    thp = os.path.join(tr, "threads.tsv")
+    if os.path.exists(thp):
+        for r in read_tsv(thp):
+            if r["comm"] == "odia-sampler":
+                sampler_cpu = float(r["utime_s"]) + float(r["stime_s"])
+    cost = dict(snapshots=len(snaps), snapshot_wall_s=sum(float(e["dur_s"]) for e in snaps),
+                sampler_cpu_s=sampler_cpu, fast_samples=meta.get("fast_samples", "-"),
+                sample_ms_mean=float(meta.get("sample_ms_mean", "nan")),
+                sample_ms_max=float(meta.get("sample_ms_max", "nan")),
+                sampler_share_core=sampler_cpu / total_wall if total_wall > 0 else float("nan"))
+    return meta, merged, pred, cost
 
 
 def fmt(v):
@@ -209,7 +234,7 @@ def fmt(v):
 def main():
     for run in sys.argv[1:]:
         label = os.path.basename(os.path.normpath(run))
-        meta, rows, pred = analyse(run)
+        meta, rows, pred, cost = analyse(run)
         tv = time_v(os.path.join(run, "time.txt"))
         cols = ["phase", "t0_s", "t1_s", "wall_s", "cpu_s", "cpu_src", "cores", "run_threads", "peak_rss_gb", "share_wall"]
         with open(os.path.join(run, "phase_table.tsv"), "w") as f:
@@ -222,6 +247,11 @@ def main():
             f.write("run\t" + "\t".join(pcols) + "\n")
             for r in pred:
                 f.write(label + "\t" + "\t".join(fmt(r[c]) for c in pcols) + "\n")
+        ccols = ["snapshots", "snapshot_wall_s", "sampler_cpu_s", "fast_samples", "sample_ms_mean",
+                 "sample_ms_max", "sampler_share_core"]
+        with open(os.path.join(run, "tracer_cost.tsv"), "w") as f:
+            f.write("run\t" + "\t".join(ccols) + "\n")
+            f.write(label + "\t" + "\t".join(fmt(cost[c]) for c in ccols) + "\n")
         print(f"\n### {label}")
         if tv:
             print(f"/usr/bin/time: elapsed {tv.get('Elapsed (wall clock) time (h:mm:ss or m:ss)')}, "
@@ -236,6 +266,8 @@ def main():
         print("|" + "---|" * len(pcols))
         for r in pred:
             print("| " + " | ".join(fmt(r[c]) for c in pcols) + " |")
+        print()
+        print("tracer: " + ", ".join("%s %s" % (c, fmt(cost[c])) for c in ccols))
 
 
 if __name__ == "__main__":

@@ -20,9 +20,14 @@
 ///   - Scope objects record events (begin, end, thread, thread CPU, and a
 ///     few integer fields such as rows and session) into a per-thread buffer,
 ///     which is handed over once, when the thread exits;
-///   - Session starts two sampler threads that read /proc (Linux only) every
-///     ODIA_TRACE_INTERVAL_MS (default 100 ms) and every few seconds, and
-///     writes everything as TSV when it ends.
+///   - Session starts one sampler thread that reads cheap, lock-free /proc
+///     counters (Linux only) every ODIA_TRACE_INTERVAL_MS (default 100 ms),
+///     and writes everything as TSV when it ends;
+///   - the expensive views -- glibc malloc_info, /proc/self/numa_maps and
+///     /proc/self/smaps_rollup, which hold the allocator's arena locks or
+///     the mmap lock while they walk -- are read only when a phase (level 0)
+///     begins, at most once per ODIA_TRACE_SNAPSHOT_MIN_S (default 30 s), on
+///     the thread that begins it, and each read is timed.
 namespace ODIA::trace
 {
   namespace detail
@@ -57,9 +62,17 @@ namespace ODIA::trace
   class Scope
   {
   public:
+    /// Not started; see start().
+    Scope() noexcept = default;
     explicit Scope(const char* name, int level = 1) noexcept
     {
       if (enabled()) { begin_(name, level); }
+    }
+    /// Start a default-constructed scope later, e.g. one declared early so
+    /// that it outlives the locals whose destruction it should time.
+    void start(const char* name, int level = 1) noexcept
+    {
+      if (!active_ && enabled()) { begin_(name, level); }
     }
     ~Scope() { if (active_) { end_(); } }
     Scope(const Scope&) = delete;

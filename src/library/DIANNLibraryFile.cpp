@@ -27,6 +27,7 @@
 #include <locale>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -810,14 +811,17 @@ namespace ODIA
     // Plain strings, not dictionary builders. The flat writer below needs its
     // dictionary builders (one row per transition repeats every string ~12x),
     // but here each Precursor.Id occurs once. A dictionary builder produced ONE
-    // global dictionary of every string, and Parquet stores an Arrow dictionary
-    // as the dictionary page of EVERY row group: on a 3.49 M-precursor human
-    // library each of the 4 row groups carried all ~3.5 M ids (~20 MB) though it
-    // holds ~0.87 M rows, so every reader decoded all of them per row group.
-    // Plain strings let Parquet dictionary-encode per row group where it pays.
-    // Measured on that library: 570 -> 458 MB, and a parallel reader loads it in
-    // 1.2 s instead of 2.0 s (identical content). Arrays are finished per row group (kChunkRows), so a
-    // string column never nears the 2 GiB offset limit of a plain StringArray.
+    // global dictionary of every string in the library, and Parquet stores an
+    // Arrow dictionary as the dictionary page of EVERY row group, so every
+    // reader decoded every string of the library once per row group. With
+    // plain strings, Parquet dictionary-encodes each row group only until the
+    // dictionary page reaches dictionary_pagesize_limit (1 MiB by default) and
+    // writes the rest of that row group as PLAIN.
+    //
+    // Arrays are finished per row group (kChunkRows). A plain StringArray holds
+    // at most 2 GiB of characters, so a chunk fails loudly (CapacityError, and
+    // no partial file) if a string column averages 2 KiB or more per row. Real
+    // libraries hold at most ~30 MB per string column and chunk, ~1.4 % of it.
     arrow::StringBuilder b_id, b_seq, b_pg;
     arrow::UInt8Builder b_z, b_dec;
     arrow::FloatBuilder b_rt, b_im, b_ccs;
@@ -836,12 +840,20 @@ namespace ODIA
                        b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
 
     constexpr std::size_t kChunkRows = std::size_t(1) << 20;   // = the row-group size passed to WriteTable
-    std::vector<arrow::ArrayVector> chunks(15);
+    // In the order of the schema's fields below; the static_assert there
+    // checks the count, ChunkedArray::Make the types.
+    arrow::ArrayBuilder* const builders[] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
+                                             &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
+    constexpr std::size_t kColumns = std::extent_v<decltype(builders)>;
+    std::vector<arrow::ArrayVector> chunks(kColumns);
     auto flush = [&] {
-      arrow::ArrayBuilder* builders[15] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
-                                           &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
       if (b_id.length() == 0) { return; }
-      for (int c = 0; c < 15; ++c)
+      for (const auto* b : builders)
+      {
+        if (b->length() != b_id.length())
+        { throw std::logic_error("compact Parquet columns differ in length"); }
+      }
+      for (std::size_t c = 0; c < kColumns; ++c)
       {
         std::shared_ptr<arrow::Array> a;
         ok(builders[c]->Finish(&a));
@@ -889,7 +901,7 @@ namespace ODIA
 
     flush();
 
-    auto schema = arrow::schema({
+    const std::shared_ptr<arrow::Field> fields[] = {
       arrow::field(Columns::PRECURSOR_ID, arrow::utf8()),
       arrow::field(Columns::MODIFIED_SEQUENCE, arrow::utf8()),
       arrow::field(Columns::PROTEIN_GROUP, arrow::utf8()),
@@ -905,7 +917,9 @@ namespace ODIA
       arrow::field(Columns::FRAGMENT_CHARGE, arrow::list(arrow::uint8())),
       arrow::field(Columns::FRAGMENT_SERIES_NUMBER, arrow::list(arrow::uint8())),
       arrow::field(Columns::FRAGMENT_LOSS_TYPE, arrow::list(arrow::uint8())),
-    });
+    };
+    static_assert(std::extent_v<decltype(fields)> == kColumns, "one builder per schema field");
+    auto schema = arrow::schema(arrow::FieldVector(std::begin(fields), std::end(fields)));
     std::vector<std::string> md_keys{
       "odia.fingerprint", "odia.target_fingerprint", "odia.layout",
       "odia.decoy_semantics", "odia.decoy_method",
@@ -932,9 +946,11 @@ namespace ODIA
     }
 
     std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
-    for (int c = 0; c < 15; ++c)
+    for (std::size_t c = 0; c < kColumns; ++c)
     {
-      columns.push_back(std::make_shared<arrow::ChunkedArray>(chunks[c], schema->field(c)->type()));
+      auto column = arrow::ChunkedArray::Make(chunks[c], fields[c]->type());
+      ok(column.status());
+      columns.push_back(*column);
     }
     auto table = arrow::Table::Make(schema, columns, static_cast<std::int64_t>(n));
 

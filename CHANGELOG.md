@@ -21,6 +21,11 @@ changes below are part of this release.
   and pandas now see `string` instead of `dictionary<string>` (pandas: `str`
   or `object` instead of `category`); DIALibGen 0.10.1 and 0.11.0 read old
   and new files alike. The flat writer keeps its dictionary builders.
+- The Linux AppImages embed AppImage type2-runtime revision 8f39b89, which
+  creates the directories it extracts into (`--appimage-extract`,
+  extract-and-run) with mode 0700 instead of 0755.
+  The build now packs a vendored copy of that pinned runtime instead of
+  upstream's mutable `continuous` download.
 
 ## [0.11.0] — 2026-09-20
 

@@ -788,10 +788,14 @@ jobs:
             || { echo "::error::the cached standalone AppImage output plugin is missing"; exit 1; }
           PACKER_CHECKSUM="$PWD/corresponding-sources/build-instructions/appimage-output-plugin.sha256"
           sha256sum "$PACKER" > "$PACKER_CHECKSUM"
+          # Embed the vendored, pinned type2-runtime instead of upstream's mutable `continuous` build.
+          RUNTIME_FILE="$PWD/.github/appimage-runtime/runtime-$(uname -m)"
+          test -s "$RUNTIME_FILE" \
+            || { echo "::error::no vendored AppImage runtime for $(uname -m)"; exit 1; }
           repack() {
             sha256sum --check "$PACKER_CHECKSUM"
             rm -f "$APPIMAGE"
-            ARCH="$(uname -m)" OUTPUT="$APPIMAGE" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ARCH="$(uname -m)" OUTPUT="$APPIMAGE" APPIMAGE_EXTRACT_AND_RUN=1 LDAI_RUNTIME_FILE="$RUNTIME_FILE" \
               "$PACKER" --appimage-extract-and-run --appdir "$APPDIR"
             test -s "$APPIMAGE"
             diff --no-dereference --brief --recursive stage "$CLI_RESOURCES"

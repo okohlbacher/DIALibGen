@@ -8,9 +8,9 @@
     "upstream_release": "https://github.com/AppImage/AppImageKit/releases/tag/continuous"
   },
   "runtime": {
-    "revision": "75849dce7cc37e4319b633df1f116ca895c71a12",
-    "build_log": "https://github.com/AppImage/type2-runtime/actions/runs/28063784345",
-    "alpine_image": "alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d",
+    "revision": "8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa",
+    "build_log": "https://github.com/AppImage/type2-runtime/actions/runs/36463736478",
+    "alpine_image": "alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507",
     "static_dependencies": {
       "libfuse": "3.15.0 (runtime mount.c patch)",
       "squashfuse": "0.5.2",
@@ -29,8 +29,8 @@
     },
     {
       "name": "type2-runtime",
-      "url": "https://codeload.github.com/AppImage/type2-runtime/tar.gz/75849dce7cc37e4319b633df1f116ca895c71a12",
-      "sha256": "b7af4960da4b90364e935a3281d04fad6560da4813c012414fa2f738291ad443",
+      "url": "https://codeload.github.com/AppImage/type2-runtime/tar.gz/8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa",
+      "sha256": "c449eb42c2190820872631f5e22f8e15b1e985a36dc4a9e2de3585bb7536c785",
       "filename": "type2-runtime.tar.gz"
     },
     {
@@ -98,9 +98,10 @@
         "build_id": "84fe6e2b121f245ed5b8c05ccafe2dc1d45a9f37"
       },
       "runtime": {
-        "sha256": "1cc49bcf1e2ccd593c379adb17c9f85a36d619088296504de95b1d06215aebbf",
+        "sha256": "156f4bdbde9c52d01814600013e0a273f0118dc2de98975f3c8c63427ec79074",
         "size": 944632,
-        "url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64",
+        "file": "appimage-runtime/runtime-x86_64",
+        "upstream_url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64",
         "mutable_sections": [
           {
             "name": ".digest_md5",
@@ -132,9 +133,10 @@
         "build_id": "8448bfc7822ab77349021a6123a6b26952985c95"
       },
       "runtime": {
-        "sha256": "7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372",
+        "sha256": "b4ff0030242d0c3bb12ce40541828303cf167493f4793456f0436edd6255c39d",
         "size": 936456,
-        "url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64",
+        "file": "appimage-runtime/runtime-aarch64",
+        "upstream_url": "https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-aarch64",
         "mutable_sections": [
           {
             "name": ".digest_md5",

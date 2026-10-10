@@ -26,6 +26,19 @@ refused(lambda: helpers.verify_runtime(b'X' + reference[1:], reference, pin))
 refused(lambda: helpers.verify_runtime(reference[:-1], reference, pin))
 refused(lambda: helpers.verify_runtime(reference, b'X' + reference[1:], pin))
 
+# The vendored runtimes are the exact pinned upstream builds of the recorded source revision.
+import json
+here = Path(__file__).resolve().parent
+pins = json.loads((here / 'appimage-helper-pins.json').read_text())
+for arch, record in pins['architectures'].items():
+    runtime = {**pins['runtime'], **record['runtime']}
+    vendored = helpers.pinned_runtime(here, runtime)
+    assert vendored[18:20] == record['elf_machine'].to_bytes(2, 'little'), arch
+    assert helpers.verify_runtime(vendored, vendored, runtime)['sha256'] == runtime['sha256'], arch
+    refused(lambda: helpers.pinned_runtime(here, {**runtime, 'sha256': '0' * 64}))
+type2 = next(source for source in pins['sources'] if source['name'] == 'type2-runtime')
+assert type2['url'].endswith('/' + pins['runtime']['revision']), 'runtime source revision differs from its binary'
+
 prefix = '#! /usr/bin/env bash\nexport TEST=value\n'
 source = 'cat > "$HOOKFILE" <<\\EOF\n' + prefix + 'EOF\n'
 keys = ['GSETTINGS_SCHEMA_DIR', 'GI_TYPELIB_PATH', 'GTK_EXE_PREFIX', 'GTK_PATH',

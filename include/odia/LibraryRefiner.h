@@ -37,6 +37,7 @@
 #pragma once
 
 #include <odia/Library.h>
+#include <odia/ModifiedSequence.h>
 
 #include <cmath>
 #include <cstdint>
@@ -48,18 +49,8 @@
 
 namespace ODIA
 {
-  /// Canonical form of a modified sequence, so a DIA-NN report joins an ODIA
-  /// library.
-  ///
-  /// NOT cosmetic. DIA-NN writes `C(UniMod:4)`; a library generated through
-  /// OpenMS writes `C(Carbamidomethyl)`. On an alkylated sample that is every
-  /// cysteine-containing precursor -- measured: 3,444 of 37,193 on IH1, exactly
-  /// the cysteine population -- and a verbatim join drops all of them silently.
-  ///
-  /// Brackets are parsed BALANCED, so `K(Label:13C(6)15N(2))` is one token.
-  /// A token that is neither a known name nor a `UniMod:` accession is passed
-  /// through verbatim and, when @p unknown is given, counted there.
-  std::string canonicalModifiedSequence(std::string_view seq, std::size_t* unknown = nullptr);
+  // canonicalModifiedSequence() lives in <odia/ModifiedSequence.h>: the TSV
+  // writer needs it too, so it belongs to odia_library.
 
   /// One fragment as the reference REPORT describes it, parsed from the
   /// positionally corresponding entries of Fragment.Info, Fragment.Quant.Raw

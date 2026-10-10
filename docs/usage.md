@@ -176,6 +176,14 @@ CPU-only ONNX Runtime, runs on the CPU without a warning.
 `-machine:require_gpu` turns every CPU fallback, that case included, into an
 error.
 
+Each model runs `-machine:gpu_sessions` CUDA sessions per GPU (default 4).
+Each session has its own stream, so the host-side encoding of one batch
+overlaps the GPU work of another; on an H100, 2-4 sessions make RT and CCS
+30-45 % faster than one and 8 is slower again. `-machine:gpu_devices 0 1`
+spreads the sessions over several GPUs, round robin; by default the first
+visible GPU that works is used. Neither changes the output. CPU runs use up to
+16 sessions (`-threads`), as before.
+
 `-machine:tf32` controls TensorFloat-32 math on the GPU, for prediction and
 for `-machine:device cuda` training. It is **off** by default, so a GPU library
 agrees with the CPU library to float rounding (measured on a whole proteome:

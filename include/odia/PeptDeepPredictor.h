@@ -28,6 +28,13 @@ namespace ODIA
     /// to ~1.9 A^2), while with it off the GPU agrees with the CPU to float
     /// rounding. On is faster (one H100, whole proteome: ~26 s less).
     bool tf32 = false;
+    /// CUDA sessions per device. Each has its own stream, so the host-side
+    /// encoding of one batch overlaps the GPU work of another; measured on an
+    /// H100, 2-4 give RT and CCS +30-45 % and 8 is slower again.
+    int sessions_per_device = 4;
+    /// CUDA devices to spread the sessions over, round robin. Empty: the
+    /// first visible device that constructs a session.
+    std::vector<int> devices;
     /// Where callers collect "requested CUDA, got the CPU" warnings for the
     /// output's provenance; may be null. The predictor itself only reports
     /// them through fallbackReason().
@@ -77,13 +84,16 @@ namespace ODIA
                                const GpuOptions& gpu = {});
     ~PeptDeepPredictor();
 
-    /// Why CUDA was requested but this predictor runs on the CPU, or empty.
+    /// Why CUDA was requested but this predictor runs on the CPU (or skips a
+    /// listed GPU), or empty.
     ///
     /// Set only when a GPU exists and could not be used (for example the
     /// CUDA provider found no cuDNN): a machine without a GPU, or a CPU-only
     /// ONNX Runtime, is the expected CPU case and leaves this empty. With
     /// GpuOptions::require the constructor throws instead.
     const std::string& fallbackReason() const;
+    /// The CUDA devices sessions run on, one entry per session; empty on CPU.
+    const std::vector<int>& sessionDevices() const;
 
 
     /// Which CUDA device the session ended up on, or -1 on CPU.

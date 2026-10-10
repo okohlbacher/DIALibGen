@@ -382,7 +382,15 @@ namespace ODIA
       std::cerr << "[" << stage << "] provider "
                 << (p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU")
                 << " device " << p.device()
-                << " sessions " << p.sessionCount() << "\n";
+                << " sessions " << p.sessionCount();
+      // Name every device when the sessions span several.
+      const auto& devices = p.sessionDevices();
+      if (std::any_of(devices.begin(), devices.end(), [&](int d) { return d != p.device(); }))
+      {
+        std::cerr << " on devices";
+        for (std::size_t k = 0; k < devices.size(); ++k) { std::cerr << (k ? "," : " ") << devices[k]; }
+      }
+      std::cerr << "\n";
       // Loud, and recorded: the provider line alone was the only sign that RT
       // and CCS had silently left the GPU.
       if (!p.fallbackReason().empty())
@@ -733,7 +741,11 @@ namespace ODIA
                                standards_file);
     }
 
-    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, gpu);
+    // Eleven peptides: one session is plenty, and each CUDA session costs a
+    // cuDNN set-up.
+    GpuOptions one_session = gpu;
+    one_session.sessions_per_device = 1;
+    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, one_session);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("IRT-FIT", predictor, gpu);

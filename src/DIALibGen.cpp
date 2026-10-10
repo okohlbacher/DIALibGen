@@ -70,7 +70,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   for (const auto& option : supplied_)
   {
     // The GPU options steer prediction in generate as well as in tune.
-    const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32";
+    const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32" ||
+                                   option == "machine:gpu_sessions" || option == "machine:gpu_devices";
     if (prediction_device && mode == "generate") { continue; }
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
@@ -129,6 +130,8 @@ ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
   ODIA::GpuOptions gpu;
   gpu.require = getFlag_("machine:require_gpu");
   gpu.tf32 = getStringOption_("machine:tf32") == "true";
+  gpu.sessions_per_device = getIntOption_("machine:gpu_sessions");
+  for (const int device : getIntList_("machine:gpu_devices")) { gpu.devices.push_back(device); }
   gpu.warnings = warnings;
   return gpu;
 }

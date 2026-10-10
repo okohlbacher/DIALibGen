@@ -113,6 +113,7 @@ namespace ODIA
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
     std::string fallback;   ///< see fallbackReason()
+    std::vector<int> session_devices;   ///< CUDA device per session; empty on CPU
   };
 
   PeptDeepPredictor::PeptDeepPredictor(const std::string& model_path,
@@ -148,9 +149,13 @@ namespace ODIA
         // PROBE the devices rather than trusting device 0. On this project's
         // GPU nodes device 0 is dead, and AppendExecutionProvider_CUDA happily
         // accepts it -- the failure only surfaces when the session is built.
-        const int first = gpu_device >= 0 ? gpu_device : 0;
-        const int last  = gpu_device >= 0 ? gpu_device : 7;
-        for (int dev = first; dev <= last; ++dev)
+        // A list (GpuOptions::devices) is probed whole and every device that
+        // works is used; otherwise the first device that works.
+        std::vector<int> candidates = gpu.devices;
+        const bool listed = !candidates.empty();
+        if (!listed && gpu_device >= 0) { candidates.push_back(gpu_device); }
+        if (!listed && gpu_device < 0) { for (int dev = 0; dev <= 7; ++dev) { candidates.push_back(dev); } }
+        for (const int dev : candidates)
         {
           try
           {
@@ -158,20 +163,25 @@ namespace ODIA
             probe.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
             appendCuda(probe, dev, gpu.tf32);
             Ort::Session test(impl_->env, ortPath(model_path).c_str(), probe);   // the real check
-            appendCuda(impl_->options, dev, gpu.tf32);
-            impl_->provider = Provider::CUDA;
-            impl_->device = dev;
-            break;
+            impl_->session_devices.push_back(dev);
+            if (!listed) { break; }
           }
           catch (const Ort::Exception& e)
           {
-            // Keep the first real failure: it is the one the user can fix.
-            if (!noSuchDevice(e.what()) && !gpu_present)
+            // Keep the first real failure: it is the one the user can fix. A
+            // device the user listed by hand is never "absent by design".
+            if ((listed || !noSuchDevice(e.what())) && !gpu_present)
             {
               gpu_present = true;
               reason = "CUDA device " + std::to_string(dev) + ": " + conciseOrtError(e.what());
             }
           }
+        }
+        if (!impl_->session_devices.empty())
+        {
+          appendCuda(impl_->options, impl_->session_devices.front(), gpu.tf32);
+          impl_->provider = Provider::CUDA;
+          impl_->device = impl_->session_devices.front();
         }
         if (impl_->provider != Provider::CUDA && reason.empty())
         { reason = "no usable CUDA device is visible"; }
@@ -193,6 +203,7 @@ namespace ODIA
         reason = "CUDA device " + std::to_string(impl_->device) + ": " + conciseOrtError(e.what());
         impl_->provider = Provider::CPU;
         impl_->device = -1;
+        impl_->session_devices.clear();
         impl_->options = Ort::SessionOptions{};
         impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
@@ -218,6 +229,16 @@ namespace ODIA
       // say why: the caller prints and records this.
       if (gpu_present)
       { impl_->fallback = model + " runs on the CPU although CUDA was requested: " + reason + ". Fix: " + fallbackFix(reason); }
+    }
+
+    if (impl_->provider == Provider::CUDA && gpu_present && !gpu.devices.empty())
+    {
+      // Some listed devices work, some do not: run on the good ones, but say
+      // so. (Probing without a list skips a dead device silently, as before.)
+      const std::string model = std::filesystem::path(model_path).filename().string();
+      if (gpu.require)
+      { throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model + " cannot use " + reason); }
+      impl_->fallback = model + " skips an unusable GPU: " + reason;
     }
 
     if (!impl_->session)
@@ -273,11 +294,33 @@ namespace ODIA
     // Replicas only after the model has been accepted, so a bad path or a
     // wrong model reports once rather than N times.
     //
-    // CUDA is deliberately excluded: replicas exist to work around CPU
-    // intra-op parallelism scaling badly, and on a GPU they would contend for
-    // one device and multiply the weight copies in its memory instead.
-    if (impl_->provider == Provider::CPU)
+    // On CUDA, sessions_per_device sessions per device, assigned round robin
+    // (session k on device k mod n). Each session has its own CUDA stream, so
+    // one session's host-side encoding and copies overlap another's kernels:
+    // on an H100, 2-4 sessions gave RT and CCS +30-45 % and 8 was slower. The
+    // output does not depend on the count: chunks are cut before dispatch.
+    if (impl_->provider == Provider::CUDA)
     {
+      const std::vector<int> devices = impl_->session_devices;
+      impl_->session_devices.clear();
+      const std::size_t total = devices.size() * static_cast<std::size_t>(std::max(1, gpu.sessions_per_device));
+      for (std::size_t k = 0; k < total; ++k)
+      {
+        const int dev = devices[k % devices.size()];
+        impl_->session_devices.push_back(dev);
+        if (k == 0) { continue; }   // `session`, created above
+        Ort::SessionOptions options;
+        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+        if (intra_op_threads > 0) { options.SetIntraOpNumThreads(intra_op_threads); }
+        appendCuda(options, dev, gpu.tf32);
+        impl_->replicas.push_back(std::make_unique<Ort::Session>(
+          impl_->env, ortPath(model_path).c_str(), options));
+      }
+    }
+    else
+    {
+      // Replicas exist on CPU to work around intra-op parallelism scaling
+      // badly with these small recurrent networks.
       for (int i = 1; i < sessions; ++i)
       {
         impl_->replicas.push_back(std::make_unique<Ort::Session>(
@@ -289,6 +332,8 @@ namespace ODIA
   int PeptDeepPredictor::device() const { return impl_->device; }
 
   const std::string& PeptDeepPredictor::fallbackReason() const { return impl_->fallback; }
+
+  const std::vector<int>& PeptDeepPredictor::sessionDevices() const { return impl_->session_devices; }
 
   std::size_t PeptDeepPredictor::sessionCount() const
   {

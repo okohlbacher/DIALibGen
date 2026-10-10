@@ -272,6 +272,15 @@ void DIALibGen::registerRefinementOptions_()
                           "libraries to float rounding. On: faster (one H100, whole proteome: ~26 s less), but about 1 % "
                           "of precursors select a different fragment set and CCS moves by up to ~1.9 A^2.", false);
     setValidStrings_("machine:tf32", {"true", "false"});
+    registerIntOption_("machine:gpu_sessions", "<n>", 4,
+                       "ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: "
+                       "2-4 give RT and CCS +30-45 %, 8 is slower. Does not change the output.", false);
+    setMinInt_("machine:gpu_sessions", 1);
+    setMaxInt_("machine:gpu_sessions", 16);
+    registerIntList_("machine:gpu_devices", "<ids>", OpenMS::IntList(),
+                     "CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible "
+                     "device that works. Does not change the output.", false);
+    setMinInt_("machine:gpu_devices", 0);
     registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
                                          "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
                                          "fallback is a WARNING in the log and in the output's provenance.");

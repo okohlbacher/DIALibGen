@@ -53,6 +53,12 @@ call took about 2 s, the sampler held the main arena's lock almost
 continuously, and a run that normally takes 17 minutes did not finish in 25.
 On a tenth of the proteome the effect was invisible.
 
+The second version (0a89832) had a use-after-free in the session's teardown:
+it unlocked the snapshot mutex after deleting the object that holds it. glibc
+then aborted the process at exit (`malloc(): unsorted double linked list
+corrupted`), after the library was written but before `events.tsv`. ASan builds
+did not show it; valgrind memcheck did. Fixed in e82ce88.
+
 ## Files
 
 All files are tab-separated, with one header line. Times are seconds on one

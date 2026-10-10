@@ -13,9 +13,11 @@ phase_table.tsv columns
   t0_s, t1_s   phase bounds on the trace clock (s)
   wall_s       t1 - t0
   cpu_s        process user+system CPU in the phase (getrusage, interpolated between 100 ms samples;
-               includes the tracer's own sampler threads); for phases shorter than 1 s the CPU of the
-               thread that ran the phase (events.tsv cpu_s), see cpu_src
-  cpu_src      'process' or 'thread', as above
+               includes the tracer's own sampler threads); for phases shorter than 1 s, where that
+               interpolation is noise, the CPU of the thread that ran the phase plus that of the
+               predictor worker threads it started (events.tsv cpu_s of the phase and of its 'worker'
+               rows on other threads), see cpu_src
+  cpu_src      'process' or 'threads', as above
   cores        cpu_s / wall_s = mean active cores
   run_threads  mean number of threads in state R at the samples inside the phase, the sampler excluded
   peak_rss_gb  largest VmRSS sample inside the phase (GiB, 100 ms resolution); when the process
@@ -109,6 +111,8 @@ def analyse(run):
     end = float(meta.get("end_s", ts[-1]))
     phases = sorted(((float(e["t0_s"]), float(e["t1_s"]), e["name"]) for e in ev if e["level"] == "0"))
     main_cpu = {(e["name"], float(e["t0_s"])): float(e["cpu_s"]) for e in ev if e["level"] == "0"}
+    main_tid = {(e["name"], float(e["t0_s"])): e["tid"] for e in ev if e["level"] == "0"}
+    workers = [(float(e["t0_s"]), e["tid"], float(e["cpu_s"])) for e in ev if e["name"] == "worker"]
     segs = []
     prev = start
     first = True
@@ -130,9 +134,12 @@ def analyse(run):
             c = cpu_at(t1)            # CPU from process start
         elif wall < SHORT and (name, t0) in main_cpu:
             # Shorter than a few sampler ticks: the interpolated process CPU is
-            # noise, so take the phase thread's own CPU (these phases are serial).
-            c = main_cpu[(name, t0)]
-            src = "thread"
+            # noise, so take the phase thread's own CPU and that of the
+            # predictor workers it ran on other threads.
+            tid = main_tid[(name, t0)]
+            c = main_cpu[(name, t0)] + sum(cw for tw, wtid, cw in workers
+                                           if t0 <= tw <= t1 and wtid != tid and cw == cw)
+            src = "threads"
         else:
             c = cpu_at(t1) - cpu_at(t0)
         nr = window(t0, t1, nrun)

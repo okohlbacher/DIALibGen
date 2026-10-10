@@ -154,3 +154,11 @@ DIA-NN on the same node; quantify how far GPU output differs from CPU output.
 Why it is here rather than done: the CPU analysis comes first, and its
 fixes (session limit, batch sizes) change what the GPU path is compared
 against.
+
+Measured 2026-10-10 on one H100 (spock): whole proteome 154 s with RT, MS2
+and CCS on CUDA (needs cuDNN 9 for CUDA 12; without it RT and CCS silently
+fall back to the CPU: 310-395 s), 126 s on two H100s; ~94 s of it is serial
+host work. Decision (owner, 2026-10-10): keep TF32 ON on GPUs (ONNX
+Runtime's default). GPU libraries then differ slightly from CPU ones
+(~1 % of precursors pick a different fragment set, CCS up to ~1.9 A^2);
+TF32 off would match the CPU but cost ~26 s per proteome.

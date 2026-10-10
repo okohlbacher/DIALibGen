@@ -484,6 +484,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
+    std::vector<std::string> device_warnings;
+    const ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
     ODIA::Library library;
     std::string standards;
     try
@@ -499,7 +501,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           " peptides with ambiguous or undefined residue masses"); }
 
       if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
-            library, rt_model, true, threads, p.free_cysteine_rt_correction); miss)
+            library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
       {
         writeLogError_(std::to_string(miss) + " precursors have no predicted RT. "
                        "Refusing rather than shipping a library with NaN retention "
@@ -518,7 +520,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           writeLogError_(e.str());
           return INPUT_FILE_NOT_FOUND;
         }
-        const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true);
+        const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true, gpu);
         ODIA::LibraryGenerator::applyIrtCalibration(library, cal);
         std::ostringstream m;
         m.setf(std::ios::fixed); m.precision(4);
@@ -536,13 +538,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
 
       if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-            library, ms2_model, p, static_cast<float>(nce), instrument, true, threads); miss)
+            library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu); miss)
       { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
       writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
       if (library.precursorCount() == 0)
       { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
       if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-            library, ccs_model, true, threads, p.derive_ion_mobility); miss)
+            library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
       { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);
@@ -554,6 +556,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }
+
+    // Recorded only when there is something to say, so a library built where
+    // nothing fell back is byte-identical to one from a build without this.
+    std::vector<std::pair<std::string, std::string>> extra_metadata;
+    if (!device_warnings.empty())
+    {
+      writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on CUDA ran on the CPU; "
+                    "recorded as odia.warnings" + std::string(parquet ? "" : " (TSV: log only)"));
+      extra_metadata.emplace_back("odia.warnings", json(device_warnings).dump());
+    }
 
     ODIA::DIANNLibraryFile::Fingerprint fp;
     try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
@@ -572,7 +584,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     try
     {
       if (parquet)
-      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump()); }
+      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extra_metadata); }
       else
       {
         ODIA::DIANNLibraryFile::storeTSV(out, library);

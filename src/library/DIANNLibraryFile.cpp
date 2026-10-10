@@ -826,7 +826,8 @@ namespace ODIA
   void DIANNLibraryFile::storeParquetCompact(const std::string& filename,
                                              const Library& library,
                                              const Fingerprint& fp,
-                                             const std::string& config_json)
+                                             const std::string& config_json,
+                                             const std::vector<std::pair<std::string, std::string>>& extra_metadata)
   {
     const auto& p = library.precursors();
     const auto& t = library.transitions();
@@ -972,6 +973,12 @@ namespace ODIA
     {
       auto md = schema->metadata()->Copy();
       md->Append("odia.config_json", config_json);
+      schema = schema->WithMetadata(md);
+    }
+    if (!extra_metadata.empty())
+    {
+      auto md = schema->metadata()->Copy();
+      for (const auto& [key, value] : extra_metadata) { md->Append(key, value); }
       schema = schema->WithMetadata(md);
     }
 

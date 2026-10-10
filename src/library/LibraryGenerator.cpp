@@ -377,12 +377,20 @@ namespace ODIA
     /// 16 is the knee. Going on to 32 buys 6% more speed for 83% more memory,
     /// which on a shared node is how a library build starts failing in the
     /// allocator instead of finishing slightly later.
-    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p)
+    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu)
     {
       std::cerr << "[" << stage << "] provider "
                 << (p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU")
                 << " device " << p.device()
                 << " sessions " << p.sessionCount() << "\n";
+      // Loud, and recorded: the provider line alone was the only sign that RT
+      // and CCS had silently left the GPU.
+      if (!p.fallbackReason().empty())
+      {
+        const std::string warning = std::string(stage) + ": " + p.fallbackReason();
+        std::cerr << "WARNING: " << warning << "\n";
+        if (gpu.warnings != nullptr) { gpu.warnings->push_back(warning); }
+      }
     }
 
     int inferenceSessions(unsigned requested)
@@ -424,7 +432,8 @@ namespace ODIA
   std::size_t LibraryGenerator::predictRetentionTimes(Library& library,
                                                       const std::string& rt_model_path,
                                                       bool prefer_gpu, unsigned sessions,
-                                                      bool free_cysteine_rt_correction)
+                                                      bool free_cysteine_rt_correction,
+                                                      const GpuOptions& gpu)
   {
     // One prediction per distinct sequence. The RT model has no charge input,
     // so predicting per precursor would repeat identical work for every charge
@@ -453,10 +462,10 @@ namespace ODIA
     }
     if (unique_peptides.empty()) { return library.precursorCount(); }
 
-    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("RT", predictor);
+    writeDeviceLine("RT", predictor, gpu);
     std::vector<PeptDeepPredictor::Failure> failures;
     const auto predicted = predictor.predictRT(unique_peptides, &failures);
 
@@ -490,7 +499,8 @@ namespace ODIA
 
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
-    float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions)
+    float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
+    const GpuOptions& gpu)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
@@ -499,10 +509,10 @@ namespace ODIA
     const std::size_t n = library.precursorCount();
     if (n == 0) { return 0; }
 
-    PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("MS2", predictor);
+    writeDeviceLine("MS2", predictor, gpu);
 
     // The new transition arrays are built alongside the old ones and swapped in
     // at the end. Editing in place is not possible: a precursor's fragment
@@ -691,7 +701,7 @@ namespace ODIA
   LibraryGenerator::IrtCalibration
   LibraryGenerator::fitIrtCalibration(const std::string& rt_model_path,
                                       const std::string& standards_file,
-                                      bool prefer_gpu)
+                                      bool prefer_gpu, const GpuOptions& gpu)
   {
     std::vector<AASequence> peptides;
     std::vector<double> known;
@@ -723,10 +733,10 @@ namespace ODIA
                                standards_file);
     }
 
-    PeptDeepPredictor predictor(rt_model_path, prefer_gpu);
+    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, gpu);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("IRT-FIT", predictor);
+    writeDeviceLine("IRT-FIT", predictor, gpu);
     // Tolerate a standard that cannot be encoded rather than abandoning the
     // calibration: with eleven points, losing one to an exotic modification
     // should cost precision, not the whole line. Their entries come back NaN
@@ -792,7 +802,7 @@ namespace ODIA
 
   std::size_t LibraryGenerator::predictCollisionCrossSections(
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
-    unsigned sessions, bool derive_mobility)
+    unsigned sessions, bool derive_mobility, const GpuOptions& gpu)
   {
     auto& p = library.precursors();
     const std::size_t n = library.precursorCount();
@@ -800,10 +810,10 @@ namespace ODIA
     if (derive_mobility) { p.im.assign(n, std::numeric_limits<float>::quiet_NaN()); }
     if (n == 0) { return 0; }
 
-    PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("CCS", predictor);
+    writeDeviceLine("CCS", predictor, gpu);
 
     // Blocked, as the MS2 pass is: the whole proteome at once would hold every
     // parsed AASequence live alongside the library.

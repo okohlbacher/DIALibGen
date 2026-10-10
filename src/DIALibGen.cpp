@@ -69,6 +69,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   { writeLogError_("refusing to overwrite config output: " + write_config); return CANNOT_WRITE_OUTPUT_FILE; }
   for (const auto& option : supplied_)
   {
+    // The GPU options steer prediction in generate as well as in tune.
+    const bool prediction_device = option == "machine:require_gpu";
+    if (prediction_device && mode == "generate") { continue; }
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
     const bool refinement = refinement_options_.count(option) || training;
@@ -119,6 +122,14 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::convert_()
                 std::to_string(library.decoyCount()) + " decoys) and " +
                 std::to_string(library.transitionCount()) + " transitions: " + in + " -> " + out);
   return EXECUTION_OK;
+}
+
+ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
+{
+  ODIA::GpuOptions gpu;
+  gpu.require = getFlag_("machine:require_gpu");
+  gpu.warnings = warnings;
+  return gpu;
 }
 
 namespace

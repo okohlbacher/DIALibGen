@@ -35,8 +35,11 @@ not a prediction or end-to-end validation. See [validation and coverage](testing
 Portable releases bundle CPU training. A source build linked to CUDA-enabled
 LibTorch can use `-machine:device cuda:0`; provide the matching CUDA and cuDNN
 runtime libraries. GPU prediction additionally needs an ONNX Runtime build
-with the CUDA execution provider. The standard CPU archive is not a CUDA
-bundle.
+with the CUDA execution provider (for example conda-forge `onnxruntime-cpp`
+built for CUDA 12) and, at run time, cuDNN 9 for CUDA 12 with the unversioned
+`libcudnn.so`: without it the RT and CCS models fall back to the CPU with a
+warning (see [GPU](usage.md#gpu)). The standard CPU archive is not a CUDA
+bundle, and no package bundles cuDNN.
 
 Linux ARM64 and Windows use different native runtime packages. The
 [release checks](testing.md#release-verification) require actual CPU training

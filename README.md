@@ -156,6 +156,9 @@ qualifications are in [the historical benchmark summary](docs/benchmark.md).
   be split; oversized operations are refused before stored offsets can overflow.
 - Portable release training uses CPU. CUDA training is supported by source
   builds with compatible CUDA LibTorch and runtime libraries.
+- GPU prediction needs an ONNX Runtime with the CUDA provider and cuDNN 9 for
+  CUDA 12; without cuDNN, RT and CCS run on the CPU with a warning
+  ([GPU](docs/usage.md#gpu)).
 - CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
   INI export do not.
 - Windows releases target x64. The macOS desktop app and Homebrew casks

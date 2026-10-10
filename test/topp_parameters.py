@@ -88,7 +88,13 @@ with tempfile.TemporaryDirectory() as directory:
     for args in (('-tune',), ('-q_precursor', 0.5), ('-train:epochs', 1)):
         result = run('-mode', 'generate', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'has no effect' in result.stdout + result.stderr
-    for args in (('-train:epochs', 999), ('-tune_heads', 'rt'), ('-machine:threads', 2), ('-filter:q_value', 0.5)):
+    # The GPU options steer prediction, so generate takes them; training-only
+    # machine options stay refused there.
+    config('-mode', 'generate', '-machine:require_gpu')
+    result = run('-mode', 'generate', '-machine:threads', 2, '-write_config', root / 'invalid.json', ok=False)
+    assert 'has no effect' in result.stdout + result.stderr
+    for args in (('-train:epochs', 999), ('-tune_heads', 'rt'), ('-machine:threads', 2), ('-filter:q_value', 0.5),
+                 ('-machine:require_gpu',)):
         result = run('-mode', 'refine', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'enable -tune' in result.stdout + result.stderr
         assert config('-mode', 'refine', '-tune', *args)['filter'] is True

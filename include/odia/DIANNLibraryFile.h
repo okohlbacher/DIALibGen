@@ -7,6 +7,8 @@
 #include <arrow/type_fwd.h>
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace ODIA
 {
@@ -231,9 +233,12 @@ namespace ODIA
     /// @param config_json when non-empty, embedded verbatim as the schema
     /// metadata key `odia.config_json`: the recipe that produced the library,
     /// travelling with it. Readers ignore unknown keys, so this is additive.
+    /// @param extra_metadata further key/value pairs appended after it (for
+    /// example `odia.warnings`); nothing is written for an empty list.
     static void storeParquetCompact(const std::string& filename, const Library& library,
                                     const Fingerprint& fp,
-                                    const std::string& config_json = "");
+                                    const std::string& config_json = "",
+                                    const std::vector<std::pair<std::string, std::string>>& extra_metadata = {});
 
   };
 

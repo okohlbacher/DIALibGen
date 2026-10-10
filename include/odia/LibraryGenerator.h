@@ -4,6 +4,7 @@
 #pragma once
 
 #include <odia/Library.h>
+#include <odia/PeptDeepPredictor.h>
 
 #include <cstddef>
 #include <string>
@@ -217,7 +218,8 @@ namespace ODIA
                                              const std::string& rt_model_path,
                                              bool prefer_gpu = true,
                                              unsigned sessions = 0,
-                                             bool free_cysteine_rt_correction = true);
+                                             bool free_cysteine_rt_correction = true,
+                                             const GpuOptions& gpu = {});
 
     /// The measured free-cysteine offset, in the RT model's own normalised
     /// units, for a peptide with @p free_cysteines unmodified cysteines.
@@ -255,7 +257,8 @@ namespace ODIA
                                                   float nce = 30.0f,
                                                   const std::string& instrument = "QE",
                                                   bool prefer_gpu = true,
-                                                  unsigned sessions = 0);
+                                                  unsigned sessions = 0,
+                                                  const GpuOptions& gpu = {});
 
     /// The line mapping the RT model's raw output onto the iRT scale.
     struct IrtCalibration
@@ -275,7 +278,8 @@ namespace ODIA
     /// would still look like iRT and simply be wrong.
     static IrtCalibration fitIrtCalibration(const std::string& rt_model_path,
                                             const std::string& standards_file,
-                                            bool prefer_gpu = true);
+                                            bool prefer_gpu = true,
+                                            const GpuOptions& gpu = {});
 
     /// Rescale a library's retention times onto the iRT scale in place.
     ///
@@ -304,7 +308,8 @@ namespace ODIA
                                                     const std::string& ccs_model_path,
                                                     bool prefer_gpu = true,
                                                     unsigned sessions = 0,
-                                                    bool derive_mobility = true);
+                                                    bool derive_mobility = true,
+                                                    const GpuOptions& gpu = {});
 
     /// Append a decoy for every target currently in @p library.
     ///

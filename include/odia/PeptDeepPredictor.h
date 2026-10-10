@@ -15,6 +15,19 @@ namespace OpenMS { class AASequence; }
 namespace ODIA
 {
 
+  /// How the models use a GPU. Only consulted when CUDA is requested.
+  struct GpuOptions
+  {
+    /// Throw instead of running on the CPU when CUDA was requested but no
+    /// CUDA session could be created (missing cuDNN, no visible GPU, a
+    /// CPU-only ONNX Runtime).
+    bool require = false;
+    /// Where callers collect "requested CUDA, got the CPU" warnings for the
+    /// output's provenance; may be null. The predictor itself only reports
+    /// them through fallbackReason().
+    std::vector<std::string>* warnings = nullptr;
+  };
+
   /// Runs AlphaPeptDeep's PeptDeep models through ONNX Runtime.
   ///
   /// ODIA drives the session itself rather than using OpenMS's PeptDeep
@@ -54,8 +67,18 @@ namespace ODIA
                                bool prefer_gpu = true,
                                int intra_op_threads = 0,
                                int sessions = 1,
-                               int gpu_device = -1);
+                               int gpu_device = -1,
+                               const GpuOptions& gpu = {});
     ~PeptDeepPredictor();
+
+    /// Why CUDA was requested but this predictor runs on the CPU, or empty.
+    ///
+    /// Set only when a GPU exists and could not be used (for example the
+    /// CUDA provider found no cuDNN): a machine without a GPU, or a CPU-only
+    /// ONNX Runtime, is the expected CPU case and leaves this empty. With
+    /// GpuOptions::require the constructor throws instead.
+    const std::string& fallbackReason() const;
+
 
     /// Which CUDA device the session ended up on, or -1 on CPU.
     int device() const;

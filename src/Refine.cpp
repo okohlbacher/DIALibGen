@@ -262,11 +262,14 @@ void DIALibGen::registerRefinementOptions_()
     registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false);
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
-    registerTOPPSubsection_("machine", "Fine-tuning: device");
+    registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
     registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
     registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+    registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
+                                         "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
+                                         "fallback is a WARNING in the log and in the output's provenance.");
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
@@ -533,6 +536,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         const bool free_cys = getFlag_("tune_keep_free_cysteine_offset");
         const bool gpu = getFlag_("tune_predict_gpu");
+        std::vector<std::string> device_warnings;
+        const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
         const unsigned sessions = static_cast<unsigned>(std::max(0, getIntOption_("tune_predict_sessions")));
 
         if (want_rt)
@@ -543,7 +548,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           // predictRetentionTimes returns what it could NOT predict, not what it
           // did -- undocumented, and it reads exactly the other way round.
           const std::size_t unpredicted =
-            ODIA::LibraryGenerator::predictRetentionTimes(library, r.model_out, gpu, sessions, free_cys);
+            ODIA::LibraryGenerator::predictRetentionTimes(library, r.model_out, gpu, sessions, free_cys, gpu_options);
           if (unpredicted) { throw std::runtime_error("tuned RT could not encode " + std::to_string(unpredicted) + " precursors; refusing mixed RT units"); }
           const std::size_t n = library.precursorCount() - unpredicted;
           // The model emits rt_norm = RT / rt_max_minutes, and that denominator
@@ -570,7 +575,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           // the CCS head actually tuned -- otherwise a library that arrived with
           // measured mobilities would lose them to stock predictions.
           const std::size_t unpredicted =
-            ODIA::LibraryGenerator::predictCollisionCrossSections(library, r.model_out, gpu, sessions, true);
+            ODIA::LibraryGenerator::predictCollisionCrossSections(library, r.model_out, gpu, sessions, true, gpu_options);
           if (unpredicted) { throw std::runtime_error("tuned CCS could not encode " + std::to_string(unpredicted) + " precursors; refusing a partially re-predicted library"); }
           const std::size_t n = library.precursorCount() - unpredicted;
           tune_prov["ccs"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
@@ -583,6 +588,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                         (unpredicted ? " (" + std::to_string(unpredicted) + " could not be encoded)" : ""));
         }
 
+        if (!device_warnings.empty()) { tune_prov["device_warnings"] = device_warnings; }
         tune_prov["full_fit"] = tp.full_fit;   // recorded for either head, not only when RT was tuned
         tune_prov["models_kept"] = keep.empty() ? json(nullptr) : json(fs::absolute(work).string());
       }

@@ -147,6 +147,35 @@ The stock free-cysteine offset is disabled because the tuned model can learn
 that effect itself. Keep the model's scale and acquisition context with the
 result; these are not generic iRT models.
 
+## GPU
+
+Generation runs the RT, MS2 and CCS models on an NVIDIA GPU when the ONNX
+Runtime it links has the CUDA execution provider and a GPU is visible;
+otherwise on the CPU. Each model prints the device it ended up on:
+
+```text
+[RT] provider CUDA device 0 sessions 4
+```
+
+Requirements on Linux: an NVIDIA driver for CUDA 12 or later, the CUDA 12
+runtime libraries (cudart, cuBLAS, cuBLASLt) and **cuDNN 9 for CUDA 12**,
+including the unversioned `libcudnn.so`, which ONNX Runtime opens by that
+name. Without cuDNN only the MS2 model (a transformer) runs on the GPU; RT and
+CCS (convolution and LSTM layers) cannot create a CUDA session and run on the
+CPU, which on one H100 makes a whole-proteome library about 2.6 times slower.
+Install cuDNN system-wide (`apt install libcudnn9-cuda-12 libcudnn9-dev-cuda-12`
+from NVIDIA's CUDA repository) or in user space (`pip install nvidia-cudnn-cu12`
+or conda `cudnn=9 cuda-version=12`), create the `libcudnn.so -> libcudnn.so.9`
+link if the package lacks it, and put that directory on `LD_LIBRARY_PATH`.
+
+When a GPU exists but a model cannot use it, DIALibGen prints a `WARNING`
+naming the model, the reason (for example `dlopen failed for libcudnn.so`) and
+the fix, and records it in Parquet output as the `odia.warnings` metadata key
+(tune: `device_warnings` in the provenance). A machine without a GPU, or a
+CPU-only ONNX Runtime, runs on the CPU without a warning.
+`-machine:require_gpu` turns every CPU fallback, that case included, into an
+error.
+
 ## Files and provenance
 
 Input libraries can be DIALibGen Parquet or DIA-NN TSV. Output format follows

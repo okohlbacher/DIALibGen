@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -35,6 +36,42 @@ namespace
   /// Ort::Session constructor needs it. Do not "fix" it into a dangling
   /// pointer by hoisting the c_str() out.
   std::filesystem::path ortPath(const std::string& p) { return std::filesystem::path(p); }
+
+  /// True for the CUDA errors that mean "there is no such GPU" rather than
+  /// "this GPU cannot run the model": probing devices 0..7 on a one-GPU box,
+  /// or any device with CUDA_VISIBLE_DEVICES empty, is the normal CPU case.
+  bool noSuchDevice(const std::string& what)
+  {
+    return what.find("no CUDA-capable device") != std::string::npos ||
+           what.find("invalid device ordinal") != std::string::npos ||
+           what.find("CUDA driver version is insufficient") != std::string::npos;
+  }
+
+  /// ONNX Runtime's message without the source path, function signature and
+  /// status code it prefixes: "... [ONNXRuntimeError] : 9 : NOT_IMPLEMENTED :
+  /// cuDNN is unavailable ...: dlopen failed for libcudnn.so: ..." keeps the
+  /// part after the last " : ", which is what a user can act on.
+  std::string conciseOrtError(const std::string& what)
+  {
+    if (what.find("[ONNXRuntimeError]") == std::string::npos) { return what; }
+    const auto last = what.rfind(" : ");
+    return last == std::string::npos ? what : what.substr(last + 3);
+  }
+
+  std::string fallbackFix(const std::string& reason)
+  {
+    std::string lower = reason;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const char* docs = "https://github.com/okohlbacher/DIALibGen/blob/main/docs/usage.md#gpu";
+    if (lower.find("cudnn") != std::string::npos)
+    {
+      return std::string("install cuDNN 9 for CUDA 12, including the unversioned libcudnn.so "
+                         "(apt: libcudnn9-cuda-12 libcudnn9-dev-cuda-12; or pip nvidia-cudnn-cu12 "
+                         "plus a libcudnn.so symlink, on LD_LIBRARY_PATH); see ") + docs;
+    }
+    return std::string("check the NVIDIA driver and the CUDA 12 runtime libraries (cuBLAS, cuDNN 9); see ") + docs;
+  }
 }
 
 namespace ODIA
@@ -58,16 +95,23 @@ namespace ODIA
     int device = -1;
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
+    std::string fallback;   ///< see fallbackReason()
   };
 
   PeptDeepPredictor::PeptDeepPredictor(const std::string& model_path,
                                        bool prefer_gpu, int intra_op_threads,
-                                       int sessions, int gpu_device)
+                                       int sessions, int gpu_device,
+                                       const GpuOptions& gpu)
     : impl_(std::make_unique<Impl>())
   {
     if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
     impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
+    // Why CUDA was not used, and whether that deserves a warning: a GPU that
+    // exists but cannot run the model (cuDNN missing, out of memory) does; a
+    // machine without one does not -- the same binary serves both.
+    std::string reason;
+    bool gpu_present = false;
     if (prefer_gpu)
     {
       // Ask before attempting. Registering CUDA blindly on a CPU-only build
@@ -81,13 +125,12 @@ namespace ODIA
         if (name == "CUDAExecutionProvider") { cuda_available = true; break; }
       }
 
-      if (cuda_available)
+      if (!cuda_available) { reason = "this ONNX Runtime build has no CUDA provider"; }
+      else
       {
         // PROBE the devices rather than trusting device 0. On this project's
         // GPU nodes device 0 is dead, and AppendExecutionProvider_CUDA happily
         // accepts it -- the failure only surfaces when the session is built.
-        // A silent fall back to CPU turns a 4-minute library into a 25-minute
-        // one with nothing in the log to say why.
         const int first = gpu_device >= 0 ? gpu_device : 0;
         const int last  = gpu_device >= 0 ? gpu_device : 7;
         for (int dev = first; dev <= last; ++dev)
@@ -107,8 +150,18 @@ namespace ODIA
             impl_->device = dev;
             break;
           }
-          catch (const Ort::Exception&) { /* dead or absent: try the next */ }
+          catch (const Ort::Exception& e)
+          {
+            // Keep the first real failure: it is the one the user can fix.
+            if (!noSuchDevice(e.what()) && !gpu_present)
+            {
+              gpu_present = true;
+              reason = "CUDA device " + std::to_string(dev) + ": " + conciseOrtError(e.what());
+            }
+          }
         }
+        if (impl_->provider != Provider::CUDA && reason.empty())
+        { reason = "no usable CUDA device is visible"; }
       }
     }
 
@@ -123,22 +176,45 @@ namespace ODIA
       {
         // Registering the provider can succeed while creating the session with
         // it fails, so the fallback has to cover both.
+        gpu_present = true;
+        reason = "CUDA device " + std::to_string(impl_->device) + ": " + conciseOrtError(e.what());
         impl_->provider = Provider::CPU;
         impl_->device = -1;
         impl_->options = Ort::SessionOptions{};
         impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
-        try
-        {
-          impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
-        }
-        catch (const Ort::Exception& retry)
-        { throw std::runtime_error("cannot open model " + model_path + ": " + retry.what()); }
       }
       else
       {
         throw std::runtime_error("cannot open model " + model_path + ": " + e.what());
       }
+    }
+
+    if (prefer_gpu && impl_->provider == Provider::CPU)
+    {
+      const std::string model = std::filesystem::path(model_path).filename().string();
+      // Requiring the GPU turns every way of ending up on the CPU into an
+      // error, the expected no-GPU case included: whoever asked knows.
+      if (gpu.require)
+      {
+        throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model +
+                                 " cannot run on CUDA: " + reason + ". Fix: " + fallbackFix(reason));
+      }
+      // A silent fall back to CPU turns a 2.5-minute library into a
+      // 6.5-minute one (H100, whole proteome) with nothing in the log to
+      // say why: the caller prints and records this.
+      if (gpu_present)
+      { impl_->fallback = model + " runs on the CPU although CUDA was requested: " + reason + ". Fix: " + fallbackFix(reason); }
+    }
+
+    if (!impl_->session)
+    {
+      try
+      {
+        impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
+      }
+      catch (const Ort::Exception& retry)
+      { throw std::runtime_error("cannot open model " + model_path + ": " + retry.what()); }
     }
 
     Ort::AllocatorWithDefaultOptions allocator;
@@ -198,6 +274,8 @@ namespace ODIA
   }
 
   int PeptDeepPredictor::device() const { return impl_->device; }
+
+  const std::string& PeptDeepPredictor::fallbackReason() const { return impl_->fallback; }
 
   std::size_t PeptDeepPredictor::sessionCount() const
   {

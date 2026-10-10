@@ -3,9 +3,11 @@
 
 #pragma once
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include <odia/PeptDeepPredictor.h>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
+#include <vector>
 
 class DIALibGen final : public OpenMS::TOPPBase
 {
@@ -20,6 +22,8 @@ protected:
   ExitCodes generate_();
   ExitCodes refine_(bool tune_only);
   ExitCodes convert_();
+  /// GPU settings for prediction from -machine:*; warnings collects CPU fallbacks.
+  ODIA::GpuOptions gpuOptions_(std::vector<std::string>* warnings);
   nlohmann::json generationValue_(const std::string& key, const nlohmann::json& value);
   std::set<std::string> supplied_;
   std::set<std::string> refinement_options_;

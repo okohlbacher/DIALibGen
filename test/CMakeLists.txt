@@ -267,6 +267,17 @@ if(EXISTS "${ODIA_MS2_MODEL_PATH}")
            COMMAND odia_ms2_sessions "${ODIA_MS2_MODEL_PATH}")
 endif()
 
+# -machine:require_gpu must turn a CPU run into an error rather than a
+# warning. With no GPU visible this is the "no CUDA device" case (or a CPU-only
+# ONNX Runtime); both have to fail before anything is written.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}")
+  add_failure_test(generate_require_gpu_without_gpu DIALibGen "the GPU is required (-machine:require_gpu)"
+                   -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   -out "${CMAKE_CURRENT_BINARY_DIR}/require_gpu.tsv" -machine:require_gpu)
+  set_tests_properties(generate_require_gpu_without_gpu PROPERTIES
+                       ENVIRONMENT "CUDA_VISIBLE_DEVICES=;DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.

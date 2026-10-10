@@ -16,6 +16,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
 #include <iomanip>
 #include <locale>
 #include <sstream>
@@ -406,7 +407,11 @@ namespace ODIA
     {
       const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
       const unsigned want = requested == 0 ? hardware : requested;
-      return static_cast<int>(std::min(want, 16u));
+      // ODIA_MAX_SESSIONS (perf/memory-cache experiment knob): the cap, default 16.
+      unsigned cap = 16u;
+      if (const char* v = std::getenv("ODIA_MAX_SESSIONS"); v != nullptr && std::atoi(v) > 0)
+      { cap = static_cast<unsigned>(std::atoi(v)); }
+      return static_cast<int>(std::min(want, cap));
     }
   } // namespace
 

@@ -21,6 +21,13 @@
 #include <thread>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <vector>
+
+#if defined(__linux__)
+#include <pthread.h>
+#include <sched.h>
+#endif
 
 namespace
 {
@@ -42,6 +49,73 @@ namespace
   /// Numbers predictor calls and predictor instances in the trace (tracing only).
   std::atomic<std::int64_t> g_trace_calls{0};
   std::atomic<std::int64_t> g_trace_instances{0};
+
+  /// Experiment knobs (perf/memory-cache). Each is read once; unset means the
+  /// unchanged default behaviour, so a run without them is the baseline.
+  ///   ODIA_BATCH_ROWS=<n>     rows per ONNX call instead of MAX_BATCH_ROWS;
+  ///                           a 1-row tail is merged into the previous chunk
+  ///                           (RT/CCS differ at the last bit for 1-row batches)
+  ///   ODIA_SHARE_PREPACK=1    one PrepackedWeightsContainer per predictor, so
+  ///                           the sessions share one copy of prepacked weights
+  ///   ODIA_ARENA_SHRINK=1     RunOptions memory.enable_memory_arena_shrinkage
+  ///   ODIA_PIN_SESSIONS=1     session s runs on the s-th CPU of the process
+  ///                           affinity mask (numactl/taskset choose the CPUs)
+  long knob(const char* name, long fallback)
+  {
+    const char* v = std::getenv(name);
+    if (v == nullptr || *v == '\0') { return fallback; }
+    char* end = nullptr;
+    const long x = std::strtol(v, &end, 10);
+    return (end != v && x > 0) ? x : fallback;
+  }
+  std::size_t batchRowsKnob()
+  {
+    static const long rows = knob("ODIA_BATCH_ROWS", 0);
+    return static_cast<std::size_t>(rows);
+  }
+  bool sharePrepackKnob() { static const bool on = knob("ODIA_SHARE_PREPACK", 0) > 0; return on; }
+  bool arenaShrinkKnob() { static const bool on = knob("ODIA_ARENA_SHRINK", 0) > 0; return on; }
+  bool pinSessionsKnob() { static const bool on = knob("ODIA_PIN_SESSIONS", 0) > 0; return on; }
+
+  /// The CPUs of the process affinity mask at first use, in ascending order.
+  const std::vector<int>& allowedCpus()
+  {
+    static const std::vector<int> cpus = [] {
+      std::vector<int> out;
+#if defined(__linux__)
+      cpu_set_t set;
+      CPU_ZERO(&set);
+      if (sched_getaffinity(0, sizeof(set), &set) == 0)
+      {
+        for (int c = 0; c < CPU_SETSIZE; ++c) { if (CPU_ISSET(c, &set)) { out.push_back(c); } }
+      }
+#endif
+      return out;
+    }();
+    return cpus;
+  }
+
+  /// Pins the calling thread to one CPU; returns false where unsupported.
+  bool pinTo(int cpu)
+  {
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    return pthread_setaffinity_np(pthread_self(), sizeof(set), &set) == 0;
+#else
+    (void)cpu;
+    return false;
+#endif
+  }
+
+  Ort::RunOptions makeRunOptions()
+  {
+    if (!arenaShrinkKnob()) { return Ort::RunOptions{nullptr}; }
+    Ort::RunOptions options;
+    options.AddConfigEntry("memory.enable_memory_arena_shrinkage", "cpu:0");
+    return options;
+  }
 }
 
 namespace ODIA
@@ -80,6 +154,8 @@ namespace ODIA
     const char* kind = "-";
     /// ODIA_ORT_PROFILE: every session writes ONNX Runtime's per-op profile.
     bool ort_profiling = false;
+    /// ODIA_SHARE_PREPACK: one container of prepacked weights for all sessions.
+    std::unique_ptr<Ort::PrepackedWeightsContainer> prepacked;
   };
 
   PeptDeepPredictor::PeptDeepPredictor(const std::string& model_path,
@@ -106,11 +182,17 @@ namespace ODIA
       if (!parent.empty()) { std::filesystem::create_directories(parent, ec); }
     }
     const std::int64_t instance = impl_->ort_profiling ? g_trace_instances++ : 0;
+    if (sharePrepackKnob() && !prefer_gpu) { impl_->prepacked = std::make_unique<Ort::PrepackedWeightsContainer>(); }
     const auto makeSession = [&](std::size_t index) {
       trace::Scope created("session_create", 3);
       created.fields().session = static_cast<std::int64_t>(index);
       if (!impl_->ort_profiling)
       {
+        if (impl_->prepacked)
+        {
+          return std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options,
+                                                *impl_->prepacked);
+        }
         return std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
       }
       Ort::SessionOptions profiled = impl_->options.Clone();
@@ -251,6 +333,11 @@ namespace ODIA
     {
       trace::note(std::string("ort_version"), Ort::GetVersionString());
       trace::note(std::string("predictor.") + impl_->kind + ".sessions", std::to_string(sessionCount()));
+      trace::note(std::string("knob.") + impl_->kind,
+                  "batch_rows=" + std::to_string(batchRowsKnob() ? batchRowsKnob() : MAX_BATCH_ROWS) +
+                  " share_prepack=" + std::to_string(impl_->prepacked ? 1 : 0) +
+                  " arena_shrink=" + std::to_string(arenaShrinkKnob() ? 1 : 0) +
+                  " pin_sessions=" + std::to_string(pinSessionsKnob() ? 1 : 0));
     }
   }
 
@@ -270,14 +357,19 @@ namespace ODIA
     // result depends on the batch size at the last bit (see MAX_BATCH_ROWS).
     trace::Scope chunking("chunking", 3);
     std::vector<std::vector<std::size_t>> chunks;
+    const std::size_t knob_rows = batchRowsKnob();
+    const std::size_t cap = knob_rows > 0 ? knob_rows : MAX_BATCH_ROWS;
     for (const auto& whole_group : PeptDeepEncoder::groupByLength(peptides))
     {
-      for (std::size_t offset = 0; offset < whole_group.size(); offset += MAX_BATCH_ROWS)
+      for (std::size_t offset = 0; offset < whole_group.size(); offset += cap)
       {
+        std::size_t stop = std::min(offset + cap, whole_group.size());
+        // Knob only: never leave a 1-row tail behind (see ODIA_BATCH_ROWS).
+        if (knob_rows > 0 && whole_group.size() - stop == 1) { stop = whole_group.size(); }
         chunks.emplace_back(
           whole_group.begin() + static_cast<std::ptrdiff_t>(offset),
-          whole_group.begin() + static_cast<std::ptrdiff_t>(
-            std::min(offset + MAX_BATCH_ROWS, whole_group.size())));
+          whole_group.begin() + static_cast<std::ptrdiff_t>(stop));
+        if (stop == whole_group.size()) { break; }
       }
     }
     // Tracing: one "dispatch" event per call, one "worker" per thread and one
@@ -356,6 +448,23 @@ namespace ODIA
 
     const auto worker = [&](std::size_t session)
     {
+#if defined(__linux__)
+      // ODIA_PIN_SESSIONS: session s always on the same CPU, so its arena
+      // pages stay where they were first touched. The caller's mask is
+      // restored after session 0's share of the work.
+      cpu_set_t saved;
+      bool restore = false;
+      if (pinSessionsKnob() && !allowedCpus().empty())
+      {
+        if (session == 0) { restore = pthread_getaffinity_np(pthread_self(), sizeof(saved), &saved) == 0; }
+        pinTo(allowedCpus()[session % allowedCpus().size()]);
+      }
+      struct Restore
+      {
+        bool on; cpu_set_t* set;
+        ~Restore() { if (on) { pthread_setaffinity_np(pthread_self(), sizeof(*set), set); } }
+      } restore_guard{restore, &saved};
+#endif
       const double w0 = trace::now();
       const double wcpu0 = tracing ? trace::threadCpu() : 0.0;
       if (tracing && session > 0) { trace::nameWorker(impl_->kind, session); }
@@ -444,7 +553,7 @@ namespace ODIA
 
     trace::Scope running("ort_run", 4);
     tag(running, impl_->kind, session, group.size());
-    auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
+    auto results = impl_->at(session).Run(makeRunOptions(), in_names.data(),
                                        inputs.data(), inputs.size(),
                                        out_names.data(), out_names.size());
     running.end();
@@ -609,7 +718,7 @@ namespace ODIA
 
       trace::Scope running("ort_run", 4);
       tag(running, impl_->kind, session, group.size());
-      auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
+      auto results = impl_->at(session).Run(makeRunOptions(), in_names.data(),
                                          inputs.data(), inputs.size(),
                                          out_names.data(), out_names.size());
       running.end();
@@ -834,7 +943,7 @@ namespace ODIA
 
     trace::Scope running("ort_run", 4);
     tag(running, impl_->kind, session, group.size());
-    auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
+    auto results = impl_->at(session).Run(makeRunOptions(), in_names.data(),
                                        inputs.data(), inputs.size(),
                                        out_names.data(), out_names.size());
     running.end();

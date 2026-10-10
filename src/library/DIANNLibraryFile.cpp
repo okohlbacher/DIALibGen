@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/DIANNLibraryFile.h>
+#include <odia/Trace.h>
 #include <odia/AtomicFile.h>
 #include <odia/TextWriter.h>
 
@@ -563,6 +564,7 @@ namespace ODIA
     // read-only, so its identity is the install's. Hash it explicitly if a
     // build ever ships more than one.
     if (path.empty()) { return "bundled"; }
+    trace::Scope hashing("hash_model", 1);
     std::ifstream in(path, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot read model: " + path); }
     std::uint64_t h = 14695981039346656037ull;
@@ -583,6 +585,7 @@ namespace ODIA
   DIANNLibraryFile::Fingerprint
   DIANNLibraryFile::fingerprintFasta(const std::string& fasta)
   {
+    trace::Scope hashing("hash_fasta", 1);
     std::ifstream in(fasta, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot read FASTA: " + fasta); }
 
@@ -805,6 +808,10 @@ namespace ODIA
       if (!st.ok()) { throw std::runtime_error("parquet build: " + st.ToString()); }
     };
 
+    // Arrays built single-threaded, precursor by precursor.
+    trace::Scope build_step("build_arrays", 1);
+    build_step.fields().rows = static_cast<std::int64_t>(n);
+
     // Precursor-level: ONE value each, not one per transition.
     arrow::StringDictionaryBuilder b_id, b_seq, b_pg;
     arrow::UInt8Builder b_z, b_dec;
@@ -861,6 +868,8 @@ namespace ODIA
       }
     }
 
+    build_step.end();
+    trace::Scope finish_step("finish_arrays", 1);
     std::shared_ptr<arrow::Array> a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im,
                                   a_ccs, a_pmz, a_qmz, a_int, a_ft, a_fz, a_ord, a_loss;
     ok(b_id.Finish(&a_id));   ok(b_seq.Finish(&a_seq)); ok(b_pg.Finish(&a_pg));
@@ -914,7 +923,10 @@ namespace ODIA
     auto table = arrow::Table::Make(schema,
       {a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im, a_ccs, a_pmz,
        a_qmz, a_int, a_ft, a_fz, a_ord, a_loss});
+    finish_step.end();
 
+    // Encoding, dictionary, ZSTD and the file write, all inside WriteTable.
+    trace::Scope write_step("write_table", 1);
     AtomicFile output(filename);
     auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
     if (!outfile.ok()) { throw std::runtime_error("cannot write library: " + filename); }
@@ -927,6 +939,8 @@ namespace ODIA
                                                props, arrow_props);
     if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
     ok((*outfile)->Close());
+    write_step.end();
+    trace::Scope commit_step("commit", 1);
     output.commit();
   }
 
@@ -1088,6 +1102,9 @@ namespace ODIA
 
   void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library)
   {
+    // Formatting and buffered writes, one row per transition, single-threaded.
+    trace::Scope format_step("format_rows", 1);
+    format_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     AtomicFile output(filename);
     TextWriter out(output.temporaryPath().string());
 
@@ -1152,9 +1169,13 @@ namespace ODIA
       }
     }
 
+    format_step.end();
     // A file checked only at open reports success on a full disk, an exceeded
     // quota or a broken mount, leaving a truncated library behind.
+    trace::Scope close_step("close", 1);
     out.close();
+    close_step.end();
+    trace::Scope commit_step("commit", 1);
     output.commit();
   }
 

@@ -7,6 +7,7 @@
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <filesystem>
 #include <fstream>
@@ -348,6 +349,8 @@ json DIALibGen::generationValue_(const std::string& key, const json& value)
 }
 OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
   {
+    // Configuration, model lookup and option checks, up to the FASTA read.
+    ODIA::trace::Scope setup_phase("setup", 0);
     ODIA::DigestParams p;                       // defaults live in DigestParams
     std::string decoys = "none", rt_model, ms2_model, ccs_model, instrument = "QE";
     bool recompute_decoy_mz = false;
@@ -486,6 +489,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
     ODIA::Library library;
     std::string standards;
+    setup_phase.fields().rows = threads;
+    setup_phase.end();
     try
     {
       const auto st = ODIA::LibraryGenerator::generate(fasta, p, library);
@@ -555,6 +560,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     catch (const std::exception& e)
     { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }
 
+    ODIA::trace::Scope fingerprint_phase("fingerprint", 0);
     ODIA::DIANNLibraryFile::Fingerprint fp;
     try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
     catch (const std::exception& e)
@@ -568,7 +574,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     fp.decoy_method = decoys;
     fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
                 ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
+    fingerprint_phase.end();
 
+    ODIA::trace::Scope write_phase("write", 0);
+    write_phase.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     try
     {
       if (parquet)
@@ -582,6 +591,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("cannot write ") + out + ": " + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+    write_phase.end();
     writeLogInfo_("wrote " + out);
+    {
+      // Releasing the library: what the destructor would do on return, done
+      // here so that the trace can time it.
+      ODIA::trace::Scope teardown_phase("teardown", 0);
+      library = ODIA::Library();
+    }
     return EXECUTION_OK;
   }

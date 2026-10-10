@@ -4,6 +4,7 @@
 #include <odia/PeptDeepPredictor.h>
 
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
@@ -12,8 +13,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <thread>
 #include <limits>
@@ -35,10 +38,25 @@ namespace
   /// Ort::Session constructor needs it. Do not "fix" it into a dangling
   /// pointer by hoisting the c_str() out.
   std::filesystem::path ortPath(const std::string& p) { return std::filesystem::path(p); }
+
+  /// Numbers predictor calls and predictor instances in the trace (tracing only).
+  std::atomic<std::int64_t> g_trace_calls{0};
+  std::atomic<std::int64_t> g_trace_instances{0};
 }
 
 namespace ODIA
 {
+  namespace
+  {
+    /// Stamps a chunk-level trace scope with its model, session and rows.
+    void tag(trace::Scope& scope, const char* kind, std::size_t session, std::size_t rows)
+    {
+      if (!scope.active()) { return; }
+      scope.fields().model = kind;
+      scope.fields().session = static_cast<std::int64_t>(session);
+      scope.fields().rows = static_cast<std::int64_t>(rows);
+    }
+  }
 
   struct PeptDeepPredictor::Impl
   {
@@ -58,6 +76,10 @@ namespace ODIA
     int device = -1;
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
+    /// RT, MS2 or CCS, from the inputs; names the model in trace events.
+    const char* kind = "-";
+    /// ODIA_ORT_PROFILE: every session writes ONNX Runtime's per-op profile.
+    bool ort_profiling = false;
   };
 
   PeptDeepPredictor::PeptDeepPredictor(const std::string& model_path,
@@ -67,6 +89,37 @@ namespace ODIA
   {
     if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
     impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // ODIA_ORT_PROFILE=<prefix>: ONNX Runtime's own per-operator profile, one
+    // JSON per session. Each session needs its own prefix -- ONNX Runtime
+    // appends only a time stamp to the second, so sessions created in the same
+    // second would overwrite each other's file. Opt-in and slow; use it on
+    // small inputs.
+    const char* ort_profile = std::getenv("ODIA_ORT_PROFILE");
+    impl_->ort_profiling = ort_profile != nullptr && *ort_profile != '\0';
+    if (impl_->ort_profiling)
+    {
+      // ONNX Runtime does not create the directory and reports no error when
+      // it cannot open the file.
+      std::error_code ec;
+      const auto parent = std::filesystem::path(ort_profile).parent_path();
+      if (!parent.empty()) { std::filesystem::create_directories(parent, ec); }
+    }
+    const std::int64_t instance = impl_->ort_profiling ? g_trace_instances++ : 0;
+    const auto makeSession = [&](std::size_t index) {
+      trace::Scope created("session_create", 3);
+      created.fields().session = static_cast<std::int64_t>(index);
+      if (!impl_->ort_profiling)
+      {
+        return std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
+      }
+      Ort::SessionOptions profiled = impl_->options.Clone();
+      const std::string prefix = std::string(ort_profile) + "_" +
+        std::filesystem::path(model_path).stem().string() + "_i" + std::to_string(instance) +
+        "_s" + std::to_string(index);
+      profiled.EnableProfiling(ortPath(prefix).c_str());
+      return std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), profiled);
+    };
 
     if (prefer_gpu)
     {
@@ -114,8 +167,7 @@ namespace ODIA
 
     try
     {
-      impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(),
-                                                      impl_->options);
+      impl_->session = makeSession(0);
     }
     catch (const Ort::Exception& e)
     {
@@ -130,7 +182,7 @@ namespace ODIA
         if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
         try
         {
-          impl_->session = std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), impl_->options);
+          impl_->session = makeSession(0);
         }
         catch (const Ort::Exception& retry)
         { throw std::runtime_error("cannot open model " + model_path + ": " + retry.what()); }
@@ -180,6 +232,7 @@ namespace ODIA
         "model " + model_path + " is not a PeptDeep retention-time, CCS or MS2 model: "
         "found inputs (" + names + ")");
     }
+    impl_->kind = looks_like_rt ? "RT" : looks_like_ms2 ? "MS2" : "CCS";
 
     // Replicas only after the model has been accepted, so a bad path or a
     // wrong model reports once rather than N times.
@@ -191,9 +244,13 @@ namespace ODIA
     {
       for (int i = 1; i < sessions; ++i)
       {
-        impl_->replicas.push_back(std::make_unique<Ort::Session>(
-          impl_->env, ortPath(model_path).c_str(), impl_->options));
+        impl_->replicas.push_back(makeSession(static_cast<std::size_t>(i)));
       }
+    }
+    if (trace::enabled())
+    {
+      trace::note(std::string("ort_version"), Ort::GetVersionString());
+      trace::note(std::string("predictor.") + impl_->kind + ".sessions", std::to_string(sessionCount()));
     }
   }
 
@@ -211,6 +268,7 @@ namespace ODIA
     // The chunk list is built up front and in the serial order, so which
     // session runs a chunk cannot change how the input was split -- and the
     // result depends on the batch size at the last bit (see MAX_BATCH_ROWS).
+    trace::Scope chunking("chunking", 3);
     std::vector<std::vector<std::size_t>> chunks;
     for (const auto& whole_group : PeptDeepEncoder::groupByLength(peptides))
     {
@@ -222,12 +280,73 @@ namespace ODIA
             std::min(offset + MAX_BATCH_ROWS, whole_group.size())));
       }
     }
+    // Tracing: one "dispatch" event per call, one "worker" per thread and one
+    // "chunk" per batch, each stamped with the call number, so that queue
+    // wait, tail idle and per-session load can be read off afterwards.
+    const bool tracing = chunking.active();
+    const std::int64_t call = tracing ? g_trace_calls++ : -1;
+    if (tracing)
+    {
+      chunking.fields().model = impl_->kind;
+      chunking.fields().call = call;
+      chunking.fields().rows = static_cast<std::int64_t>(peptides.size());
+      chunking.fields().idx = static_cast<std::int64_t>(chunks.size());
+      chunking.end();
+    }
     if (chunks.empty()) { return; }
 
     const std::size_t workers = std::min(sessionCount(), chunks.size());
+    const double dispatch_t0 = trace::now();
+    const double dispatch_cpu0 = tracing ? trace::threadCpu() : 0.0;
+    const auto runChunk = [&](std::size_t session, std::size_t i, std::int64_t& rows_done)
+    {
+      if (!tracing) { body(session, chunks[i]); return; }
+      const double t0 = trace::now();
+      const double cpu0 = trace::threadCpu();
+      body(session, chunks[i]);
+      trace::Fields f;
+      f.model = impl_->kind;
+      f.call = call;
+      f.idx = static_cast<std::int64_t>(i);
+      f.session = static_cast<std::int64_t>(session);
+      f.rows = static_cast<std::int64_t>(chunks[i].size());
+      f.len = static_cast<std::int64_t>(peptides[chunks[i].front()].size());
+      f.wait_s = t0 - dispatch_t0;
+      trace::record("chunk", 3, t0, trace::now(), trace::threadCpu() - cpu0, f);
+      rows_done += f.rows;
+    };
+    const auto recordWorker = [&](std::size_t session, double t0, double cpu0,
+                                  std::int64_t chunks_done, std::int64_t rows_done)
+    {
+      trace::Fields f;
+      f.model = impl_->kind;
+      f.call = call;
+      f.idx = chunks_done;
+      f.session = static_cast<std::int64_t>(session);
+      f.rows = rows_done;
+      f.wait_s = t0 - dispatch_t0;
+      trace::record("worker", 3, t0, trace::now(), trace::threadCpu() - cpu0, f);
+    };
+    const auto recordDispatch = [&]()
+    {
+      trace::Fields f;
+      f.model = impl_->kind;
+      f.call = call;
+      f.idx = static_cast<std::int64_t>(chunks.size());
+      f.session = static_cast<std::int64_t>(workers);
+      f.rows = static_cast<std::int64_t>(peptides.size());
+      trace::record("dispatch", 3, dispatch_t0, trace::now(), trace::threadCpu() - dispatch_cpu0, f);
+    };
+
     if (workers <= 1)
     {
-      for (const auto& chunk : chunks) { body(0, chunk); }
+      std::int64_t rows_done = 0;
+      for (std::size_t i = 0; i < chunks.size(); ++i) { runChunk(0, i, rows_done); }
+      if (tracing)
+      {
+        recordWorker(0, dispatch_t0, dispatch_cpu0, static_cast<std::int64_t>(chunks.size()), rows_done);
+        recordDispatch();
+      }
       return;
     }
 
@@ -237,6 +356,10 @@ namespace ODIA
 
     const auto worker = [&](std::size_t session)
     {
+      const double w0 = trace::now();
+      const double wcpu0 = tracing ? trace::threadCpu() : 0.0;
+      if (tracing && session > 0) { trace::nameWorker(impl_->kind, session); }
+      std::int64_t chunks_done = 0, rows_done = 0;
       for (std::size_t i = next++; i < chunks.size(); i = next++)
       {
         // One thread's failure must stop the others rather than let them run
@@ -244,19 +367,21 @@ namespace ODIA
         // exception is kept and rethrown on the calling thread.
         {
           const std::lock_guard<std::mutex> lock(first_error_mutex);
-          if (first_error) { return; }
+          if (first_error) { break; }
         }
         try
         {
-          body(session, chunks[i]);
+          runChunk(session, i, rows_done);
+          ++chunks_done;
         }
         catch (...)
         {
           const std::lock_guard<std::mutex> lock(first_error_mutex);
           if (!first_error) { first_error = std::current_exception(); }
-          return;
+          break;
         }
       }
+      if (tracing) { recordWorker(session, w0, wcpu0, chunks_done, rows_done); }
     };
 
     std::vector<std::thread> threads;
@@ -264,11 +389,29 @@ namespace ODIA
     for (std::size_t s = 1; s < workers; ++s) { threads.emplace_back(worker, s); }
     worker(0);
     for (auto& t : threads) { t.join(); }
+    if (tracing) { recordDispatch(); }
 
     if (first_error) { std::rethrow_exception(first_error); }
   }
 
-  PeptDeepPredictor::~PeptDeepPredictor() = default;
+  PeptDeepPredictor::~PeptDeepPredictor()
+  {
+    if (!impl_ || !impl_->ort_profiling) { return; }
+    // End explicitly rather than at session destruction, so the file names
+    // can be reported.
+    Ort::AllocatorWithDefaultOptions allocator;
+    for (std::size_t i = 0; i < sessionCount(); ++i)
+    {
+      try
+      {
+        const auto file = impl_->at(i).EndProfilingAllocated(allocator);
+        const std::string name = file.get();
+        std::cerr << "[trace] ONNX Runtime profile: " << name << "\n";
+        trace::note(std::string("ort_profile.") + impl_->kind + ".s" + std::to_string(i), name);
+      }
+      catch (const std::exception&) {}
+    }
+  }
 
   PeptDeepPredictor::Provider PeptDeepPredictor::provider() const
   {
@@ -299,9 +442,14 @@ namespace ODIA
                                       impl_->input_names[1].c_str()};
     std::vector<const char*> out_names{impl_->output_names[0].c_str()};
 
+    trace::Scope running("ort_run", 4);
+    tag(running, impl_->kind, session, group.size());
     auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
                                        inputs.data(), inputs.size(),
                                        out_names.data(), out_names.size());
+    running.end();
+    trace::Scope unpacking("unpack", 4);
+    tag(unpacking, impl_->kind, session, group.size());
 
     // Validate what came back rather than trusting the shape. The MS2 model
     // returns [batch, seq_len-3, 8]; read blindly, the same loop would hand back
@@ -363,6 +511,8 @@ namespace ODIA
 
     forEachChunk_(peptides, [&](std::size_t session, const std::vector<std::size_t>& group)
     {
+      trace::Scope encoding("encode", 4);
+      tag(encoding, impl_->kind, session, group.size());
       std::vector<OpenMS::AASequence> subset;
       std::vector<int> subset_charges;
       for (const auto index : group)
@@ -378,6 +528,7 @@ namespace ODIA
       }
       catch (const std::exception&)
       {
+        encoding.end();
         // As in predictRT: one unencodable peptide, or one impossible charge,
         // must not discard its whole chunk and take 2047 good peptides with it.
         // Retry singly so only the offending rows are recorded -- reporting the
@@ -401,6 +552,7 @@ namespace ODIA
         }
         return;
       }
+      encoding.end();
 
       runMS2Batch_(session, batch, group, out);
     });
@@ -455,9 +607,14 @@ namespace ODIA
       for (const auto& n : impl_->input_names) { in_names.push_back(n.c_str()); }
       std::vector<const char*> out_names{impl_->output_names[0].c_str()};
 
+      trace::Scope running("ort_run", 4);
+      tag(running, impl_->kind, session, group.size());
       auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
                                          inputs.data(), inputs.size(),
                                          out_names.data(), out_names.size());
+      running.end();
+      trace::Scope unpacking("unpack", 4);
+      tag(unpacking, impl_->kind, session, group.size());
 
       const auto info = results.front().GetTensorTypeAndShapeInfo();
       const auto shape = info.GetShape();
@@ -518,6 +675,8 @@ namespace ODIA
     // Submitted in capped chunks; see MAX_BATCH_ROWS.
     forEachChunk_(peptides, [&](std::size_t session, const std::vector<std::size_t>& group)
     {
+      trace::Scope encoding("encode", 4);
+      tag(encoding, impl_->kind, session, group.size());
       std::vector<OpenMS::AASequence> subset;
       subset.reserve(group.size());
       for (const auto index : group) { subset.push_back(peptides[index]); }
@@ -529,6 +688,7 @@ namespace ODIA
       }
       catch (const std::exception&)
       {
+        encoding.end();
         // One unencodable peptide must not discard the whole run -- at proteome
         // scale that is minutes of inference lost to a single mass-shift
         // modification -- nor its whole chunk, which would take 2047 good
@@ -551,6 +711,7 @@ namespace ODIA
         }
         return;
       }
+      encoding.end();
 
       runBatch_(session, batch, group, out);
     });
@@ -587,6 +748,8 @@ namespace ODIA
 
     forEachChunk_(peptides, [&](std::size_t session, const std::vector<std::size_t>& group)
     {
+      trace::Scope encoding("encode", 4);
+      tag(encoding, impl_->kind, session, group.size());
       std::vector<OpenMS::AASequence> subset;
       std::vector<int> subset_charges;
       subset.reserve(group.size());
@@ -607,6 +770,7 @@ namespace ODIA
       }
       catch (const std::exception&)
       {
+        encoding.end();
         // One unencodable peptide, or one impossible charge, must not discard
         // its chunk. As in predictRT and predictMS2.
         if (failures == nullptr) { throw; }
@@ -627,6 +791,7 @@ namespace ODIA
         }
         return;
       }
+      encoding.end();
 
       runCCSBatch_(session, batch, group, out);
     });
@@ -667,9 +832,14 @@ namespace ODIA
     for (const auto& n : impl_->input_names) { in_names.push_back(n.c_str()); }
     std::vector<const char*> out_names{impl_->output_names[0].c_str()};
 
+    trace::Scope running("ort_run", 4);
+    tag(running, impl_->kind, session, group.size());
     auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, in_names.data(),
                                        inputs.data(), inputs.size(),
                                        out_names.data(), out_names.size());
+    running.end();
+    trace::Scope unpacking("unpack", 4);
+    tag(unpacking, impl_->kind, session, group.size());
 
     const auto info = results.front().GetTensorTypeAndShapeInfo();
     const auto shape = info.GetShape();

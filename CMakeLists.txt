@@ -119,6 +119,7 @@ add_library(odia_library STATIC
   src/library/DIANNLibraryFile.cpp
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
+  src/library/Trace.cpp
 )
 add_library(DIALibGen::odia_library ALIAS odia_library)
 target_compile_features(odia_library PUBLIC cxx_std_23)
@@ -142,6 +143,10 @@ target_link_libraries(odia_library PUBLIC
   ONNXRuntime::ONNXRuntime)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(odia_library PUBLIC OpenMP::OpenMP_CXX)
+endif()
+# dlsym, for glibc's mallinfo2 in the opt-in tracer (src/library/Trace.cpp).
+if(CMAKE_DL_LIBS)
+  target_link_libraries(odia_library PRIVATE ${CMAKE_DL_LIBS})
 endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 

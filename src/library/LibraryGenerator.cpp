@@ -3,6 +3,7 @@
 
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepPredictor.h>
+#include <odia/Trace.h>
 
 #include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
@@ -196,10 +197,14 @@ namespace ODIA
     { throw std::invalid_argument("precursor_charges must be distinct integers between 1 and 8"); }
     Stats stats;
 
+    trace::Scope fasta_phase("fasta_read", 0);
     std::vector<FASTAFile::FASTAEntry> entries;
     FASTAFile().load(fasta_file, entries);
     stats.proteins = entries.size();
+    fasta_phase.fields().rows = static_cast<std::int64_t>(entries.size());
+    fasta_phase.end();
 
+    trace::Scope digest_phase("digest", 0);
     ProteaseDigestion digestion;
     digestion.setEnzyme(params.enzyme);
     digestion.setMissedCleavages(params.missed_cleavages);
@@ -262,6 +267,11 @@ namespace ODIA
       }
     }
     stats.peptides = peptide_to_proteins.size();
+    digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
+    digest_phase.end();
+
+    // Precursors and their m/z-capped placeholder fragments.
+    trace::Scope enumerate_phase("enumerate", 0);
 
     // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
     // the two are distinct types and no implicit conversion exists between the
@@ -355,6 +365,7 @@ namespace ODIA
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
+    enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
     return stats;
   }
 
@@ -429,6 +440,8 @@ namespace ODIA
     // One prediction per distinct sequence. The RT model has no charge input,
     // so predicting per precursor would repeat identical work for every charge
     // state of the same peptide.
+    trace::Scope rt_phase("rt", 0);
+    trace::Scope unique_step("unique_parse", 1);
     std::map<std::uint32_t, std::size_t> handle_to_slot;
     std::vector<AASequence> unique_peptides;
     std::vector<std::uint32_t> slot_handle;
@@ -451,15 +464,24 @@ namespace ODIA
       unique_peptides.push_back(std::move(peptide));
       slot_handle.push_back(handle);
     }
+    unique_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
+    unique_step.end();
     if (unique_peptides.empty()) { return library.precursorCount(); }
 
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("RT", predictor);
     std::vector<PeptDeepPredictor::Failure> failures;
+    trace::Scope predict_step("predict", 1);
+    predict_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
     const auto predicted = predictor.predictRT(unique_peptides, &failures);
+    predict_step.end();
 
+    trace::Scope assign_step("assign", 1);
     std::map<std::uint32_t, float> by_handle;
     for (std::size_t slot = 0; slot < predicted.size(); ++slot)
     {
@@ -499,11 +521,16 @@ namespace ODIA
     const std::size_t n = library.precursorCount();
     if (n == 0) { return 0; }
 
+    trace::Scope ms2_phase("ms2", 0);
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("MS2", predictor);
 
+    trace::Scope reserve_step("reserve", 1);
     // The new transition arrays are built alongside the old ones and swapped in
     // at the end. Editing in place is not possible: a precursor's fragment
     // count changes, so every later precursor's CSR offset moves.
@@ -517,6 +544,7 @@ namespace ODIA
     built.loss.reserve(t.product_mz.size());
 
     std::vector<std::uint32_t> begin(n, 0), count(n, 0);
+    reserve_step.end();
 
     // Blocked so that peak memory is set by the block, not by the proteome.
     constexpr std::size_t BLOCK = 20000;
@@ -527,7 +555,11 @@ namespace ODIA
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
       const std::size_t last = std::min(base + BLOCK, n);
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(last - base);
 
+      trace::Scope parse_step("parse", 2);
       std::vector<AASequence> peptides;
       std::vector<int> charges;
       peptides.reserve(last - base);
@@ -538,10 +570,18 @@ namespace ODIA
           AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i]))));
         charges.push_back(static_cast<int>(p.charge[i]));
       }
+      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
+      parse_step.end();
 
       std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
       const auto spectra = predictor.predictMS2(peptides, charges, nce, instrument, &failures);
+      predict_step.end();
 
+      // Fragment annotation, base-peak floor, ranking and the cap.
+      trace::Scope post_step("post", 2);
+      post_step.fields().rows = static_cast<std::int64_t>(last - base);
       for (std::size_t i = base; i < last; ++i)
       {
         const auto& spectrum = spectra[i - base];
@@ -675,6 +715,7 @@ namespace ODIA
       }
     }
 
+    trace::Scope finalize_step("finalize", 1);
     t = std::move(built);
     p.transition_begin = std::move(begin);
     p.transition_count = std::move(count);
@@ -723,6 +764,7 @@ namespace ODIA
                                standards_file);
     }
 
+    trace::Scope irt_phase("irt_fit", 0);
     PeptDeepPredictor predictor(rt_model_path, prefer_gpu);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
@@ -794,13 +836,17 @@ namespace ODIA
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
     unsigned sessions, bool derive_mobility)
   {
+    trace::Scope ccs_phase("ccs", 0);
     auto& p = library.precursors();
     const std::size_t n = library.precursorCount();
     p.ccs.assign(n, std::numeric_limits<float>::quiet_NaN());
     if (derive_mobility) { p.im.assign(n, std::numeric_limits<float>::quiet_NaN()); }
     if (n == 0) { return 0; }
 
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("CCS", predictor);
@@ -812,6 +858,10 @@ namespace ODIA
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
       const std::size_t last = std::min(base + BLOCK, n);
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(last - base);
+      trace::Scope parse_step("parse", 2);
       std::vector<AASequence> peptides;
       std::vector<int> charges;
       peptides.reserve(last - base);
@@ -822,9 +872,16 @@ namespace ODIA
           AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i]))));
         charges.push_back(static_cast<int>(p.charge[i]));
       }
+      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
+      parse_step.end();
 
       std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
       const auto ccs = predictor.predictCCS(peptides, charges, &failures);
+      predict_step.end();
+      trace::Scope post_step("post", 2);
+      post_step.fields().rows = static_cast<std::int64_t>(last - base);
       for (std::size_t i = base; i < last; ++i)
       {
         p.ccs[i] = ccs[i - base];
@@ -848,6 +905,7 @@ namespace ODIA
                                              bool recompute_decoy_mz)
   {
     if (method == DecoyMethod::None) { return 0; }
+    trace::Scope decoy_phase("decoys", 0);
 
     const std::size_t n_targets = library.precursorCount();
 

@@ -6,6 +6,7 @@
 #include <OpenMS/FORMAT/ParamXMLFile.h>
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
+#include <odia/Trace.h>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -41,6 +42,8 @@ void DIALibGen::registerOptionsAndFlags_()
 
 OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
 {
+  // ODIA_TRACE=<dir>: phase events and /proc samples for this run (docs/tracing.md).
+  const ODIA::trace::Session trace_session(argc, argv);
   std::string ini, instance = "1";
   for (int i = 1; i < argc; ++i)
   {

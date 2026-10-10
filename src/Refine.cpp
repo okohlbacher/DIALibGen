@@ -269,7 +269,7 @@ void DIALibGen::registerRefinementOptions_()
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     registerStringOption_("machine:tf32", "<true/false>", "false",
                           "TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU "
-                          "libraries to float rounding. On: faster (one H100, whole proteome: ~26 s less), but about 1 % "
+                          "libraries to float rounding. On: faster (one H100, whole proteome: ~25 s less), but about 1 % "
                           "of precursors select a different fragment set and CCS moves by up to ~1.9 A^2.", false);
     setValidStrings_("machine:tf32", {"true", "false"});
     registerIntOption_("machine:gpu_sessions", "<n>", 4,
@@ -750,11 +750,16 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
     try
     {
+      // The writers' output does not depend on the thread count.
+      const unsigned write_threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
       if (out.ends_with(".parquet"))
-      { ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{}, prov.dump()); }
+      {
+        ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{},
+                                                    prov.dump(), {}, write_threads);
+      }
       else if (out.ends_with(".tsv"))
-      { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library); }
+      { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library, write_threads); }
       else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
       std::ofstream side(sidecar.temporaryPath());
       side << prov.dump(2) << '\n'; side.close();

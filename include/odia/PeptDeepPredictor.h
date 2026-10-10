@@ -26,7 +26,7 @@ namespace ODIA
     /// matmul and convolution inputs to 10 mantissa bits, so a TF32 library
     /// differs from the CPU library (about 1 % of fragment sets, CCS by up
     /// to ~1.9 A^2), while with it off the GPU agrees with the CPU to float
-    /// rounding. On is faster (one H100, whole proteome: ~26 s less).
+    /// rounding. On is faster (one H100, whole proteome: ~25 s less).
     bool tf32 = false;
     /// CUDA sessions per device. Each has its own stream, so the host-side
     /// encoding of one batch overlaps the GPU work of another; measured on an

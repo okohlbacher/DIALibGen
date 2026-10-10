@@ -8,6 +8,9 @@ add_test(NAME atomic_file_contract COMMAND dialibgen_atomic_file "${CMAKE_CURREN
 
 add_executable(dialibgen_library_io library_io.cpp)
 target_link_libraries(dialibgen_library_io PRIVATE odia_library)
+foreach(mode compact-chunks compact-empty)
+  add_test(NAME library_io_${mode} COMMAND dialibgen_library_io ${mode} "${CMAKE_CURRENT_BINARY_DIR}/${mode}.parquet")
+endforeach()
 if(ODIA_PYTHON)
   add_test(NAME library_io_contract COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/library_io.py"
     $<TARGET_FILE:dialibgen_library_io> "${CMAKE_CURRENT_BINARY_DIR}/library-io")

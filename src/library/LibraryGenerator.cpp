@@ -4,6 +4,7 @@
 #include <odia/LibraryGenerator.h>
 #include <odia/PeptDeepPredictor.h>
 #include <odia/Trace.h>
+#include <odia/PerfKnobs.h>
 
 #include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
@@ -281,8 +282,75 @@ namespace ODIA
     // proteins accumulates them, which is what protein inference later needs.
     std::map<std::string, std::string> peptide_to_proteins;
     std::vector<AASequence> peptides;
+    // Adds one accepted peptide's protein to the map, as the serial loop does.
+    const auto addProtein = [&](const std::string& peptide, const std::string& identifier) {
+      auto& proteins = peptide_to_proteins[peptide];
+      if (proteins.empty()) { proteins = identifier; }
+      else if (!containsAccession(proteins, identifier))
+      {
+        proteins += ';';
+        proteins += identifier;
+      }
+    };
+    const bool parallel_enum = perf::parEnum() && perf::workerThreads() > 1;
+    if (parallel_enum)
+    {
+      // perf/generate-solutions: proteins are digested independently on all
+      // worker threads; only the map update, which decides the order of the
+      // accessions, runs serially and in input order.
+      struct Digested { bool dropped = false; std::size_t ambiguous = 0; std::vector<std::string> accepted; };
+      std::vector<Digested> digested(entries.size());
+      perf::parallelSlices(entries.size(), perf::workerThreads(), [&](std::size_t, std::size_t b, std::size_t e) {
+        ProteaseDigestion local_digestion = digestion;
+        std::vector<AASequence> local;
+        for (std::size_t q = b; q < e; ++q)
+        {
+          const auto& entry = entries[q];
+          auto& out = digested[q];
+          AASequence protein;
+          std::string sequence = entry.sequence;
+          if (!sequence.empty() && sequence.back() == '*') { sequence.pop_back(); }
+          try { protein = AASequence::fromString(sequence); }
+          catch (const std::exception&) { out.dropped = true; continue; }
+          local.clear();
+          local_digestion.digest(protein, local, params.min_length, params.max_length);
+          if (params.n_terminal_methionine_excision && !entry.sequence.empty() &&
+              entry.sequence.front() == 'M')
+          {
+            try
+            {
+              const auto excised = AASequence::fromString(sequence.substr(1));
+              std::vector<AASequence> more;
+              local_digestion.digest(excised, more, params.min_length, params.max_length);
+              local.insert(local.end(), more.begin(), more.end());
+            }
+            catch (const std::exception&) {}
+          }
+          for (const auto& pep : local)
+          {
+            std::string residues = pep.toUnmodifiedString();
+            if (residues.find_first_of("XBZJ") != std::string::npos) { ++out.ambiguous; continue; }
+            try
+            {
+              if (!std::isfinite(pep.getMonoWeight())) { ++out.ambiguous; continue; }
+            }
+            catch (const std::exception&) { ++out.ambiguous; continue; }
+            out.accepted.push_back(std::move(residues));
+          }
+        }
+      });
+      for (std::size_t q = 0; q < entries.size(); ++q)
+      {
+        auto& d = digested[q];
+        if (d.dropped) { ++stats.dropped_proteins; continue; }
+        stats.dropped_ambiguous_peptides += d.ambiguous;
+        for (const auto& pep : d.accepted) { addProtein(pep, entries[q].identifier); }
+        d = Digested{};
+      }
+    }
     for (const auto& entry : entries)
     {
+      if (parallel_enum) { break; }
       AASequence protein;
       std::string sequence = entry.sequence;
       if (!sequence.empty() && sequence.back() == '*') { sequence.pop_back(); }
@@ -365,8 +433,102 @@ namespace ODIA
 
     std::vector<Fragment> fragments;
     std::vector<AASequence> forms;
+    if (parallel_enum)
+    {
+      // perf/generate-solutions: each peptide's forms, precursor m/z and
+      // fragments are computed on all worker threads, in rounds; the strings
+      // are interned and the arrays appended serially in the map's order, so
+      // every handle and every array is what the serial loop produces.
+      struct Prec { double mz; int z; int status; std::vector<Fragment> fragments; };   // 0 kept, 1 m/z, 2 too few
+      struct Form { std::string sequence; std::vector<Prec> precursors; };
+      struct Pep { bool ok = false; std::vector<Form> forms; };
+      std::vector<const std::pair<const std::string, std::string>*> items;
+      items.reserve(peptide_to_proteins.size());
+      for (const auto& kv : peptide_to_proteins) { items.push_back(&kv); }
+      constexpr std::size_t ROUND = 65536;
+      std::vector<Pep> round;
+      for (std::size_t r0 = 0; r0 < items.size(); r0 += ROUND)
+      {
+        const std::size_t r1 = std::min(r0 + ROUND, items.size());
+        round.assign(r1 - r0, Pep{});
+        perf::parallelSlices(r1 - r0, perf::workerThreads(), [&](std::size_t, std::size_t b, std::size_t e) {
+          std::vector<AASequence> local_forms;
+          for (std::size_t q = b; q < e; ++q)
+          {
+            auto& out = round[q];
+            AASequence base;
+            try { base = AASequence::fromString(items[r0 + q]->first); }
+            catch (const std::exception&) { continue; }
+            out.ok = true;
+            ModifiedPeptideGenerator::applyFixedModifications(fixed_map, base);
+            local_forms.clear();
+            if (params.variable_modifications.empty()) { local_forms.push_back(base); }
+            else
+            {
+              ModifiedPeptideGenerator::applyVariableModifications(
+                variable_map, base, params.max_variable_modifications, local_forms, true);
+            }
+            out.forms.resize(local_forms.size());
+            for (std::size_t f = 0; f < local_forms.size(); ++f)
+            {
+              const auto& form = local_forms[f];
+              out.forms[f].sequence = form.toString();
+              for (int z : params.charges)
+              {
+                Prec pr{form.getMZ(z), z, 0, {}};
+                if (pr.mz < params.precursor_mz_min || pr.mz > params.precursor_mz_max) { pr.status = 1; }
+                else
+                {
+                  enumerateFragments(form, params, z, pr.fragments);
+                  if (pr.fragments.size() < params.min_fragments) { pr.status = 2; pr.fragments.clear(); }
+                }
+                out.forms[f].precursors.push_back(std::move(pr));
+              }
+            }
+          }
+        });
+        for (std::size_t q = 0; q < round.size(); ++q)
+        {
+          const auto& pep = round[q];
+          if (!pep.ok) { continue; }
+          const std::uint32_t protein_handle = library.strings().intern(items[r0 + q]->second);
+          for (const auto& form : pep.forms)
+          {
+            const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
+            for (const auto& pr : form.precursors)
+            {
+              if (pr.status == 1) { ++stats.dropped_precursor_mz; continue; }
+              if (pr.status == 2) { ++stats.dropped_too_few_fragments; continue; }
+              auto& p = library.precursors();
+              auto& t = library.transitions();
+              Library::checkTransitionCapacity(t.product_mz.size(), pr.fragments.size());
+              p.mz.push_back(toFixed(pr.mz));
+              p.irt.push_back(std::nanf(""));
+              p.im.push_back(std::nanf(""));
+              p.ccs.push_back(std::nanf(""));
+              p.charge.push_back(static_cast<std::uint8_t>(pr.z));
+              p.decoy.push_back(0);
+              p.modified_sequence.push_back(sequence_handle);
+              p.protein_group.push_back(protein_handle);
+              p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
+              p.transition_count.push_back(static_cast<std::uint32_t>(pr.fragments.size()));
+              for (const auto& f : pr.fragments)
+              {
+                t.product_mz.push_back(toFixed(f.mz));
+                t.library_intensity.push_back(1.0f);
+                t.type.push_back(f.type);
+                t.ordinal.push_back(f.ordinal);
+                t.charge.push_back(f.charge);
+                t.loss.push_back(LossType::None);
+              }
+            }
+          }
+        }
+      }
+    }
     for (const auto& [sequence, proteins] : peptide_to_proteins)
     {
+      if (parallel_enum) { break; }
       AASequence base;
       try { base = AASequence::fromString(sequence); }
       catch (const std::exception&) { continue; }
@@ -470,7 +632,9 @@ namespace ODIA
     {
       const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
       const unsigned want = requested == 0 ? hardware : requested;
-      return static_cast<int>(std::min(want, 16u));
+      // perf/generate-solutions: ODIA_MAX_SESSIONS replaces the cap; 0 is none.
+      const unsigned cap = perf::sessionCap();
+      return static_cast<int>(cap == 0 ? want : std::min(want, cap));
     }
   } // namespace
 
@@ -617,7 +781,7 @@ namespace ODIA
     reserve_step.end();
 
     // Blocked so that peak memory is set by the block, not by the proteome.
-    constexpr std::size_t BLOCK = 20000;
+    const std::size_t BLOCK = perf::ms2Block();
     std::size_t unpredicted = 0;
     std::vector<Fragment> fragments;
     std::vector<std::pair<float, Fragment>> ranked;
@@ -659,143 +823,193 @@ namespace ODIA
       double part[4] = {0.0, 0.0, 0.0, 0.0};   // enumerate, rank, select, emit
       double mark = 0.0;
       const auto lap = [&](int k) { const double now = trace::now(); part[k] += now - mark; mark = now; };
-      for (std::size_t i = base; i < last; ++i)
+      // One precursor's annotation, floor, ranking and cap, appended to @p dst;
+      // returns how many transitions it kept. Shared by the serial and the
+      // parallel path, so both run the same code.
+      const auto postOne = [&](std::size_t i, Library::TransitionArrays& dst,
+                               std::vector<Fragment>& fragments,
+                               std::vector<std::pair<float, Fragment>>& ranked,
+                               std::size_t& unpred, bool timed) -> std::uint32_t
       {
-        const auto& spectrum = spectra[i - base];
-        begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
+          const auto& spectrum = spectra[i - base];
 
-        if (spectrum.positions == 0)
-        {
-          Library::checkTransitionCapacity(built.product_mz.size(), p.transition_count[i]);
-          // Prediction failed for this one. Keep what generate() chose rather
-          // than dropping the precursor: an m/z-ranked assay is worse than a
-          // predicted one but better than none, and it is counted.
-          ++unpredicted;
-          for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+          if (spectrum.positions == 0)
           {
-            const std::size_t j = p.transition_begin[i] + k;
-            built.product_mz.push_back(t.product_mz[j]);
-            built.library_intensity.push_back(t.library_intensity[j]);
-            built.type.push_back(t.type[j]);
-            built.ordinal.push_back(t.ordinal[j]);
-            built.charge.push_back(t.charge[j]);
-            built.loss.push_back(t.loss[j]);
-          }
-          count[i] = p.transition_count[i];
-          continue;
-        }
-
-        // Re-enumerate without the m/z cap: the cap is what has to be redone.
-        if (split_post) { mark = trace::now(); }
-        enumerateAllFragments(peptides[i - base], params, charges[i - base], fragments);
-        if (split_post) { lap(0); }
-
-        const std::size_t residues = peptides[i - base].size();
-        // Base-peak relative, so one absolute threshold cannot be right for a
-        // strong precursor and wrong for a weak one.
-        float peak = 0.0f;
-        for (std::size_t q = 0; q < spectrum.positions; ++q)
-        {
-          for (std::size_t ch = 0; ch < 4; ++ch) { peak = std::max(peak, spectrum.at(q, ch)); }
-        }
-        const float floor = peak * static_cast<float>(params.min_relative_intensity);
-        ranked.clear();
-        for (const auto& f : fragments)
-        {
-          // Position and channel follow alphabase's layout: fragment position
-          // q separates prefix q+1 from suffix nAA-q-1, so a b ion of ordinal
-          // o sits at q = o-1 and a y ion of ordinal o at q = nAA-1-o.
-          std::size_t position = 0;
-          std::size_t channel = 0;
-          if (f.type == FragmentType::B)
-          {
-            position = static_cast<std::size_t>(f.ordinal) - 1;
-            channel = f.charge == 1 ? 0 : 1;
-          }
-          else
-          {
-            position = residues - 1 - static_cast<std::size_t>(f.ordinal);
-            channel = f.charge == 1 ? 2 : 3;
-          }
-          if (position >= spectrum.positions) { continue; }
-          const float intensity = spectrum.at(position, channel);
-          // A predicted zero is a fragment the model says is not there, and a
-          // predicted 1e-7 is the same statement in floating point. Ranking on
-          // `> 0` filled spare slots with denormal noise (see
-          // min_relative_intensity); the floor is relative to this precursor's
-          // own base peak, because the spectrum is base-peak normalised.
-          if (!(intensity > floor)) { continue; }
-          ranked.emplace_back(intensity, f);
-        }
-        if (split_post) { lap(1); }
-
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& a, const auto& b) {
-                    if (a.first != b.first) { return a.first > b.first; }
-                    // Ties broken deterministically, so the library does not
-                    // depend on sort implementation.
-                    if (a.second.mz != b.second.mz) { return a.second.mz > b.second.mz; }
-                    if (a.second.type != b.second.type) { return a.second.type < b.second.type; }
-                    if (a.second.ordinal != b.second.ordinal)
-                    { return a.second.ordinal < b.second.ordinal; }
-                    return a.second.charge < b.second.charge;
-                  });
-        // A quota for doubly-charged fragments, when asked for. Applied by
-        // promoting the best unselected z2 ions over the weakest selected z1
-        // ones, so the cap is unchanged and only its composition moves.
-        if (params.reserved_doubly_charged > 0 && ranked.size() > params.max_fragments)
-        {
-          const std::size_t cap = params.max_fragments;
-          const std::size_t want =
-            std::min(params.reserved_doubly_charged, cap);
-          std::size_t have = 0;
-          for (std::size_t r = 0; r < cap; ++r)
-          {
-            if (ranked[r].second.charge >= 2) { ++have; }
-          }
-          for (std::size_t r = cap; r < ranked.size() && have < want; ++r)
-          {
-            if (ranked[r].second.charge < 2) { continue; }
-            // The weakest singly-charged fragment inside the cap makes way.
-            std::size_t victim = cap;
-            for (std::size_t q = cap; q-- > 0;)
+            Library::checkTransitionCapacity(dst.product_mz.size(), p.transition_count[i]);
+            // Prediction failed for this one. Keep what generate() chose rather
+            // than dropping the precursor: an m/z-ranked assay is worse than a
+            // predicted one but better than none, and it is counted.
+            ++unpred;
+            for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
             {
-              if (ranked[q].second.charge < 2) { victim = q; break; }
+              const std::size_t j = p.transition_begin[i] + k;
+              dst.product_mz.push_back(t.product_mz[j]);
+              dst.library_intensity.push_back(t.library_intensity[j]);
+              dst.type.push_back(t.type[j]);
+              dst.ordinal.push_back(t.ordinal[j]);
+              dst.charge.push_back(t.charge[j]);
+              dst.loss.push_back(t.loss[j]);
             }
-            if (victim == cap) { break; }
-            std::swap(ranked[victim], ranked[r]);
-            ++have;
+            return p.transition_count[i];
           }
-        }
-        if (ranked.size() > params.max_fragments) { ranked.resize(params.max_fragments); }
 
-        // The same bar `enumerateFragments` applied BEFORE prediction. The
-        // base-peak intensity floor above can prune a precursor below it, and
-        // until now nothing re-checked, so the count committed here was
-        // whatever survived. That is where the S08 library's 366,084 targets
-        // with 0-2 fragments came from -- and `appendDecoys` then refused to
-        // build decoys for them, because it does apply the bar. The result was
-        // 7.3% of targets competing against a null that contained nothing like
-        // them. Emptied rather than kept: a precursor below the bar its decoy
-        // would have to clear is not searchable, and `-min_library_fragments`
-        // drops it symmetrically at load.
-        if (ranked.size() < params.min_fragments) { ranked.clear(); }
-        if (split_post) { lap(2); }
+          // Re-enumerate without the m/z cap: the cap is what has to be redone.
+          if (timed) { mark = trace::now(); }
+          enumerateAllFragments(peptides[i - base], params, charges[i - base], fragments);
+          if (timed) { lap(0); }
 
-        Library::checkTransitionCapacity(built.product_mz.size(), ranked.size());
-        for (const auto& [intensity, f] : ranked)
+          const std::size_t residues = peptides[i - base].size();
+          // Base-peak relative, so one absolute threshold cannot be right for a
+          // strong precursor and wrong for a weak one.
+          float peak = 0.0f;
+          for (std::size_t q = 0; q < spectrum.positions; ++q)
+          {
+            for (std::size_t ch = 0; ch < 4; ++ch) { peak = std::max(peak, spectrum.at(q, ch)); }
+          }
+          const float floor = peak * static_cast<float>(params.min_relative_intensity);
+          ranked.clear();
+          for (const auto& f : fragments)
+          {
+            // Position and channel follow alphabase's layout: fragment position
+            // q separates prefix q+1 from suffix nAA-q-1, so a b ion of ordinal
+            // o sits at q = o-1 and a y ion of ordinal o at q = nAA-1-o.
+            std::size_t position = 0;
+            std::size_t channel = 0;
+            if (f.type == FragmentType::B)
+            {
+              position = static_cast<std::size_t>(f.ordinal) - 1;
+              channel = f.charge == 1 ? 0 : 1;
+            }
+            else
+            {
+              position = residues - 1 - static_cast<std::size_t>(f.ordinal);
+              channel = f.charge == 1 ? 2 : 3;
+            }
+            if (position >= spectrum.positions) { continue; }
+            const float intensity = spectrum.at(position, channel);
+            // A predicted zero is a fragment the model says is not there, and a
+            // predicted 1e-7 is the same statement in floating point. Ranking on
+            // `> 0` filled spare slots with denormal noise (see
+            // min_relative_intensity); the floor is relative to this precursor's
+            // own base peak, because the spectrum is base-peak normalised.
+            if (!(intensity > floor)) { continue; }
+            ranked.emplace_back(intensity, f);
+          }
+          if (timed) { lap(1); }
+
+          std::sort(ranked.begin(), ranked.end(),
+                    [](const auto& a, const auto& b) {
+                      if (a.first != b.first) { return a.first > b.first; }
+                      // Ties broken deterministically, so the library does not
+                      // depend on sort implementation.
+                      if (a.second.mz != b.second.mz) { return a.second.mz > b.second.mz; }
+                      if (a.second.type != b.second.type) { return a.second.type < b.second.type; }
+                      if (a.second.ordinal != b.second.ordinal)
+                      { return a.second.ordinal < b.second.ordinal; }
+                      return a.second.charge < b.second.charge;
+                    });
+          // A quota for doubly-charged fragments, when asked for. Applied by
+          // promoting the best unselected z2 ions over the weakest selected z1
+          // ones, so the cap is unchanged and only its composition moves.
+          if (params.reserved_doubly_charged > 0 && ranked.size() > params.max_fragments)
+          {
+            const std::size_t cap = params.max_fragments;
+            const std::size_t want =
+              std::min(params.reserved_doubly_charged, cap);
+            std::size_t have = 0;
+            for (std::size_t r = 0; r < cap; ++r)
+            {
+              if (ranked[r].second.charge >= 2) { ++have; }
+            }
+            for (std::size_t r = cap; r < ranked.size() && have < want; ++r)
+            {
+              if (ranked[r].second.charge < 2) { continue; }
+              // The weakest singly-charged fragment inside the cap makes way.
+              std::size_t victim = cap;
+              for (std::size_t q = cap; q-- > 0;)
+              {
+                if (ranked[q].second.charge < 2) { victim = q; break; }
+              }
+              if (victim == cap) { break; }
+              std::swap(ranked[victim], ranked[r]);
+              ++have;
+            }
+          }
+          if (ranked.size() > params.max_fragments) { ranked.resize(params.max_fragments); }
+
+          // The same bar `enumerateFragments` applied BEFORE prediction. The
+          // base-peak intensity floor above can prune a precursor below it, and
+          // until now nothing re-checked, so the count committed here was
+          // whatever survived. That is where the S08 library's 366,084 targets
+          // with 0-2 fragments came from -- and `appendDecoys` then refused to
+          // build decoys for them, because it does apply the bar. The result was
+          // 7.3% of targets competing against a null that contained nothing like
+          // them. Emptied rather than kept: a precursor below the bar its decoy
+          // would have to clear is not searchable, and `-min_library_fragments`
+          // drops it symmetrically at load.
+          if (ranked.size() < params.min_fragments) { ranked.clear(); }
+          if (timed) { lap(2); }
+
+          Library::checkTransitionCapacity(dst.product_mz.size(), ranked.size());
+          for (const auto& [intensity, f] : ranked)
+          {
+            dst.product_mz.push_back(toFixed(f.mz));
+            dst.library_intensity.push_back(intensity);
+            dst.type.push_back(f.type);
+            dst.ordinal.push_back(f.ordinal);
+            dst.charge.push_back(f.charge);
+            dst.loss.push_back(LossType::None);
+          }
+          const auto kept = static_cast<std::uint32_t>(ranked.size());
+          if (timed) { lap(3); }
+          return kept;
+      };
+      if (!perf::parPost() || perf::workerThreads() <= 1)
+      {
+        for (std::size_t i = base; i < last; ++i)
         {
-          built.product_mz.push_back(toFixed(f.mz));
-          built.library_intensity.push_back(intensity);
-          built.type.push_back(f.type);
-          built.ordinal.push_back(f.ordinal);
-          built.charge.push_back(f.charge);
-          built.loss.push_back(LossType::None);
+          begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
+          count[i] = postOne(i, built, fragments, ranked, unpredicted, split_post);
         }
-        count[i] = static_cast<std::uint32_t>(ranked.size());
-        if (split_post) { lap(3); }
       }
-      if (split_post)
+      else
+      {
+        // perf/generate-solutions: every precursor is independent, so slices
+        // run on all worker threads into their own arrays, which are then
+        // appended in precursor order -- the same arrays, in the same order,
+        // as the serial loop builds.
+        const std::size_t slices = std::min<std::size_t>(perf::workerThreads(), (last - base + 255) / 256);
+        std::vector<Library::TransitionArrays> local(std::max<std::size_t>(slices, 1));
+        std::vector<std::size_t> local_unpred(local.size(), 0);
+        perf::parallelSlices(last - base, slices, [&](std::size_t s, std::size_t b, std::size_t e) {
+          std::vector<Fragment> frag;
+          std::vector<std::pair<float, Fragment>> rank;
+          auto& dst = local[s];
+          for (std::size_t i = base + b; i < base + e; ++i)
+          {
+            begin[i] = static_cast<std::uint32_t>(dst.product_mz.size());   // local, rebased below
+            count[i] = postOne(i, dst, frag, rank, local_unpred[s], false);
+          }
+        });
+        for (std::size_t q = 0; q < local.size(); ++q)
+        {
+          const std::size_t b = base + (last - base) * q / local.size();
+          const std::size_t e = base + (last - base) * (q + 1) / local.size();
+          const std::size_t offset = built.product_mz.size();
+          Library::checkTransitionCapacity(offset, local[q].product_mz.size());
+          for (std::size_t i = b; i < e; ++i) { begin[i] = static_cast<std::uint32_t>(begin[i] + offset); }
+          auto& src = local[q];
+          built.product_mz.insert(built.product_mz.end(), src.product_mz.begin(), src.product_mz.end());
+          built.library_intensity.insert(built.library_intensity.end(), src.library_intensity.begin(), src.library_intensity.end());
+          built.type.insert(built.type.end(), src.type.begin(), src.type.end());
+          built.ordinal.insert(built.ordinal.end(), src.ordinal.begin(), src.ordinal.end());
+          built.charge.insert(built.charge.end(), src.charge.begin(), src.charge.end());
+          built.loss.insert(built.loss.end(), src.loss.begin(), src.loss.end());
+          unpredicted += local_unpred[q];
+          src = Library::TransitionArrays{};
+        }
+      }
+      if (split_post && !(perf::parPost() && perf::workerThreads() > 1))
       {
         // Aggregates, not intervals: t0 is the start of the post step and
         // t1 - t0 the summed time (docs/tracing.md).

@@ -5,6 +5,7 @@
 
 #include <odia/PeptDeepEncoder.h>
 #include <odia/Trace.h>
+#include <odia/PerfKnobs.h>
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
@@ -201,11 +202,18 @@ namespace ODIA
     bool ort_profiling = false;
   };
 
-  PeptDeepPredictor::PeptDeepPredictor(const std::string& model_path,
+  PeptDeepPredictor::PeptDeepPredictor(const std::string& configured_model_path,
                                        bool prefer_gpu, int intra_op_threads,
                                        int sessions, int gpu_device)
     : impl_(std::make_unique<Impl>())
   {
+    // ODIA_MS2_PRUNED (prototype): run a pruned MS2 graph instead. Only an
+    // MS2 model is replaced; which one this is is known from the file's inputs
+    // after opening, so the substitution is checked there.
+    const std::string pruned = perf::ms2Pruned();
+    const bool try_pruned = !pruned.empty() &&
+      configured_model_path.find("ms2") != std::string::npos;
+    const std::string model_path = try_pruned ? pruned : configured_model_path;
     if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
     impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
@@ -389,6 +397,9 @@ namespace ODIA
         "found inputs (" + names + ")");
     }
     impl_->kind = looks_like_rt ? "RT" : looks_like_ms2 ? "MS2" : "CCS";
+    if (try_pruned && !looks_like_ms2)
+    { throw std::runtime_error("ODIA_MS2_PRUNED is not an MS2 model: " + model_path); }
+    if (try_pruned) { trace::note("predictor.MS2.pruned_model", model_path); }
     for (const auto& n : impl_->input_names) { impl_->input_ptrs.push_back(n.c_str()); }
     impl_->output_ptr = impl_->output_names.at(0).c_str();
 
@@ -491,15 +502,46 @@ namespace ODIA
     // result depends on the batch size at the last bit (see MAX_BATCH_ROWS).
     trace::Scope chunking("chunking", 3);
     std::vector<std::vector<std::size_t>> chunks;
+    // perf/generate-solutions: smaller chunks, cut so that the result cannot
+    // change. MS2 is bit-identical for every batch size, so it is simply cut
+    // into rows of ms2Rows(). The LSTM models (RT, CCS) are bit-identical for
+    // every batch of two or more rows but not for a single row, so each
+    // 2048-row chunk is cut into pieces of about lstmRows() with no piece of
+    // one row -- and a 2048-row chunk that WAS a single row stays one.
+    const bool is_ms2 = std::string_view(impl_->kind) == "MS2";
+    const std::size_t small = is_ms2 ? perf::ms2Rows() : perf::lstmRows();
     for (const auto& whole_group : PeptDeepEncoder::groupByLength(peptides))
     {
       for (std::size_t offset = 0; offset < whole_group.size(); offset += MAX_BATCH_ROWS)
       {
-        chunks.emplace_back(
-          whole_group.begin() + static_cast<std::ptrdiff_t>(offset),
-          whole_group.begin() + static_cast<std::ptrdiff_t>(
-            std::min(offset + MAX_BATCH_ROWS, whole_group.size())));
+        const std::size_t end = std::min(offset + MAX_BATCH_ROWS, whole_group.size());
+        if (small == 0 || end - offset <= small)
+        {
+          chunks.emplace_back(whole_group.begin() + static_cast<std::ptrdiff_t>(offset),
+                              whole_group.begin() + static_cast<std::ptrdiff_t>(end));
+          continue;
+        }
+        for (std::size_t b = offset; b < end;)
+        {
+          std::size_t e = std::min(b + small, end);
+          // A one-row remainder joins the piece before it (LSTM models only).
+          if (!is_ms2 && end - e == 1) { e = end; }
+          chunks.emplace_back(whole_group.begin() + static_cast<std::ptrdiff_t>(b),
+                              whole_group.begin() + static_cast<std::ptrdiff_t>(e));
+          b = e;
+        }
       }
+    }
+    // Longest peptides first: they cost the most, and starting them last is
+    // what leaves sessions idle at the end of a call. Order only -- every
+    // chunk keeps its rows, so no result can change.
+    if (perf::lpt())
+    {
+      std::stable_sort(chunks.begin(), chunks.end(), [&](const auto& a, const auto& b) {
+        const auto la = peptides[a.front()].size(), lb = peptides[b.front()].size();
+        if (la != lb) { return la > lb; }
+        return a.size() > b.size();
+      });
     }
     // Tracing: one "dispatch" event per call, one "worker" per thread and one
     // "chunk" per batch, each stamped with the call number, so that queue

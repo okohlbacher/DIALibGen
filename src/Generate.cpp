@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <odia/PerfKnobs.h>
 #include "DIALibGen.h"
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
@@ -351,6 +352,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
   {
     // Configuration, model lookup and option checks, up to the FASTA read.
     ODIA::trace::Scope setup_phase("setup", 0);
+    // perf/generate-solutions: ODIA_INTERLEAVE spreads the pages (and with
+    // them, through NUMA balancing, the inference threads) over all nodes.
+    if (ODIA::perf::interleave())
+    {
+      const bool ok = ODIA::perf::interleaveMemory();
+      ODIA::trace::note("perf.interleave", ok ? "1" : "failed");
+    }
     ODIA::DigestParams p;                       // defaults live in DigestParams
     std::string decoys = "none", rt_model, ms2_model, ccs_model, instrument = "QE";
     bool recompute_decoy_mz = false;
@@ -487,6 +495,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
+    ODIA::perf::setWorkerThreads(threads);
+    const auto trimAfterPhase = [] { if (ODIA::perf::trim()) { ODIA::perf::trimHeap(); } };
     ODIA::Library library;
     std::string standards;
     setup_phase.fields().rows = threads;
@@ -511,6 +521,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                        "times, which extracts from nowhere and looks like a search bug.");
         return UNEXPECTED_RESULT;
       }
+      trimAfterPhase();
       if (irt_rescale)
       {
         standards = getStringOption_("irt_standards");
@@ -543,12 +554,14 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
             library, ms2_model, p, static_cast<float>(nce), instrument, true, threads); miss)
       { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+      trimAfterPhase();
       writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
       if (library.precursorCount() == 0)
       { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
       if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
             library, ccs_model, true, threads, p.derive_ion_mobility); miss)
       { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+      trimAfterPhase();
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);
       const auto made = ODIA::LibraryGenerator::appendDecoys(library, method, &skipped,

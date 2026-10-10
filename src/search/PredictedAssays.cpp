@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <odia/PerfKnobs.h>
 #include <odia/search/PredictedAssays.h>
 
 #include <odia/PeptDeepEncoder.h>
@@ -60,7 +61,7 @@ namespace ODIA::search
     nce_ = nce > 0 ? static_cast<float>(nce) : PeptDeepEncoder::defaultNce(instrument_);
     // CPU only: the search runs where the extraction runs. One intra-op thread
     // per session (the recurrent model does not spread; PeptDeepPredictor.h).
-    predictor_ = std::make_unique<PeptDeepPredictor>(model_path, false, 1, std::max(1, std::min(sessions, 16)));
+    predictor_ = std::make_unique<PeptDeepPredictor>(model_path, false, 1, std::max(1, perf::sessionCap() == 0 ? sessions : std::min(sessions, static_cast<int>(perf::sessionCap()))));
   }
 
   PeptDeepFragmentModel::~PeptDeepFragmentModel() = default;

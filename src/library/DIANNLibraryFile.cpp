@@ -1,6 +1,7 @@
 // Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
+#include <odia/PerfKnobs.h>
 #include <odia/DIANNLibraryFile.h>
 #include <odia/Trace.h>
 #include <odia/AtomicFile.h>
@@ -830,42 +831,84 @@ namespace ODIA
     arrow::ListBuilder b_qmz(pool, qmz_v), b_int(pool, int_v),
                        b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
 
-    for (std::size_t i = 0; i < n; ++i)
-    {
-      const auto seq = library.strings().get(p.modified_sequence[i]);
-      const auto pg = library.strings().get(p.protein_group[i]);
-      const std::string seq_s(seq.data(), seq.size());
-      const std::string pg_s(pg.data(), pg.size());
-      const int z = static_cast<int>(p.charge[i]);
-      const std::string id = seq_s + std::to_string(z) + (p.decoy[i] ? "_decoy" : "");
-
-      ok(b_id.Append(id)); ok(b_seq.Append(seq_s)); ok(b_pg.Append(pg_s));
-      ok(b_z.Append(static_cast<std::uint8_t>(z)));
-      ok(b_dec.Append(static_cast<std::uint8_t>(p.decoy[i])));
-      // NaN means ABSENT and is written as null. A zero ion mobility is a
-      // VALUE that gates every peak against 0 and rejects them all.
-      if (!std::isnan(p.irt[i])) { ok(b_rt.Append(p.irt[i])); } else { ok(b_rt.AppendNull()); }
-      if (i < p.im.size() && !std::isnan(p.im[i])) { ok(b_im.Append(p.im[i])); }
-      else { ok(b_im.AppendNull()); }
-      if (i < p.ccs.size() && !std::isnan(p.ccs[i])) { ok(b_ccs.Append(p.ccs[i])); }
-      else { ok(b_ccs.AppendNull()); }
-      ok(b_pmz.Append(fromFixed(p.mz[i])));
-
-      ok(b_qmz.Append()); ok(b_int.Append()); ok(b_ft.Append());
-      ok(b_fz.Append()); ok(b_ord.Append()); ok(b_loss.Append());
-      const std::uint32_t begin = p.transition_begin[i];
-      for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+    // The rows each column gets, as one function per column group, so the
+    // same code runs serially or one group per thread (perf/generate-solutions,
+    // ODIA_PAR_WRITE). Each builder is touched by exactly one group, and every
+    // group appends in precursor order, so the arrays are identical.
+    const auto groupIds = [&] {
+      for (std::size_t i = 0; i < n; ++i)
       {
-        const std::uint32_t j = begin + k;
-        ok(qmz_v->Append(fromFixed(t.product_mz[j])));
-        ok(int_v->Append(t.library_intensity[j]));
-        // The enum's own value, not its spelling: "noloss" and "y" cost bytes
-        // and a parse on every read.
-        ok(ft_v->Append(static_cast<std::uint8_t>(t.type[j])));
-        ok(fz_v->Append(static_cast<std::uint8_t>(t.charge[j])));
-        ok(ord_v->Append(static_cast<std::uint8_t>(t.ordinal[j])));
-        ok(loss_v->Append(static_cast<std::uint8_t>(t.loss[j])));
+        const auto seq = library.strings().get(p.modified_sequence[i]);
+        const auto pg = library.strings().get(p.protein_group[i]);
+        const std::string seq_s(seq.data(), seq.size());
+        const std::string pg_s(pg.data(), pg.size());
+        const int z = static_cast<int>(p.charge[i]);
+        const std::string id = seq_s + std::to_string(z) + (p.decoy[i] ? "_decoy" : "");
+        ok(b_id.Append(id)); ok(b_seq.Append(seq_s)); ok(b_pg.Append(pg_s));
       }
+    };
+    const auto groupScalars = [&] {
+      for (std::size_t i = 0; i < n; ++i)
+      {
+        const int z = static_cast<int>(p.charge[i]);
+        ok(b_z.Append(static_cast<std::uint8_t>(z)));
+        ok(b_dec.Append(static_cast<std::uint8_t>(p.decoy[i])));
+        // NaN means ABSENT and is written as null. A zero ion mobility is a
+        // VALUE that gates every peak against 0 and rejects them all.
+        if (!std::isnan(p.irt[i])) { ok(b_rt.Append(p.irt[i])); } else { ok(b_rt.AppendNull()); }
+        if (i < p.im.size() && !std::isnan(p.im[i])) { ok(b_im.Append(p.im[i])); }
+        else { ok(b_im.AppendNull()); }
+        if (i < p.ccs.size() && !std::isnan(p.ccs[i])) { ok(b_ccs.Append(p.ccs[i])); }
+        else { ok(b_ccs.AppendNull()); }
+        ok(b_pmz.Append(fromFixed(p.mz[i])));
+      }
+    };
+    // One list column: its offsets builder and its value builder.
+    const auto groupList = [&](arrow::ListBuilder& list, auto& values, auto value) {
+      return [&list, &values, value, &p, &t, n, &ok] {
+        for (std::size_t i = 0; i < n; ++i)
+        {
+          ok(list.Append());
+          const std::uint32_t begin = p.transition_begin[i];
+          for (std::uint32_t k = 0; k < p.transition_count[i]; ++k) { ok(values->Append(value(begin + k))); }
+        }
+      };
+    };
+    // The enum's own value, not its spelling: "noloss" and "y" cost bytes
+    // and a parse on every read.
+    std::vector<std::function<void()>> groups{
+      groupIds, groupScalars,
+      groupList(b_qmz, qmz_v, [&t](std::uint32_t j) { return fromFixed(t.product_mz[j]); }),
+      groupList(b_int, int_v, [&t](std::uint32_t j) { return t.library_intensity[j]; }),
+      groupList(b_ft, ft_v, [&t](std::uint32_t j) { return static_cast<std::uint8_t>(t.type[j]); }),
+      groupList(b_fz, fz_v, [&t](std::uint32_t j) { return static_cast<std::uint8_t>(t.charge[j]); }),
+      groupList(b_ord, ord_v, [&t](std::uint32_t j) { return static_cast<std::uint8_t>(t.ordinal[j]); }),
+      groupList(b_loss, loss_v, [&t](std::uint32_t j) { return static_cast<std::uint8_t>(t.loss[j]); })};
+    const bool parallel = perf::parWrite();
+    if (parallel)
+    {
+      // Sizes are known, so no builder grows by doubling (a transient of
+      // several GiB at proteome scale). Reserving does not change the arrays.
+      const auto transitions = static_cast<std::int64_t>(t.product_mz.size());
+      const auto rows = static_cast<std::int64_t>(n);
+      for (auto* b : std::initializer_list<arrow::ArrayBuilder*>{&b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
+                                                                &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss})
+      { ok(b->Reserve(rows)); }
+      for (auto* b : std::initializer_list<arrow::ArrayBuilder*>{qmz_v.get(), int_v.get(), ft_v.get(),
+                                                                fz_v.get(), ord_v.get(), loss_v.get()})
+      { ok(b->Reserve(transitions)); }
+      std::vector<std::thread> threads;
+      std::vector<std::exception_ptr> errors(groups.size());
+      for (std::size_t g = 0; g < groups.size(); ++g)
+      {
+        threads.emplace_back([&, g] { try { groups[g](); } catch (...) { errors[g] = std::current_exception(); } });
+      }
+      for (auto& th : threads) { th.join(); }
+      for (const auto& e : errors) { if (e) { std::rethrow_exception(e); } }
+    }
+    else
+    {
+      for (const auto& g : groups) { g(); }
     }
 
     build_step.end();
@@ -934,10 +977,33 @@ namespace ODIA
                    .compression(parquet::Compression::ZSTD)
                    ->enable_dictionary()
                    ->build();
-    auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
-    const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, 1 << 20,
-                                               props, arrow_props);
-    if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    constexpr std::int64_t ROW_GROUP = 1 << 20;
+    if (!parallel)
+    {
+      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+      const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, ROW_GROUP,
+                                                 props, arrow_props);
+      if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    }
+    else
+    {
+      // perf/generate-solutions: the same row groups, but each one buffered
+      // and its column chunks encoded and compressed in parallel. The chunks
+      // are still written in column order.
+      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->set_use_threads(true)->build();
+      auto opened = parquet::arrow::FileWriter::Open(*table->schema(), pool, *outfile, props, arrow_props);
+      if (!opened.ok()) { throw std::runtime_error("cannot write Parquet: " + opened.status().ToString()); }
+      auto writer = std::move(*opened);
+      auto combined = table->CombineChunksToBatch(pool);
+      if (!combined.ok()) { throw std::runtime_error("cannot write Parquet: " + combined.status().ToString()); }
+      const auto& batch = *combined;
+      for (std::int64_t offset = 0; offset < batch->num_rows(); offset += ROW_GROUP)
+      {
+        ok(writer->NewBufferedRowGroup());
+        ok(writer->WriteRecordBatch(*batch->Slice(offset, std::min(ROW_GROUP, batch->num_rows() - offset))));
+      }
+      ok(writer->Close());
+    }
     ok((*outfile)->Close());
     write_step.end();
     trace::Scope commit_step("commit", 1);
@@ -1124,7 +1190,8 @@ namespace ODIA
 
     const auto& p = library.precursors();
     const auto& t = library.transitions();
-    for (std::size_t i = 0; i < library.precursorCount(); ++i)
+    const auto rows = [&](auto& out, std::size_t i0, std::size_t i1) {
+    for (std::size_t i = i0; i < i1; ++i)
     {
       const auto seq = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
@@ -1166,6 +1233,41 @@ namespace ODIA
         // accepts the latter, and a 0 here would read as a real cross-section.
         if (has_ccs) { out.number(p.ccs[i], 9); }
         out.put('\n');
+      }
+    }
+    };
+    const std::size_t n = library.precursorCount();
+    if (!perf::parWrite() || perf::workerThreads() <= 1) { rows(out, 0, n); }
+    else
+    {
+      // perf/generate-solutions: rows formatted by every worker thread into
+      // its own buffer with the same calls, written in precursor order.
+      struct Sink
+      {
+        std::string s;
+        void put(char c) { s.push_back(c); }
+        void put(std::string_view v) { s.append(v.data(), v.size()); }
+        void integer(long long v) { char b[32]; const auto r = std::to_chars(b, b + sizeof b, v); s.append(b, r.ptr); }
+        void number(double v, int digits)
+        {
+          char b[64];
+          const auto r = std::to_chars(b, b + sizeof b, v, std::chars_format::general, digits);
+          if (r.ec != std::errc{}) { throw std::runtime_error("number did not fit its buffer"); }
+          s.append(b, r.ptr);
+        }
+      };
+      const std::size_t slices = perf::workerThreads();
+      constexpr std::size_t PER_SLICE = 4096;   // precursors per buffer, ~3 MB
+      std::vector<Sink> sinks(slices);
+      for (std::size_t r0 = 0; r0 < n; r0 += slices * PER_SLICE)
+      {
+        const std::size_t r1 = std::min(n, r0 + slices * PER_SLICE);
+        perf::parallelSlices(r1 - r0, slices, [&](std::size_t sl, std::size_t b, std::size_t e) {
+          sinks[sl].s.clear();
+          rows(sinks[sl], r0 + b, r0 + e);
+        });
+        const std::size_t used = std::min(slices, r1 - r0);
+        for (std::size_t sl = 0; sl < used; ++sl) { out.put(std::string_view(sinks[sl].s)); }
       }
     }
 

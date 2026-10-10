@@ -532,16 +532,18 @@ namespace ODIA
         }
       }
     }
-    // Longest peptides first: they cost the most, and starting them last is
-    // what leaves sessions idle at the end of a call. Order only -- every
+    // Costliest chunks first (longest-processing-time order): a chunk that
+    // starts last is what leaves sessions idle at the end of a call. The cost
+    // model is rows x (6 + residues), from the measured per-row MS2 cost of
+    // 0.82-2.90 ms for 7-30 residues (bid10-threads). Order only -- every
     // chunk keeps its rows, so no result can change.
     if (perf::lpt())
     {
-      std::stable_sort(chunks.begin(), chunks.end(), [&](const auto& a, const auto& b) {
-        const auto la = peptides[a.front()].size(), lb = peptides[b.front()].size();
-        if (la != lb) { return la > lb; }
-        return a.size() > b.size();
-      });
+      const auto cost = [&](const std::vector<std::size_t>& c) {
+        return c.size() * (6 + peptides[c.front()].size());
+      };
+      std::stable_sort(chunks.begin(), chunks.end(),
+                       [&](const auto& a, const auto& b) { return cost(a) > cost(b); });
     }
     // Tracing: one "dispatch" event per call, one "worker" per thread and one
     // "chunk" per batch, each stamped with the call number, so that queue

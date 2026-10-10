@@ -69,7 +69,10 @@ Regions recorded by `generate`:
 | 4 | `encode` (tokenisation and tensors), `ort_run` (ONNX Runtime `Run`), `unpack` (validation and copy-out) |
 
 Phases follow one another on the main thread. Time between them (log output)
-belongs to no phase.
+belongs to no phase. A phase ends when its function returns, so the part of a
+phase that none of its steps covers is mostly what the function frees on the
+way out: for `rt`, `ms2` and `ccs` that is the predictor, whose sessions and
+arenas are released there (about 1 s per phase at 16 sessions).
 
 ### proc.tsv: process, every fast tick
 

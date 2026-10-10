@@ -137,3 +137,20 @@ grows with every variable modification, charge state and missed cleavage.
 
 Why it is here rather than done: where the 18 minutes go (digest, the three
 models, writing) has not been measured.
+
+## Benchmark the ONNX predictors on a GPU (H100)
+
+Every timing so far is CPU-only. On an H100 node, `generate` with the MS2 model
+on CUDA took 6:10-6:27 wall for the whole proteome, about 2.7 x the 96-thread
+CPU run (a side measurement during a review, two runs sharing one GPU, not a
+benchmark). GPU output is deterministic but not byte-identical to CPU output.
+
+To do: measure RT, MS2 and CCS throughput on one H100 (batch size, number of
+sessions and CUDA streams, fp32 vs fp16/TF32, device transfer and host-side
+encoding/post-processing as the new bottleneck), whole-proteome `generate`
+and the prediction steps of `tune` and `-run`, against the tuned CPU path and
+DIA-NN on the same node; quantify how far GPU output differs from CPU output.
+
+Why it is here rather than done: the CPU analysis comes first, and its
+fixes (session limit, batch sizes) change what the GPU path is compared
+against.

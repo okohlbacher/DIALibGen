@@ -85,7 +85,7 @@ jobs:
                       tap = pathlib.Path(subprocess.check_output(['brew', '--repository', 'dialibgen/startup'], text=True).strip())
                       (tap / 'Casks').mkdir(exist_ok=True)
                       (tap / 'Casks/dialibgen-candidate.rb').write_text(f'''cask "dialibgen-candidate" do
-            version "0.11.0"
+            version "0.11.1"
             sha256 "{digest}"
             url "{url}"
             name "DIALibGen release candidate"

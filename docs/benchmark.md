@@ -2,7 +2,7 @@
 
 This summary covers the completed 20 September 2026 benchmark of
 **DIALibGen 0.10.1**, **DIALibRefine 0.3.0-dev** and **DIA-NN 2.0** on K562
-from a timsTOF diaPASEF acquisition. It is not a benchmark of 0.11.0.
+from a timsTOF diaPASEF acquisition. It is not a benchmark of 0.11.0 or later.
 In particular, 0.11.0 restores Met-excised missed-cleavage peptides, changing
 unrestricted generation outputs.
 

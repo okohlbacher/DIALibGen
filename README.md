@@ -10,7 +10,7 @@ runtime.
 | `refine` | Library and one run's identification report | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
 | `tune` | Library and one run's identification report | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-Version **0.11.0** incorporates library refinement and model training from
+Version **0.11.1** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), and [changes](CHANGELOG.md).
 
@@ -137,8 +137,8 @@ found tuned DIALibGen within the registered whole-run margins of tuned DIA-NN,
 with 0.79% / 0.34% fewer precursor identifications on two exposed technical
 replicates. This is descriptive evidence, not equivalence or independent
 confirmation. The 0.11.0 digestion fix changes generated peptide space; those
-numbers do not validate unrestricted 0.11.0 outputs. Details and qualifications
-are in [the historical benchmark summary](docs/benchmark.md).
+numbers do not validate unrestricted outputs since 0.11.0. Details and
+qualifications are in [the historical benchmark summary](docs/benchmark.md).
 
 - Generation emits b/y fragments without neutral losses. It does not tune the
   fragment-intensity model.

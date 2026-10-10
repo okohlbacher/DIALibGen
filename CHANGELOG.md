@@ -3,7 +3,10 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.1] — 2026-10-10
+
+First published 0.11 release. 0.11.0 was validated but not published; its
+changes below are part of this release.
 
 ### Changed
 

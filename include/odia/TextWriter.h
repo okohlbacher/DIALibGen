@@ -166,4 +166,39 @@ namespace ODIA
     std::size_t used_ = 0;
   };
 
+  /// TextWriter's formatting into memory: the same put/integer/number calls,
+  /// the same to_chars digits, appended to a string. Lets several threads
+  /// render disjoint parts of a file that one TextWriter then writes in order.
+  class TextBuffer
+  {
+  public:
+    void put(char c) { text_.push_back(c); }
+    void put(std::string_view s) { text_.append(s); }
+
+    void integer(long long v)
+    {
+      char scratch[32];
+      const auto r = std::to_chars(scratch, scratch + sizeof scratch, v);
+      append(scratch, r);
+    }
+
+    void number(double v, int digits)
+    {
+      char scratch[64];
+      const auto r = std::to_chars(scratch, scratch + sizeof scratch, v, std::chars_format::general, digits);
+      append(scratch, r);
+    }
+
+    const std::string& text() const { return text_; }
+
+  private:
+    void append(const char* first, std::to_chars_result r)
+    {
+      if (r.ec != std::errc{}) { throw std::runtime_error("number did not fit its buffer"); }
+      text_.append(first, static_cast<std::size_t>(r.ptr - first));
+    }
+
+    std::string text_;
+  };
+
 } // namespace ODIA

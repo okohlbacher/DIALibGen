@@ -134,7 +134,10 @@ namespace ODIA
     /// what DIA-NN parses; a modification without a UniMod accession is
     /// written verbatim and counted in a warning. Precursor.Id is synthesised
     /// as <sequence><charge>, with `_decoy` appended for a decoy.
-    static void storeTSV(const std::string& filename, const Library& library);
+    /// @param threads host threads for rendering rows (0 = all); the file
+    /// does not depend on it.
+    static void storeTSV(const std::string& filename, const Library& library,
+                         unsigned threads = 1);
 
     /// Write the library as flat Parquet, one row per transition, with the
     /// `Columns` names, so `loadParquet` reads back what this writes.
@@ -235,10 +238,13 @@ namespace ODIA
     /// travelling with it. Readers ignore unknown keys, so this is additive.
     /// @param extra_metadata further key/value pairs appended after it (for
     /// example `odia.warnings`); nothing is written for an empty list.
+    /// @param threads host threads for building the row groups (0 = all);
+    /// the file does not depend on it.
     static void storeParquetCompact(const std::string& filename, const Library& library,
                                     const Fingerprint& fp,
                                     const std::string& config_json = "",
-                                    const std::vector<std::pair<std::string, std::string>>& extra_metadata = {});
+                                    const std::vector<std::pair<std::string, std::string>>& extra_metadata = {},
+                                    unsigned threads = 1);
 
   };
 

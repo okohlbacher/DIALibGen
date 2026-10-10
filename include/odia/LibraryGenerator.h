@@ -184,9 +184,12 @@ namespace ODIA
       std::size_t dropped_ambiguous_peptides = 0;
     };
 
+    /// @param threads host threads for digestion and precursor enumeration
+    ///        (0 = all); the library does not depend on it.
     static Stats generate(const std::string& fasta_file,
                           const DigestParams& params,
-                          Library& library);
+                          Library& library,
+                          unsigned threads = 1);
 
     /// The canonical content-affecting parameter string for the library cache.
     ///

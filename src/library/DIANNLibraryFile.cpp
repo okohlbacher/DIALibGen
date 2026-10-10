@@ -6,9 +6,12 @@
 #include <odia/AtomicFile.h>
 #include <odia/TextWriter.h>
 
+#include "Parallel.h"
+
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/io/file.h>
+#include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
 #include <parquet/file_reader.h>
@@ -17,6 +20,8 @@
 #include <arrow/builder.h>
 #include <arrow/table.h>
 
+#include <array>
+#include <atomic>
 #include <charconv>
 #include <algorithm>
 #include <cctype>
@@ -827,7 +832,8 @@ namespace ODIA
                                              const Library& library,
                                              const Fingerprint& fp,
                                              const std::string& config_json,
-                                             const std::vector<std::pair<std::string, std::string>>& extra_metadata)
+                                             const std::vector<std::pair<std::string, std::string>>& extra_metadata,
+                                             unsigned threads)
   {
     const auto& p = library.precursors();
     const auto& t = library.transitions();
@@ -853,84 +859,95 @@ namespace ODIA
     // at most 2 GiB of characters, so a chunk fails loudly (CapacityError, and
     // no partial file) if a string column averages 2 KiB or more per row. Real
     // libraries hold at most ~30 MB per string column and chunk, ~1.4 % of it.
-    arrow::StringBuilder b_id, b_seq, b_pg;
-    arrow::UInt8Builder b_z, b_dec;
-    arrow::FloatBuilder b_rt, b_im, b_ccs;
-    arrow::DoubleBuilder b_pmz;
-
-    // Transition-level: a LIST per precursor. The list offsets replace the
-    // repeated precursor key entirely -- there is no foreign key to store.
-    auto pool = arrow::default_memory_pool();
-    auto qmz_v = std::make_shared<arrow::DoubleBuilder>(pool);
-    auto int_v = std::make_shared<arrow::FloatBuilder>(pool);
-    auto ft_v  = std::make_shared<arrow::UInt8Builder>(pool);
-    auto fz_v  = std::make_shared<arrow::UInt8Builder>(pool);
-    auto ord_v = std::make_shared<arrow::UInt8Builder>(pool);
-    auto loss_v = std::make_shared<arrow::UInt8Builder>(pool);
-    arrow::ListBuilder b_qmz(pool, qmz_v), b_int(pool, int_v),
-                       b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
-
     constexpr std::size_t kChunkRows = std::size_t(1) << 20;   // = the row-group size passed to WriteTable
-    // In the order of the schema's fields below; the static_assert there
-    // checks the count, ChunkedArray::Make the types.
-    arrow::ArrayBuilder* const builders[] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
-                                             &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
-    constexpr std::size_t kColumns = std::extent_v<decltype(builders)>;
-    std::vector<arrow::ArrayVector> chunks(kColumns);
-    auto flush = [&] {
-      if (b_id.length() == 0) { return; }
-      for (const auto* b : builders)
+    constexpr std::size_t kColumns = 15;
+    auto pool = arrow::default_memory_pool();
+
+    // Builds the arrays of rows [first, last), one per column in the order of
+    // the schema's fields below; the static_assert there checks the count,
+    // ChunkedArray::Make the types. Chunks are independent, so they are built
+    // in parallel and stitched together in order: the table is the same as
+    // from one sequential pass.
+    const auto buildChunk = [&](std::size_t first, std::size_t last)
+    {
+      arrow::StringBuilder b_id(pool), b_seq(pool), b_pg(pool);
+      arrow::UInt8Builder b_z(pool), b_dec(pool);
+      arrow::FloatBuilder b_rt(pool), b_im(pool), b_ccs(pool);
+      arrow::DoubleBuilder b_pmz(pool);
+
+      // Transition-level: a LIST per precursor. The list offsets replace the
+      // repeated precursor key entirely -- there is no foreign key to store.
+      auto qmz_v = std::make_shared<arrow::DoubleBuilder>(pool);
+      auto int_v = std::make_shared<arrow::FloatBuilder>(pool);
+      auto ft_v  = std::make_shared<arrow::UInt8Builder>(pool);
+      auto fz_v  = std::make_shared<arrow::UInt8Builder>(pool);
+      auto ord_v = std::make_shared<arrow::UInt8Builder>(pool);
+      auto loss_v = std::make_shared<arrow::UInt8Builder>(pool);
+      arrow::ListBuilder b_qmz(pool, qmz_v), b_int(pool, int_v),
+                         b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
+      arrow::ArrayBuilder* const builders[] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
+                                               &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
+      static_assert(std::extent_v<decltype(builders)> == kColumns, "one builder per column");
+
+      for (std::size_t i = first; i < last; ++i)
       {
-        if (b->length() != b_id.length())
-        { throw std::logic_error("compact Parquet columns differ in length"); }
+        const auto seq = library.strings().get(p.modified_sequence[i]);
+        const auto pg = library.strings().get(p.protein_group[i]);
+        const std::string seq_s(seq.data(), seq.size());
+        const std::string pg_s(pg.data(), pg.size());
+        const int z = static_cast<int>(p.charge[i]);
+        const std::string id = seq_s + std::to_string(z) + (p.decoy[i] ? "_decoy" : "");
+
+        ok(b_id.Append(id)); ok(b_seq.Append(seq_s)); ok(b_pg.Append(pg_s));
+        ok(b_z.Append(static_cast<std::uint8_t>(z)));
+        ok(b_dec.Append(static_cast<std::uint8_t>(p.decoy[i])));
+        // NaN means ABSENT and is written as null. A zero ion mobility is a
+        // VALUE that gates every peak against 0 and rejects them all.
+        if (!std::isnan(p.irt[i])) { ok(b_rt.Append(p.irt[i])); } else { ok(b_rt.AppendNull()); }
+        if (i < p.im.size() && !std::isnan(p.im[i])) { ok(b_im.Append(p.im[i])); }
+        else { ok(b_im.AppendNull()); }
+        if (i < p.ccs.size() && !std::isnan(p.ccs[i])) { ok(b_ccs.Append(p.ccs[i])); }
+        else { ok(b_ccs.AppendNull()); }
+        ok(b_pmz.Append(fromFixed(p.mz[i])));
+
+        ok(b_qmz.Append()); ok(b_int.Append()); ok(b_ft.Append());
+        ok(b_fz.Append()); ok(b_ord.Append()); ok(b_loss.Append());
+        const std::uint32_t begin = p.transition_begin[i];
+        for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+        {
+          const std::uint32_t j = begin + k;
+          ok(qmz_v->Append(fromFixed(t.product_mz[j])));
+          ok(int_v->Append(t.library_intensity[j]));
+          // The enum's own value, not its spelling: "noloss" and "y" cost bytes
+          // and a parse on every read.
+          ok(ft_v->Append(static_cast<std::uint8_t>(t.type[j])));
+          ok(fz_v->Append(static_cast<std::uint8_t>(t.charge[j])));
+          ok(ord_v->Append(static_cast<std::uint8_t>(t.ordinal[j])));
+          ok(loss_v->Append(static_cast<std::uint8_t>(t.loss[j])));
+        }
       }
+
+      std::array<std::shared_ptr<arrow::Array>, kColumns> arrays;
+      const auto rows = static_cast<std::int64_t>(last - first);
       for (std::size_t c = 0; c < kColumns; ++c)
       {
-        std::shared_ptr<arrow::Array> a;
-        ok(builders[c]->Finish(&a));
-        chunks[c].push_back(std::move(a));
+        if (builders[c]->length() != rows)
+        { throw std::logic_error("compact Parquet columns differ in length"); }
+        ok(builders[c]->Finish(&arrays[c]));
       }
+      return arrays;
     };
-    for (std::size_t i = 0; i < n; ++i)
+
+    const std::size_t chunk_count = (n + kChunkRows - 1) / kChunkRows;
+    std::vector<std::array<std::shared_ptr<arrow::Array>, kColumns>> built(chunk_count);
+    parallel::forEach(chunk_count, parallel::workers(threads), [&](std::size_t c)
+    { built[c] = buildChunk(c * kChunkRows, std::min(n, (c + 1) * kChunkRows)); });
+    std::vector<arrow::ArrayVector> chunks(kColumns);
+    for (const auto& arrays : built)
     {
-      if (i > 0 && i % kChunkRows == 0) { flush(); }
-      const auto seq = library.strings().get(p.modified_sequence[i]);
-      const auto pg = library.strings().get(p.protein_group[i]);
-      const std::string seq_s(seq.data(), seq.size());
-      const std::string pg_s(pg.data(), pg.size());
-      const int z = static_cast<int>(p.charge[i]);
-      const std::string id = seq_s + std::to_string(z) + (p.decoy[i] ? "_decoy" : "");
-
-      ok(b_id.Append(id)); ok(b_seq.Append(seq_s)); ok(b_pg.Append(pg_s));
-      ok(b_z.Append(static_cast<std::uint8_t>(z)));
-      ok(b_dec.Append(static_cast<std::uint8_t>(p.decoy[i])));
-      // NaN means ABSENT and is written as null. A zero ion mobility is a
-      // VALUE that gates every peak against 0 and rejects them all.
-      if (!std::isnan(p.irt[i])) { ok(b_rt.Append(p.irt[i])); } else { ok(b_rt.AppendNull()); }
-      if (i < p.im.size() && !std::isnan(p.im[i])) { ok(b_im.Append(p.im[i])); }
-      else { ok(b_im.AppendNull()); }
-      if (i < p.ccs.size() && !std::isnan(p.ccs[i])) { ok(b_ccs.Append(p.ccs[i])); }
-      else { ok(b_ccs.AppendNull()); }
-      ok(b_pmz.Append(fromFixed(p.mz[i])));
-
-      ok(b_qmz.Append()); ok(b_int.Append()); ok(b_ft.Append());
-      ok(b_fz.Append()); ok(b_ord.Append()); ok(b_loss.Append());
-      const std::uint32_t begin = p.transition_begin[i];
-      for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
-      {
-        const std::uint32_t j = begin + k;
-        ok(qmz_v->Append(fromFixed(t.product_mz[j])));
-        ok(int_v->Append(t.library_intensity[j]));
-        // The enum's own value, not its spelling: "noloss" and "y" cost bytes
-        // and a parse on every read.
-        ok(ft_v->Append(static_cast<std::uint8_t>(t.type[j])));
-        ok(fz_v->Append(static_cast<std::uint8_t>(t.charge[j])));
-        ok(ord_v->Append(static_cast<std::uint8_t>(t.ordinal[j])));
-        ok(loss_v->Append(static_cast<std::uint8_t>(t.loss[j])));
-      }
+      for (std::size_t c = 0; c < kColumns; ++c) { chunks[c].push_back(arrays[c]); }
     }
-
-    flush();
+    built.clear();
 
     const std::shared_ptr<arrow::Field> fields[] = {
       arrow::field(Columns::PRECURSOR_ID, arrow::utf8()),
@@ -998,10 +1015,35 @@ namespace ODIA
                    .compression(parquet::Compression::ZSTD)
                    ->enable_dictionary()
                    ->build();
-    auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
-    const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, static_cast<std::int64_t>(kChunkRows),
-                                               props, arrow_props);
-    if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    const unsigned writers = parallel::workers(threads);
+    if (writers <= 1 || n == 0)
+    {
+      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
+      const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, static_cast<std::int64_t>(kChunkRows),
+                                                 props, arrow_props);
+      if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
+    }
+    else
+    {
+      // The same row groups through the buffered writer, which encodes and
+      // compresses a row group's columns in parallel (Arrow's CPU pool, sized
+      // to -threads); WriteTable does them one after the other.
+      if (::arrow::GetCpuThreadPoolCapacity() != static_cast<int>(writers))
+      { ok(::arrow::SetCpuThreadPoolCapacity(static_cast<int>(writers))); }
+      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->set_use_threads(true)->build();
+      auto opened = parquet::arrow::FileWriter::Open(*schema, pool, *outfile, props, arrow_props);
+      if (!opened.ok()) { throw std::runtime_error("cannot write Parquet: " + opened.status().ToString()); }
+      auto writer = std::move(*opened);
+      for (std::size_t c = 0; c < chunks.front().size(); ++c)
+      {
+        std::vector<std::shared_ptr<arrow::Array>> arrays;
+        for (std::size_t col = 0; col < kColumns; ++col) { arrays.push_back(chunks[col][c]); }
+        const auto batch = arrow::RecordBatch::Make(schema, arrays.front()->length(), arrays);
+        ok(writer->NewBufferedRowGroup());
+        ok(writer->WriteRecordBatch(*batch));
+      }
+      ok(writer->Close());
+    }
     ok((*outfile)->Close());
     output.commit();
   }
@@ -1162,13 +1204,14 @@ namespace ODIA
     output.commit();
   }
 
-  void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library)
+  void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library,
+                                   unsigned threads)
   {
     AtomicFile output(filename);
     TextWriter out(output.temporaryPath().string());
 
     using T = TSVColumns;
-    bool first = true;
+    bool first_column = true;
     for (const char* column : {T::PRECURSOR_ID, T::MODIFIED_PEPTIDE, T::PRECURSOR_CHARGE, T::DECOY,
                                T::RT, T::IM, T::PRECURSOR_MZ, T::PRODUCT_MZ,
                                T::RELATIVE_INTENSITY, T::FRAGMENT_TYPE, T::FRAGMENT_CHARGE,
@@ -1176,17 +1219,17 @@ namespace ODIA
                                T::PROTEIN_IDS, T::PROTEIN_NAMES, T::PROTEOTYPIC,
                                T::PROTEIN_GROUP, T::CCS})
     {
-      if (!first) { out.put('\t'); }
+      if (!first_column) { out.put('\t'); }
       out.put(column);
-      first = false;
+      first_column = false;
     }
     out.put('\n');
 
     // DIA-NN's protein columns from DIALibGen's group "sp|P1|N1_HUMAN;sp|P2|N2_HUMAN":
     // accessions "P1;P2", entry names "N1_HUMAN;N2_HUMAN". A member without the
     // db|accession|name form stands for itself in both.
-    std::string ids, names;
-    auto proteins = [&](std::string_view group) -> std::size_t {
+    // Stateless, so precursors can be rendered on several threads.
+    auto proteins = [](std::string_view group, std::string& ids, std::string& names) -> std::size_t {
       ids.clear(); names.clear();
       std::size_t members = 0;
       std::size_t pos = 0;
@@ -1211,11 +1254,11 @@ namespace ODIA
       return members;
     };
 
-    std::size_t unknown_mods = 0;
-    std::string seq;
+    std::atomic<std::size_t> unknown_mods{0};
     const auto& p = library.precursors();
     const auto& t = library.transitions();
-    for (std::size_t i = 0; i < library.precursorCount(); ++i)
+    // One precursor's rows, into a TextWriter or a TextBuffer alike.
+    const auto writePrecursor = [&](auto& sink, std::size_t i)
     {
       const auto stored = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
@@ -1224,8 +1267,11 @@ namespace ODIA
       { throw std::runtime_error("TSV sequence or protein group contains a tab, newline or NUL"); }
       // DIA-NN parses UniMod accessions; OpenMS names such as Carbamidomethyl
       // are not what either version expects.
-      seq = canonicalModifiedSequence(stored, &unknown_mods);
-      const std::size_t members = proteins(pg);
+      std::size_t unknown = 0;
+      const std::string seq = canonicalModifiedSequence(stored, &unknown);
+      if (unknown) { unknown_mods += unknown; }
+      std::string ids, names;
+      const std::size_t members = proteins(pg, ids, names);
       const int z = p.charge[i];
       const bool has_im = i < p.im.size() && !std::isnan(p.im[i]);
       const bool has_ccs = i < p.ccs.size() && !std::isnan(p.ccs[i]);
@@ -1238,32 +1284,58 @@ namespace ODIA
         // Without the suffix, reloading our own output merged each such pair and
         // re-labelled the decoy's transitions as target evidence -- 33,390
         // precursors became 33,386, silently, with no transitions lost.
-        out.put(seq); out.integer(z); out.put(p.decoy[i] ? "_decoy" : ""); out.put('\t');
-        out.put(seq); out.put('\t'); out.integer(z); out.put('\t');
-        out.integer(p.decoy[i]); out.put('\t');
+        sink.put(seq); sink.integer(z); sink.put(p.decoy[i] ? "_decoy" : ""); sink.put('\t');
+        sink.put(seq); sink.put('\t'); sink.integer(z); sink.put('\t');
+        sink.integer(p.decoy[i]); sink.put('\t');
         // An unpredicted retention time is written as an empty field, not as
         // "nan": no TSV consumer accepts the latter, and it propagates into
         // anything that reads the library back.
-        if (!std::isnan(p.irt[i])) { out.number(p.irt[i], 9); }
-        out.put('\t');
-        if (has_im) { out.number(p.im[i], 9); }
-        out.put('\t');
-        out.number(fromFixed(p.mz[i]), 10); out.put('\t');
-        out.number(fromFixed(t.product_mz[j]), 10); out.put('\t');
-        if (!std::isnan(t.library_intensity[j])) { out.number(t.library_intensity[j], 9); }
-        out.put('\t');
-        out.put(toString(t.type[j])); out.put('\t');
-        out.integer(t.charge[j]); out.put('\t');
-        out.integer(t.ordinal[j]); out.put('\t');
-        out.put(toString(t.loss[j])); out.put('\t');
-        out.put(ids); out.put('\t');
-        out.put(names); out.put('\t');
-        out.put(members == 1 ? "1" : "0"); out.put('\t');
-        out.put(pg); out.put('\t');
+        if (!std::isnan(p.irt[i])) { sink.number(p.irt[i], 9); }
+        sink.put('\t');
+        if (has_im) { sink.number(p.im[i], 9); }
+        sink.put('\t');
+        sink.number(fromFixed(p.mz[i]), 10); sink.put('\t');
+        sink.number(fromFixed(t.product_mz[j]), 10); sink.put('\t');
+        if (!std::isnan(t.library_intensity[j])) { sink.number(t.library_intensity[j], 9); }
+        sink.put('\t');
+        sink.put(toString(t.type[j])); sink.put('\t');
+        sink.integer(t.charge[j]); sink.put('\t');
+        sink.integer(t.ordinal[j]); sink.put('\t');
+        sink.put(toString(t.loss[j])); sink.put('\t');
+        sink.put(ids); sink.put('\t');
+        sink.put(names); sink.put('\t');
+        sink.put(members == 1 ? "1" : "0"); sink.put('\t');
+        sink.put(pg); sink.put('\t');
         // Empty rather than "nan" when absent, as for RT: no TSV consumer
         // accepts the latter, and a 0 here would read as a real cross-section.
-        if (has_ccs) { out.number(p.ccs[i], 9); }
-        out.put('\n');
+        if (has_ccs) { sink.number(p.ccs[i], 9); }
+        sink.put('\n');
+      }
+    };
+
+    // Rendering numbers is the cost (see store()), so blocks of precursors are
+    // rendered in parallel and written in order: the same bytes as one pass.
+    const unsigned workers = parallel::workers(threads);
+    const std::size_t n = library.precursorCount();
+    if (workers <= 1)
+    {
+      for (std::size_t i = 0; i < n; ++i) { writePrecursor(out, i); }
+    }
+    else
+    {
+      constexpr std::size_t TASK = 4096;
+      const std::size_t wave = TASK * 4 * workers;
+      std::vector<TextBuffer> rendered;
+      for (std::size_t first = 0; first < n; first += wave)
+      {
+        const std::size_t count = std::min(wave, n - first);
+        rendered.assign((count + TASK - 1) / TASK, TextBuffer{});
+        parallel::forEach(rendered.size(), workers, [&](std::size_t task)
+        {
+          const std::size_t end = first + std::min(count, (task + 1) * TASK);
+          for (std::size_t i = first + task * TASK; i < end; ++i) { writePrecursor(rendered[task], i); }
+        });
+        for (const auto& block : rendered) { out.put(block.text()); }
       }
     }
 
@@ -1273,7 +1345,7 @@ namespace ODIA
     output.commit();
     if (unknown_mods)
     {
-      std::cerr << "warning: " << unknown_mods << " modification tokens have no UniMod accession and "
+      std::cerr << "warning: " << unknown_mods.load() << " modification tokens have no UniMod accession and "
                    "were written verbatim; DIA-NN may not read those precursors\n";
     }
   }

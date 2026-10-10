@@ -1,10 +1,13 @@
 #include <odia/DIANNLibraryFile.h>
+#include "../../src/library/Parallel.h"
 #include <parquet/file_reader.h>
 #include <parquet/metadata.h>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <numeric>
 #include <stdexcept>
 
@@ -56,6 +59,11 @@ Library chunked(std::size_t n)
     t.charge.push_back(1); t.ordinal.push_back(1); t.loss.push_back(LossType::None);
   }
   return lib;
+}
+std::string bytes(const fs::path& path)
+{
+  std::ifstream in(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 std::vector<std::int64_t> rowGroups(const fs::path& path)
 {
@@ -110,6 +118,54 @@ int main(int argc, char** argv)
       Library loaded; DIANNLibraryFile::load(path.string(), loaded);
       check(loaded.precursorCount() == expected.precursorCount(), "compact precursor count changed");
       compare(loaded, expected);
+      return 0;
+    }
+    // The writers render rows (TSV) and build row groups (Parquet) on several
+    // threads; the files must be the bytes a single thread writes. Three row
+    // groups, the last a partial one, and more TSV blocks than threads.
+    if (mode == "threads-identical")
+    {
+      fs::create_directories(path);
+      const auto library = chunked((std::size_t(2) << 20) + 12345);
+      for (const unsigned threads : {1u, 3u, 8u})
+      {
+        const std::string suffix = std::to_string(threads);
+        DIANNLibraryFile::storeParquetCompact((path / ("t" + suffix + ".parquet")).string(), library, {}, "{}", {}, threads);
+        DIANNLibraryFile::storeTSV((path / ("t" + suffix + ".tsv")).string(), library, threads);
+      }
+      for (const char* ext : {".parquet", ".tsv"})
+      {
+        const auto reference = bytes(path / (std::string("t1") + ext));
+        check(!reference.empty(), std::string("empty ") + ext);
+        for (const char* other : {"t3", "t8"})
+        { check(bytes(path / (other + std::string(ext))) == reference, std::string(other) + ext + " differs from one thread"); }
+      }
+      check(rowGroups(path / "t8.parquet").size() == 3, "expected three row groups");
+      // A failure reports the row a serial writer would have hit first.
+      auto bad = chunked((std::size_t(2) << 20) + 12345);
+      for (const std::size_t row : {std::size_t(1500000), std::size_t(70000)})
+      { bad.precursors().protein_group[row] = bad.strings().intern("bad\tgroup " + std::to_string(row)); }
+      try { DIANNLibraryFile::storeTSV((path / "bad.tsv").string(), bad, 8); check(false, "a tab was written"); }
+      catch (const std::runtime_error& e) { check(std::string(e.what()).find("contains a tab") != std::string::npos, e.what()); }
+      check(!fs::exists(path / "bad.tsv"), "a failed TSV write left a file");
+      return 0;
+    }
+    // parallel::forEach: every index once, and the lowest failure wins.
+    if (mode == "parallel-for-each")
+    {
+      for (const unsigned threads : {1u, 2u, 7u, 64u})
+      {
+        std::vector<int> hits(10007, 0);
+        parallel::forEach(hits.size(), threads, [&](std::size_t i) { ++hits[i]; });
+        check(std::all_of(hits.begin(), hits.end(), [](int h) { return h == 1; }), "an index ran other than once");
+        try
+        {
+          parallel::forEach(hits.size(), threads, [&](std::size_t i)
+          { if (i == 9000 || i == 4242 || i == 5000) { throw std::runtime_error(std::to_string(i)); } });
+          check(false, "no exception");
+        }
+        catch (const std::runtime_error& e) { check(std::string(e.what()) == "4242", std::string("rethrew ") + e.what()); }
+      }
       return 0;
     }
     auto original = fixture();

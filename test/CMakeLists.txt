@@ -278,6 +278,22 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}")
                        ENVIRONMENT "CUDA_VISIBLE_DEVICES=;DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
 endif()
 
+# Byte-identical output at any -threads. Several precursor charges and
+# variable modifications give the enumeration and selection more to reorder.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/threads_identical.json"
+       "{\"precursor_charges\": [2, 3], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+       " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\",\n"
+       " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${ODIA_MS2_MODEL_PATH}\",\n"
+       " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  add_test(NAME generate_threads_identical
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/threads_identical.json"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/threads_identical"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/threads_identical.cmake")
+endif()
+
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.

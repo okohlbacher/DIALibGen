@@ -490,7 +490,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::string standards;
     try
     {
-      const auto st = ODIA::LibraryGenerator::generate(fasta, p, library);
+      const auto st = ODIA::LibraryGenerator::generate(fasta, p, library, threads);
       writeLogInfo_("digest: " + std::to_string(st.proteins) + " proteins, " +
                     std::to_string(st.peptides) + " peptides, " +
                     std::to_string(st.precursors) + " precursors, " +
@@ -584,10 +584,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     try
     {
       if (parquet)
-      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extra_metadata); }
+      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extra_metadata, threads); }
       else
       {
-        ODIA::DIANNLibraryFile::storeTSV(out, library);
+        ODIA::DIANNLibraryFile::storeTSV(out, library, threads);
         writeLogWarn_("TSV cannot carry the recipe: the config is NOT embedded and this "
                       "file is not cache-eligible. Use .parquet to keep them together.");
       }

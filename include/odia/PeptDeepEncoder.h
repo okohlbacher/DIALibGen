@@ -104,6 +104,18 @@ namespace ODIA
                         const std::vector<int>& charges,
                         float nce, const std::string& instrument);
 
+    /// The peptides at @p rows of @p peptides, in that order -- the same batch
+    /// as encoding a copy of those rows, without making the copy.
+    static Batch encode(const std::vector<OpenMS::AASequence>& peptides,
+                        const std::vector<std::size_t>& rows);
+
+    /// As above, with the meta inputs. @p charges is parallel to @p peptides
+    /// (one per peptide, not per row).
+    static Batch encode(const std::vector<OpenMS::AASequence>& peptides,
+                        const std::vector<std::size_t>& rows,
+                        const std::vector<int>& charges,
+                        float nce, const std::string& instrument);
+
     /// Group by residue count, so each batch is length-homogeneous. Returns the
     /// index groups; the caller encodes and runs each in turn.
     static std::vector<std::vector<std::size_t>>
@@ -124,8 +136,10 @@ namespace ODIA
     static std::vector<float> modificationVector(const std::string& mod_id);
 
   private:
-    static void addModification_(Batch& batch, std::size_t row, std::size_t site,
-                                 const std::string& mod_id);
+    /// Fills the charge, NCE and instrument inputs. The charge of batch row r
+    /// is charges[rows[r]], or charges[r] when @p rows is null.
+    static Batch addMeta_(Batch batch, const int* charges, const std::size_t* rows,
+                          float nce, const std::string& instrument);
   };
 
 } // namespace ODIA

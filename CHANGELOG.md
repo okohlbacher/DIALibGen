@@ -3,6 +3,17 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Compact Parquet libraries store `Precursor.Id`, `Modified.Sequence` and `Protein.Group` as plain
+  strings, dictionary-encoded per row group by Parquet, instead of one global Arrow dictionary that was
+  repeated as the dictionary page of every row group. On a 3.49 M-precursor human library: 570 -> 458 MB,
+  identical content, and readers no longer decode every string once per row group (a parallel reader
+  loads it in 1.2 s instead of 2.0 s). Readers that accept dictionary or plain string columns are
+  unaffected; the flat writer keeps its dictionary builders.
+
 ## [0.11.0] — 2026-09-20
 
 See the [validation record](docs/testing.md#release-verification) for tested

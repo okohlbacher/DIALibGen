@@ -806,7 +806,19 @@ namespace ODIA
     };
 
     // Precursor-level: ONE value each, not one per transition.
-    arrow::StringDictionaryBuilder b_id, b_seq, b_pg;
+    //
+    // Plain strings, not dictionary builders. The flat writer below needs its
+    // dictionary builders (one row per transition repeats every string ~12x),
+    // but here each Precursor.Id occurs once. A dictionary builder produced ONE
+    // global dictionary of every string, and Parquet stores an Arrow dictionary
+    // as the dictionary page of EVERY row group: on a 3.49 M-precursor human
+    // library each of the 4 row groups carried all ~3.5 M ids (~20 MB) though it
+    // holds ~0.87 M rows, so every reader decoded all of them per row group.
+    // Plain strings let Parquet dictionary-encode per row group where it pays.
+    // Measured on that library: 570 -> 458 MB, and a parallel reader loads it in
+    // 1.2 s instead of 2.0 s (identical content). Arrays are finished per row group (kChunkRows), so a
+    // string column never nears the 2 GiB offset limit of a plain StringArray.
+    arrow::StringBuilder b_id, b_seq, b_pg;
     arrow::UInt8Builder b_z, b_dec;
     arrow::FloatBuilder b_rt, b_im, b_ccs;
     arrow::DoubleBuilder b_pmz;
@@ -823,8 +835,22 @@ namespace ODIA
     arrow::ListBuilder b_qmz(pool, qmz_v), b_int(pool, int_v),
                        b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
 
+    constexpr std::size_t kChunkRows = std::size_t(1) << 20;   // = the row-group size passed to WriteTable
+    std::vector<arrow::ArrayVector> chunks(15);
+    auto flush = [&] {
+      arrow::ArrayBuilder* builders[15] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
+                                           &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
+      if (b_id.length() == 0) { return; }
+      for (int c = 0; c < 15; ++c)
+      {
+        std::shared_ptr<arrow::Array> a;
+        ok(builders[c]->Finish(&a));
+        chunks[c].push_back(std::move(a));
+      }
+    };
     for (std::size_t i = 0; i < n; ++i)
     {
+      if (i > 0 && i % kChunkRows == 0) { flush(); }
       const auto seq = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
       const std::string seq_s(seq.data(), seq.size());
@@ -861,18 +887,12 @@ namespace ODIA
       }
     }
 
-    std::shared_ptr<arrow::Array> a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im,
-                                  a_ccs, a_pmz, a_qmz, a_int, a_ft, a_fz, a_ord, a_loss;
-    ok(b_id.Finish(&a_id));   ok(b_seq.Finish(&a_seq)); ok(b_pg.Finish(&a_pg));
-    ok(b_z.Finish(&a_z));     ok(b_dec.Finish(&a_dec)); ok(b_rt.Finish(&a_rt));
-    ok(b_im.Finish(&a_im));   ok(b_ccs.Finish(&a_ccs)); ok(b_pmz.Finish(&a_pmz));
-    ok(b_qmz.Finish(&a_qmz)); ok(b_int.Finish(&a_int)); ok(b_ft.Finish(&a_ft));
-    ok(b_fz.Finish(&a_fz));   ok(b_ord.Finish(&a_ord)); ok(b_loss.Finish(&a_loss));
+    flush();
 
     auto schema = arrow::schema({
-      arrow::field(Columns::PRECURSOR_ID, a_id->type()),
-      arrow::field(Columns::MODIFIED_SEQUENCE, a_seq->type()),
-      arrow::field(Columns::PROTEIN_GROUP, a_pg->type()),
+      arrow::field(Columns::PRECURSOR_ID, arrow::utf8()),
+      arrow::field(Columns::MODIFIED_SEQUENCE, arrow::utf8()),
+      arrow::field(Columns::PROTEIN_GROUP, arrow::utf8()),
       arrow::field(Columns::PRECURSOR_CHARGE, arrow::uint8()),
       arrow::field(Columns::DECOY, arrow::uint8()),
       arrow::field(Columns::RT, arrow::float32()),
@@ -911,9 +931,12 @@ namespace ODIA
       schema = schema->WithMetadata(md);
     }
 
-    auto table = arrow::Table::Make(schema,
-      {a_id, a_seq, a_pg, a_z, a_dec, a_rt, a_im, a_ccs, a_pmz,
-       a_qmz, a_int, a_ft, a_fz, a_ord, a_loss});
+    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+    for (int c = 0; c < 15; ++c)
+    {
+      columns.push_back(std::make_shared<arrow::ChunkedArray>(chunks[c], schema->field(c)->type()));
+    }
+    auto table = arrow::Table::Make(schema, columns, static_cast<std::int64_t>(n));
 
     AtomicFile output(filename);
     auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
@@ -923,7 +946,7 @@ namespace ODIA
                    ->enable_dictionary()
                    ->build();
     auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
-    const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, 1 << 20,
+    const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, static_cast<std::int64_t>(kChunkRows),
                                                props, arrow_props);
     if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
     ok((*outfile)->Close());

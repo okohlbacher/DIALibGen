@@ -158,7 +158,7 @@ against.
 Measured 2026-10-10 on one H100 (spock): whole proteome 154 s with RT, MS2
 and CCS on CUDA (needs cuDNN 9 for CUDA 12; without it RT and CCS silently
 fall back to the CPU: 310-395 s), 126 s on two H100s; ~94 s of it is serial
-host work. Decision (owner, 2026-10-10): keep TF32 ON on GPUs (ONNX
-Runtime's default). GPU libraries then differ slightly from CPU ones
-(~1 % of precursors pick a different fragment set, CCS up to ~1.9 A^2);
-TF32 off would match the CPU but cost ~26 s per proteome.
+host work. Decision (owner, 2026-10-10, revised): TF32 is an option and
+OFF by default, so GPU libraries match CPU libraries; ON (opt-in) saves
+~26 s per proteome on one H100 but changes ~1 % of fragment sets and CCS
+by up to ~1.9 A^2.

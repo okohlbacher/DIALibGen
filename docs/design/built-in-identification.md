@@ -1253,7 +1253,9 @@ intensities (4 calls). CPU is the process's over the phase (`proc.tsv`).
 | Astral | 32 | passive | 294 s | 8,266 s | 28.1 | 119 s, 162 s |
 
 16 threads beat 8 on neither run, and 32 collapses with and without the
-passive policy. On Astral, 16 threads keep 14.7 cores busy for twice the
+passive policy. The same holds on the reduced timsTOF cell with predicted
+intensities (30,000 pairs, 16 threads): extraction 355 s with a team of 8,
+390 s with 16. On Astral, 16 threads keep 14.7 cores busy for twice the
 CPU of 8 and a longer wall: the extra threads work against each other, and
 not by libgomp spin-waiting, which the passive policy would have removed. On
 the timsTOF cell every call ends with one window running alone: the count of

@@ -6,9 +6,19 @@
 //   diann2 <dir>     DIA-NN 2.0's Parquet layout: the schema column by column
 //                    against the one DIA-NN 2.0 writes itself, the values, and
 //                    DIALibGen reading the file back.
+//   openswath <dir>  PQP and OpenSWATH TSV through OpenMS's own readers
+//                    (what TargetedFileConverter and OpenSwathWorkflow use):
+//                    counts, decoys, m/z, intensities, RT, 1/K0, charges,
+//                    proteins and modified sequences.
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/LibraryExport.h>
+
+#include <OpenMS/ANALYSIS/OPENSWATH/TransitionPQPFile.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/TransitionTSVFile.h>
+#include <OpenMS/ANALYSIS/TARGETED/TargetedExperiment.h>
+#include <OpenMS/CHEMISTRY/AASequence.h>
+#include <OpenMS/FORMAT/FileTypes.h>
 
 #include <arrow/api.h>
 #include <arrow/io/file.h>
@@ -17,6 +27,8 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -166,15 +178,96 @@ namespace
     std::cout << "diann2_parquet: 27 columns as DIA-NN 2.0 writes them, 15 rows, read back whole\n";
   }
 
+  // --------------------------------------------------------------- openswath
+
+  void compare(const OpenMS::TargetedExperiment& written, const OpenMS::TargetedExperiment& read, const std::string& what)
+  {
+    check(read.getPeptides().size() == written.getPeptides().size(),
+          what + ": " + std::to_string(read.getPeptides().size()) + " precursors read, " +
+          std::to_string(written.getPeptides().size()) + " written");
+    check(read.getTransitions().size() == written.getTransitions().size(),
+          what + ": " + std::to_string(read.getTransitions().size()) + " transitions read, " +
+          std::to_string(written.getTransitions().size()) + " written");
+    check(read.getProteins().size() == written.getProteins().size(), what + ": protein count");
+
+    std::map<std::string, const OpenMS::TargetedExperiment::Peptide*> peptides;
+    for (const auto& peptide : read.getPeptides()) { peptides[peptide.id] = &peptide; }
+    for (const auto& w : written.getPeptides())
+    {
+      const auto found = peptides.find(w.id);
+      check(found != peptides.end(), what + ": precursor " + w.id + " missing");
+      const auto& r = *found->second;
+      const auto ws = OpenMS::TargetedExperimentHelper::getAASequence(w);
+      const auto rs = OpenMS::TargetedExperimentHelper::getAASequence(r);
+      check(rs.toUniModString() == ws.toUniModString() &&
+            std::abs(rs.getMonoWeight() - ws.getMonoWeight()) < 1e-6,
+            what + ": sequence " + rs.toUniModString() + " read for " + ws.toUniModString());
+      check(r.getChargeState() == w.getChargeState(), what + ": charge of " + w.id);
+      check(std::abs(r.getRetentionTime() - w.getRetentionTime()) < 1e-6, what + ": RT of " + w.id);
+      check(std::abs(r.getDriftTime() - w.getDriftTime()) < 1e-6, what + ": 1/K0 of " + w.id);
+      check(std::set<std::string>(r.protein_refs.begin(), r.protein_refs.end()) ==
+            std::set<std::string>(w.protein_refs.begin(), w.protein_refs.end()), what + ": proteins of " + w.id);
+    }
+    std::map<std::string, const OpenMS::ReactionMonitoringTransition*> transitions;
+    for (const auto& t : read.getTransitions()) { transitions[t.getNativeID()] = &t; }
+    std::size_t decoys = 0;
+    for (const auto& w : written.getTransitions())
+    {
+      const auto found = transitions.find(w.getNativeID());
+      check(found != transitions.end(), what + ": transition " + w.getNativeID() + " missing");
+      const auto& r = *found->second;
+      check(std::abs(r.getPrecursorMZ() - w.getPrecursorMZ()) < 1e-6 && std::abs(r.getProductMZ() - w.getProductMZ()) < 1e-6,
+            what + ": m/z of " + w.getNativeID());
+      check(std::abs(r.getLibraryIntensity() - w.getLibraryIntensity()) < 1e-6, what + ": intensity of " + w.getNativeID());
+      check(r.getDecoyTransitionType() == w.getDecoyTransitionType(), what + ": decoy flag of " + w.getNativeID());
+      check(r.getPeptideRef() == w.getPeptideRef(), what + ": precursor of " + w.getNativeID());
+      check(r.getProductChargeState() == w.getProductChargeState(), what + ": fragment charge of " + w.getNativeID());
+      decoys += r.getDecoyTransitionType() == OpenMS::ReactionMonitoringTransition::DECOY;
+    }
+    check(decoys == 3, what + ": the decoy's three transitions");
+  }
+
+  void openswath(const fs::path& dir)
+  {
+    fs::create_directories(dir);
+    const Library lib = fixture();
+    OpenMS::TargetedExperiment written;
+    LibraryExport::toTargetedExperiment(lib, written);
+    check(written.getPeptides().size() == 5 && written.getTransitions().size() == 15 && written.getProteins().size() == 4,
+          "the experiment holds what the library holds");
+    // OpenMS's notation: terminal modifications with the dot.
+    std::set<std::string> forms;
+    for (const auto& peptide : written.getPeptides())
+    { forms.insert(OpenMS::TargetedExperimentHelper::getAASequence(peptide).toUniModString()); }
+    for (const char* form : {".(UniMod:1)PEPTIDEK", "AC(UniMod:4)DEFGHK", "LLM(UniMod:35)EPTIDER", "PEPTIDEK.(UniMod:2)"})
+    { check(forms.count(form) == 1, std::string("OpenSWATH form ") + form + " not written"); }
+
+    const auto pqp = (dir / "library.pqp").string();
+    const auto tsv = (dir / "library.tsv").string();
+    fs::remove(pqp);
+    fs::remove(tsv);
+    LibraryExport::storeOpenSwath(pqp, lib, true);
+    LibraryExport::storeOpenSwath(tsv, lib, false);
+
+    OpenMS::TargetedExperiment from_pqp, from_tsv;
+    // legacy_traml_id: the ids as written (by default the reader numbers the
+    // precursors and transitions by their table ID).
+    OpenMS::TransitionPQPFile().convertPQPToTargetedExperiment(pqp.c_str(), from_pqp, true);
+    compare(written, from_pqp, "PQP");
+    OpenMS::TransitionTSVFile().convertTSVToTargetedExperiment(tsv.c_str(), OpenMS::FileTypes::TSV, from_tsv);
+    compare(written, from_tsv, "OpenSWATH TSV");
+    std::cout << "openswath: PQP and TSV read back by OpenMS with 5 precursors (1 decoy), 15 transitions, 4 proteins\n";
+  }
 }
 
 int main(int argc, char** argv)
 {
-  if (argc != 3) { std::cerr << "usage: library_export diann2 <dir>\n"; return 2; }
+  if (argc != 3) { std::cerr << "usage: library_export diann2|openswath <dir>\n"; return 2; }
   try
   {
     const std::string mode = argv[1];
     if (mode == "diann2") { diann2(argv[2]); }
+    else if (mode == "openswath") { openswath(argv[2]); }
     else { std::cerr << "unknown mode " << mode << '\n'; return 2; }
   }
   catch (const std::exception& e)

@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+namespace OpenMS { class TargetedExperiment; }
+
 namespace ODIA
 {
 
@@ -23,7 +25,9 @@ namespace ODIA
   {
     DIALibGenParquet,  ///< `dialibgen_parquet`: DIALibGen's compact layout, with provenance
     DIANNTSV,          ///< `diann_tsv`: DIA-NN's TSV library, read by DIA-NN 1.7 and 2.x
-    DIANN2Parquet      ///< `diann2_parquet`: DIA-NN 2.0's own Parquet library layout
+    DIANN2Parquet,     ///< `diann2_parquet`: DIA-NN 2.0's own Parquet library layout
+    OpenSwathPQP,      ///< `openswath_pqp`: OpenSWATH's PQP (SQLite), written by OpenMS
+    OpenSwathTSV       ///< `openswath_tsv`: OpenSWATH's assay TSV, written by OpenMS
   };
 
   class LibraryExport
@@ -38,8 +42,8 @@ namespace ODIA
     /// The format for @p out and the `-out_format` value @p requested.
     ///
     /// `auto` picks by extension: .parquet DIALibGen's layout, .tsv DIA-NN's
-    /// TSV. An explicit format must match the extension (.parquet for
-    /// diann2_parquet).
+    /// TSV, .pqp OpenSWATH's PQP. An explicit format must match the
+    /// extension (.parquet for diann2_parquet, .tsv for openswath_tsv).
     /// @throws std::invalid_argument with a message for the user otherwise.
     static LibraryFormat resolve(const std::string& out, const std::string& requested);
 
@@ -74,6 +78,20 @@ namespace ODIA
     static void storeDIANN2Parquet(const std::string& filename, const Library& library,
                                    const std::vector<std::pair<std::string, std::string>>& metadata = {},
                                    unsigned threads = 1);
+
+    /// The library as an OpenMS TargetedExperiment, the input of OpenMS's
+    /// OpenSWATH writers. One peptide per precursor (decoys prefixed
+    /// `DECOY_`), one transition per fragment, the precursor's proteins with
+    /// their accessions, RT as the peptide's normalised retention time and
+    /// 1/K0 as its drift time.
+    static void toTargetedExperiment(const Library& library, OpenMS::TargetedExperiment& experiment);
+
+    /// Write @p library as OpenSWATH's PQP (@p pqp) or assay TSV, through
+    /// OpenMS's TransitionPQPFile and TransitionTSVFile.
+    ///
+    /// Exports what the library holds, decoys included. A library without
+    /// decoys needs OpenSwathDecoyGenerator before OpenSwathWorkflow.
+    static void storeOpenSwath(const std::string& filename, const Library& library, bool pqp);
 
     /// Dispatch on @p format.
     static void store(const std::string& filename, const Library& library, LibraryFormat format,

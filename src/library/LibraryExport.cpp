@@ -9,6 +9,12 @@
 
 #include "Parallel.h"
 
+#include <OpenMS/ANALYSIS/OPENSWATH/TransitionPQPFile.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/TransitionTSVFile.h>
+#include <OpenMS/ANALYSIS/TARGETED/TargetedExperiment.h>
+#include <OpenMS/CHEMISTRY/AASequence.h>
+#include <OpenMS/CHEMISTRY/ResidueModification.h>
+
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/writer.h>
@@ -20,8 +26,10 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
 
 namespace ODIA
 {
@@ -32,6 +40,8 @@ namespace ODIA
       {LibraryFormat::DIALibGenParquet, "dialibgen_parquet", ".parquet"},
       {LibraryFormat::DIANNTSV, "diann_tsv", ".tsv"},
       {LibraryFormat::DIANN2Parquet, "diann2_parquet", ".parquet"},
+      {LibraryFormat::OpenSwathPQP, "openswath_pqp", ".pqp"},
+      {LibraryFormat::OpenSwathTSV, "openswath_tsv", ".tsv"},
     };
 
     std::string lowerExtension(const std::string& filename)
@@ -179,6 +189,55 @@ namespace ODIA
       return arrow::Table::Make(schema, arrays, static_cast<std::int64_t>(rows));
     }
 
+    // ------------------------------------------------------------- OpenSWATH
+
+    std::string uniModString(const OpenMS::AASequence& sequence) { return sequence.toUniModString(); }
+
+    double lossMass(LossType loss)
+    {
+      switch (loss)
+      {
+        case LossType::Water: return 18.0105646837;
+        case LossType::Ammonia: return 17.0265491015;
+        case LossType::Phospho: return 97.9768955;
+        case LossType::Metaphosphate: return 79.9663304;
+        case LossType::CO: return 27.9949146;
+        case LossType::None: case LossType::Other: break;
+      }
+      return 0.0;
+    }
+
+    OpenMS::Residue::ResidueType ionType(FragmentType type, LossType loss)
+    {
+      using R = OpenMS::Residue;
+      if (loss == LossType::Water && type == FragmentType::B) { return R::BIonMinusH20; }
+      if (loss == LossType::Water && type == FragmentType::Y) { return R::YIonMinusH20; }
+      if (loss == LossType::Ammonia && type == FragmentType::B) { return R::BIonMinusNH3; }
+      if (loss == LossType::Ammonia && type == FragmentType::Y) { return R::YIonMinusNH3; }
+      switch (type)
+      {
+        case FragmentType::A: return R::AIon;
+        case FragmentType::B: return R::BIon;
+        case FragmentType::C: return R::CIon;
+        case FragmentType::X: return R::XIon;
+        case FragmentType::Y: return R::YIon;
+        case FragmentType::Z: return R::ZIon;
+        case FragmentType::Precursor: return R::Precursor;
+        case FragmentType::Unknown: break;
+      }
+      return R::NonIdentified;
+    }
+
+    void addModification(std::vector<OpenMS::TargetedExperiment::Peptide::Modification>& mods, int location,
+                         const OpenMS::ResidueModification& rmod)
+    {
+      OpenMS::TargetedExperiment::Peptide::Modification mod;
+      mod.location = location;
+      mod.mono_mass_delta = rmod.getDiffMonoMass();
+      mod.avg_mass_delta = rmod.getDiffAverageMass();
+      mod.unimod_id = rmod.getUniModRecordId();
+      mods.push_back(mod);
+    }
   } // namespace
 
   std::vector<std::string> LibraryExport::formatNames()
@@ -201,7 +260,8 @@ namespace ODIA
     {
       if (extension == ".parquet") { return LibraryFormat::DIALibGenParquet; }
       if (extension == ".tsv") { return LibraryFormat::DIANNTSV; }
-      throw std::invalid_argument("-out must end in .parquet or .tsv (got '" + out + "')");
+      if (extension == ".pqp") { return LibraryFormat::OpenSwathPQP; }
+      throw std::invalid_argument("-out must end in .parquet, .tsv or .pqp (got '" + out + "')");
     }
     for (const auto& f : FORMATS)
     {
@@ -290,6 +350,157 @@ namespace ODIA
     }
   }
 
+  void LibraryExport::toTargetedExperiment(const Library& library, OpenMS::TargetedExperiment& experiment)
+  {
+    using OpenMS::TargetedExperiment;
+    using OpenMS::ReactionMonitoringTransition;
+    const auto& p = library.precursors();
+    const auto& t = library.transitions();
+
+    std::vector<TargetedExperiment::Peptide> peptides;
+    std::vector<TargetedExperiment::Protein> proteins;
+    std::vector<ReactionMonitoringTransition> transitions;
+    peptides.reserve(library.precursorCount());
+    transitions.reserve(library.transitionCount());
+    std::unordered_map<std::string, std::size_t> protein_index;
+    // Parsed once per distinct sequence: precursors of one peptide share it.
+    std::unordered_map<std::uint32_t, OpenMS::AASequence> parsed;
+
+    for (std::size_t i = 0; i < library.precursorCount(); ++i)
+    {
+      auto found = parsed.find(p.modified_sequence[i]);
+      if (found == parsed.end())
+      {
+        const std::string stored(library.strings().get(p.modified_sequence[i]));
+        OpenMS::AASequence sequence;
+        try { sequence = OpenMS::AASequence::fromString(stored); }
+        catch (const std::exception& e)
+        { throw std::runtime_error("OpenSWATH export: cannot parse '" + stored + "': " + e.what()); }
+        found = parsed.emplace(p.modified_sequence[i], std::move(sequence)).first;
+      }
+      const OpenMS::AASequence& sequence = found->second;
+      const std::string unimod = uniModString(sequence);
+      const int z = p.charge[i];
+      const bool decoy = p.decoy[i] != 0;
+      const std::string prefix = decoy ? "DECOY_" : "";
+      // Unique per precursor; the index keeps two copies of one precursor apart.
+      const std::string peptide_id = prefix + std::to_string(i) + "_" + unimod + "_" + std::to_string(z);
+
+      TargetedExperiment::Peptide peptide;
+      peptide.id = peptide_id;
+      peptide.sequence = sequence.toUnmodifiedString();
+      peptide.setMetaValue("full_peptide_name", unimod);
+      peptide.setPeptideGroupLabel(prefix + unimod);
+      peptide.setChargeState(z);
+      if (!std::isnan(p.irt[i]))
+      {
+        TargetedExperiment::RetentionTime rt;
+        rt.setRT(p.irt[i]);
+        rt.retention_time_type = OpenMS::TargetedExperimentHelper::RetentionTime::RTType::IRT;
+        peptide.rts.push_back(rt);
+      }
+      if (i < p.im.size() && !std::isnan(p.im[i])) { peptide.setDriftTime(p.im[i]); }
+      if (sequence.hasNTerminalModification()) { addModification(peptide.mods, -1, *sequence.getNTerminalModification()); }
+      if (sequence.hasCTerminalModification())
+      { addModification(peptide.mods, static_cast<int>(sequence.size()), *sequence.getCTerminalModification()); }
+      for (OpenMS::Size k = 0; k < sequence.size(); ++k)
+      {
+        if (sequence[k].isModified()) { addModification(peptide.mods, static_cast<int>(k), *sequence[k].getModification()); }
+      }
+      for (const auto member : members(library.strings().get(p.protein_group[i])))
+      {
+        const std::string protein_id(member);
+        peptide.protein_refs.push_back(protein_id);
+        if (protein_index.emplace(protein_id, proteins.size()).second)
+        {
+          TargetedExperiment::Protein protein;
+          protein.id = protein_id;
+          OpenMS::CVTerm accession;
+          accession.setCVIdentifierRef("MS");
+          accession.setAccession("MS:1000885");
+          accession.setName("protein accession");
+          accession.setValue(OpenMS::DataValue(std::string(accessionAndName(member).first)));
+          protein.addCVTerm(accession);
+          proteins.push_back(std::move(protein));
+        }
+      }
+
+      const double precursor_mz = fromFixed(p.mz[i]);
+      for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+      {
+        const std::uint32_t j = p.transition_begin[i] + k;
+        const int fragment_charge = t.charge[j];
+        std::string annotation = std::string(toString(t.type[j])) + std::to_string(t.ordinal[j]);
+        if (const double loss = lossMass(t.loss[j]); loss > 0.0)
+        { annotation += "-" + std::to_string(static_cast<long>(std::lround(loss))); }
+        annotation += "^" + std::to_string(fragment_charge);
+
+        ReactionMonitoringTransition transition;
+        transition.setNativeID(prefix + std::to_string(j) + "_" + annotation + "_" + std::to_string(i));
+        transition.setPeptideRef(peptide_id);
+        transition.setPrecursorMZ(precursor_mz);
+        transition.setProductMZ(fromFixed(t.product_mz[j]));
+        transition.setLibraryIntensity(std::isnan(t.library_intensity[j]) ? 0.0 : t.library_intensity[j]);
+        auto product = transition.getProduct();
+        product.setChargeState(fragment_charge);
+        TargetedExperiment::Interpretation interpretation;
+        interpretation.rank = 1;
+        interpretation.ordinal = t.ordinal[j];
+        interpretation.iontype = ionType(t.type[j], t.loss[j]);
+        if (const double loss = lossMass(t.loss[j]); loss > 0.0)
+        {
+          OpenMS::CVTerm neutral_loss;
+          neutral_loss.setCVIdentifierRef("MS");
+          neutral_loss.setAccession("MS:1001524");
+          neutral_loss.setName("fragment neutral loss");
+          neutral_loss.setValue(-loss);
+          interpretation.addCVTerm(neutral_loss);
+        }
+        product.addInterpretation(interpretation);
+        transition.setProduct(product);
+        transition.setDecoyTransitionType(decoy ? ReactionMonitoringTransition::DECOY
+                                                : ReactionMonitoringTransition::TARGET);
+        transition.setMetaValue("annotation", annotation);
+        transition.setDetectingTransition(true);
+        transition.setIdentifyingTransition(false);
+        transition.setQuantifyingTransition(true);
+        transitions.push_back(std::move(transition));
+      }
+      peptides.push_back(std::move(peptide));
+    }
+    experiment.setProteins(std::move(proteins));
+    experiment.setPeptides(std::move(peptides));
+    experiment.setTransitions(std::move(transitions));
+  }
+
+  void LibraryExport::storeOpenSwath(const std::string& filename, const Library& library, bool pqp)
+  {
+    if (const std::size_t decoys = library.decoyCount(); decoys > 0)
+    {
+      // OpenMS keys PEPTIDE (and through it PROTEIN) by sequence, and a
+      // DIALibGen decoy carries its target's sequence: the writer then marks
+      // that peptide and its proteins as decoys. Precursors and transitions
+      // keep their own flags.
+      std::cerr << "WARNING: the library has " << decoys << " decoys; DIALibGen decoys carry their target's "
+                   "sequence, so OpenSWATH's peptide and protein tables will mark those targets' peptides and "
+                   "proteins as decoys too. For OpenSWATH, generate with decoys 'none' and run "
+                   "OpenSwathDecoyGenerator.\n";
+    }
+    trace::Scope build_step("build_targeted_experiment", 1);
+    build_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());
+    OpenMS::TargetedExperiment experiment;
+    toTargetedExperiment(library, experiment);
+    build_step.end();
+    trace::Scope write_step(pqp ? "write_pqp" : "write_openswath_tsv", 1);
+    AtomicFile output(filename);
+    const std::string staged = output.temporaryPath().string();
+    if (pqp) { OpenMS::TransitionPQPFile().convertTargetedExperimentToPQP(staged.c_str(), experiment); }
+    else { OpenMS::TransitionTSVFile().convertTargetedExperimentToTSV(staged.c_str(), experiment); }
+    if (!std::filesystem::exists(output.temporaryPath()))
+    { throw std::runtime_error("OpenMS wrote no file for " + filename); }
+    output.commit();
+  }
+
   void LibraryExport::store(const std::string& filename, const Library& library, LibraryFormat format,
                             const std::vector<std::pair<std::string, std::string>>& metadata, unsigned threads)
   {
@@ -300,6 +511,8 @@ namespace ODIA
         return;
       case LibraryFormat::DIANNTSV: DIANNLibraryFile::storeTSV(filename, library, threads); return;
       case LibraryFormat::DIANN2Parquet: storeDIANN2Parquet(filename, library, metadata, threads); return;
+      case LibraryFormat::OpenSwathPQP: storeOpenSwath(filename, library, true); return;
+      case LibraryFormat::OpenSwathTSV: storeOpenSwath(filename, library, false); return;
     }
   }
 

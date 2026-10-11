@@ -172,7 +172,7 @@ if run_bare "$BIN" -in "$FASTA" -out "$TMP/library.parqet" \
        >"$TMP/e.log" 2>&1; then
   fail "-out with an unknown extension was accepted"
 fi
-grep -q "must end in .parquet or .tsv" "$TMP/e.log" \
+grep -q "must end in .parquet, .tsv or .pqp" "$TMP/e.log" \
   || fail "a bad -out extension failed for the wrong reason"
 
 # Out-of-range numbers. A negative integer is the sharp one: nlohmann converts

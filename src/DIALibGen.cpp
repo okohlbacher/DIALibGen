@@ -33,9 +33,9 @@ void DIALibGen::registerOptionsAndFlags_()
   setValidStrings_("mode", {"generate", "refine", "tune", "convert"});
   registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
-  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. -out_format selects the other layouts.", false);
-  setValidFormats_("out", {"parquet", "tsv"}, false);
-  registerStringOption_("out_format", "<format>", "auto", "Layout of -out. auto: by extension (.parquet dialibgen_parquet, .tsv diann_tsv). diann2_parquet (.parquet): DIA-NN 2.0's own Parquet library layout, which DIA-NN 2.0 loads.", false);
+  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. .pqp: OpenSWATH's PQP. -out_format selects the other layouts.", false);
+  setValidFormats_("out", {"parquet", "tsv", "pqp"}, false);
+  registerStringOption_("out_format", "<format>", "auto", "Layout of -out. auto: by extension (.parquet dialibgen_parquet, .tsv diann_tsv, .pqp openswath_pqp). diann2_parquet (.parquet): DIA-NN 2.0's own Parquet library layout, which DIA-NN 2.0 loads. openswath_tsv (.tsv): OpenSWATH's assay TSV, as TargetedFileConverter reads it.", false);
   {
     const auto names = ODIA::LibraryExport::formatNames();
     setValidStrings_("out_format", OpenMS::StringList(names.begin(), names.end()));

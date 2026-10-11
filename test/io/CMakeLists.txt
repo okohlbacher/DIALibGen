@@ -26,9 +26,10 @@ if(ODIA_PYTHON AND TARGET DIALibGen)
     $<TARGET_FILE:dialibgen_library_io> $<TARGET_FILE:DIALibGen> "${CMAKE_CURRENT_BINARY_DIR}/convert")
 endif()
 
-# The opt-in layouts read back: DIA-NN 2.0's Parquet schema column by column.
+# The opt-in layouts read back: DIA-NN 2.0's Parquet schema column by column,
+# and OpenSWATH's PQP and TSV through OpenMS's own readers.
 add_executable(dialibgen_library_export library_export.cpp)
 target_link_libraries(dialibgen_library_export PRIVATE odia_library)
-foreach(mode diann2)
+foreach(mode diann2 openswath)
   add_test(NAME library_export_${mode} COMMAND dialibgen_library_export ${mode} "${CMAKE_CURRENT_BINARY_DIR}/export-${mode}")
 endforeach()

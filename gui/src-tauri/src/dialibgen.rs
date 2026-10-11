@@ -112,6 +112,10 @@ pub struct RunParams {
     #[serde(rename = "in")]
     input: String,
     out: String,
+    /// -out_format: a layout the output's extension does not select by itself.
+    /// Absent for the extension's own layout, so that command line is unchanged.
+    #[serde(default)]
+    out_format: Option<String>,
     #[serde(default)]
     ids: Option<String>,
     #[serde(default)]
@@ -553,6 +557,12 @@ fn unused_output(path: &Path) -> Result<(), String> {
     }
 }
 
+/// The CLI's -out_format layouts and the extension each one needs.
+const OUT_FORMATS: [(&str, &str); 5] = [
+    ("dialibgen_parquet", ".parquet"), ("diann_tsv", ".tsv"), ("diann2_parquet", ".parquet"),
+    ("openswath_pqp", ".pqp"), ("openswath_tsv", ".tsv"),
+];
+
 fn validate_run_inputs(params: &RunParams) -> Result<(), String> {
     let input = params.input.trim();
     let output = params.out.trim();
@@ -563,8 +573,16 @@ fn validate_run_inputs(params: &RunParams) -> Result<(), String> {
     if input.is_empty() || output.is_empty() {
         return Err("an input and an output file are both required".into());
     }
-    if !output.ends_with(".parquet") && !output.ends_with(".tsv") {
-        return Err("the output file must end in .parquet or .tsv".into());
+    if !output.ends_with(".parquet") && !output.ends_with(".tsv") && !output.ends_with(".pqp") {
+        return Err("the output file must end in .parquet, .tsv or .pqp".into());
+    }
+    if let Some(format) = params.out_format.as_deref() {
+        let Some(&(_, extension)) = OUT_FORMATS.iter().find(|(name, _)| *name == format) else {
+            return Err(format!("unknown output layout: {format}"));
+        };
+        if !output.ends_with(extension) {
+            return Err(format!("the {format} layout needs an output ending in {extension}"));
+        }
     }
     if params.threads.is_some_and(|n| n < 0 || n > i32::MAX as i64) {
         return Err("threads must be an integer between 0 and 2147483647".into());
@@ -689,6 +707,7 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
         .arg(params.threads.unwrap_or(1).to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(format) = params.out_format.as_deref() { cmd.args(["-out_format", format]); }
     if params.tune { cmd.arg("-tune"); }
     for (flag, value) in [("-ids", &params.ids), ("-out_report", &params.out_report), ("-tune_out_models", &params.tune_out_models)] {
         if let Some(value) = value.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
@@ -933,6 +952,21 @@ mod tests {
             ("tuning", serde_json::json!({"train:epochs":1}))] {
             let mut invalid = base.clone(); invalid[key] = value;
             assert!(validate(invalid).is_err(), "{key}");
+        }
+        // The opt-in layouts: each needs its own extension.
+        for (out, format) in [("out.pqp", None), ("out.parquet", Some("diann2_parquet")), ("out.tsv", Some("openswath_tsv")),
+                              ("out.pqp", Some("openswath_pqp"))] {
+            let mut layout = base.clone();
+            layout["out"] = dir.path().join(out).display().to_string().into();
+            if let Some(format) = format { layout["outFormat"] = format.into(); }
+            assert!(validate(layout).is_ok(), "{out} {format:?}");
+        }
+        for (out, format) in [("out.tsv", "diann2_parquet"), ("out.parquet", "openswath_tsv"), ("out.tsv", "openswath_pqp"),
+                              ("out.parquet", "bogus"), ("out.pqp", "-force")] {
+            let mut layout = base.clone();
+            layout["out"] = dir.path().join(out).display().to_string().into();
+            layout["outFormat"] = format.into();
+            assert!(validate(layout).is_err(), "{out} {format}");
         }
         let mut training = base.clone(); training["tune"] = true.into();
         training["tuning"] = serde_json::json!({"tune_heads":"rt"});
@@ -1199,6 +1233,7 @@ printf 'library' > "$out"
         let args: Vec<_> = argv.lines().collect();
         assert_eq!(&args[..4], &["-mode", "generate", "-in", "./-fasta with spaces"]);
         assert_eq!(&args[args.len()-2..], &["-threads", "3"]);
+        assert!(!args.contains(&"-out_format"), "the extension's own layout adds nothing to the command line");
         assert_eq!(std::fs::read_to_string(dir.path().join("model-env.txt")).unwrap(), model_dir.canonicalize().unwrap().display().to_string());
         let temporary = std::fs::read_to_string(dir.path().join("config-path.txt")).unwrap();
         assert!(!Path::new(&temporary).exists());
@@ -1240,7 +1275,7 @@ printf 'library' > "$out"
 
         for mode in ["refine", "tune"] {
             let trained = serde_json::json!({"mode":mode,"in":"-library with spaces.tsv", "ids":"-force.parquet",
-                "out":dir.path().join(format!("{mode}.tsv")), "outReport":"-residual report.tsv",
+                "out":dir.path().join(format!("{mode}.tsv")), "outFormat":"openswath_tsv", "outReport":"-residual report.tsv",
                 "tune":mode == "refine", "tuneOutModels":"-models with spaces",
                 "tuning":{"tune_heads":"rt","train:epochs":25,"cohort:full_fit":true,"machine:no_cudnn":false}});
             assert_eq!(invoke("run", serde_json::json!({"params":trained})).unwrap()["started"], true);
@@ -1248,7 +1283,7 @@ printf 'library' > "$out"
             let arguments = std::fs::read_to_string(dir.path().join("argv.txt")).unwrap();
             let arguments: Vec<_> = arguments.lines().collect();
             assert_eq!(&arguments[..4], &["-mode", mode, "-in", "./-library with spaces.tsv"]);
-            for pair in [["-ids", "./-force.parquet"], ["-out_report", "./-residual report.tsv"],
+            for pair in [["-ids", "./-force.parquet"], ["-out_report", "./-residual report.tsv"], ["-out_format", "openswath_tsv"],
                          ["-tune_out_models", "./-models with spaces"], ["-train:epochs", "25"], ["-tune_heads", "rt"]] {
                 assert!(arguments.windows(2).any(|args| args == pair));
             }

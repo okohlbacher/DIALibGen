@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'rea
 import ParamField from './ParamField'
 import { buildSpecs, inertBecause, invalidValue, refinementSpecs, tuningError, tuningSpecs, type ParamSpec } from './paramLayout'
 import type { BinaryInfo, Mode, ModelHead, ModelStatus, RunResult, TuningOption } from './types'
+import { DEFAULT_LAYOUT, LAYOUTS, effectiveLayout, isLayout, layoutInfo, outFormatFor, withExtension, type Layout } from './outputLayout'
 
 type Values = Record<string, unknown>
 type Configs = Partial<Record<Mode, Values>>
@@ -16,9 +17,7 @@ function humanBytes(n: number): string {
   while (n >= 1000 && i < units.length - 1) { n /= 1000; i += 1 }
   return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`
 }
-export function withExtension(path: string, ext: 'parquet' | 'tsv'): string {
-  return path.replace(/\.(parquet|tsv)$/i, '') + '.' + ext
-}
+export { withExtension }
 export function stripPrivate(v: Values): Values {
   return Object.fromEntries(Object.entries(v).filter(([key]) => !key.startsWith('__')))
 }
@@ -45,6 +44,7 @@ export default function App(): JSX.Element {
   const [library, setLibrary] = useState('')
   const [ids, setIds] = useState('')
   const [out, setOut] = useState('')
+  const [layout, setLayout] = useState<Layout>(DEFAULT_LAYOUT)
   const [outReport, setOutReport] = useState('')
   const [tuneOutModels, setTuneOutModels] = useState('')
   const [modelDir, setModelDir] = useState('')
@@ -93,6 +93,7 @@ export default function App(): JSX.Element {
         ['fasta', setFasta], ['library', setLibrary], ['ids', setIds], ['out', setOut]] as const) {
         if (typeof gui[key] === 'string') setter(gui[key] as string)
       }
+      setLayout(isLayout(gui.layout) ? gui.layout : DEFAULT_LAYOUT)
       if (typeof gui.threads === 'number') setThreads(gui.threads)
     } else {
       setMode(fallbackMode)
@@ -166,7 +167,8 @@ export default function App(): JSX.Element {
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight }, [log])
 
   const set = (name: string, value: unknown) => setConfigs((old) => ({ ...old, [mode]: { ...old[mode], [name]: value } }))
-  const outExt = /\.parquet$/.test(out) ? 'parquet' : /\.tsv$/.test(out) ? 'tsv' : null
+  const outLayout = effectiveLayout(layout, out)
+  const outFormat = outLayout ? outFormatFor(outLayout) : undefined
   const threadsValid = threads !== null && Number.isSafeInteger(threads) && threads >= 0 && threads <= 2147483647
   const configValidation = defaults && (Object.keys(toolConfig(values)).find((key) => !(key in defaults))
     ? 'The configuration contains an option from another mode or an unknown option.'
@@ -181,10 +183,10 @@ export default function App(): JSX.Element {
         ? 'Observed RT with filtering off requires RT fine-tuning, or turn off write rt.' : null
   const validation = configValidation || tuneValidation || modeValidation
   const inputReady = mode === 'generate' ? !!fasta.trim() : /\.(parquet|tsv)$/.test(library) && /\.parquet$/.test(ids)
-  const canRun = initialized && threadsValid && !running && inputReady && !!out.trim() && !!outExt && modelsReady
+  const canRun = initialized && threadsValid && !running && inputReady && !!out.trim() && !!outLayout && modelsReady
     && !!defaults && !!info?.ok && (!usesTuning || !!options?.length) && !validation && (mode === 'generate' || !outReport || /\.tsv$/.test(outReport))
   const snapshot = (): Values => ({ ...toolConfig(values), __gui: { version: 1, mode, configs, tuning, tune, modelDir,
-    tuneOutModels, outReport, threads, fasta, library, ids, out } })
+    tuneOutModels, outReport, threads, fasta, library, ids, out, ...(layout !== DEFAULT_LAYOUT ? { layout } : {}) } })
 
   async function start(): Promise<void> {
     if (!canRun) return
@@ -195,7 +197,7 @@ export default function App(): JSX.Element {
       if (!await window.dialibgen.saveLast(snapshot())) throw new Error('could not save settings; check that the app config directory is writable')
       if (launchRef.current !== launch) return
       if (launch.cancelled) { setRunning(false); setOutcome({ ok: false, text: 'Cancelled before launch.' }); return }
-      const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out,
+      const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out, ...(outFormat ? { outFormat } : {}),
         config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
         ...(mode !== 'generate' ? { ids, ...(outReport ? { outReport } : {}) } : {}),
         ...(usesTuning ? { tuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
@@ -251,10 +253,10 @@ export default function App(): JSX.Element {
         : <><PathField id="library" label="input library" value={library} set={setLibrary} pick={window.dialibgen.pickLibrary} help="Existing library ending in .parquet or .tsv." />
           <PathField id="ids" label="DIA-NN report (Parquet)" value={ids} set={setIds} pick={window.dialibgen.pickReport} help="DIA-NN report ending in .parquet." /></>}
       <PathField id="out" label="output library" value={out} set={setOut} pick={() => window.dialibgen.pickOutput(out || undefined)} />
-      <div className="row tight formats">{(['parquet', 'tsv'] as const).map((ext) => <button type="button" key={ext}
-        className={`chip${outExt === ext ? ' on' : ''}`} disabled={!out} onClick={() => setOut(withExtension(out, ext))}>.{ext}</button>)}</div>
-      <p className="help">{outExt === 'tsv' ? 'DIA-NN dialect. A TSV cannot carry the recipe, so this library is not reproducible from itself.'
-        : outExt === 'parquet' ? 'Carries the config verbatim in its schema metadata, so the library states how it was built.' : 'The name must end in .parquet or .tsv.'}</p>
+      <div className="field"><label htmlFor="layout">output layout</label><select id="layout" value={outLayout ?? layout} disabled={running}
+        onChange={(e) => { const next = e.target.value as Layout; setLayout(next); if (out) setOut(withExtension(out, layoutInfo(next).ext)) }}>
+        {LAYOUTS.map((l) => <option key={l.id} value={l.id}>{l.label} (.{l.ext})</option>)}
+      </select><p className="help">{outLayout ? layoutInfo(outLayout).help : 'The name must end in .parquet, .tsv or .pqp.'}</p></div>
       {mode === 'refine' && <div className="field check"><input id="tune" type="checkbox" checked={tune} disabled={running} onChange={(e) => setTune(e.target.checked)} />
         <label htmlFor="tune">fine-tune before refinement</label><p className="help">Train selected models and re-predict before applying observed values.</p></div>}
       {modelKey && <><PathField id="models" label="model directory" value={modelDir} set={setModelDir} pick={window.dialibgen.pickDirectory} placeholder="(search the usual places)" />

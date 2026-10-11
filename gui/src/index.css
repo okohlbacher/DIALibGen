@@ -126,7 +126,6 @@ button.secondary { background: var(--panel); border: 1px solid var(--border); co
 button.slim { flex: 0 0 auto; padding: 6px 10px; font-size: 12px; }
 button:disabled { opacity: .45; cursor: not-allowed; }
 
-.formats { margin-top: 6px; }
 .chip {
   flex: 0 0 auto;
   padding: 3px 10px;
@@ -180,5 +179,4 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .presets .row + .row { margin-top: 6px; }
 
 .controls > .help { margin-bottom: 14px; }
-.controls > .formats { margin-top: -8px; margin-bottom: 4px; }
 .params h3 { margin: 18px 0 12px; font-size: 13px; }

@@ -27,6 +27,10 @@ This project follows [Semantic Versioning](https://semver.org/).
     the PQP. Replaces the manual column mapping. The writers hold the library
     as a `TargetedExperiment`: about 0.8 kB (PQP) and 2 kB (TSV) per
     transition.
+- Desktop app: an **output layout** choice offers the five layouts (DIALibGen
+  Parquet, DIA-NN TSV, DIA-NN 2 Parquet, OpenSWATH PQP, OpenSWATH TSV); it
+  sets the extension and passes `-out_format` where the extension does not
+  select the layout. The default is unchanged.
 - Protein-terminal modifications (`Acetyl (Protein N-term)`,
   `Amidated (Protein C-term)`, fixed or variable) apply to protein-terminal
   peptides, including the N-terminus after initiator-Met excision; the digest

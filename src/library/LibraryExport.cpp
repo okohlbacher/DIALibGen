@@ -44,12 +44,13 @@ namespace ODIA
       {LibraryFormat::OpenSwathTSV, "openswath_tsv", ".tsv"},
     };
 
-    std::string lowerExtension(const std::string& filename)
+    /// The extension as written. Case-sensitive, as -out always was: the
+    /// streaming writer and refine's sidecars key off the exact suffix, and a
+    /// `.PARQUET` must not be resolved to a layout that a later check does not
+    /// recognise.
+    std::string extensionOf(const std::string& filename)
     {
-      auto extension = std::filesystem::path(filename).extension().string();
-      std::transform(extension.begin(), extension.end(), extension.begin(),
-                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      return extension;
+      return std::filesystem::path(filename).extension().string();
     }
 
     void ok(const arrow::Status& status)
@@ -255,7 +256,7 @@ namespace ODIA
 
   LibraryFormat LibraryExport::resolve(const std::string& out, const std::string& requested)
   {
-    const std::string extension = lowerExtension(out);
+    const std::string extension = extensionOf(out);
     if (requested.empty() || requested == "auto")
     {
       if (extension == ".parquet") { return LibraryFormat::DIALibGenParquet; }

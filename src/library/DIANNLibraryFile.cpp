@@ -8,6 +8,7 @@
 #include <odia/TextWriter.h>
 
 #include "Parallel.h"
+#include "ParseDouble.h"
 
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
@@ -67,19 +68,8 @@ namespace ODIA
         if (token == "nan" || token == "+nan" || token == "-nan") { return std::nan(""); }
         throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s));
       }
-#ifdef __APPLE__
-      // Apple's deployment SDKs do not yet provide floating-point from_chars.
-      std::istringstream input{std::string(s)};
-      input.imbue(std::locale::classic());
-      input >> std::noskipws >> v;
-      if (!input || input.peek() != std::char_traits<char>::eof() || std::isinf(v))
-#else
-      const auto* first = s.data();
-      const auto* last = first + s.size();
-      if (*first == '+' && s.size() > 1 && s[1] != '-') { ++first; }
-      const auto parsed = std::from_chars(first, last, v, std::chars_format::general);
-      if (parsed.ec != std::errc{} || parsed.ptr != last || std::isinf(v))
-#endif
+      // Correctly rounded on every platform; see ParseDouble.h.
+      if (!parseDouble(s, v) || std::isinf(v))
       { throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s)); }
       return v;
     }

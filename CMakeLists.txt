@@ -150,6 +150,19 @@ set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(odia_refine STATIC src/refine/LibraryRefiner.cpp)
 target_link_libraries(odia_refine PUBLIC odia_library)
+
+# Floating-point std::from_chars for the number parser (src/library/ParseDouble.h).
+# Apple's libc++ lacks it, or marks it unavailable below the macOS release that
+# ships it, so the check compiles for CMAKE_OSX_DEPLOYMENT_TARGET (try_compile
+# inherits it). Without it the parser uses strtod_l in the "C" locale.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles([=[
+#include <charconv>
+int main() { double v = 0; const char s[] = "1.5"; return std::from_chars(s, s + 3, v).ec == std::errc{} ? 0 : 1; }
+]=] DIALIBGEN_FLOAT_FROM_CHARS)
+foreach(target odia_library odia_refine)
+  target_compile_definitions(${target} PRIVATE ODIA_FLOAT_FROM_CHARS=$<BOOL:${DIALIBGEN_FLOAT_FROM_CHARS}>)
+endforeach()
 add_library(DIALibGen::odia_refine ALIAS odia_refine)
 set_target_properties(odia_refine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(DIALIBGEN_TARGETS odia_library odia_refine)

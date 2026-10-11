@@ -1057,19 +1057,31 @@ namespace ODIA
       return std::move(*opened);
     }
 
+    /// One row group. Buffered: Arrow encodes the columns in parallel and
+    /// holds the whole encoded row group until the next one starts. Direct:
+    /// column after column, each streamed to the file as it is encoded, so
+    /// only one column's pages are held -- what the streaming writer uses,
+    /// since it works while MS2 holds its peak memory. The bytes are the same.
     void writeCompactRowGroup(parquet::arrow::FileWriter& writer, const std::shared_ptr<arrow::Schema>& schema,
-                              const CompactChunk& chunk)
+                              const CompactChunk& chunk, bool buffered = true)
     {
       const std::vector<std::shared_ptr<arrow::Array>> arrays(chunk.begin(), chunk.end());
-      const auto batch = arrow::RecordBatch::Make(schema, arrays.front()->length(), arrays);
-      okStatus(writer.NewBufferedRowGroup());
-      okStatus(writer.WriteRecordBatch(*batch));
+      const auto rows = arrays.front()->length();
+      if (buffered)
+      {
+        const auto batch = arrow::RecordBatch::Make(schema, rows, arrays);
+        okStatus(writer.NewBufferedRowGroup());
+        okStatus(writer.WriteRecordBatch(*batch));
+        return;
+      }
+      okStatus(writer.WriteTable(*arrow::Table::Make(schema, arrays, rows), rows));
     }
 
     /// Builds the row groups of library rows [first, last) (a multiple of
     /// compactChunkRows() from first) in parallel, then writes them in order.
     void writeCompactLibraryRows(parquet::arrow::FileWriter& writer, const std::shared_ptr<arrow::Schema>& schema,
-                                 const Library& library, std::size_t first, std::size_t last, unsigned threads)
+                                 const Library& library, std::size_t first, std::size_t last, unsigned threads,
+                                 bool buffered = true)
     {
       const std::size_t chunk_count = (last - first + compactChunkRows() - 1) / compactChunkRows();
       std::vector<CompactChunk> built(chunk_count);
@@ -1079,7 +1091,7 @@ namespace ODIA
         const auto rows = libraryRows(library, a, b);
         built[c] = buildCompactChunk(library, rows.data(), rows.size());
       });
-      for (auto& chunk : built) { writeCompactRowGroup(writer, schema, chunk); chunk = CompactChunk{}; }
+      for (auto& chunk : built) { writeCompactRowGroup(writer, schema, chunk, buffered); chunk = CompactChunk{}; }
     }
   } // namespace
 
@@ -1509,7 +1521,8 @@ namespace ODIA
       auto opened = arrow::io::FileOutputStream::Open(m.output.temporaryPath().string());
       if (!opened.ok()) { throw std::runtime_error("cannot write library: " + filename); }
       m.outfile = *opened;
-      m.writer = openCompactWriter(m.schema, m.outfile, parallel::workers(threads));
+      // Direct row groups, one column at a time (writeCompactRowGroup).
+      m.writer = openCompactWriter(m.schema, m.outfile, 1);
     }
     else
     {
@@ -1561,7 +1574,7 @@ namespace ODIA
         if (offset == b.precursor.size()) { ++block; offset = 0; }
       }
       const auto chunk = buildCompactChunk(m.library, list.data(), list.size());
-      writeCompactRowGroup(*m.writer, m.schema, chunk);
+      writeCompactRowGroup(*m.writer, m.schema, chunk, false);
       for (std::size_t k = 0; k < block; ++k) { m.pending.pop_front(); }
       m.pending_offset = offset;
       m.pending_rows -= compactChunkRows();
@@ -1585,7 +1598,7 @@ namespace ODIA
     write_step.fields().rows = static_cast<std::int64_t>(n - m.written);
     if (m.parquet)
     {
-      writeCompactLibraryRows(*m.writer, m.schema, final_library, m.written, n, m.threads);
+      writeCompactLibraryRows(*m.writer, m.schema, final_library, m.written, n, m.threads, false);
       okStatus(m.writer->Close());
       okStatus(m.outfile->Close());
     }

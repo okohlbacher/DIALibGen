@@ -234,6 +234,11 @@ def main(binary, fasta, model_dir, workdir):
               and not os.path.exists("refused.tsv"),
               f"generation refuses {json.dumps(config)} ({what})")
 
+    # The untrained instruments warn, and SciexTOF is not called Lumos-like.
+    for instrument, says in (("SciexTOF", "NOT those of Lumos"), ("ThermoTOF", "effectively Lumos's")):
+        text = run(f"{instrument}.tsv", {"instrument": instrument})
+        check(says in text, f"{instrument} warning says '{says}'")
+
     print()
     if failures:
         print("e2e: FAILED")

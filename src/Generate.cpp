@@ -574,11 +574,19 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                     " (recorded as " + nce_source + ")");
 
     }
-    if (instrument == "SciexTOF" || instrument == "ThermoTOF")
-    { writeLogWarn_(instrument + " is in upstream's instrument list but carries no trained weights in the shipped "
-                    "MS2 checkpoint (whose own constants name four instruments, and whose SciexTOF column sits at "
-                    "its initialisation). Predictions will be close to Lumos, the no-correction baseline; name "
-                    "Lumos if that is what you want."); }
+    // Neither instrument has trained weights in the shipped MS2 checkpoint
+    // (its own constants name four instruments). Measured against Lumos at
+    // the same NCE (median spectral cosine per precursor, synthetic
+    // peptides): ThermoTOF 0.993 -- effectively Lumos -- but SciexTOF only
+    // 0.914, with a tenth of the precursors below 0.64.
+    if (instrument == "ThermoTOF")
+    { writeLogWarn_("ThermoTOF carries no trained weights in the shipped MS2 checkpoint; its predictions are "
+                    "effectively Lumos's (median spectral cosine 0.993 at the same NCE). Name Lumos to say so."); }
+    if (instrument == "SciexTOF")
+    { writeLogWarn_("SciexTOF (also TripleTOF and ZenoTOF) carries no trained weights in the shipped MS2 "
+                    "checkpoint, and its predictions are NOT those of Lumos: median spectral cosine 0.914 against "
+                    "Lumos at the same NCE, below 0.64 for a tenth of precursors. Neither has been validated on "
+                    "SCIEX data; name Lumos to get the no-correction baseline instead."); }
 
     struct { const char* name; const char* file; std::string* path; } models[] = {
       {"rt_model", kRtModelFile, &rt_model},

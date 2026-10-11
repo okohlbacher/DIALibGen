@@ -118,7 +118,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::convert_()
   ODIA::Library library;
   try
   {
-    ODIA::DIANNLibraryFile::load(in, library);
+    ODIA::DIANNLibraryFile::load(in, library, static_cast<unsigned>(std::max(0, getIntOption_("threads"))));
     // Parquet output is the compact layout every other mode writes; it carries
     // no recipe, because conversion changes none.
     if (out.ends_with(".parquet"))

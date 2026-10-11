@@ -420,7 +420,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json tune_prov = json::object();
     try
     {
-      ODIA::DIANNLibraryFile::load(in, library);
+      ODIA::DIANNLibraryFile::load(in, library, static_cast<unsigned>(std::max(0, getIntOption_("threads"))));
       writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
                     std::to_string(library.transitionCount()) + " transitions");
       ODIA::LibraryRefiner::ObsMap obs;

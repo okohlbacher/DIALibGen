@@ -92,8 +92,8 @@ int main(int argc, char** argv)
       if (!refused) { throw std::runtime_error("a variable modification that modifies nothing was not refused"); }
     }
     // Residue-less peptide-terminal modifications at the default maximum 1
-    // (dropped by OpenMS's one-modification path) and at 2; protein-terminal
-    // ones are refused.
+    // (dropped by OpenMS's one-modification path) and at 2. Protein-terminal
+    // ones: odia_terminal_mods.
     for (const std::size_t maximum : {1u, 2u})
     {
       for (const char* mod : {"Acetyl (N-term)", "Amidated (C-term)"})
@@ -106,20 +106,6 @@ int main(int argc, char** argv)
         if (library.precursorCount() != 2u || st.variable_modification_precursors.size() != 1 ||
             st.variable_modification_precursors.front().second != 1u)
         { throw std::runtime_error(std::string(mod) + " at max " + std::to_string(maximum) + " did not give one modified form"); }
-      }
-    }
-    for (const char* mod : {"Acetyl (Protein N-term)"})
-    {
-      for (const bool fixed : {false, true})
-      {
-        ODIA::DigestParams protein = params;
-        (fixed ? protein.fixed_modifications : protein.variable_modifications) = {mod};
-        ODIA::Library library;
-        bool refused = false;
-        try { ODIA::LibraryGenerator::generate(argv[1], protein, library); }
-        catch (const std::invalid_argument& e)
-        { refused = std::string(e.what()).find("protein-terminal") != std::string::npos; }
-        if (!refused) { throw std::runtime_error(std::string(mod) + " was not refused"); }
       }
     }
     for (const std::size_t maximum : {1u, 2u})

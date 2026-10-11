@@ -26,4 +26,15 @@ namespace ODIA
   /// as `(UniMod:4)`.
   std::string canonicalModifiedSequence(std::string_view seq, std::size_t* unknown = nullptr);
 
+  /// The sequence as DIA-NN writes it, for the TSV and Parquet libraries:
+  /// canonicalModifiedSequence() without the dot that marks a C-terminal
+  /// modification, so `PEPTIDEK.(Amidated)` is `PEPTIDEK(UniMod:2)` and
+  /// `.(Acetyl)PEPTIDEK` is `(UniMod:1)PEPTIDEK`.
+  ///
+  /// DIA-NN 2.0 reads both spellings and reports the second; OpenMS parses it
+  /// back to the C-terminal modification. Not a join key: the canonical form
+  /// keeps the dot so that a C-terminal modification never collides with one
+  /// of the last residue (`Methyl` on the C-terminus or on K).
+  std::string diannModifiedSequence(std::string_view seq, std::size_t* unknown = nullptr);
+
 } // namespace ODIA

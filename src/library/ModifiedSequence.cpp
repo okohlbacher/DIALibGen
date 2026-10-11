@@ -140,4 +140,18 @@ namespace ODIA
     return out;
   }
 
+  std::string diannModifiedSequence(std::string_view seq, std::size_t* unknown)
+  {
+    std::string out = canonicalModifiedSequence(seq, unknown);
+    // canonicalModifiedSequence keeps only the C-terminal dot: a leading one
+    // is already gone, and a dot is never part of a modification token.
+    for (std::size_t i = 1; i + 1 < out.size(); ++i)
+    {
+      if (out[i] == '.' && std::isupper(static_cast<unsigned char>(out[i - 1])) &&
+          (out[i + 1] == '(' || out[i + 1] == '['))
+      { out.erase(i, 1); break; }
+    }
+    return out;
+  }
+
 } // namespace ODIA

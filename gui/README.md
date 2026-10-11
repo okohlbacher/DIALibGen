@@ -12,8 +12,13 @@ three AlphaPeptDeep ONNX models and CPU training.
 | Refine | Library and one run's DIA-NN report | A library filtered and updated with accepted observations |
 | Fine-tune | Library and one run's DIA-NN report | The complete library re-predicted with adapted RT/CCS models |
 
-Choose an unused output ending in `.parquet` or `.tsv`. A library input may
-use either format; identification reports use Parquet. The same report-column,
+Choose an unused output and its **output layout**: DIALibGen Parquet
+(`.parquet`, the default), DIA-NN TSV (`.tsv`), DIA-NN 2 Parquet (`.parquet`,
+DIA-NN 2.0's own layout), OpenSWATH PQP (`.pqp`) or OpenSWATH TSV (`.tsv`).
+Choosing a layout sets the extension; the app passes `-out_format` for the two
+layouts the extension alone does not select ([layouts](../docs/usage.md#files-and-provenance)).
+A library input may be DIALibGen Parquet, a DIA-NN TSV or a DIA-NN 2
+Parquet; identification reports use Parquet. The same report-column,
 quality-gate and RT-unit rules apply as in the [CLI](../docs/usage.md).
 
 Generation lets you set digestion, modifications, instrument and fragment

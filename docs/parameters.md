@@ -8,7 +8,8 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 |---|---|---|---|---|
 | `-mode` | string | `generate` | generate,refine,tune,convert | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged. |
 | `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune/convert). |
-| `-out` | output-file | (empty) |  | Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. |
+| `-out` | output-file | (empty) |  | Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. .pqp: OpenSWATH's PQP. -out_format selects the other layouts. |
+| `-out_format` | string | `auto` | auto,dialibgen_parquet,diann_tsv,diann2_parquet,openswath_pqp,openswath_tsv | Layout of -out. auto: by extension (.parquet dialibgen_parquet, .tsv diann_tsv, .pqp openswath_pqp). diann2_parquet (.parquet): DIA-NN 2.0's own Parquet library layout, which DIA-NN 2.0 loads. openswath_tsv (.tsv): OpenSWATH's assay TSV, as TargetedFileConverter reads it. |
 | `-config` | input-file | (empty) |  | Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON. |
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |

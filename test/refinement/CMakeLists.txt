@@ -2,6 +2,12 @@ add_executable(dialibgen_canonical_modseq canonical_modseq.cpp)
 target_link_libraries(dialibgen_canonical_modseq PRIVATE odia_refine)
 add_test(NAME refinement_canonical_modseq COMMAND dialibgen_canonical_modseq)
 
+# A DIA-NN report joins N- and C-terminally modified precursors whichever way
+# either side spells the modification.
+add_executable(dialibgen_terminal_join terminal_join.cpp)
+target_link_libraries(dialibgen_terminal_join PRIVATE odia_refine)
+add_test(NAME refinement_terminal_join COMMAND dialibgen_terminal_join)
+
 add_executable(dialibgen_intensity_match intensity_match.cpp)
 target_link_libraries(dialibgen_intensity_match PRIVATE odia_refine)
 add_test(NAME refinement_intensity_match COMMAND dialibgen_intensity_match)

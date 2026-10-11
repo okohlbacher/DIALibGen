@@ -1702,7 +1702,7 @@ namespace ODIA
       // DIA-NN parses UniMod accessions; OpenMS names such as Carbamidomethyl
       // are not what either version expects.
       std::size_t unknown = 0;
-      const std::string seq = canonicalModifiedSequence(stored, &unknown);
+      const std::string seq = diannModifiedSequence(stored, &unknown);
       if (unknown) { unknown_mods += unknown; }
       std::string ids, names;
       const std::size_t members = tsvProteins(pg, ids, names);

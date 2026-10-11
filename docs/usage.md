@@ -66,25 +66,41 @@ native option is set back to -1.
 ### Modifications
 
 `fixed_modifications` and `variable_modifications` take OpenMS names such as
-`Carbamidomethyl (C)`, `Oxidation (M)`, `Acetyl (N-term)` or
-`Amidated (C-term)`; `max_variable_modifications` (default 1) caps the variable
-ones per peptide. Peptide-terminal modifications without a residue apply at any
-maximum (until 0.11.1 they were dropped at 1). Generation refuses, with exit
-code 6 (ILLEGAL_PARAMETERS) and no output:
+`Carbamidomethyl (C)`, `Oxidation (M)`, `Acetyl (N-term)`,
+`Amidated (C-term)` or `Acetyl (Protein N-term)`;
+`max_variable_modifications` (default 1) caps the variable ones per peptide.
+Peptide-terminal modifications without a residue apply at any maximum (until
+0.11.1 they were dropped at 1).
 
-- a protein-terminal specificity such as `Acetyl (Protein N-term)`, fixed or
-  variable: generation does not track where a peptide sits in its protein, so
-  it cannot apply one. `Acetyl (N-term)` modifies every peptide N-terminus;
-- a variable modification that leaves no modified precursor in the whole
-  library (no site within the length and m/z windows, or
-  `max_variable_modifications` 0).
+Protein-terminal modifications (`Acetyl (Protein N-term)`,
+`Amidated (Protein C-term)`, ...) apply only to peptides that begin or end a
+protein. With `n_terminal_methionine_excision` (the default) the residue after
+an initiator Met counts as the protein N-terminus as well, so both
+`(UniMod:1)MSAAAGK` and `(UniMod:1)SAAAGK` are made from a protein
+`MSAAAGK...`. A variable one is added to every form of such a peptide that has
+room for one more variable modification. A fixed one modifies the peptide
+where it is protein-terminal; a peptide that also occurs inside a protein is
+kept unmodified as well. This is DIA-NN's `--var-mod UniMod:1,42.010565,*n
+--met-excision`: on a 40-protein FASTA both make the same 92 acetylated forms.
+Until 0.11.2 protein-terminal modifications were refused.
 
-The log lists the precursors carrying each variable modification. The TSV
-writes modifications as UniMod accessions; DIA-NN knows only some of them by
-default. `(UniMod:1)PEPTIDE` (N-terminal acetylation) loads as is, while for
-example C-terminal amidation (`PEPTIDE.(UniMod:2)`) needs
-`--mod UniMod:2,-0.984016` in the DIA-NN command, or DIA-NN 2.0 stops on an
-unknown modification.
+Generation refuses, with exit code 6 (ILLEGAL_PARAMETERS) and no output, a
+requested modification that leaves no modified precursor in the whole
+library: a variable one with no site within the length and m/z windows (or
+`max_variable_modifications` 0), and a protein-terminal one, fixed or
+variable, when no protein-terminal peptide passes the windows.
+
+The log lists the precursors carrying each variable modification. The TSV and
+the DIA-NN Parquet write modifications as UniMod accessions, terminal ones as
+DIA-NN does: `(UniMod:1)PEPTIDE` for an N-terminal and `PEPTIDE(UniMod:2)` for
+a C-terminal one (0.11.2 wrote `PEPTIDE.(UniMod:2)`; DIA-NN 2.0 reads both and
+reports the former, and OpenMS parses both; refine joins a report to the
+library in either spelling). DIA-NN knows only some accessions
+by default: `(UniMod:1)` loads as is, while for example C-terminal amidation
+needs `--mod UniMod:2,-0.984016` in the DIA-NN command, or DIA-NN 2.0 stops on
+an unknown modification. DIA-NN itself has no C-terminal modifications
+(`--var-mod` with `c` or `*c` makes none). The OpenSWATH outputs use OpenMS's
+notation, `.(UniMod:1)PEPTIDE` and `PEPTIDE.(UniMod:2)`.
 
 ### MS2 model
 
@@ -310,8 +326,21 @@ after selection dropped others can differ from 0.11.1's in the last bits.
 
 ## Files and provenance
 
-Input libraries can be DIALibGen Parquet or DIA-NN TSV. Output format follows
-`-out`'s extension. Generation embeds the effective recipe and FASTA/model
+Input libraries can be DIALibGen Parquet, DIA-NN TSV or a DIA-NN 2.0 Parquet
+library. The output format follows `-out`'s extension, or `-out_format` (all
+modes):
+
+| `-out_format` | `-out` | layout |
+|---|---|---|
+| `auto` (default) | `.parquet`, `.tsv`, `.pqp` | `dialibgen_parquet`, `diann_tsv`, `openswath_pqp` |
+| `dialibgen_parquet` | `.parquet` | DIALibGen's compact layout with provenance; DIA-NN does not read it |
+| `diann_tsv` | `.tsv` | DIA-NN's TSV library, read by DIA-NN 1.7 and 2.x (below) |
+| `diann2_parquet` | `.parquet` | DIA-NN 2.0's own Parquet library layout (below) |
+| `openswath_pqp` | `.pqp` | OpenSWATH's PQP, written by OpenMS ([OpenSWATH](#openswath)) |
+| `openswath_tsv` | `.tsv` | OpenSWATH's assay TSV, written by OpenMS |
+
+The default outputs are unchanged: a 0.11.3 `.parquet` or `.tsv` is byte for
+byte what 0.11.2 writes. Generation embeds the effective recipe and FASTA/model
 hashes in Parquet. Refinement and tuning additionally write JSON provenance
 sidecars beside their output, including input hashes and the selected mode.
 Each tuned head includes its full recipe, cohort counts, filtering, seed,
@@ -323,8 +352,9 @@ schema metadata.
 
 ### The TSV library
 
-`.parquet` is DIALibGen's own layout; DIA-NN does not read it. `.tsv` is
-DIA-NN's TSV library format, and DIA-NN 1.7 and 2.x both read the whole
+`.parquet` is DIALibGen's own layout; DIA-NN does not read it (DIA-NN 2.0
+stops: the file "is missing the 'Flags' column"). `-out_format diann2_parquet`
+writes DIA-NN's layout instead (below). `.tsv` is DIA-NN's TSV library format, and DIA-NN 1.7 and 2.x both read the whole
 file: precursors, fragments, RT, ion mobility, decoy flags, protein
 accessions and entry names, and proteotypicity. No `--fasta --reannotate`
 is needed to get protein groups. The columns:
@@ -363,7 +393,83 @@ found 84,076 precursors with RT scaled to 0..100 and 84,161 with it left
 at 0..1.
 
 `-mode convert -in lib.parquet -out lib.tsv` writes an existing library in
-the other format, content unchanged, and works in either direction.
+the other format, content unchanged, and works in either direction; with
+`-out_format` it writes any of the layouts above.
+
+### The DIA-NN 2.0 Parquet library
+
+`-out_format diann2_parquet` (with `-out lib.parquet`) writes the layout DIA-NN
+2.0 writes itself with `--out-lib lib.parquet`: one row per transition, these
+27 columns in this order, none nullable:
+
+| column | type | content |
+|---|---|---|
+| `Precursor.Id` | string | `<sequence><charge>`, `_decoy` appended for a decoy |
+| `Modified.Sequence`, `Stripped.Sequence` | string | UniMod notation as in the TSV; residues only |
+| `Precursor.Charge`, `Proteotypic`, `Decoy` | int64 | as in the TSV |
+| `N.Term`, `C.Term` | int64 | 0: the library does not record protein-terminal peptides |
+| `RT`, `IM` | float | as stored; 1/K0 0 when absent |
+| `Q.Value`, `Peptidoform.Q.Value`, `PG.Q.Value` | float | 0, as in DIA-NN's predicted libraries |
+| `PTM.Site.Confidence` | float | 1 |
+| `Precursor.Mz`, `Product.Mz`, `Relative.Intensity` | float | |
+| `Fragment.Type`, `Fragment.Charge`, `Fragment.Series.Number`, `Fragment.Loss.Type` | string, int64, int64, string | |
+| `Exclude.From.Quant`, `Flags` | int64 | 0 |
+| `Protein.Ids`, `Protein.Group` | string | accessions, `P1;P2` |
+| `Protein.Names` | string | entry names |
+| `Genes` | string | empty: the library records no gene names |
+
+DIA-NN ignores the file's metadata, so the generation recipe travels in it as
+in DIALibGen's own layout (`odia.config_json`); the file is not
+cache-eligible. Checked with DIA-NN 2.0: a 3,000-protein library loads with
+the same 2,997 protein isoforms, 3,379 protein groups and 503,945 precursors
+from the TSV and from this file, and a search of an Astral run's first seven
+minutes finds the same 350 precursors and 120 protein groups at 1 % FDR, with
+identical reports. DIALibGen reads the file back (`-in`), with the protein
+group as accessions. DIA-NN makes its own decoys; generate for DIA-NN with
+`decoys` `none` (the default).
+
+### OpenSWATH
+
+`-out library.pqp` writes OpenSWATH's PQP, `-out library.tsv -out_format
+openswath_tsv` its assay TSV. Both are written by OpenMS
+(`TransitionPQPFile`, `TransitionTSVFile`) from an OpenMS
+`TargetedExperiment` built from the library: one precursor per library
+precursor (`TransitionGroupId` `<n>_<sequence>_<charge>`), the protein group's
+members as proteins with their accessions, RT as `NormalizedRetentionTime`
+(`LIBRARY_RT`), 1/K0 as `PrecursorIonMobility` (`LIBRARY_DRIFT_TIME`), every
+fragment as a detecting and quantifying transition. No column mapping is
+needed any more:
+
+```bash
+DIALibGen -in proteins.fasta -out library.pqp -generation:irt_rescale true
+OpenSwathDecoyGenerator -in library.pqp -out library_decoys.pqp
+OpenSwathWorkflow -in run.mzML -tr library_decoys.pqp -out_features run.osw
+```
+
+Decoys: the export writes what the library holds. Generate without decoys
+(the default) and let `OpenSwathDecoyGenerator` make them. A DIALibGen decoy
+carries its target's sequence with shifted fragment m/z (DIA-NN's
+convention); OpenMS keys PQP peptides by sequence, so the target's peptide and
+protein rows would be marked as decoys too, and DIALibGen warns when a library
+with decoys is exported.
+
+Checked with OpenMS 3.5: a 1,000-protein library (105,791 precursors,
+1,235,554 transitions) round-trips through `TargetedFileConverter` (PQP to
+TSV and TSV to PQP) with every precursor, transition, peptide and protein,
+RT and 1/K0; `OpenSwathDecoyGenerator` and `OpenSwathWorkflow` run on the
+exported PQP. On an Astral run's first seven minutes, the extracted fragment
+traces of 62 of 96 precursors that DIA-NN identified there peak within 15 s
+of DIA-NN's retention time (median 1.7 s). A calibrated, scored OpenSWATH
+search (iRT, PyProphet) has not been benchmarked: on that uncalibrated slice
+PyProphet reported no identifications at 1 % FDR. Use `-generation:irt_rescale true` so that the RT is on the iRT
+scale, and give `OpenSwathWorkflow` iRT assays for your sample (`-tr_irt`) or
+its `-auto_irt` sampling. OpenMS's writers take the whole library in memory
+as a `TargetedExperiment`: measured, about 0.8 kB per transition for the PQP
+and 2 kB for the OpenSWATH TSV, on top of the library. A whole human proteome
+with charges 1-4 (about 70 M transitions) needs roughly 60 GB for the PQP;
+export it on a machine that has the memory, or export a FASTA subset. The
+PQP is deterministic: `-mode convert` of a generated Parquet writes the same
+bytes as generating the PQP directly.
 
 Existing library outputs are refused. Writers stage complete files in a private
 directory beside the destination and rename them into place only after a

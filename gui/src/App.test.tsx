@@ -25,6 +25,8 @@ describe('withExtension', () => {
     // A name with no known extension gains one rather than losing its tail.
     expect(withExtension('/a/lib', 'parquet')).toBe('/a/lib.parquet')
     expect(withExtension('/a/my.v2.lib', 'tsv')).toBe('/a/my.v2.lib.tsv')
+    expect(withExtension('/a/lib.tsv', 'pqp')).toBe('/a/lib.pqp')
+    expect(withExtension('/a/lib.pqp', 'parquet')).toBe('/a/lib.parquet')
   })
 })
 
@@ -72,7 +74,7 @@ describe('App', () => {
     await userEvent.type(screen.getByLabelText('output library'), '/d/lib.parqet')
     const run = screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement
     expect(run.disabled).toBe(true)
-    expect(screen.getByText(/must end in \.parquet or \.tsv/)).toBeTruthy()
+    expect(screen.getByText(/must end in \.parquet, \.tsv or \.pqp/)).toBeTruthy()
   })
 
   it('sends the config as an object with no GUI-private keys', async () => {
@@ -363,9 +365,9 @@ describe('App', () => {
     const browse = screen.getAllByRole('button', { name: 'Browse…' })
     for (const button of browse) await userEvent.click(button)
     expect((screen.getByLabelText('protein FASTA') as HTMLInputElement).value).toBe('/data/proteins.fasta')
-    await userEvent.click(screen.getByRole('button', { name: '.tsv' }))
+    await userEvent.selectOptions(screen.getByLabelText('output layout'), 'diann_tsv')
     expect((screen.getByLabelText('output library') as HTMLInputElement).value).toBe('/data/library.tsv')
-    await userEvent.click(screen.getByRole('button', { name: '.parquet' }))
+    await userEvent.selectOptions(screen.getByLabelText('output layout'), 'dialibgen_parquet')
     expect((screen.getByLabelText('output library') as HTMLInputElement).value).toBe('/data/library.parquet')
     fireEvent.change(screen.getByLabelText('threads'), { target: { value: '0' } })
     await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
@@ -430,7 +432,42 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('protein FASTA'), { target: { value: '/d/p.fasta' } })
     fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/output.PARQUET' } })
     expect((screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement).disabled).toBe(true)
-    await userEvent.click(screen.getByRole('button', { name: '.parquet' }))
+    await userEvent.selectOptions(screen.getByLabelText('output layout'), 'dialibgen_parquet')
     expect((screen.getByLabelText('output library') as HTMLInputElement).value).toBe('/d/output.parquet')
+  })
+
+  it('maps each output layout to its extension and -out_format, the default to neither', async () => {
+    await renderApp()
+    fireEvent.change(screen.getByLabelText('protein FASTA'), { target: { value: '/d/p.fasta' } })
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/lib.parquet' } })
+    const layout = screen.getByLabelText('output layout') as HTMLSelectElement
+    expect(layout.value).toBe('dialibgen_parquet')
+    const expected: [string, string, string | undefined][] = [
+      ['diann2_parquet', '/d/lib.parquet', 'diann2_parquet'], ['openswath_pqp', '/d/lib.pqp', undefined],
+      ['openswath_tsv', '/d/lib.tsv', 'openswath_tsv'], ['diann_tsv', '/d/lib.tsv', undefined],
+      ['dialibgen_parquet', '/d/lib.parquet', undefined]]
+    for (const [choice, out, format] of expected) {
+      await userEvent.selectOptions(layout, choice)
+      expect((screen.getByLabelText('output library') as HTMLInputElement).value).toBe(out)
+      bridge.runs.length = 0
+      await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
+      await waitFor(() => expect(bridge.runs.length).toBe(1))
+      const sent = bridge.runs[0] as { out: string; outFormat?: string }
+      expect(sent.out).toBe(out)
+      expect(sent.outFormat).toBe(format)
+      if (format === undefined) expect(sent).not.toHaveProperty('outFormat')
+      act(() => bridge.emitDone({ ok: true, code: 0, bytes: 1 }))
+      await waitFor(() => expect((screen.getByRole('button', { name: /generate library/i }) as HTMLButtonElement).disabled).toBe(false))
+    }
+  })
+
+  it('follows a typed extension: a .tsv name under DIA-NN 2 Parquet is the DIA-NN TSV', async () => {
+    await renderApp()
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/lib.parquet' } })
+    await userEvent.selectOptions(screen.getByLabelText('output layout'), 'diann2_parquet')
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/lib.tsv' } })
+    expect((screen.getByLabelText('output layout') as HTMLSelectElement).value).toBe('diann_tsv')
+    fireEvent.change(screen.getByLabelText('output library'), { target: { value: '/d/other.parquet' } })
+    expect((screen.getByLabelText('output layout') as HTMLSelectElement).value).toBe('diann2_parquet')
   })
 })

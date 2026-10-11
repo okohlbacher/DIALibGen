@@ -24,7 +24,7 @@ set(ODIA_CCS_MODEL_PATH "${ODIA_MODEL_DIR}/peptdeep_ccs_dynamic.onnx" CACHE FILE
 
 set(ODIA_IRT_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/data/peptdeep_irt_peptides_predicted.csv")
 
-foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest
+foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest odia_terminal_mods
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
                odia_irt_calibration odia_ms2_sessions odia_instrument_dump)
   add_executable(${helper} tools/${helper}.cpp)
@@ -148,6 +148,12 @@ add_test(NAME library_subset_outlives_parent COMMAND odia_library_subset)
 # when the fully cleaved N-terminal peptide is below the length limit.
 add_test(NAME digest_methionine_excision
          COMMAND odia_digest "${CMAKE_CURRENT_BINARY_DIR}/digest.fasta")
+
+# Peptide- and protein-terminal modifications, counted form by form on a FASTA
+# with known protein termini and an initiator Met; a requested one that
+# matches nothing is refused.
+add_test(NAME terminal_modifications
+         COMMAND odia_terminal_mods "${CMAKE_CURRENT_BINARY_DIR}/terminal_mods.fasta")
 
 # --------------------------------------------------------------- tier 2
 

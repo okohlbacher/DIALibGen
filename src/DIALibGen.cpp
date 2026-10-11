@@ -7,6 +7,7 @@
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
 #include <odia/DIANNLibraryFile.h>
+#include <odia/LibraryExport.h>
 #include <odia/Trace.h>
 #include <algorithm>
 #include <cstdlib>
@@ -32,8 +33,13 @@ void DIALibGen::registerOptionsAndFlags_()
   setValidStrings_("mode", {"generate", "refine", "tune", "convert"});
   registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
-  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it.", false);
-  setValidFormats_("out", {"parquet", "tsv"}, false);
+  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. .pqp: OpenSWATH's PQP. -out_format selects the other layouts.", false);
+  setValidFormats_("out", {"parquet", "tsv", "pqp"}, false);
+  registerStringOption_("out_format", "<format>", "auto", "Layout of -out. auto: by extension (.parquet dialibgen_parquet, .tsv diann_tsv, .pqp openswath_pqp). diann2_parquet (.parquet): DIA-NN 2.0's own Parquet library layout, which DIA-NN 2.0 loads. openswath_tsv (.tsv): OpenSWATH's assay TSV, as TargetedFileConverter reads it.", false);
+  {
+    const auto names = ODIA::LibraryExport::formatNames();
+    setValidStrings_("out_format", OpenMS::StringList(names.begin(), names.end()));
+  }
   registerInputFile_("config", "<file>", "", "Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON.", false);
   setValidFormats_("config", {"json"}, false);
   registerOutputFile_("write_config", "<file>", "", "Write the effective mode configuration and exit.", false);
@@ -115,20 +121,25 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::convert_()
   if (in.empty() || out.empty()) { writeLogError_("-mode convert needs -in and -out"); return ILLEGAL_PARAMETERS; }
   if (fs::exists(out) || fs::is_symlink(out))
   { writeLogError_("refusing to overwrite existing output: " + out); return CANNOT_WRITE_OUTPUT_FILE; }
+  ODIA::LibraryFormat format;
+  try { format = ODIA::LibraryExport::resolve(out, getStringOption_("out_format")); }
+  catch (const std::invalid_argument& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
   ODIA::Library library;
   try
   {
     ODIA::DIANNLibraryFile::load(in, library, static_cast<unsigned>(std::max(0, getIntOption_("threads"))));
     // Parquet output is the compact layout every other mode writes; it carries
     // no recipe, because conversion changes none.
-    if (out.ends_with(".parquet"))
+    if (format == ODIA::LibraryFormat::DIALibGenParquet)
     { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, ODIA::DIANNLibraryFile::Fingerprint{}); }
-    else { ODIA::DIANNLibraryFile::store(out, library); }
+    else if (format == ODIA::LibraryFormat::DIANNTSV) { ODIA::DIANNLibraryFile::store(out, library); }
+    else { ODIA::LibraryExport::store(out, library, format); }
   }
   catch (const std::exception& e) { writeLogError_(e.what()); return INPUT_FILE_CORRUPT; }
   writeLogInfo_("converted " + std::to_string(library.precursorCount()) + " precursors (" +
                 std::to_string(library.decoyCount()) + " decoys) and " +
-                std::to_string(library.transitionCount()) + " transitions: " + in + " -> " + out);
+                std::to_string(library.transitionCount()) + " transitions: " + in + " -> " + out +
+                " (" + ODIA::LibraryExport::name(format) + ")");
   return EXECUTION_OK;
 }
 

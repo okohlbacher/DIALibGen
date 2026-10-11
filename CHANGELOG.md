@@ -3,10 +3,50 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.3] — unreleased
+
+### Added
+
+- `-out_format` (all modes) selects the layout of `-out`; `auto`, the default,
+  keeps choosing by extension, and the default `.parquet` and `.tsv` outputs
+  are byte for byte those of 0.11.2. The opt-in layouts carry their version
+  in their name:
+  - `diann2_parquet` (`.parquet`): DIA-NN 2.0's own Parquet library layout,
+    the 27 columns, order and types of a library DIA-NN 2.0 writes, including
+    `Flags` and `Protein.Ids`. DIA-NN 2.0 refuses DIALibGen's own Parquet
+    ("missing the 'Flags' column") and loads this one completely: on a
+    3,000-protein library the same protein isoforms, protein groups and
+    precursors as from the TSV, and a search of a DIA slice gives an
+    identical report. The recipe travels in its metadata, which DIA-NN
+    ignores. DIALibGen reads it back.
+  - `openswath_pqp` (`.pqp`, also chosen by `auto`) and `openswath_tsv`
+    (`.tsv`): OpenSWATH's PQP and assay TSV, written by OpenMS's
+    `TransitionPQPFile` and `TransitionTSVFile` from a `TargetedExperiment`.
+    `TargetedFileConverter` reads both back with every precursor and
+    transition, and `OpenSwathDecoyGenerator` and `OpenSwathWorkflow` run on
+    the PQP. Replaces the manual column mapping. The writers hold the library
+    as a `TargetedExperiment`: about 0.8 kB (PQP) and 2 kB (TSV) per
+    transition.
+- Desktop app: an **output layout** choice offers the five layouts (DIALibGen
+  Parquet, DIA-NN TSV, DIA-NN 2 Parquet, OpenSWATH PQP, OpenSWATH TSV); it
+  sets the extension and passes `-out_format` where the extension does not
+  select the layout. The default is unchanged.
+- Protein-terminal modifications (`Acetyl (Protein N-term)`,
+  `Amidated (Protein C-term)`, fixed or variable) apply to protein-terminal
+  peptides, including the N-terminus after initiator-Met excision; the digest
+  records where each peptide sits in its proteins. A fixed one keeps a peptide
+  that also occurs inside a protein unmodified as well. The protein N-terminal
+  acetylated forms equal DIA-NN 2.0's (`--var-mod UniMod:1,42.010565,*n
+  --met-excision`) on a 40-protein FASTA. They were refused in 0.11.2.
 
 ### Changed
 
+- C-terminal modifications are written as DIA-NN writes them,
+  `PEPTIDEK(UniMod:2)` instead of `PEPTIDEK.(UniMod:2)`, in the TSV and the
+  DIA-NN Parquet. DIA-NN 2.0 reads both and reports `PEPTIDEK(UniMod:2)`, so its
+  report now matches the library text. OpenMS parses both.
+- A requested protein-terminal modification that modifies no precursor is
+  refused (exit code 6), as a variable one already was.
 - **`-machine:threads` (CPU training threads) defaults to 16** instead of 4.
   The tuned weights depend on the thread count (it fixes the order of
   LibTorch's reductions), so at default settings the tuned models and the
@@ -25,6 +65,22 @@ This project follows [Semantic Versioning](https://semver.org/).
   LibTorch's inter-op pool is one thread (tune never uses it). Tracing
   (`ODIA_TRACE`) shows a phase per tuned head. At a given thread count none of
   this changes the tuned weights.
+
+### Fixed
+
+- Refine joins C-terminally modified precursors of a DIA-NN report
+  to the library. DIA-NN reports `PEPTIDEK(UniMod:2)`, generation stores
+  `PEPTIDEK.(Amidated)`, and until 0.11.2 the two keys differed, so such
+  precursors were silently left unmatched. A modification OpenMS knows only
+  at the C-terminus now has one key in either spelling; one that can also
+  sit on the last residue (`Methyl` on K) is joined to the library's spelling
+  when the library holds only one of the two forms.
+
+### Documentation
+
+- Usage: the output layouts, the DIA-NN 2.0 Parquet columns, OpenSWATH export
+  and decoys, protein-terminal modifications and the terminal notation of each
+  output.
 
 ## [0.11.2] — 2026-10-11
 

@@ -53,7 +53,7 @@ describe('native bridge', () => {
       expect(await picker()).toBeNull()
     }
     expect(vi.mocked(open).mock.calls[0][0]).toMatchObject({ multiple: false, filters: [{ extensions: ['fasta', 'fa', 'faa'] }] })
-    expect(vi.mocked(save).mock.calls[0][0]).toMatchObject({ defaultPath: '/suggested', filters: [{ extensions: ['parquet', 'tsv'] }] })
+    expect(vi.mocked(save).mock.calls[0][0]).toMatchObject({ defaultPath: '/suggested', filters: [{ extensions: ['parquet', 'tsv', 'pqp'] }] })
     expect(await window.dialibgen.revealPath('/library.parquet')).toBe(true)
     expect(revealItemInDir).toHaveBeenCalledWith('/library.parquet')
   })

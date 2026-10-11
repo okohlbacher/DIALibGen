@@ -222,10 +222,35 @@ def main(binary, fasta, model_dir, workdir):
     check(any(q.startswith("(UniMod:1)") for q in seqs) and not any(q.startswith(".") for q in seqs),
           "N-terminal acetylation is written (UniMod:1)PEPTIDE")
     check(any("(UniMod:2)" in q for q in seqs), "C-terminal amidation is written with UniMod:2")
-    for config, what in (({"variable_modifications": ["Acetyl (Protein N-term)"]}, "protein-terminal"),
-                         ({"fixed_modifications": ["Carbamidomethyl (C)", "Acetyl (Protein N-term)"]}, "protein-terminal"),
-                         ({"variable_modifications": ["Oxidation (M)"], "max_variable_modifications": 0},
-                          "produced no modified precursor")):
+    # Protein-terminal modifications: only on peptides that begin a protein,
+    # directly or after its initiator Met (until 0.11.2 they were refused).
+    proteins = []
+    with open(fasta) as fh:
+        for line in fh:
+            if line.startswith(">"):
+                proteins.append("")
+            elif proteins:
+                proteins[-1] += line.strip()
+    def protein_n_terminal(peptide):
+        return any(p.startswith(peptide) or (p.startswith("M") and p[1:].startswith(peptide)) for p in proteins)
+    def acetylated(name):
+        with open(name) as fh:
+            next(fh)
+            forms = {line.split("\t")[1] for line in fh}
+        stripped = lambda q: re.sub(r"\(UniMod:\d+\)", "", q)
+        return ({stripped(q) for q in forms if q.startswith("(UniMod:1)")},
+                {stripped(q) for q in forms if not q.startswith("(UniMod:1)")})
+    modlog = run("protein_n.tsv", {"variable_modifications": ["Acetyl (Protein N-term)"]})
+    m = re.search(r"variable modification 'Acetyl \(Protein N-term\)': (\d+) precursors", modlog)
+    with_ac, without = acetylated("protein_n.tsv")
+    check(m is not None and int(m.group(1)) > 0 and with_ac and all(protein_n_terminal(q) for q in with_ac),
+          f"Acetyl (Protein N-term) is on protein N-terminal peptides only ({len(with_ac)})")
+    run("protein_n_fixed.tsv", {"fixed_modifications": ["Carbamidomethyl (C)", "Acetyl (Protein N-term)"]})
+    with_ac, without = acetylated("protein_n_fixed.tsv")
+    check(with_ac and all(protein_n_terminal(q) for q in with_ac),
+          f"fixed Acetyl (Protein N-term) modifies protein N-terminal peptides only ({len(with_ac)})")
+    for config, what in (({"variable_modifications": ["Oxidation (M)"], "max_variable_modifications": 0},
+                          "produced no modified precursor"),):
         with open("refused.json", "w") as fh:
             json.dump(config, fh)
         failure = subprocess.run([binary, "-in", fasta, "-config", "refused.json", "-out", "refused.tsv"],

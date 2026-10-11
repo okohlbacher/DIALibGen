@@ -21,6 +21,9 @@ const FASTA = [{ name: 'Protein FASTA', extensions: ['fasta', 'fa', 'faa'] }]
 const LIBRARY = [
   { name: 'Spectral library', extensions: ['parquet', 'tsv'] }
 ]
+const OUTPUT = [
+  { name: 'Spectral library', extensions: ['parquet', 'tsv', 'pqp'] }
+]
 const JSON_FILTER = [{ name: 'Library config (JSON)', extensions: ['json'] }]
 
 // listen() is async but the renderer wants a synchronous unsubscribe (it
@@ -60,7 +63,7 @@ const api: DialibgenApi = {
     return typeof r === 'string' ? r : null
   },
   pickOutput: async (defaultPath?: string) => {
-    const r = await save({ defaultPath, filters: LIBRARY })
+    const r = await save({ defaultPath, filters: OUTPUT })
     return typeof r === 'string' ? r : null
   },
   pickDirectory: async () => {

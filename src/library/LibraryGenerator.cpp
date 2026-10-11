@@ -266,6 +266,18 @@ namespace ODIA
       std::size_t ambiguous = 0;          ///< peptides dropped for X/B/Z/J or no mass
       std::vector<std::string> peptides;  ///< accepted, in digest order
       std::vector<std::uint8_t> shard;    ///< the peptide map shard of each
+      std::vector<std::uint8_t> sites;    ///< per peptide: ProteinSite bits of this occurrence
+    };
+
+    /// Where an occurrence of a peptide sits in its protein, for
+    /// protein-terminal modifications. A peptide accumulates the bits of all
+    /// its occurrences.
+    enum ProteinSite : std::uint8_t
+    {
+      PROTEIN_N = 1,    ///< starts at the protein N-terminus, or right after an excised initiator Met
+      PROTEIN_C = 2,    ///< ends at the protein C-terminus
+      INTERNAL_N = 4,   ///< starts anywhere else
+      INTERNAL_C = 8    ///< ends anywhere else
     };
 
     /// The peptide map, one shard of it: peptide -> ';'-separated accessions.
@@ -334,6 +346,7 @@ namespace ODIA
     {
       std::string sequence;
       std::uint64_t variable_mods = 0;   ///< bit k: carries requested variable modification k
+      std::uint64_t fixed_mods = 0;      ///< bit k: carries protein-terminal fixed modification k
       std::vector<EnumeratedPrecursor> precursors;
     };
 
@@ -443,27 +456,38 @@ namespace ODIA
       try { protein = AASequence::fromString(sequence); }
       catch (const std::exception&) { out.invalid = true; return; }
 
+      // The products as start/end positions: the same peptides, in the same
+      // order, as the AASequence overload (which is built on this one), plus
+      // where each sits in the protein.
       std::vector<AASequence> peptides;
-      digestion.digest(protein, peptides, params.min_length, params.max_length);
+      std::vector<std::uint8_t> sites;
+      const auto digestSpans = [&](const AASequence& chain)
+      {
+        std::vector<std::pair<std::size_t, std::size_t>> spans;
+        digestion.digest(chain, spans, params.min_length, params.max_length);
+        for (const auto& [begin, end] : spans)
+        {
+          peptides.push_back(chain.getSubsequence(begin, static_cast<UInt>(end - begin)));
+          sites.push_back(static_cast<std::uint8_t>((begin == 0 ? PROTEIN_N : INTERNAL_N) |
+                                                    (end == chain.size() ? PROTEIN_C : INTERNAL_C)));
+        }
+      };
+      digestSpans(protein);
 
       // Include the Met-excised N-terminus at every allowed missed-cleavage
       // count. Internal peptides repeat the original digest and are removed
-      // by the peptide-to-protein map below.
+      // by the peptide-to-protein map below. The excised chain's first
+      // residue is the mature protein's N-terminus.
       if (params.n_terminal_methionine_excision && !entry.sequence.empty() &&
           entry.sequence.front() == 'M')
       {
-        try
-        {
-          const auto excised = AASequence::fromString(sequence.substr(1));
-          std::vector<AASequence> more;
-          digestion.digest(excised, more, params.min_length, params.max_length);
-          peptides.insert(peptides.end(), more.begin(), more.end());
-        }
+        try { digestSpans(AASequence::fromString(sequence.substr(1))); }
         catch (const std::exception&) {}   // non-standard residues, as above
       }
 
-      for (const auto& pep : peptides)
+      for (std::size_t j = 0; j < peptides.size(); ++j)
       {
+        const auto& pep = peptides[j];
         // Ambiguous residues have no unique elemental composition. Keep the
         // other peptides from that protein; never guess a mass for X/B/Z/J.
         std::string residues = pep.toUnmodifiedString();
@@ -478,7 +502,26 @@ namespace ODIA
         { ++out.ambiguous; continue; }
         out.shard.push_back(static_cast<std::uint8_t>(std::hash<std::string>{}(residues) % shards));
         out.peptides.push_back(std::move(residues));
+        out.sites.push_back(sites[j]);
       }
+    };
+
+    // Protein-terminal modifications need each peptide's position in its
+    // proteins; collected only when one is requested, per shard of the
+    // peptide map like the accessions (sitesOf() finds a peptide's).
+    const auto proteinTerminal = [](const std::string& name) {
+      const auto term = ModificationsDB::getInstance()->getModification(name)->getTermSpecificity();
+      return term == ResidueModification::PROTEIN_N_TERM || term == ResidueModification::PROTEIN_C_TERM;
+    };
+    const bool track_sites =
+      std::any_of(params.fixed_modifications.begin(), params.fixed_modifications.end(), proteinTerminal) ||
+      std::any_of(params.variable_modifications.begin(), params.variable_modifications.end(), proteinTerminal);
+    std::vector<std::unordered_map<std::string, std::uint8_t>> peptide_sites(track_sites ? shards : 0);
+    const auto sitesOf = [&](const std::string& peptide) -> std::uint8_t {
+      if (!track_sites) { return 0; }
+      const auto& map = peptide_sites[std::hash<std::string>{}(peptide) % shards];
+      const auto found = map.find(peptide);
+      return found == map.end() ? 0 : found->second;
     };
 
     const std::size_t wave = TASK_ITEMS * TASKS_PER_THREAD * threads;
@@ -514,6 +557,7 @@ namespace ODIA
           for (std::size_t q = 0; q < protein.peptides.size(); ++q)
           {
             if (protein.shard[q] != sh) { continue; }
+            if (track_sites) { peptide_sites[sh][protein.peptides[q]] |= protein.sites[q]; }
             // Each peptide is visited by its own shard only, so it can be moved.
             auto& proteins = map[std::move(protein.peptides[q])];
             // Compare on ';' boundaries, not by substring: a plain find() drops P1
@@ -545,35 +589,34 @@ namespace ODIA
     auto toStringList = [](const std::vector<std::string>& v) {
       return StringList(v.begin(), v.end());
     };
-    ModifiedPeptideGenerator::MapToResidueType fixed_map =
-      ModifiedPeptideGenerator::getModifications(toStringList(params.fixed_modifications));
-    ModifiedPeptideGenerator::MapToResidueType variable_map =
-      ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
-
-    // Requested modifications that would silently do nothing are refused.
-    // Protein-terminal ones need the peptide's position in its protein,
-    // which generation does not keep; OpenMS's ModifiedPeptideGenerator
-    // applies them nowhere, fixed or variable, so a library "with" protein
-    // N-terminal acetylation came out without it and with exit code 0.
+    // Protein-terminal modifications are applied here, from the positions the
+    // digest recorded: OpenMS's ModifiedPeptideGenerator does not know where
+    // a peptide sits in its protein and applies them nowhere, fixed or
+    // variable. The residue and peptide-terminal ones go to OpenMS.
+    std::vector<std::string> residue_fixed, residue_variable;
+    std::vector<const ResidueModification*> protein_fixed, protein_variable;
     std::vector<const ResidueModification*> requested_variable;
+    std::vector<std::string> protein_fixed_names;
     {
       const auto* db = ModificationsDB::getInstance();
-      const auto refuseProteinTerminal = [&](const std::string& name, const char* kind) {
-        const auto* mod = db->getModification(name);
-        const auto term = mod->getTermSpecificity();
-        if (term == ResidueModification::PROTEIN_N_TERM || term == ResidueModification::PROTEIN_C_TERM)
-        {
-          throw std::invalid_argument(std::string(kind) + " modification '" + name +
-            "' is protein-terminal; protein-terminal modifications are not supported yet (generation "
-            "does not track where a peptide sits in its protein). The peptide-terminal form, e.g. "
-            "'Acetyl (N-term)', applies to every peptide N-terminus.");
-        }
-        return mod;
-      };
-      for (const auto& name : params.fixed_modifications) { refuseProteinTerminal(name, "fixed"); }
+      for (const auto& name : params.fixed_modifications)
+      {
+        if (!proteinTerminal(name)) { residue_fixed.push_back(name); continue; }
+        protein_fixed.push_back(db->getModification(name));
+        protein_fixed_names.push_back(name);
+      }
       for (const auto& name : params.variable_modifications)
-      { requested_variable.push_back(refuseProteinTerminal(name, "variable")); }
+      {
+        const auto* mod = db->getModification(name);
+        requested_variable.push_back(mod);
+        if (proteinTerminal(name)) { protein_variable.push_back(mod); }
+        else { residue_variable.push_back(name); }
+      }
     }
+    ModifiedPeptideGenerator::MapToResidueType fixed_map =
+      ModifiedPeptideGenerator::getModifications(toStringList(residue_fixed));
+    ModifiedPeptideGenerator::MapToResidueType variable_map =
+      ModifiedPeptideGenerator::getModifications(toStringList(residue_variable));
     if (requested_variable.size() > 64)
     { throw std::invalid_argument("at most 64 variable modifications can be requested"); }
     // Residue-less peptide-terminal variable modifications (origin 'X', such
@@ -605,6 +648,30 @@ namespace ODIA
       return bits;
     };
 
+    // A protein-terminal modification fits a peptide that has the site, is
+    // free at that terminus and, for a residue-specific one, starts (ends)
+    // with its residue.
+    const auto fits = [](const ResidueModification* mod, const AASequence& form, std::uint8_t sites) {
+      const bool n_term = mod->getTermSpecificity() == ResidueModification::PROTEIN_N_TERM;
+      if (!(sites & (n_term ? PROTEIN_N : PROTEIN_C)) || form.empty()) { return false; }
+      if (n_term ? form.hasNTerminalModification() : form.hasCTerminalModification()) { return false; }
+      const char origin = mod->getOrigin();
+      const auto& residue = form[n_term ? 0 : form.size() - 1];
+      return origin == 'X' || (!residue.isModified() && residue.getOneLetterCode()[0] == origin);
+    };
+    const auto withTerminal = [](AASequence form, const ResidueModification* mod) {
+      if (mod->getTermSpecificity() == ResidueModification::PROTEIN_N_TERM) { form.setNTerminalModification(mod); }
+      else { form.setCTerminalModification(mod); }
+      return form;
+    };
+    // Variable modifications a form carries beyond its base.
+    const auto variableCount = [](const AASequence& form, const AASequence& base) {
+      std::size_t n = (form.getNTerminalModification() != base.getNTerminalModification()) +
+                      (form.getCTerminalModification() != base.getCTerminalModification());
+      for (Size k = 0; k < form.size(); ++k) { n += form[k].getModification() != base[k].getModification(); }
+      return n;
+    };
+
     // Reject the estimate before multiplying: an extreme fragment cap must
     // not wrap size_t and bypass the 32-bit CSR limit in reserve().
     constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
@@ -629,31 +696,88 @@ namespace ODIA
 
       ModifiedPeptideGenerator::applyFixedModifications(fixed_map, base);
 
-      std::vector<AASequence> forms;
-      if (params.variable_modifications.empty()) { forms.push_back(base); }
-      else
+      // Fixed protein-terminal modifications: the modified base where the
+      // peptide is protein-terminal, and the unmodified one as well where it
+      // also occurs elsewhere.
+      const std::uint8_t sites = sitesOf(sequence);
+      std::vector<AASequence> bases{base};
+      std::vector<std::uint64_t> base_fixed{0};
+      for (std::size_t m = 0; m < protein_fixed.size(); ++m)
       {
-        ModifiedPeptideGenerator::applyVariableModifications(
-          variable_map, base, params.max_variable_modifications, forms, true);
-        if (params.max_variable_modifications == 1)
+        const auto* mod = protein_fixed[m];
+        const bool n_term = mod->getTermSpecificity() == ResidueModification::PROTEIN_N_TERM;
+        const bool elsewhere = sites & (n_term ? INTERNAL_N : INTERNAL_C);
+        for (std::size_t b = 0, end = bases.size(); b < end; ++b)
         {
-          for (const auto* mod : terminal_variable)
+          if (!fits(mod, bases[b], sites)) { continue; }
+          if (elsewhere)
           {
-            const bool n_term = mod->getTermSpecificity() == ResidueModification::N_TERM;
-            if (n_term ? base.hasNTerminalModification() : base.hasCTerminalModification()) { continue; }
-            AASequence form = base;
-            if (n_term) { form.setNTerminalModification(mod); } else { form.setCTerminalModification(mod); }
-            forms.push_back(std::move(form));
+            bases.push_back(withTerminal(bases[b], mod));
+            base_fixed.push_back(base_fixed[b] | std::uint64_t{1} << m);
+          }
+          else
+          {
+            bases[b] = withTerminal(bases[b], mod);
+            base_fixed[b] |= std::uint64_t{1} << m;
           }
         }
       }
 
-      std::vector<Fragment> fragments;
-      for (const auto& form : forms)
+      std::vector<AASequence> forms;
+      std::vector<std::uint64_t> form_fixed;
+      std::vector<std::uint64_t> merged;   ///< variable bits of a form that duplicated another
+      for (std::size_t b = 0; b < bases.size(); ++b)
       {
+        const AASequence& from = bases[b];
+        const std::size_t first = forms.size();
+        if (params.variable_modifications.empty()) { forms.push_back(from); }
+        else
+        {
+          ModifiedPeptideGenerator::applyVariableModifications(
+            variable_map, from, params.max_variable_modifications, forms, true);
+          if (params.max_variable_modifications == 1)
+          {
+            for (const auto* mod : terminal_variable)
+            {
+              const bool n_term = mod->getTermSpecificity() == ResidueModification::N_TERM;
+              if (n_term ? from.hasNTerminalModification() : from.hasCTerminalModification()) { continue; }
+              AASequence form = from;
+              if (n_term) { form.setNTerminalModification(mod); } else { form.setCTerminalModification(mod); }
+              forms.push_back(std::move(form));
+            }
+          }
+        }
+        // Variable protein-terminal modifications, on every form of this base
+        // that has room for one more variable modification.
+        merged.resize(forms.size(), 0);
+        for (const auto* mod : protein_variable)
+        {
+          for (std::size_t k = first, end = forms.size(); k < end; ++k)
+          {
+            if (!fits(mod, forms[k], sites) ||
+                variableCount(forms[k], from) >= params.max_variable_modifications) { continue; }
+            AASequence form = withTerminal(forms[k], mod);
+            // 'Acetyl (N-term)' and 'Acetyl (Protein N-term)' write the same
+            // form: keep one, credited to both.
+            const std::string text = form.toString();
+            std::size_t same = first;
+            while (same < forms.size() && forms[same].toString() != text) { ++same; }
+            if (same < forms.size()) { merged[same] |= variableBits(form); continue; }
+            forms.push_back(std::move(form));
+            merged.push_back(0);
+          }
+        }
+        form_fixed.resize(forms.size(), base_fixed[b]);
+      }
+
+      std::vector<Fragment> fragments;
+      for (std::size_t index = 0; index < forms.size(); ++index)
+      {
+        const auto& form = forms[index];
         EnumeratedForm& f = out.forms.emplace_back();
         f.sequence = form.toString();
-        if (!requested_variable.empty()) { f.variable_mods = variableBits(form); }
+        if (!requested_variable.empty()) { f.variable_mods = variableBits(form) | merged[index]; }
+        f.fixed_mods = form_fixed[index];
         for (int z : params.charges)
         {
           const double precursor_mz = form.getMZ(z);
@@ -679,6 +803,7 @@ namespace ODIA
 
 
     std::vector<std::size_t> variable_counts(requested_variable.size(), 0);
+    std::vector<std::size_t> fixed_counts(protein_fixed.size(), 0);
     auto& p = library.precursors();
     auto& t = library.transitions();
     auto& strings = library.strings();
@@ -717,6 +842,8 @@ namespace ODIA
         {
           for (std::size_t v = 0; v < variable_counts.size(); ++v)
           { if (form.variable_mods >> v & 1) { variable_counts[v] += form.precursors.size(); } }
+          for (std::size_t v = 0; v < fixed_counts.size(); ++v)
+          { if (form.fixed_mods >> v & 1) { fixed_counts[v] += form.precursors.size(); } }
         }
         precursors += peptide.precursors;
         transitions += peptide.fragments.size();
@@ -808,6 +935,13 @@ namespace ODIA
       else { hint = " (does any peptide in the m/z and length windows have its site?)"; }
       throw std::invalid_argument("variable modification '" + params.variable_modifications[k] +
                                   "' produced no modified precursor in the whole library" + hint);
+    }
+    for (std::size_t k = 0; k < fixed_counts.size(); ++k)
+    {
+      if (fixed_counts[k] > 0) { continue; }
+      throw std::invalid_argument("fixed modification '" + protein_fixed_names[k] +
+                                  "' produced no modified precursor in the whole library (does any "
+                                  "protein-terminal peptide in the m/z and length windows have its site?)");
     }
     enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
     enumerate_phase.end();

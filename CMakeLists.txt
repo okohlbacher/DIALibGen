@@ -117,6 +117,7 @@ add_library(odia_library STATIC
   src/library/Library.cpp
   src/library/LibraryGenerator.cpp
   src/library/DIANNLibraryFile.cpp
+  src/library/LibraryExport.cpp
   src/library/ModifiedSequence.cpp
   src/library/PeptideParser.cpp
   src/library/ThreadPool.cpp

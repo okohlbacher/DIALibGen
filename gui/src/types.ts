@@ -84,6 +84,8 @@ export interface DialibgenApi {
     outReport?: string
     in: string
     out: string
+    /// -out_format; absent when the extension alone selects the layout.
+    outFormat?: string
     config: Record<string, unknown>
     modelDir?: string | null
     threads?: number | null

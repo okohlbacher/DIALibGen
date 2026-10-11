@@ -190,6 +190,8 @@ namespace ODIA
     }
 
     const std::string& text() const { return text_; }
+    /// Empties the text, keeping its capacity.
+    void clear() { text_.clear(); }
 
   private:
     void append(const char* first, std::to_chars_result r)

@@ -1362,9 +1362,15 @@ namespace ODIA
     }
 
     /// One precursor's rows, into a TextWriter or a TextBuffer alike.
+    ///
+    /// The fields every row of a precursor repeats -- the leading ones up to
+    /// its m/z and the trailing ones from the protein columns on -- are
+    /// formatted once into @p head and @p tail and copied per row: number
+    /// formatting is the writer's cost, and these are four of its seven
+    /// numbers. The same digits, so the same bytes.
     template <class Sink>
     void writeTsvPrecursor(Sink& sink, const Library& library, const WriteRow& row,
-                           std::atomic<std::size_t>& unknown_mods)
+                           std::atomic<std::size_t>& unknown_mods, TextBuffer& head, TextBuffer& tail)
     {
       const auto& p = library.precursors();
       const auto& t = *row.transitions;
@@ -1384,25 +1390,39 @@ namespace ODIA
       const int z = p.charge[i];
       const bool has_im = i < p.im.size() && !std::isnan(p.im[i]);
       const bool has_ccs = i < p.ccs.size() && !std::isnan(p.ccs[i]);
+
+      head.clear();
+      // DIA-NN gives a decoy the same Modified.Sequence, charge and
+      // Precursor.Mz as its target, so <sequence><charge> alone is not unique.
+      // Without the suffix, reloading our own output merged each such pair and
+      // re-labelled the decoy's transitions as target evidence -- 33,390
+      // precursors became 33,386, silently, with no transitions lost.
+      head.put(seq); head.integer(z); head.put(p.decoy[i] ? "_decoy" : ""); head.put('\t');
+      head.put(seq); head.put('\t'); head.integer(z); head.put('\t');
+      head.integer(p.decoy[i]); head.put('\t');
+      // An unpredicted retention time is written as an empty field, not as
+      // "nan": no TSV consumer accepts the latter, and it propagates into
+      // anything that reads the library back.
+      if (!std::isnan(p.irt[i])) { head.number(p.irt[i], 9); }
+      head.put('\t');
+      if (has_im) { head.number(p.im[i], 9); }
+      head.put('\t');
+      head.number(fromFixed(p.mz[i]), 10); head.put('\t');
+
+      tail.clear();
+      tail.put(ids); tail.put('\t');
+      tail.put(names); tail.put('\t');
+      tail.put(members == 1 ? "1" : "0"); tail.put('\t');
+      tail.put(pg); tail.put('\t');
+      // Empty rather than "nan" when absent, as for RT: no TSV consumer
+      // accepts the latter, and a 0 here would read as a real cross-section.
+      if (has_ccs) { tail.number(p.ccs[i], 9); }
+      tail.put('\n');
+
       for (std::uint32_t k = 0; k < row.count; ++k)
       {
         const std::uint32_t j = row.begin + k;
-        // DIA-NN gives a decoy the same Modified.Sequence, charge and
-        // Precursor.Mz as its target, so <sequence><charge> alone is not unique.
-        // Without the suffix, reloading our own output merged each such pair and
-        // re-labelled the decoy's transitions as target evidence -- 33,390
-        // precursors became 33,386, silently, with no transitions lost.
-        sink.put(seq); sink.integer(z); sink.put(p.decoy[i] ? "_decoy" : ""); sink.put('\t');
-        sink.put(seq); sink.put('\t'); sink.integer(z); sink.put('\t');
-        sink.integer(p.decoy[i]); sink.put('\t');
-        // An unpredicted retention time is written as an empty field, not as
-        // "nan": no TSV consumer accepts the latter, and it propagates into
-        // anything that reads the library back.
-        if (!std::isnan(p.irt[i])) { sink.number(p.irt[i], 9); }
-        sink.put('\t');
-        if (has_im) { sink.number(p.im[i], 9); }
-        sink.put('\t');
-        sink.number(fromFixed(p.mz[i]), 10); sink.put('\t');
+        sink.put(head.text());
         sink.number(fromFixed(t.product_mz[j]), 10); sink.put('\t');
         if (!std::isnan(t.library_intensity[j])) { sink.number(t.library_intensity[j], 9); }
         sink.put('\t');
@@ -1410,19 +1430,15 @@ namespace ODIA
         sink.integer(t.charge[j]); sink.put('\t');
         sink.integer(t.ordinal[j]); sink.put('\t');
         sink.put(toString(t.loss[j])); sink.put('\t');
-        sink.put(ids); sink.put('\t');
-        sink.put(names); sink.put('\t');
-        sink.put(members == 1 ? "1" : "0"); sink.put('\t');
-        sink.put(pg); sink.put('\t');
-        // Empty rather than "nan" when absent, as for RT: no TSV consumer
-        // accepts the latter, and a 0 here would read as a real cross-section.
-        if (has_ccs) { sink.number(p.ccs[i], 9); }
-        sink.put('\n');
+        sink.put(tail.text());
       }
     }
 
     /// Rendering numbers is the cost (see store()), so blocks of precursors are
     /// rendered in parallel and written in order: the same bytes as one pass.
+    /// The rendered text held at once is bounded by a fixed number of
+    /// precursors (WAVE), not by the thread count: four tasks per thread grew
+    /// it to ~4 GB at 96 threads.
     void writeTsvRows(TextWriter& out, const Library& library, const std::vector<WriteRow>& rows,
                       unsigned threads, std::atomic<std::size_t>& unknown_mods)
     {
@@ -1430,23 +1446,25 @@ namespace ODIA
       const std::size_t n = rows.size();
       if (workers <= 1)
       {
-        for (const auto& row : rows) { writeTsvPrecursor(out, library, row, unknown_mods); }
+        TextBuffer head, tail;
+        for (const auto& row : rows) { writeTsvPrecursor(out, library, row, unknown_mods, head, tail); }
         return;
       }
-      constexpr std::size_t TASK = 4096;
-      const std::size_t wave = TASK * 4 * workers;
+      constexpr std::size_t TASK = 2048;
+      constexpr std::size_t WAVE = 128 * TASK;   // ~262k precursors, ~0.7 GB of text
       std::vector<TextBuffer> rendered;
-      for (std::size_t first = 0; first < n; first += wave)
+      for (std::size_t first = 0; first < n; first += WAVE)
       {
-        const std::size_t count = std::min(wave, n - first);
+        const std::size_t count = std::min(WAVE, n - first);
         rendered.assign((count + TASK - 1) / TASK, TextBuffer{});
         parallel::forEach(rendered.size(), workers, [&](std::size_t task)
         {
+          TextBuffer head, tail;
           const std::size_t end = first + std::min(count, (task + 1) * TASK);
           for (std::size_t i = first + task * TASK; i < end; ++i)
-          { writeTsvPrecursor(rendered[task], library, rows[i], unknown_mods); }
+          { writeTsvPrecursor(rendered[task], library, rows[i], unknown_mods, head, tail); }
         });
-        for (const auto& block : rendered) { out.put(block.text()); }
+        for (auto& block : rendered) { out.put(block.text()); block = TextBuffer{}; }
       }
     }
 

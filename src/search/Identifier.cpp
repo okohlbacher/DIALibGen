@@ -352,6 +352,7 @@ namespace ODIA::search
     // 2. Candidates and their in-memory decoys; with search:intensities
     //    predicted, both members of every pair predicted by one model.
     std::shared_ptr<FragmentModel> model = fragment_model_;
+    int prediction_sessions = 0;   // ONNX Runtime sessions of the model built here (0: none built here)
     json intensities_json = {{"source", toString(params_.intensities)}};
     if (predicted)
     {
@@ -363,6 +364,7 @@ namespace ODIA::search
           params_.instrument_source = "run (" + std::string(run.ion_mobility ? "ion mobility" : "no ion mobility") + ")";
         }
         auto peptdeep = std::make_shared<PeptDeepFragmentModel>(params_.ms2_model, params_.instrument, params_.nce, params_.threads);
+        prediction_sessions = peptdeep->sessions();
         params_.instrument = peptdeep->instrument();
         params_.nce = peptdeep->nce();
         model = peptdeep;
@@ -615,6 +617,7 @@ namespace ODIA::search
     search["warnings"] = warnings;
     search["resources"] = {{"threads", params_.threads},
                            {"openswath_threads", std::min(params_.threads, SearchParams::openswath_max_threads)},
+                           {"prediction_sessions", prediction_sessions},
                            {"seconds", timing}};
     // Decided by the free memory of the moment: the sidecar's, never the report's.
     if (!run.ms1_memory_json.empty()) { search["resources"]["ms1_in_memory"] = json::parse(run.ms1_memory_json); }

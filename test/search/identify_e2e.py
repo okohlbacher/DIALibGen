@@ -29,6 +29,8 @@ import csv
 import filecmp
 import json
 import math
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -162,6 +164,17 @@ try:
         for other in (ids4, ids4c):
             if not filecmp.cmp(ids, other, shallow=False):
                 fail('%s differs from %s' % (other, ids))
+        # -threads 0: the effective CPU budget (the physical cores), said in the log and recorded; the same report.
+        _, ids0, prov0, log0 = search('t0', threads=0)
+        said = re.search(r'-threads 0: (\d+) threads \(', log0)
+        if not said or prov0['search']['resources']['threads'] != int(said.group(1)) or int(said.group(1)) < 1:
+            print(log0, file=sys.stderr)
+            fail('-threads 0 must say how many threads it means and use them: %s' % json.dumps(prov0['search']['resources']))
+        if (os.cpu_count() or 1) >= 4 and int(said.group(1)) < 2:
+            fail('-threads 0 means %s thread(s) on a machine with %d hardware threads' % (said.group(1), os.cpu_count()))
+        if not filecmp.cmp(ids, ids0, shallow=False):
+            fail('the report at -threads 0 differs from that at -threads 1')
+        print('ok   -threads 0 means %s threads here, and the report is the same' % said.group(1))
         print('ok   report byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
 
         # search:ms1_in_memory decides how extraction reads the MS1 map, never

@@ -35,6 +35,11 @@ add_executable(identify_ms1_memory identify_ms1_memory.cpp)
 target_link_libraries(identify_ms1_memory PRIVATE odia_search)
 add_test(NAME identify_ms1_memory COMMAND identify_ms1_memory)
 
+# -threads 0 for -run: the physical cores, so more than one prediction session.
+add_executable(identify_threads identify_threads.cpp)
+target_link_libraries(identify_threads PRIVATE odia_search)
+add_test(NAME identify_threads COMMAND identify_threads "${ODIA_MS2_MODEL_PATH}")
+
 # The RT calibration's line-or-LOWESS choice on synthetic calibration points.
 add_executable(identify_rt_model identify_rt_model.cpp)
 target_link_libraries(identify_rt_model PRIVATE odia_search nlohmann_json::nlohmann_json)

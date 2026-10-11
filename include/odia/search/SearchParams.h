@@ -180,8 +180,19 @@ namespace ODIA::search
     /// falls. Only known nulls see it: search:entrapment_tag's winner test.
     bool selftest = true;
 
-    /// Threads for extraction and the classifier's folds (TOPP -threads).
+    /// Threads for the search's prediction sessions, OpenMP loops and the
+    /// classifier's folds (TOPP -threads, resolved by resolveThreads: never 0).
+    /// OpenSWATH's own team stays capped at openswath_max_threads.
     int threads = 1;
+
+    /// -threads as the search uses it: @p requested when positive; for 0 (and
+    /// below) the effective CPU budget, ODIA::physicalCores() -- the physical
+    /// cores in the affinity mask under the cgroup CPU quota -- as generate
+    /// counts it (Hardware.h).
+    static int resolveThreads(int requested);
+    /// ONNX Runtime sessions of the search's PeptDeep MS2 model at @p threads:
+    /// one per thread (one intra-op thread each), at most max_prediction_sessions.
+    static int predictionSessions(int threads);
 
     /// Why the caller needs observed 1/K0 values (e.g. "-write_im"); empty =
     /// it does not. When set, a run without ion mobility is refused right
@@ -216,6 +227,8 @@ namespace ODIA::search
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
     /// a process-wide lock, and more threads only spin (see RunStages.cpp).
     static constexpr int openswath_max_threads = 8;
+    /// The most ONNX Runtime sessions the search's MS2 model gets.
+    static constexpr int max_prediction_sessions = 16;
     /// Evidence prefilter: the fragments indexed per pair member, its own most
     /// intense (search:intensities predicted: each member by its own
     /// prediction; library: by the target's library intensity, in the same

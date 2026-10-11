@@ -3,6 +3,7 @@
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
+#include <odia/Hardware.h>
 #include <memory>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
@@ -26,6 +27,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -424,7 +428,7 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.report_max_q = getDoubleOption_("search:report_max_q");
     s.entrapment_tag = getStringOption_("search:entrapment_tag");
     s.selftest = getStringOption_("search:selftest") == "true";
-    s.threads = std::max(1, getIntOption_("threads"));
+    s.threads = ODIA::search::SearchParams::resolveThreads(getIntOption_("threads"));
     s.validate();
     return s;
   }
@@ -608,6 +612,18 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       }
       try { search = std::make_unique<ODIA::search::SearchParams>(searchParams_()); }
       catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+      if (getIntOption_("threads") <= 0)
+      {
+        // -threads 0 is the effective CPU budget, as generate counts it: the
+        // search's prediction sessions, its OpenMP loops (TOPPBase passes 0 to
+        // omp_set_num_threads, which leaves OpenMP at every logical CPU) and
+        // the classifier. OpenSWATH's own team stays capped at
+        // SearchParams::openswath_max_threads.
+        writeLogInfo_("-threads 0: " + std::to_string(search->threads) + " threads (" + ODIA::physicalCoresReason() + ")");
+#ifdef _OPENMP
+        omp_set_num_threads(search->threads);
+#endif
+      }
       search->require_ion_mobility = needs_im_text;
       out_ids = getParam_().getValue("out_ids").toString();
       if (out_ids.empty()) { out_ids = out + ".ids.parquet"; }

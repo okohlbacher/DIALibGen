@@ -90,9 +90,12 @@ namespace ODIA::search
     std::string describe() const override;
     const std::string& instrument() const { return instrument_; }
     float nce() const { return nce_; }
+    /// The ONNX Runtime sessions it predicts with (SearchParams::predictionSessions).
+    int sessions() const { return sessions_; }
 
   private:
     std::unique_ptr<PeptDeepPredictor> predictor_;
+    int sessions_ = 1;
     std::string instrument_;
     float nce_ = 30.0f;
   };

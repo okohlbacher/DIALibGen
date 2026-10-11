@@ -3,8 +3,11 @@
 
 #include <odia/search/SearchParams.h>
 
+#include <odia/Hardware.h>
+
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -90,6 +93,16 @@ namespace ODIA::search
       case DecoyMethod::None: break;
     }
     return "none";
+  }
+
+  int SearchParams::resolveThreads(int requested)
+  {
+    return requested > 0 ? requested : static_cast<int>(std::max(1u, physicalCores()));
+  }
+
+  int SearchParams::predictionSessions(int threads)
+  {
+    return std::clamp(threads, 1, max_prediction_sessions);
   }
 
   void SearchParams::validate() const

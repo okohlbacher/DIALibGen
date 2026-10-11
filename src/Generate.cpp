@@ -5,6 +5,7 @@
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
 #include <odia/Library.h>
+#include <odia/LibraryExport.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/Hardware.h>
 #include <odia/PeptDeepEncoder.h>
@@ -641,12 +642,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     (void)getStringOption_("out");
     if (fasta.empty() || out.empty())
     { writeLogError_("-in and -out are required"); return ILLEGAL_PARAMETERS; }
-    const bool parquet = out.ends_with(".parquet");
-    if (!parquet && !out.ends_with(".tsv"))
-    {
-      writeLogError_("-out must end in .parquet or .tsv (got '" + out + "')");
-      return ILLEGAL_PARAMETERS;
-    }
+    ODIA::LibraryFormat format;
+    try { format = ODIA::LibraryExport::resolve(out, getStringOption_("out_format")); }
+    catch (const std::invalid_argument& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+    const bool parquet = format == ODIA::LibraryFormat::DIALibGenParquet;
 
     json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                nce, instrument, irt_rescale,
@@ -735,7 +734,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // ODIA_STREAM=0 restores 0.11.1's order (MS2 before CCS) and the one-pass
     // writer: the same file, for comparison.
     const char* stream_env = std::getenv("ODIA_STREAM");
-    const bool stream = stream_env == nullptr || std::string_view(stream_env) != "0";
+    // The other layouts are written in one pass, from the final library.
+    const bool stream = (stream_env == nullptr || std::string_view(stream_env) != "0") &&
+                        (parquet || format == ODIA::LibraryFormat::DIANNTSV);
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
     try
     {
@@ -859,17 +860,31 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       else if (parquet)
       { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extraMetadata(), threads); }
-      else { ODIA::DIANNLibraryFile::storeTSV(out, library, threads); }
-      if (!parquet)
+      else if (format == ODIA::LibraryFormat::DIANNTSV) { ODIA::DIANNLibraryFile::storeTSV(out, library, threads); }
+      else
+      {
+        // DIA-NN ignores the file's metadata, so the DIA-NN 2.0 layout
+        // carries the recipe as DIALibGen's own does.
+        auto metadata = extraMetadata();
+        if (ODIA::LibraryExport::carriesRecipe(format)) { metadata.insert(metadata.begin(), {"odia.config_json", eff.dump()}); }
+        ODIA::LibraryExport::store(out, library, format, metadata, threads);
+      }
+      if (format == ODIA::LibraryFormat::DIANNTSV)
       {
         writeLogWarn_("TSV cannot carry the recipe: the config is NOT embedded and this "
                       "file is not cache-eligible. Use .parquet to keep them together.");
+      }
+      else if (!ODIA::LibraryExport::carriesRecipe(format))
+      {
+        writeLogWarn_(std::string(ODIA::LibraryExport::name(format)) + " cannot carry the recipe: the config "
+                      "is NOT embedded. Use .parquet to keep them together.");
       }
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("cannot write ") + out + ": " + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
     write_phase.end();
-    writeLogInfo_("wrote " + out);
+    writeLogInfo_("wrote " + out + (format == ODIA::LibraryFormat::DIALibGenParquet || format == ODIA::LibraryFormat::DIANNTSV
+                                     ? std::string() : std::string(" (") + ODIA::LibraryExport::name(format) + ")"));
     {
       // Releasing the library: what the destructor would do on return, done
       // here so that the trace can time it.

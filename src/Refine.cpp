@@ -3,6 +3,7 @@
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
+#include <odia/LibraryExport.h>
 #include <memory>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
@@ -400,8 +401,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     if (tune)
     { writeLogError_("this build has no fine-tuning stage; configure DIALIBGEN_BUILD_FINETUNE with libtorch"); return ILLEGAL_PARAMETERS; }
 #endif
-    if (!out.ends_with(".parquet") && !out.ends_with(".tsv"))
-    { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
+    ODIA::LibraryFormat format;
+    try { format = ODIA::LibraryExport::resolve(out, getStringOption_("out_format")); }
+    catch (const std::invalid_argument& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
     const std::string report = getParam_().getValue("out_report").toString();
     std::set<std::filesystem::path> destinations;
     for (const auto& file : {out, out + ".refine.json", report})
@@ -759,14 +761,19 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       // The writers' output does not depend on the thread count.
       const unsigned write_threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
-      if (out.ends_with(".parquet"))
+      if (format == ODIA::LibraryFormat::DIALibGenParquet)
       {
         ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{},
                                                     prov.dump(), {}, write_threads);
       }
-      else if (out.ends_with(".tsv"))
+      else if (format == ODIA::LibraryFormat::DIANNTSV)
       { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library, write_threads); }
-      else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
+      else
+      {
+        std::vector<std::pair<std::string, std::string>> metadata;
+        if (ODIA::LibraryExport::carriesRecipe(format)) { metadata.emplace_back("odia.config_json", prov.dump()); }
+        ODIA::LibraryExport::store(output.temporaryPath().string(), library, format, metadata, write_threads);
+      }
       std::ofstream side(sidecar.temporaryPath());
       side << prov.dump(2) << '\n'; side.close();
       if (!side) { throw std::runtime_error("cannot write " + out + ".refine.json"); }

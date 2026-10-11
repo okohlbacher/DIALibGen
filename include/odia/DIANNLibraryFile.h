@@ -223,6 +223,12 @@ namespace ODIA
       std::unique_ptr<Impl> impl_;
     };
 
+    /// Sizes Arrow's CPU thread pool to @p threads (0 = one per physical
+    /// core) and its I/O pool to at most 8 of them. Arrow otherwise starts a
+    /// pool as large as the hardware-thread count (384 on a 2 x 96-core node)
+    /// whatever -threads says. Output does not depend on it.
+    static void useThreads(unsigned threads);
+
     /// Hash a FASTA by content. Throws if it cannot be read.
     static Fingerprint fingerprintFasta(const std::string& fasta);
 

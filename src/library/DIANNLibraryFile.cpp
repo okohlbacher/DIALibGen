@@ -12,6 +12,7 @@
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/io/file.h>
+#include <arrow/io/interfaces.h>
 #include <arrow/util/thread_pool.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/arrow/writer.h>
@@ -1081,6 +1082,14 @@ namespace ODIA
       for (auto& chunk : built) { writeCompactRowGroup(writer, schema, chunk); chunk = CompactChunk{}; }
     }
   } // namespace
+
+  void DIANNLibraryFile::useThreads(unsigned threads)
+  {
+    const auto workers = static_cast<int>(parallel::workers(threads));
+    if (::arrow::GetCpuThreadPoolCapacity() != workers) { okStatus(::arrow::SetCpuThreadPoolCapacity(workers)); }
+    const int io = std::min(workers, 8);
+    if (::arrow::io::GetIOThreadPoolCapacity() != io) { okStatus(::arrow::io::SetIOThreadPoolCapacity(io)); }
+  }
 
   void DIANNLibraryFile::storeParquetCompact(const std::string& filename,
                                              const Library& library,

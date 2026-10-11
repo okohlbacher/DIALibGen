@@ -186,6 +186,13 @@ fn apply_env(cmd: &mut Command, r: &Resolved) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW: the GUI owns the log.
     }
+    // OpenBLAS (pulled in through OpenMS's LAPACK) starts a spinning thread
+    // per hardware thread before main -- ~14 CPU-s per run on a large node
+    // -- for BLAS calls the CLI never makes. Only the starting environment
+    // can prevent it; a value the user set wins.
+    if std::env::var_os("OPENBLAS_NUM_THREADS").is_none() {
+        cmd.env("OPENBLAS_NUM_THREADS", "1");
+    }
     if let Some(d) = &r.data {
         cmd.env("OPENMS_DATA_PATH", d);
     }
@@ -835,6 +842,18 @@ mod tests {
         match serde_json::from_str(s).unwrap() {
             Value::Object(m) => m,
             _ => panic!("not an object"),
+        }
+    }
+
+    #[test]
+    fn cli_starts_with_one_openblas_thread_unless_the_user_chose() {
+        let resolved = Resolved { bin: "DIALibGen".into(), data: None, share: None, source: "path" };
+        let mut command = Command::new(&resolved.bin);
+        apply_env(&mut command, &resolved);
+        let value = command.get_envs().find(|(key, _)| *key == "OPENBLAS_NUM_THREADS").and_then(|(_, v)| v);
+        match std::env::var_os("OPENBLAS_NUM_THREADS") {
+            None => assert_eq!(value, Some(std::ffi::OsStr::new("1"))),
+            Some(_) => assert_eq!(value, None),
         }
     }
 

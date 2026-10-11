@@ -8,6 +8,7 @@
 #include <odia/AtomicFile.h>
 #include <odia/DIANNLibraryFile.h>
 #include <odia/Trace.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -66,6 +67,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   }
   const std::string mode = getStringOption_("mode");
   const auto& parameters = getParam_();
+  // Arrow's pools follow -threads, not the hardware-thread count.
+  try { ODIA::DIANNLibraryFile::useThreads(static_cast<unsigned>(std::max(0, getIntOption_("threads")))); }
+  catch (const std::exception& e) { writeLogWarn_(std::string("cannot size Arrow's thread pools: ") + e.what()); }
   // Inspect the raw path before TOPP's output getter can probe a dangling symlink.
   const std::string write_config = parameters.getValue("write_config").toString();
   if (!write_config.empty() && (fs::exists(write_config) || fs::is_symlink(write_config)))

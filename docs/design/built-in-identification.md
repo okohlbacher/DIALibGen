@@ -1328,6 +1328,16 @@ MS1-in-memory measurement above (build f365ba3, tims_auto), both on dax:
 | report | 909c95b4... | 1cbf491a...: the same table; only the embedded tool_version differs (0.11.0 -> 0.11.1) |
 | tuned library | 8fa82a45... (0.11.1 TSV columns) | ece0d219..., which is exactly f365ba3's library converted to 0.11.2's TSV dialect (`-mode convert`) |
 
+The same command at `-threads 0` (192 physical cores, 192 prediction
+sessions) took 1:04:24 with the same report and library md5s: the prefilter
+330 s (176 active cores, 58,220 CPU-s against 16,280 at 16 threads),
+extraction and calibration unchanged (team 8), re-prediction 15 + 33 s
+instead of 41 + 95 s; but 28.2 CPU-hours instead of 11.0, the run's cache
+written with 57 busy cores for no gain in wall time (250 s, 14,369 CPU-s),
+and 37.6 GB peak. -12 minutes for 2.6 times the CPU: on a shared machine
+`-threads 16` stays the efficient choice, and 0 is not proposed as the
+default.
+
 Most of the prefilter's gain is 0.11.2's predictor; this branch adds the
 searched set (-78 s) and a few seconds in decoys and ranking. What remains:
 extraction (50 %), the model in the prefilter (22 %), tuning (13 %),

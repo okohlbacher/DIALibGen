@@ -7,6 +7,8 @@
 #include <odia/PeptDeepEncoder.h>
 #include <odia/Trace.h>
 
+#include "../library/Parallel.h"
+
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
 #include <onnxruntime_cxx_api.h>
@@ -24,6 +26,7 @@
 #include <iterator>
 #include <mutex>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <limits>
 #include <stdexcept>
@@ -682,7 +685,7 @@ namespace ODIA
         };
         std::vector<std::thread> pool;
         pool.reserve(builders - 1);
-        for (std::size_t b = 1; b < builders; ++b) { pool.emplace_back(build); }
+        parallel::startThreads(pool, builders - 1, build);
         build();
         for (auto& t : pool) { t.join(); }
         if (error)
@@ -923,9 +926,15 @@ namespace ODIA
       if (tracing) { recordWorker(session, w0, wcpu0, chunks_done, rows_done); }
     };
 
+    // Each worker owns one session; a worker that cannot be started leaves
+    // its session idle and the others take its chunks.
     std::vector<std::thread> threads;
     threads.reserve(workers - 1);
-    for (std::size_t s = 1; s < workers; ++s) { threads.emplace_back(worker, s); }
+    for (std::size_t s = 1; s < workers; ++s)
+    {
+      try { threads.emplace_back(worker, s); }
+      catch (const std::system_error&) { break; }
+    }
     worker(0);
     for (auto& t : threads) { t.join(); }
     if (tracing) { recordDispatch(); }

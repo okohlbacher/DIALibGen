@@ -11,11 +11,30 @@
 #include <exception>
 #include <limits>
 #include <mutex>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 namespace ODIA::parallel
 {
+  /// Starts up to @p n threads running @p fn into @p pool and returns how many
+  /// started. A thread that cannot be created (EAGAIN under a process or
+  /// cgroup thread limit) ends the starting, and the work runs on the threads
+  /// that exist -- the caller's included -- instead of the process
+  /// terminating with joinable threads in a destroyed vector. Callers hand
+  /// out work through a shared counter, so fewer threads change nothing but
+  /// the time.
+  template <class Fn>
+  std::size_t startThreads(std::vector<std::thread>& pool, std::size_t n, const Fn& fn)
+  {
+    for (std::size_t t = 0; t < n; ++t)
+    {
+      try { pool.emplace_back(fn); }
+      catch (const std::system_error&) { break; }
+    }
+    return pool.size();
+  }
+
   /// Worker threads for host-side work: `requested`, or every physical core
   /// for 0 (the meaning of -threads 0; see physicalCores()).
   inline unsigned workers(unsigned requested)
@@ -68,7 +87,7 @@ namespace ODIA::parallel
 
     std::vector<std::thread> pool;
     pool.reserve(count - 1);
-    for (std::size_t t = 1; t < count; ++t) { pool.emplace_back(run); }
+    startThreads(pool, count - 1, run);
     run();
     for (auto& t : pool) { t.join(); }
     if (error) { std::rethrow_exception(error); }

@@ -36,6 +36,7 @@
 #include <random>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 
 using namespace OpenMS;
@@ -1119,7 +1120,14 @@ namespace ODIA
       Block done;
       if (selection.valid()) { selection.get(); done = std::move(selecting); }
       selecting = std::move(block);
-      selection = std::async(std::launch::async, [&] { select(selecting); });
+      try { selection = std::async(std::launch::async, [&] { select(selecting); }); }
+      catch (const std::system_error&)
+      {
+        // No thread to spare (a process or cgroup thread limit): select on
+        // this one, without the overlap.
+        select(selecting);
+        selection = std::async(std::launch::deferred, [] {});
+      }
       if (done.last > done.base) { append(done); }
     }
     if (selection.valid())

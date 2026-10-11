@@ -19,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -812,7 +813,9 @@ namespace ODIA::trace
     smp->fast_ms = std::max(10L, envLong("ODIA_TRACE_INTERVAL_MS", 100));
     note("interval_ms", std::to_string(smp->fast_ms));
     sampler() = smp;
-    smp->fast = std::thread([smp] { smp->fastLoop(); });
+    try { smp->fast = std::thread([smp] { smp->fastLoop(); }); }
+    catch (const std::system_error&)
+    { std::fprintf(stderr, "[trace] cannot start the sampler thread; no proc.tsv or threads.tsv samples\n"); }
 
     const double snapshot_s = envSeconds("ODIA_TRACE_SNAPSHOT_MIN_S", 30.0);
     note("snapshot_min_s", std::to_string(snapshot_s));

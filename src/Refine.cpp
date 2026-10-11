@@ -224,7 +224,7 @@ void DIALibGen::registerRefinementOptions_()
                                                           ".trajectory.tsv sidecars here. Default: a scratch "
                                                           "directory, removed on exit -- the deliverable is the library.", false);
     registerFlag_("tune_predict_gpu", "Use the GPU for the re-prediction pass (the ONNX one, not training).");
-    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = default.", false);
+    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = as many as -threads (-threads 0: one per physical core).", false);
     registerFlag_("tune_keep_free_cysteine_offset",
                   "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by "
                   "default: that offset was fitted against the STOCK model, and a model tuned on this run's own "
@@ -553,7 +553,13 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         const bool gpu = getFlag_("tune_predict_gpu");
         std::vector<std::string> device_warnings;
         const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
-        const unsigned sessions = static_cast<unsigned>(std::max(0, getIntOption_("tune_predict_sessions")));
+        // 0 follows -threads, the run's CPU budget; 0.11.2 lifted the cap of
+        // 16 sessions, so 0 meaning "all cores" would take a 2 x 96-core node
+        // whatever -threads said. The predictor never exceeds the physical
+        // cores (Hardware.h).
+        const int requested_sessions = getIntOption_("tune_predict_sessions");
+        const unsigned sessions = static_cast<unsigned>(
+          std::max(0, requested_sessions > 0 ? requested_sessions : getIntOption_("threads")));
 
         if (want_rt)
         {

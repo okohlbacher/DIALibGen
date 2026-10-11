@@ -43,7 +43,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-tune_heads` | string | `both` | rt,ccs,both | Which models to tune. |
 | `-tune_out_models` | string | (empty) |  | Keep the tuned ONNX files and their .tune.json and .trajectory.tsv sidecars here. Default: a scratch directory, removed on exit -- the deliverable is the library. |
 | `-tune_predict_gpu` | bool | `false` |  | Use the GPU for the re-prediction pass (the ONNX one, not training). |
-| `-tune_predict_sessions` | int | `0` | 0: | ONNX Runtime sessions for the re-prediction pass; 0 = default. |
+| `-tune_predict_sessions` | int | `0` | 0: | ONNX Runtime sessions for the re-prediction pass; 0 = as many as -threads (-threads 0: one per physical core). |
 | `-tune_keep_free_cysteine_offset` | bool | `false` |  | Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by default: that offset was fitted against the STOCK model, and a model tuned on this run's own identifications has had the chance to learn the effect itself -- applying both counts it twice. |
 | `-log` | string | (empty) |  | Name of log file (created only when specified) |
 | `-debug` | int | `0` |  | Sets the debug level |

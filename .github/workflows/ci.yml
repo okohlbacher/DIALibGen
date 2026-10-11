@@ -369,9 +369,9 @@ jobs:
           # The TSV is the DIA-NN dialect: a header and at least one row.
           rows=$(wc -l < out.tsv)
           [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
-          # Require DIA-NN column spellings (DIANNLibraryFile::Columns).
-          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
-                     Relative.Intensity Fragment.Type Protein.Group; do
+          # Require DIA-NN column spellings (DIANNLibraryFile::TSVColumns).
+          for col in Precursor.Id ModifiedPeptide PrecursorMz ProductMz \
+                     LibraryIntensity FragmentType UniprotID ProteinName Protein.Group; do
             head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
               || { echo "::error::the TSV header has no $col column"; exit 1; }
           done

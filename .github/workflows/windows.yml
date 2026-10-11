@@ -549,8 +549,8 @@ jobs:
                   sys.exit(f"::error::the embedded recipe is missing {key!r}")
           print(f"library: {f.metadata.num_rows} precursors")
           PY
-          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
-                     Relative.Intensity Fragment.Type Protein.Group; do
+          for col in Precursor.Id ModifiedPeptide PrecursorMz ProductMz \
+                     LibraryIntensity FragmentType UniprotID ProteinName Protein.Group; do
             head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
               || { echo "::error::the TSV header has no $col column"; exit 1; }
           done

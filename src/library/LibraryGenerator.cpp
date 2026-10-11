@@ -4,6 +4,7 @@
 #include <odia/LibraryGenerator.h>
 #include <odia/Hardware.h>
 #include <odia/PeptDeepPredictor.h>
+#include <odia/PeptideParser.h>
 #include <odia/Trace.h>
 
 #include "Parallel.h"
@@ -264,14 +265,69 @@ namespace ODIA
       bool invalid = false;               ///< the protein sequence did not parse
       std::size_t ambiguous = 0;          ///< peptides dropped for X/B/Z/J or no mass
       std::vector<std::string> peptides;  ///< accepted, in digest order
+      std::vector<std::uint8_t> shard;    ///< the peptide map shard of each
     };
 
-    /// One precursor of one modified form, ready to append.
+    /// The peptide map, one shard of it: peptide -> ';'-separated accessions.
+    using PeptideMap = std::unordered_map<std::string, std::string>;
+    using PeptideItem = const PeptideMap::value_type*;
+
+    /// Every item of @p shards, in key order: the order one std::map holding
+    /// them all would iterate in.
+    ///
+    /// Bucketed by the first two bytes (unsigned, as std::string compares, a
+    /// missing byte as 0, which sorts a prefix first), which is the key order
+    /// between buckets; each bucket is then sorted on its own. Keys are
+    /// unique across the shards, so the result does not depend on which shard
+    /// held what or on the thread count.
+    std::vector<PeptideItem> inKeyOrder(const std::vector<PeptideMap>& shards, unsigned threads)
+    {
+      constexpr std::size_t BUCKETS = std::size_t(1) << 16;
+      const auto bucket = [](const std::string& key) {
+        const std::size_t c0 = key.size() > 0 ? static_cast<unsigned char>(key[0]) : 0u;
+        const std::size_t c1 = key.size() > 1 ? static_cast<unsigned char>(key[1]) : 0u;
+        return (c0 << 8) | c1;
+      };
+      std::vector<std::vector<std::size_t>> at(shards.size(), std::vector<std::size_t>(BUCKETS, 0));
+      parallel::forEach(shards.size(), threads, [&](std::size_t sh)
+      { for (const auto& item : shards[sh]) { ++at[sh][bucket(item.first)]; } });
+      std::vector<std::size_t> bucket_begin(BUCKETS + 1, 0);
+      std::size_t total = 0;
+      for (std::size_t b = 0; b < BUCKETS; ++b)
+      {
+        bucket_begin[b] = total;
+        for (auto& counts : at)
+        {
+          const std::size_t c = counts[b];
+          counts[b] = total;   // from now on: where this shard's next item of bucket b goes
+          total += c;
+        }
+      }
+      bucket_begin[BUCKETS] = total;
+      std::vector<PeptideItem> items(total);
+      parallel::forEach(shards.size(), threads, [&](std::size_t sh)
+      { for (const auto& item : shards[sh]) { items[at[sh][bucket(item.first)]++] = &item; } });
+      constexpr std::size_t TASK = 16;   // buckets; one first byte spans 256 of them
+      parallel::forEach(BUCKETS / TASK, threads, [&](std::size_t task)
+      {
+        for (std::size_t b = task * TASK; b < (task + 1) * TASK; ++b)
+        {
+          std::sort(items.begin() + static_cast<std::ptrdiff_t>(bucket_begin[b]),
+                    items.begin() + static_cast<std::ptrdiff_t>(bucket_begin[b + 1]),
+                    [](PeptideItem a, PeptideItem b) { return a->first < b->first; });
+        }
+      });
+      return items;
+    }
+
+    /// One precursor of one modified form, ready to append: its fragments
+    /// are [first, first + count) of the peptide's `fragments`.
     struct EnumeratedPrecursor
     {
       double mz;
       int charge;
-      std::vector<Fragment> fragments;
+      std::uint32_t first;
+      std::uint32_t count;
     };
 
     struct EnumeratedForm
@@ -288,14 +344,52 @@ namespace ODIA
       bool parsed = false;
       std::size_t dropped_precursor_mz = 0;
       std::size_t dropped_too_few_fragments = 0;
+      std::size_t precursors = 0;          ///< over all forms
       std::vector<EnumeratedForm> forms;
+      std::vector<Fragment> fragments;     ///< every precursor's, one after the other
     };
 
     /// Items per parallel task and per wave. A wave is computed in parallel
-    /// and then merged serially in input order, so memory is bounded by the
-    /// wave and the merge sees exactly the serial order.
+    /// and then merged in input order, so memory is bounded by the wave and
+    /// the merge sees exactly the serial order.
     constexpr std::size_t TASK_ITEMS = 256;
     constexpr std::size_t TASKS_PER_THREAD = 8;
+
+    /// Sequences per forEach grain when parsing (parsePeptide): a parse is
+    /// about a microsecond, too little to hand out one index at a time.
+    constexpr std::size_t PARSE_GRAIN = 256;
+
+    /// Runs @p task on a pool worker, or on this thread, without the
+    /// overlap, when no worker can be started (a process or cgroup thread
+    /// limit). The result is the same either way.
+    ///
+    /// The handle waits for the task when it goes, exceptions or not: the
+    /// task refers to the caller's locals.
+    class Overlapped
+    {
+    public:
+      Overlapped() = default;
+      explicit Overlapped(std::future<void> f) : f_(std::move(f)) {}
+      Overlapped(Overlapped&&) = default;
+      Overlapped& operator=(Overlapped&& other)
+      {
+        if (f_.valid()) { f_.wait(); }
+        f_ = std::move(other.f_);
+        return *this;
+      }
+      ~Overlapped() { if (f_.valid()) { f_.wait(); } }
+      bool valid() const { return f_.valid(); }
+      void get() { f_.get(); }
+
+    private:
+      std::future<void> f_;
+    };
+
+    template <class Task>
+    Overlapped overlap(const Task& task)
+    {
+      return Overlapped(parallel::async(task));
+    }
   } // namespace
 
   LibraryGenerator::Stats LibraryGenerator::generate(const std::string& fasta_file,
@@ -325,8 +419,21 @@ namespace ODIA
 
     trace::Scope digest_phase("digest", 0);
 
-    // Digest in parallel, merge serially in FASTA order: the peptide map and
-    // its accession lists come out exactly as from the serial loop.
+    // Peptides are deduplicated across proteins; a peptide seen in several
+    // proteins accumulates them, which is what protein inference later needs.
+    //
+    // Digested in parallel and merged in parallel too: the peptide map is
+    // split into shards by a hash of the peptide, every shard visits the
+    // proteins in FASTA order, so each accession list is built exactly as by
+    // one serial pass, and the keys are put in order at the end (inKeyOrder).
+    //
+    // At most 16 digest threads. The digest is cheap (about 9 CPU-s for a
+    // whole human proteome) and beyond 16 threads it got no faster but burnt
+    // CPU waiting: at 96 threads 98 CPU-s for the same 2.3 s (2.2 s and 22
+    // CPU-s at 16).
+    const unsigned digest_threads = std::min(threads, 16u);
+    const std::size_t shards = digest_threads;
+    std::vector<PeptideMap> peptide_to_proteins(shards);
     const auto digestOne = [&](const ProteaseDigestion& digestion, const FASTAFile::FASTAEntry& entry,
                                DigestedProtein& out)
     {
@@ -369,19 +476,12 @@ namespace ODIA
         }
         catch (const std::exception&)
         { ++out.ambiguous; continue; }
+        out.shard.push_back(static_cast<std::uint8_t>(std::hash<std::string>{}(residues) % shards));
         out.peptides.push_back(std::move(residues));
       }
     };
 
-    // Peptides are deduplicated across proteins; a peptide seen in several
-    // proteins accumulates them, which is what protein inference later needs.
-    std::map<std::string, std::string> peptide_to_proteins;
     const std::size_t wave = TASK_ITEMS * TASKS_PER_THREAD * threads;
-    // At most 16 digest threads. The digest is cheap (about 9 CPU-s for a
-    // whole human proteome) and beyond 16 threads it got no faster but burnt
-    // CPU waiting: at 96 threads 98 CPU-s for the same 2.3 s (2.2 s and 22
-    // CPU-s at 16).
-    const unsigned digest_threads = std::min(threads, 16u);
     std::vector<DigestedProtein> digested;
     for (std::size_t first = 0; first < entries.size(); first += wave)
     {
@@ -400,25 +500,37 @@ namespace ODIA
 
       for (std::size_t k = 0; k < count; ++k)
       {
-        const auto& entry = entries[first + k];
         if (digested[k].invalid) { ++stats.dropped_proteins; continue; }
         stats.dropped_ambiguous_peptides += digested[k].ambiguous;
-        for (const auto& residues : digested[k].peptides)
+      }
+      parallel::forEach(shards, digest_threads, [&](std::size_t sh)
+      {
+        auto& map = peptide_to_proteins[sh];
+        for (std::size_t k = 0; k < count; ++k)
         {
-          auto& proteins = peptide_to_proteins[residues];
-          // Compare on ';' boundaries, not by substring: a plain find() drops P1
-          // when P12 is already present, which is routine with isoform accessions
-          // (P12345 / P12345-2) and with the sp|X|Y form we emit.
-          if (proteins.empty()) { proteins = entry.identifier; }
-          else if (!containsAccession(proteins, entry.identifier))
+          auto& protein = digested[k];
+          if (protein.invalid) { continue; }
+          const auto& accession = entries[first + k].identifier;
+          for (std::size_t q = 0; q < protein.peptides.size(); ++q)
           {
-            proteins += ';';
-            proteins += entry.identifier;
+            if (protein.shard[q] != sh) { continue; }
+            // Each peptide is visited by its own shard only, so it can be moved.
+            auto& proteins = map[std::move(protein.peptides[q])];
+            // Compare on ';' boundaries, not by substring: a plain find() drops P1
+            // when P12 is already present, which is routine with isoform accessions
+            // (P12345 / P12345-2) and with the sp|X|Y form we emit.
+            if (proteins.empty()) { proteins = accession; }
+            else if (!containsAccession(proteins, accession))
+            {
+              proteins += ';';
+              proteins += accession;
+            }
           }
         }
-      }
+      });
     }
-    stats.peptides = peptide_to_proteins.size();
+    const std::vector<PeptideItem> ordered = inKeyOrder(peptide_to_proteins, threads);
+    stats.peptides = ordered.size();
     digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
     digest_phase.end();
 
@@ -496,15 +608,18 @@ namespace ODIA
     // Reject the estimate before multiplying: an extreme fragment cap must
     // not wrap size_t and bypass the 32-bit CSR limit in reserve().
     constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
-    Library::checkTransitionCapacity(peptide_to_proteins.size());
-    const auto estimated_precursors = peptide_to_proteins.size() * params.charges.size();
+    Library::checkTransitionCapacity(ordered.size());
+    const auto estimated_precursors = ordered.size() * params.charges.size();
     if (params.max_fragments && estimated_precursors > transition_limit / params.max_fragments)
     { throw std::length_error("library exceeds the 32-bit transition limit (4294967295); split the input FASTA"); }
     library.reserve(estimated_precursors, estimated_precursors * params.max_fragments);
 
     // Enumerate in parallel -- parsing, modifications, precursor m/z and the
-    // fragment ladders are the expensive part -- and append serially in map
-    // order, interning strings in the same order as the serial loop did.
+    // fragment ladders are the expensive part -- and append in map order:
+    // the output offsets of a wave are a prefix sum over its peptides, the
+    // arrays are filled in parallel at those offsets, and only the interning
+    // of strings stays serial, in the order of the serial loop, on a helper
+    // thread that overlaps the next wave's enumeration.
     const auto enumerateOne = [&](const std::string& sequence, EnumeratedPeptide& out)
     {
       AASequence base;
@@ -554,71 +669,131 @@ namespace ODIA
             ++out.dropped_too_few_fragments;
             continue;
           }
-          f.precursors.push_back({precursor_mz, z, fragments});
+          f.precursors.push_back({precursor_mz, z, static_cast<std::uint32_t>(out.fragments.size()),
+                                  static_cast<std::uint32_t>(fragments.size())});
+          out.fragments.insert(out.fragments.end(), fragments.begin(), fragments.end());
+          ++out.precursors;
         }
       }
     };
 
-    std::vector<const std::pair<const std::string, std::string>*> ordered;
-    ordered.reserve(peptide_to_proteins.size());
-    for (const auto& item : peptide_to_proteins) { ordered.push_back(&item); }
 
     std::vector<std::size_t> variable_counts(requested_variable.size(), 0);
-    std::vector<EnumeratedPeptide> enumerated;
+    auto& p = library.precursors();
+    auto& t = library.transitions();
+    auto& strings = library.strings();
+    std::vector<EnumeratedPeptide> enumerated[2];   // the wave being interned, and the next
+    std::vector<std::size_t> precursor_at, transition_at;
+    std::size_t precursor_total = p.mz.size(), transition_total = t.product_mz.size();
+    Overlapped interning;   // after the waves: waited for before they go
     for (std::size_t first = 0; first < ordered.size(); first += wave)
     {
       const std::size_t count = std::min(wave, ordered.size() - first);
-      enumerated.assign(count, EnumeratedPeptide{});
+      auto& items = enumerated[first / wave % 2];
+      items.resize(count);
       parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
       {
         const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
         for (std::size_t k = task * TASK_ITEMS; k < end; ++k)
-        { enumerateOne(ordered[first + k]->first, enumerated[k]); }
+        {
+          items[k] = EnumeratedPeptide{};   // the wave before last, freed in parallel
+          enumerateOne(ordered[first + k]->first, items[k]);
+        }
       });
 
+      // Where every peptide's precursors and transitions go.
+      precursor_at.resize(count);
+      transition_at.resize(count);
+      std::size_t precursors = precursor_total, transitions = transition_total;
       for (std::size_t k = 0; k < count; ++k)
       {
-        const auto& peptide = enumerated[k];
+        const auto& peptide = items[k];
+        precursor_at[k] = precursors;
+        transition_at[k] = transitions;
         if (!peptide.parsed) { continue; }
         stats.dropped_precursor_mz += peptide.dropped_precursor_mz;
         stats.dropped_too_few_fragments += peptide.dropped_too_few_fragments;
-
-        const std::uint32_t protein_handle = library.strings().intern(ordered[first + k]->second);
         for (const auto& form : peptide.forms)
         {
-          for (std::size_t k = 0; k < variable_counts.size(); ++k)
-          { if (form.variable_mods >> k & 1) { variable_counts[k] += form.precursors.size(); } }
-          const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
-          for (const auto& precursor : form.precursors)
-          {
-            const auto& fragments = precursor.fragments;
-            auto& p = library.precursors();
-            auto& t = library.transitions();
-            Library::checkTransitionCapacity(t.product_mz.size(), fragments.size());
-            p.mz.push_back(toFixed(precursor.mz));
-            p.irt.push_back(std::nanf(""));   // filled in by prediction
-            p.im.push_back(std::nanf(""));
-            p.ccs.push_back(std::nanf(""));   // likewise
-            p.charge.push_back(static_cast<std::uint8_t>(precursor.charge));
-            p.decoy.push_back(0);
-            p.modified_sequence.push_back(sequence_handle);
-            p.protein_group.push_back(protein_handle);
-            p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
-            p.transition_count.push_back(static_cast<std::uint32_t>(fragments.size()));
+          for (std::size_t v = 0; v < variable_counts.size(); ++v)
+          { if (form.variable_mods >> v & 1) { variable_counts[v] += form.precursors.size(); } }
+        }
+        precursors += peptide.precursors;
+        transitions += peptide.fragments.size();
+      }
+      Library::checkTransitionCapacity(transition_total, transitions - transition_total);
 
-            for (const auto& f : fragments)
+      // The previous wave's strings are interned: the arrays can grow.
+      if (interning.valid()) { interning.get(); }
+      p.mz.resize(precursors); p.irt.resize(precursors); p.im.resize(precursors); p.ccs.resize(precursors);
+      p.charge.resize(precursors); p.decoy.resize(precursors);
+      p.modified_sequence.resize(precursors); p.protein_group.resize(precursors);
+      p.transition_begin.resize(precursors); p.transition_count.resize(precursors);
+      t.product_mz.resize(transitions); t.library_intensity.resize(transitions); t.type.resize(transitions);
+      t.ordinal.resize(transitions); t.charge.resize(transitions); t.loss.resize(transitions);
+
+      // The string handles, serially and in order, beside everything else;
+      // they are the only columns it writes.
+      const auto* wave_items = &items;
+      const std::size_t wave_first = first, wave_precursor = precursor_total;
+      interning = overlap([&, wave_items, wave_first, count, wave_precursor]() {
+        std::size_t i = wave_precursor;
+        for (std::size_t k = 0; k < count; ++k)
+        {
+          const auto& peptide = (*wave_items)[k];
+          if (!peptide.parsed) { continue; }
+          const std::uint32_t protein_handle = strings.intern(ordered[wave_first + k]->second);
+          for (const auto& form : peptide.forms)
+          {
+            const std::uint32_t sequence_handle = strings.intern(form.sequence);
+            for (std::size_t q = 0; q < form.precursors.size(); ++q, ++i)
             {
-              t.product_mz.push_back(toFixed(f.mz));
-              t.library_intensity.push_back(1.0f);  // placeholder until prediction
-              t.type.push_back(f.type);
-              t.ordinal.push_back(f.ordinal);
-              t.charge.push_back(f.charge);
-              t.loss.push_back(LossType::None);
+              p.modified_sequence[i] = sequence_handle;
+              p.protein_group[i] = protein_handle;
             }
           }
         }
-      }
+      });
+
+      parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
+      {
+        const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
+        for (std::size_t k = task * TASK_ITEMS; k < end; ++k)
+        {
+          const auto& peptide = items[k];
+          if (!peptide.parsed) { continue; }
+          std::size_t i = precursor_at[k], j = transition_at[k];
+          for (const auto& form : peptide.forms)
+          {
+            for (const auto& precursor : form.precursors)
+            {
+              p.mz[i] = toFixed(precursor.mz);
+              p.irt[i] = std::nanf("");   // filled in by prediction
+              p.im[i] = std::nanf("");
+              p.ccs[i] = std::nanf("");   // likewise
+              p.charge[i] = static_cast<std::uint8_t>(precursor.charge);
+              p.decoy[i] = 0;
+              p.transition_begin[i] = static_cast<std::uint32_t>(j);
+              p.transition_count[i] = precursor.count;
+              for (std::uint32_t q = 0; q < precursor.count; ++q, ++j)
+              {
+                const auto& f = peptide.fragments[precursor.first + q];
+                t.product_mz[j] = toFixed(f.mz);
+                t.library_intensity[j] = 1.0f;  // placeholder until prediction
+                t.type[j] = f.type;
+                t.ordinal[j] = f.ordinal;
+                t.charge[j] = f.charge;
+                t.loss[j] = LossType::None;
+              }
+              ++i;
+            }
+          }
+        }
+      });
+      precursor_total = precursors;
+      transition_total = transitions;
     }
+    if (interning.valid()) { interning.get(); }
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
@@ -637,6 +812,17 @@ namespace ODIA
     enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
     enumerate_phase.end();
     release_phase.start("release", 0);
+    // The peptide map and the last waves, freed in parallel; the rest goes on return.
+    parallel::forEach(peptide_to_proteins.size(), digest_threads, [&](std::size_t sh)
+    { PeptideMap().swap(peptide_to_proteins[sh]); });
+    for (auto& items : enumerated)
+    {
+      parallel::forEach((items.size() + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
+      {
+        for (std::size_t k = task * TASK_ITEMS; k < std::min(items.size(), (task + 1) * TASK_ITEMS); ++k)
+        { items[k] = EnumeratedPeptide{}; }
+      });
+    }
     return stats;
   }
 
@@ -682,6 +868,18 @@ namespace ODIA
       const unsigned cores = physicalCores();
       const unsigned want = requested == 0 ? cores : std::min(requested, cores);
       return static_cast<int>(std::max(1u, want));
+    }
+
+    /// Host threads for the work that runs beside a prediction call: parsing
+    /// the next block, and selecting and appending the previous one. On the
+    /// CPU every session already holds a core, and the helper has a whole
+    /// block's prediction to finish in, so it gets an eighth of the threads
+    /// instead of a second full team competing with the sessions. On CUDA the
+    /// cores are mostly free while the device computes.
+    unsigned overlapThreads(const PeptDeepPredictor& predictor, unsigned threads)
+    {
+      if (predictor.provider() == PeptDeepPredictor::Provider::CUDA) { return std::max(1u, threads / 2); }
+      return std::max(1u, threads / 8);
     }
   } // namespace
 
@@ -745,11 +943,11 @@ namespace ODIA
     {
       try
       {
-        parsed[k] = AASequence::fromString(std::string(library.strings().get(candidates[k])));
+        parsed[k] = parsePeptide(library.strings().get(candidates[k]));
         parsed_ok[k] = 1;
       }
       catch (const std::exception&) {}   // left NaN, and counted below
-    });
+    }, PARSE_GRAIN);
     std::vector<AASequence> unique_peptides;
     std::vector<std::uint32_t> slot_handle;
     unique_peptides.reserve(candidates.size());
@@ -790,7 +988,7 @@ namespace ODIA
         value += freeCysteineRtOffset(freeCysteines(unique_peptides[slot]));
       }
       by_handle[slot_handle[slot]] = value;
-    });
+    }, 4096);
 
     std::size_t unpredicted = 0;
     auto& precursors = library.precursors();
@@ -955,10 +1153,11 @@ namespace ODIA
     // Blocked so that peak memory is set by the block, not by the proteome.
     //
     // Pipelined: while the model predicts block k (on the GPU, or on the CPU
-    // sessions), the fragment selection of block k-1 runs on the host
-    // threads, and block k-2's result is appended. Selection is parallel per
-    // precursor and the append is serial in precursor order, so the arrays
-    // come out exactly as from the serial loop, whatever the thread count.
+    // sessions), a helper thread parses block k+1 and then selects and
+    // appends block k-1, so the sessions do not wait for host work between
+    // two calls. Selection is parallel per precursor and the append is serial
+    // in precursor order, one block after the other, so the arrays come out
+    // exactly as from the serial loop, whatever the thread count.
     //
     // The block is also the unit every session waits at: 100,000 precursors
     // on the CPU, so that a call is long against its last batch; 20,000 on
@@ -986,7 +1185,7 @@ namespace ODIA
       std::vector<RankedFragments> ranked;
     };
 
-    const auto parse = [&](std::size_t base)
+    const auto parse = [&](std::size_t base, unsigned team)
     {
       trace::Scope parse_step("parse", 2);
       parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
@@ -997,25 +1196,23 @@ namespace ODIA
       const std::size_t size = block.last - base;
       block.peptides.resize(size);
       block.charges.resize(size);
-      parallel::forEach(size, threads, [&](std::size_t k)
+      parallel::forEach(size, team, [&](std::size_t k)
       {
-        block.peptides[k] =
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
+        block.peptides[k] = parsePeptide(library.strings().get(p.modified_sequence[base + k]));
         block.charges[k] = static_cast<int>(p.charge[base + k]);
-      });
+      }, PARSE_GRAIN);
       return block;
     };
 
-    const auto select = [&](Block& block)
+    const auto select = [&](Block& block, unsigned team)
     {
-      // On a helper thread, overlapping the next block's prediction.
       trace::Scope post_step("post", 2);
       post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
       post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
       const std::size_t size = block.last - block.base;
       block.ranked.assign(size, RankedFragments{});
       constexpr std::size_t TASK = 256;
-      parallel::forEach((size + TASK - 1) / TASK, threads, [&](std::size_t task)
+      parallel::forEach((size + TASK - 1) / TASK, team, [&](std::size_t task)
       {
         std::vector<Fragment> fragments;
         for (std::size_t k = task * TASK; k < std::min(size, (task + 1) * TASK); ++k)
@@ -1103,38 +1300,41 @@ namespace ODIA
       sink->rows(std::move(rows));
     };
 
-    Block selecting;              // its selection runs in `selection`
-    std::future<void> selection;
+    const unsigned helper = overlapThreads(predictor, threads);
+    Block next = parse(0, threads);   // nothing to overlap with yet: every thread
+    Block previous;                   // predicted, not yet selected and appended
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
+      Block current = std::move(next);
+      next = Block{};
+      // Declared after `current`, so that it is waited for before `current`
+      // goes, should the prediction throw.
+      Overlapped host = overlap([&]() {
+        if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
+        if (previous.last > previous.base)
+        {
+          select(previous, helper);
+          append(previous);
+          previous = Block{};   // freed here, not between two calls
+        }
+      });
       trace::Scope block_step("block", 1);
       block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
-      block_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
-      Block block = parse(base);
+      block_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
       std::vector<PeptDeepPredictor::Failure> failures;
       trace::Scope predict_step("predict", 2);
-      predict_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
-      block.spectra = predictor.predictMS2(block.peptides, block.charges, nce, instrument, &failures);
+      predict_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      current.spectra = predictor.predictMS2(current.peptides, current.charges, nce, instrument, &failures);
       predict_step.end();
-
-      Block done;
-      if (selection.valid()) { selection.get(); done = std::move(selecting); }
-      selecting = std::move(block);
-      try { selection = std::async(std::launch::async, [&] { select(selecting); }); }
-      catch (const std::system_error&)
-      {
-        // No thread to spare (a process or cgroup thread limit): select on
-        // this one, without the overlap.
-        select(selecting);
-        selection = std::async(std::launch::deferred, [] {});
-      }
-      if (done.last > done.base) { append(done); }
+      host.get();
+      previous = std::move(current);
     }
-    if (selection.valid())
+    if (previous.last > previous.base)
     {
+      // The sessions are done: every thread.
       trace::Scope drain_step("drain", 1);
-      selection.get();
-      append(selecting);
+      select(previous, threads);
+      append(previous);
     }
 
     if (sink != nullptr)
@@ -1287,42 +1487,54 @@ namespace ODIA
     if (lengths != nullptr) { lengths->assign(n, 0); }
 
     // Blocked, as the MS2 pass is: the whole proteome at once would hold every
-    // parsed AASequence live alongside the library.
+    // parsed AASequence live alongside the library. Pipelined like it too:
+    // while block k predicts, a helper thread parses block k+1 and stores
+    // block k-1's values. Every row is written by exactly one block, so the
+    // result does not depend on the overlap.
     const std::size_t BLOCK = ccsBlock();
+    const unsigned threads = parallel::workers(sessions);
+    const unsigned helper = overlapThreads(predictor, threads);
     std::size_t unpredicted = 0;
-    for (std::size_t base = 0; base < n; base += BLOCK)
+
+    struct Block
     {
-      const std::size_t last = std::min(base + BLOCK, n);
-      trace::Scope block_step("block", 1);
-      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
-      block_step.fields().rows = static_cast<std::int64_t>(last - base);
+      std::size_t base = 0, last = 0;
+      std::vector<AASequence> peptides;
+      std::vector<int> charges;
+      std::vector<float> ccs;
+    };
+
+    const auto parse = [&](std::size_t base, unsigned team)
+    {
+      Block block;
+      block.base = base;
+      block.last = std::min(base + BLOCK, n);
       trace::Scope parse_step("parse", 2);
-      std::vector<AASequence> peptides(last - base);
-      std::vector<int> charges(last - base);
-      parallel::forEach(last - base, parallel::workers(sessions), [&](std::size_t k)
+      parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      parse_step.fields().rows = static_cast<std::int64_t>(block.last - base);
+      block.peptides.resize(block.last - base);
+      block.charges.resize(block.last - base);
+      parallel::forEach(block.last - base, team, [&](std::size_t k)
       {
-        peptides[k] =
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
-        charges[k] = static_cast<int>(p.charge[base + k]);
-      });
-      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
-      parse_step.end();
+        block.peptides[k] = parsePeptide(library.strings().get(p.modified_sequence[base + k]));
+        block.charges[k] = static_cast<int>(p.charge[base + k]);
+      }, PARSE_GRAIN);
       if (lengths != nullptr)
       {
-        for (std::size_t k = 0; k < peptides.size(); ++k)
-        { (*lengths)[base + k] = static_cast<std::uint16_t>(peptides[k].size()); }
+        for (std::size_t k = 0; k < block.peptides.size(); ++k)
+        { (*lengths)[base + k] = static_cast<std::uint16_t>(block.peptides[k].size()); }
       }
+      return block;
+    };
 
-      std::vector<PeptDeepPredictor::Failure> failures;
-      trace::Scope predict_step("predict", 2);
-      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
-      const auto ccs = predictor.predictCCS(peptides, charges, &failures);
-      predict_step.end();
+    const auto post = [&](const Block& block)
+    {
       trace::Scope post_step("post", 2);
-      post_step.fields().rows = static_cast<std::int64_t>(last - base);
-      for (std::size_t i = base; i < last; ++i)
+      post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
+      for (std::size_t i = block.base; i < block.last; ++i)
       {
-        p.ccs[i] = ccs[i - base];
+        p.ccs[i] = block.ccs[i - block.base];
         if (std::isnan(p.ccs[i])) { ++unpredicted; continue; }
         // Derive 1/K0 alongside. CCS stays the authoritative value -- this is
         // the nominal mobility a timsTOF would report for it, which is what a
@@ -1333,7 +1545,35 @@ namespace ODIA
             mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]));
         }
       }
+    };
+
+    Block next = parse(0, threads);   // nothing to overlap with yet: every thread
+    Block previous;                   // predicted, not yet stored
+    for (std::size_t base = 0; base < n; base += BLOCK)
+    {
+      Block current = std::move(next);
+      next = Block{};
+      // Declared after `current`: waited for before `current` goes.
+      Overlapped host = overlap([&]() {
+        if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
+        if (previous.last > previous.base)
+        {
+          post(previous);
+          previous = Block{};   // freed here, not between two calls
+        }
+      });
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      current.ccs = predictor.predictCCS(current.peptides, current.charges, &failures);
+      predict_step.end();
+      host.get();
+      previous = std::move(current);
     }
+    if (previous.last > previous.base) { post(previous); }
     return unpredicted;
   }
 
@@ -1414,7 +1654,7 @@ namespace ODIA
         // Predicted again the old way: alone, or as a batch of two rows (any
         // batch of two or more gives a row the same value).
         if (!predictor_) { predictor_ = std::make_unique<PeptDeepPredictor>(model_, false, 1, 1); }
-        const auto peptide = AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i])));
+        const auto peptide = parsePeptide(library.strings().get(p.modified_sequence[i]));
         const int charge = static_cast<int>(p.charge[i]);
         const std::size_t rows = old_alone[k] ? 1 : 2;
         const auto ccs = predictor_->predictCCS(std::vector<AASequence>(rows, peptide), std::vector<int>(rows, charge));
@@ -1465,7 +1705,7 @@ namespace ODIA
       // Parse with OpenMS so terminal and nested modification names cannot
       // become bogus residue tokens. Terminal modifications stay terminal.
       AASequence target;
-      try { target = AASequence::fromString(sequence); }
+      try { target = parsePeptide(sequence); }
       catch (const std::exception&) { ++skipped; continue; }
       struct Token { std::string text; char residue; bool modified; };
       std::vector<Token> tokens;

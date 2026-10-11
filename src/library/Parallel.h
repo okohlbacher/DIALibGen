@@ -5,6 +5,8 @@
 
 #include <odia/Hardware.h>
 
+#include "ThreadPool.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -17,24 +19,6 @@
 
 namespace ODIA::parallel
 {
-  /// Starts up to @p n threads running @p fn into @p pool and returns how many
-  /// started. A thread that cannot be created (EAGAIN under a process or
-  /// cgroup thread limit) ends the starting, and the work runs on the threads
-  /// that exist -- the caller's included -- instead of the process
-  /// terminating with joinable threads in a destroyed vector. Callers hand
-  /// out work through a shared counter, so fewer threads change nothing but
-  /// the time.
-  template <class Fn>
-  std::size_t startThreads(std::vector<std::thread>& pool, std::size_t n, const Fn& fn)
-  {
-    for (std::size_t t = 0; t < n; ++t)
-    {
-      try { pool.emplace_back(fn); }
-      catch (const std::system_error&) { break; }
-    }
-    return pool.size();
-  }
-
   /// Worker threads for host-side work: `requested`, or every physical core
   /// for 0 (the meaning of -threads 0; see physicalCores()).
   inline unsigned workers(unsigned requested)
@@ -53,10 +37,16 @@ namespace ODIA::parallel
   /// If bodies throw, the exception of the LOWEST failing index is rethrown
   /// once all threads have stopped -- the one a serial loop would have hit
   /// first -- so the error message does not depend on scheduling either.
+  ///
+  /// Indices are handed out @p grain at a time, in order within a grain: one
+  /// shared counter increment per index costs more than a body of a few
+  /// hundred nanoseconds once dozens of threads contend for its cache line.
   template <class Body>
-  void forEach(std::size_t n, unsigned threads, Body&& body)
+  void forEach(std::size_t n, unsigned threads, Body&& body, std::size_t grain = 1)
   {
-    const std::size_t count = std::min<std::size_t>(std::max(1u, threads), n);
+    grain = std::max<std::size_t>(1, grain);
+    const std::size_t grains = (n + grain - 1) / grain;
+    const std::size_t count = std::min<std::size_t>(std::max(1u, threads), grains);
     if (count <= 1)
     {
       for (std::size_t i = 0; i < n; ++i) { body(i); }
@@ -71,25 +61,29 @@ namespace ODIA::parallel
 
     const auto run = [&]
     {
-      for (std::size_t i = next++; i < n && i < stop_at.load(); i = next++)
+      for (std::size_t g = next.fetch_add(1, std::memory_order_relaxed); g < grains;
+           g = next.fetch_add(1, std::memory_order_relaxed))
       {
-        try { body(i); }
-        catch (...)
+        const std::size_t end = std::min(n, (g + 1) * grain);
+        for (std::size_t i = g * grain; i < end && i < stop_at.load(std::memory_order_relaxed); ++i)
         {
-          const std::lock_guard<std::mutex> lock(error_mutex);
-          if (i < error_index) { error_index = i; error = std::current_exception(); }
-          // Indices below i are still run, so a lower failure is still found.
-          std::size_t current = stop_at.load();
-          while (i < current && !stop_at.compare_exchange_weak(current, i)) {}
+          try { body(i); }
+          catch (...)
+          {
+            const std::lock_guard<std::mutex> lock(error_mutex);
+            if (i < error_index) { error_index = i; error = std::current_exception(); }
+            // Indices below i are still run, so a lower failure is still found.
+            std::size_t current = stop_at.load();
+            while (i < current && !stop_at.compare_exchange_weak(current, i)) {}
+          }
         }
+        if (g * grain >= stop_at.load(std::memory_order_relaxed)) { break; }
       }
     };
 
-    std::vector<std::thread> pool;
-    pool.reserve(count - 1);
-    startThreads(pool, count - 1, run);
-    run();
-    for (auto& t : pool) { t.join(); }
+    // On the calling thread and up to count - 1 pool workers; fewer when no
+    // more can be started, which changes only the time.
+    team(count, [&](std::size_t) { run(); });
     if (error) { std::rethrow_exception(error); }
   }
 } // namespace ODIA::parallel

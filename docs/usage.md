@@ -210,6 +210,16 @@ took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
 CPU training.
 
+`-machine:threads` (default 4) is the number of CPU threads LibTorch trains
+with. Each training step is a chain of small operations, so the count stops
+paying early: for the RT head on an Astral run (77,029 sequences) on a
+2 x 96-core EPYC 9654, an epoch took 16.7 s at 4 threads, 12.1 s at 8, 9.1 s
+at 16, 9.0 s at 32 and 10.8 s at 64, while training kept 3.8, 7.3, 14, 28
+and 56 cores busy. Above 16 threads the extra cores only wait. The tuned weights
+depend on the thread count (it fixes the order of LibTorch's reductions):
+they are reproducible with the same build at the same count, which
+`.tune.json` records as `threads`.
+
 Tune mode uses training filters such as `-filter:q_value`. Refinement-only
 settings such as `-q_precursor`, `-q_global`, `-q_protein` and observed-value
 replacement flags are refused when changed from their defaults in tune mode.

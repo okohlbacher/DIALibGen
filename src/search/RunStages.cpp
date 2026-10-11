@@ -43,6 +43,9 @@
 
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/SpectrumAccessOpenMS.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/MRMRTNormalizer.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathOSWWriter.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathWorkflow.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/SwathMapMassCorrection.h>
@@ -64,17 +67,24 @@
 #ifdef _OPENMP
 #include <omp.h>
 #endif
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <streambuf>
@@ -206,6 +216,258 @@ namespace ODIA::search
     {
       Quiet out{std::cout};
       Quiet err{std::cerr};
+    };
+
+    // ---- perf/run-efficiency prototypes (environment switches, measurement only) ----
+
+    /// An integer environment switch, or @p fallback when unset or malformed.
+    int envInt(const char* name, int fallback)
+    {
+      const char* e = std::getenv(name);
+      if (!e || !*e) { return fallback; }
+      char* end = nullptr;
+      const long v = std::strtol(e, &end, 10);
+      return (end && *end == '\0') ? static_cast<int>(v) : fallback;
+    }
+
+    std::string envStr(const char* name)
+    {
+      const char* e = std::getenv(name);
+      return e ? std::string(e) : std::string();
+    }
+
+    double stampNow()
+    {
+      if (trace::enabled()) { return trace::now(); }
+      static const auto t0 = std::chrono::steady_clock::now();
+      return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+
+    long kernelTid()
+    {
+#ifdef __linux__
+      return static_cast<long>(::syscall(SYS_gettid));
+#else
+      return 0;
+#endif
+    }
+
+    /// ODIA_CALIB_PAR=k (prototype): stock performRTNormalization with its
+    /// one serial step -- MRMFeatureFinderScoring::pickExperiment over every
+    /// seed's whole-run chromatograms, which ran alone on the main thread for
+    /// ~270 of the 275 s of calibration on the timsTOF run -- split over k
+    /// threads by seed. Everything else is stock 3.5.0's doDataNormalization_
+    /// (lib_OpenSwathWorkflow.cpp), step for step. Each transition group is
+    /// picked and scored on its own in stock code too; the groups land in one
+    /// std::map keyed by id, so the order of the threads does not matter.
+    class SplitCalibration : public OpenMS::OpenSwathCalibrationWorkflow
+    {
+    public:
+      OpenMS::TransformationDescription run(const OpenSwath::LightTargetedExperiment& targeted_exp,
+                                            std::vector<OpenSwath::SwathMap>& swath_maps, OpenMS::TransformationDescription& im_trafo,
+                                            double min_rsq, double min_coverage, const Param& default_ffparam,
+                                            const OpenMS::ChromExtractParams& cp_irt, const Param& irt_detection_param,
+                                            const Param& calibration_param, bool pasef, int k)
+      {
+        using namespace OpenMS;
+        std::vector<MSChromatogram> chromatograms;
+        TransformationDescription dummy;
+        simpleExtractChromatograms_(swath_maps, targeted_exp, chromatograms, dummy, cp_irt, pasef, false);
+
+        const bool estimateBestPeptides = irt_detection_param.getValue("estimateBestPeptides").toBool();
+        std::pair<double, double> RTRange = OpenSwathHelper::estimateRTRange(targeted_exp);
+        std::map<OpenMS::String, double> PeptideRTMap;
+        for (Size i = 0; i < targeted_exp.getCompounds().size(); i++)
+        { PeptideRTMap[targeted_exp.getCompounds()[i].id] = targeted_exp.getCompounds()[i].rt; }
+
+        Param feature_finder_param(default_ffparam);
+        feature_finder_param.setValue("Scores:use_rt_score", "false");
+        feature_finder_param.setValue("Scores:use_elution_model_score", "false");
+        feature_finder_param.setValue("rt_extraction_window", -1.0);
+        feature_finder_param.setValue("stop_report_after_feature", 1);
+        feature_finder_param.setValue("TransitionGroupPicker:PeakPickerChromatogram:signal_to_noise", 1.0);
+        feature_finder_param.setValue("TransitionGroupPicker:compute_peak_quality", "false");
+        if (estimateBestPeptides)
+        {
+          feature_finder_param.setValue("TransitionGroupPicker:compute_peak_quality", "true");
+          feature_finder_param.setValue("TransitionGroupPicker:minimal_quality", irt_detection_param.getValue("InitialQualityCutoff"));
+        }
+
+        // The seeds in k * 4 pieces (dynamic schedule), each with its own
+        // experiment, chromatograms and feature finder.
+        const std::size_t n = targeted_exp.compounds.size();
+        const std::size_t pieces = std::max<std::size_t>(1, std::min<std::size_t>(n, static_cast<std::size_t>(k) * 4));
+        std::unordered_map<std::string, std::size_t> piece_of_compound;
+        for (std::size_t i = 0; i < n; ++i) { piece_of_compound[targeted_exp.compounds[i].id] = i * pieces / n; }
+        std::vector<OpenSwath::LightTargetedExperiment> sub(pieces);
+        for (auto& e : sub) { e.proteins = targeted_exp.proteins; }
+        for (const auto& c : targeted_exp.compounds) { sub[piece_of_compound.at(c.id)].compounds.push_back(c); }
+        std::unordered_map<std::string, std::size_t> piece_of_transition;
+        for (const auto& t : targeted_exp.transitions)
+        {
+          const auto it = piece_of_compound.find(t.peptide_ref);
+          if (it == piece_of_compound.end()) { continue; }
+          sub[it->second].transitions.push_back(t);
+          piece_of_transition[t.transition_name] = it->second;
+        }
+        std::vector<std::shared_ptr<PeakMap>> xic(pieces);
+        for (auto& x : xic) { x = std::make_shared<PeakMap>(); }
+        {
+          std::vector<std::vector<MSChromatogram>> parts(pieces);
+          for (const auto& ch : chromatograms)
+          {
+            const auto it = piece_of_transition.find(ch.getNativeID());
+            if (it != piece_of_transition.end()) { parts[it->second].push_back(ch); }
+            else { for (auto& p : parts) { p.push_back(ch); } }   // not a seed transition: every piece sees it, as stock
+          }
+          for (std::size_t p = 0; p < pieces; ++p) { xic[p]->setChromatograms(parts[p]); }
+        }
+        std::vector<MRMFeatureFinderScoring::TransitionGroupMapType> maps(pieces);
+        std::vector<std::string> errors(pieces);
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(k) schedule(dynamic, 1)
+#endif
+        for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(pieces); ++p)
+        {
+          try
+          {
+            MRMFeatureFinderScoring featureFinder;
+            featureFinder.setParameters(feature_finder_param);
+            FeatureMap featureFile;
+            std::vector<OpenSwath::SwathMap> empty_swath_maps;
+            TransformationDescription empty_trafo;
+            OpenSwath::SpectrumAccessPtr chromatogram_ptr = OpenSwath::SpectrumAccessPtr(new OpenMS::SpectrumAccessOpenMS(xic[p]));
+            featureFinder.setStrictFlag(false);
+            featureFinder.pickExperiment(chromatogram_ptr, featureFile, sub[p], empty_trafo, empty_swath_maps, maps[p]);
+          }
+          catch (const std::exception& e) { errors[p] = e.what(); }
+        }
+        for (const auto& e : errors) { if (!e.empty()) { throw std::runtime_error(e); } }
+        MRMFeatureFinderScoring::TransitionGroupMapType transition_group_map;
+        for (auto& m : maps)
+        {
+          for (auto& kv : m) { transition_group_map.emplace(kv.first, std::move(kv.second)); }
+        }
+
+        // From here on stock doDataNormalization_, steps 4 to 9.
+        std::vector<std::pair<double, double>> pairs;
+        std::map<std::string, double> best_features = OpenSwathHelper::simpleFindBestFeature(transition_group_map,
+          estimateBestPeptides, irt_detection_param.getValue("OverallQualityCutoff"));
+        std::map<OpenMS::String, MRMFeatureFinderScoring::MRMTransitionGroupType*> trgrmap_allpeaks;
+        for (auto it = best_features.begin(); it != best_features.end(); ++it)
+        {
+          pairs.emplace_back(it->second, PeptideRTMap[it->first]);
+          if (transition_group_map.find(it->first) != transition_group_map.end())
+          { trgrmap_allpeaks[it->first] = &transition_group_map[it->first]; }
+        }
+        std::vector<std::pair<double, double>> pairs_corrected;
+        const std::string outlier_method = irt_detection_param.getValue("outlierMethod").toString();
+        if (outlier_method == "iter_residual" || outlier_method == "iter_jackknife")
+        {
+          pairs_corrected = MRMRTNormalizer::removeOutliersIterative(pairs, min_rsq, min_coverage,
+            irt_detection_param.getValue("useIterativeChauvenet").toBool(), outlier_method);
+        }
+        else if (outlier_method == "ransac")
+        {
+          const double pcnt_rt_threshold = irt_detection_param.getValue("RANSACMaxPercentRTThreshold");
+          const double max_rt_threshold = (RTRange.second - RTRange.first) * pcnt_rt_threshold / 100.0;
+          pairs_corrected = MRMRTNormalizer::removeOutliersRANSAC(pairs, min_rsq, min_coverage,
+            irt_detection_param.getValue("RANSACMaxIterations"), max_rt_threshold, irt_detection_param.getValue("RANSACSamplingSize"));
+        }
+        else if (outlier_method == "none") { pairs_corrected = pairs; }
+        else { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "Illegal outlierMethod " + outlier_method); }
+        if (estimateBestPeptides)
+        {
+          const bool enoughPeptides = MRMRTNormalizer::computeBinnedCoverage(RTRange, pairs_corrected,
+            irt_detection_param.getValue("NrRTBins"), irt_detection_param.getValue("MinPeptidesPerBin"),
+            irt_detection_param.getValue("MinBinsFilled"));
+          if (!enoughPeptides)
+          { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "There were not enough bins with the minimal number of peptides"); }
+        }
+        if (pairs_corrected.size() < 2)
+        { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "There are less than 2 iRT normalization peptides, not enough for an RT correction."); }
+        std::map<OpenMS::String, MRMFeatureFinderScoring::MRMTransitionGroupType*> trgrmap_final;
+        for (const auto& it : trgrmap_allpeaks)
+        {
+          if (it.second->getFeatures().empty()) { continue; }
+          const MRMFeature& feat = it.second->getBestFeature();
+          for (Size pit = 0; pit < pairs_corrected.size(); pit++)
+          {
+            if (std::fabs(feat.getRT() - pairs_corrected[pit].first) < 1e-2) { trgrmap_final[it.first] = it.second; break; }
+          }
+        }
+        SwathMapMassCorrection mc;
+        mc.setParameters(calibration_param);
+        mc.correctMZ(trgrmap_final, targeted_exp, swath_maps, pasef);
+        mc.correctIM(trgrmap_final, targeted_exp, swath_maps, pasef, im_trafo);
+        setEstimatedMzWindow(mc.getFragmentMzWindow());
+        setEstimatedImWindow(mc.getFragmentImWindow());
+        setEstimatedMs1MzWindow(mc.getPrecursorMzWindow());
+        setEstimatedMs1ImWindow(mc.getPrecursorImWindow());
+        TransformationDescription trafo_out;
+        trafo_out.setDataPoints(pairs_corrected);
+        Param model_params;
+        model_params.setValue("symmetric_regression", "false");
+        model_params.setValue("span", irt_detection_param.getValue("lowess:span"));
+        model_params.setValue("auto_span", irt_detection_param.getValue("lowess:auto_span"));
+        model_params.setValue("auto_span_min", irt_detection_param.getValue("lowess:auto_span_min"));
+        model_params.setValue("auto_span_max", irt_detection_param.getValue("lowess:auto_span_max"));
+        model_params.setValue("auto_span_grid", irt_detection_param.getValue("lowess:auto_span_grid"));
+        model_params.setValue("num_nodes", irt_detection_param.getValue("b_spline:num_nodes"));
+        const OpenMS::String model_type = irt_detection_param.getValue("alignmentMethod").toString();
+        trafo_out.fitModel(model_type, model_params);
+        return trafo_out;
+      }
+    };
+
+    /// ODIA_OSW_LOG=<prefix>: stock OpenSWATH's per-batch progress lines on
+    /// std::cout ("Thread 3_0 will analyze N compounds and M transitions from
+    /// SWATH i (batch j out of k)"), each stamped with the trace clock and the
+    /// kernel thread id, appended to <prefix>.lines.tsv. Stock prints them in
+    /// a named critical section, so one line is never interleaved with another.
+    class StampLines : public std::streambuf
+    {
+    public:
+      StampLines(std::ostream& stream, std::ofstream& out, std::size_t call)
+          : stream_(stream), out_(out), call_(call), previous_(stream.rdbuf(this)) {}
+      ~StampLines() override
+      {
+        stream_.rdbuf(previous_);
+        if (!line_.empty()) { emit(); }
+      }
+      StampLines(const StampLines&) = delete;
+      StampLines& operator=(const StampLines&) = delete;
+
+    protected:
+      int overflow(int c) override
+      {
+        if (c == traits_type::eof()) { return traits_type::not_eof(c); }
+        if (line_.empty()) { t_ = stampNow(); tid_ = kernelTid(); }
+        if (c == '\n') { emit(); }
+        else { line_.push_back(static_cast<char>(c)); }
+        return c;
+      }
+      std::streamsize xsputn(const char* s, std::streamsize n) override
+      {
+        for (std::streamsize i = 0; i < n; ++i) { overflow(static_cast<unsigned char>(s[i])); }
+        return n;
+      }
+
+    private:
+      void emit()
+      {
+        char stamp[32];
+        std::snprintf(stamp, sizeof stamp, "%.4f", t_);
+        out_ << stamp << '\t' << tid_ << '\t' << call_ << '\t' << line_ << '\n';
+        line_.clear();
+      }
+      std::ostream& stream_;
+      std::ofstream& out_;
+      std::size_t call_;
+      std::streambuf* previous_;
+      std::string line_;
+      double t_ = 0.0;
+      long tid_ = 0;
     };
 
     /// What stock OpenMS says about an error while a call runs: its fatal and
@@ -783,7 +1045,13 @@ namespace ODIA::search
       file.setLogType(OpenMS::ProgressLogger::NONE);
       QuietStreams quiet;
       OpenMSErrors capture(said);
+      // ODIA_LOAD_THREADS=k (prototype): the OpenMP team that decodes the
+      // mzML's binary arrays while the parser reads it.
+      const int load_threads = envInt("ODIA_LOAD_THREADS", 0);
+      std::unique_ptr<ThreadCap> load_team;
+      if (load_threads >= 1) { load_team = std::make_unique<ThreadCap>(load_threads); }
       trace::Scope reading("cache_write", 1);
+      if (load_team) { reading.fields().session = load_team->used(); }
       run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode);
     }
     catch (const std::exception& e)
@@ -1286,12 +1554,25 @@ namespace ODIA::search
         normalizing.fields().rows = static_cast<std::int64_t>(seed.compounds.size());
         normalizing.fields().session = team.used();
         // pasef on an ion-mobility run searched with it (see the seeds above).
-        cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
-                                                 params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
-                                                 massCorrectionParam(), "", 0, im_run, false);
+        const int calib_par = envInt("ODIA_CALIB_PAR", 0);
+        if (calib_par >= 2)
+        {
+          SplitCalibration split;
+          split.setLogType(OpenMS::ProgressLogger::NONE);
+          cal.rt = split.run(seed, maps, im_trafo, params().calibration_min_rsq, params().calibration_min_coverage, ff, cp_irt,
+                             irtDetectionParam(), massCorrectionParam(), im_run, calib_par);
+          mz_estimate = split.getEstimatedMzWindow();
+          ms1_mz_estimate = split.getEstimatedMs1MzWindow();
+        }
+        else
+        {
+          cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
+                                                   params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
+                                                   massCorrectionParam(), "", 0, im_run, false);
+          mz_estimate = workflow.getEstimatedMzWindow();
+          ms1_mz_estimate = workflow.getEstimatedMs1MzWindow();
+        }
         cal.im = im_trafo;
-        mz_estimate = workflow.getEstimatedMzWindow();
-        ms1_mz_estimate = workflow.getEstimatedMs1MzWindow();
       }
       catch (const std::exception& e)
       {
@@ -1747,7 +2028,10 @@ namespace ODIA::search
     const OpenMS::ChromExtractParams cp = chromParams(calibration.mz_ppm, im ? calibration.im_window : -1.0, calibration.rt_window);
     const OpenMS::ChromExtractParams cp_ms1 =
       chromParams(calibration.ms1_mz_ppm, ms1_im ? calibration.im_window : -1.0, calibration.rt_window);
-    OpenMS::OpenSwathWorkflow workflow(ms1, ms1_im, false, im, -1);
+    // ODIA_OPENSWATH_OUTER=k (prototype): stock OpenSWATH's nested loop, k
+    // windows at once, each worked on by team/k threads over its batches.
+    const int outer_loop = envInt("ODIA_OPENSWATH_OUTER", -1) >= 1 ? envInt("ODIA_OPENSWATH_OUTER", -1) : -1;
+    OpenMS::OpenSwathWorkflow workflow(ms1, ms1_im, false, im, outer_loop);
     AssayOptions assay_options;
     if (im)
     {
@@ -1808,6 +2092,28 @@ namespace ODIA::search
 
     const auto chunks = AssayBuilder::chunks(set, params().chunk, params().batch_size);
     const std::vector<IsolationWindow> windows = isolationWindows(run);
+    // Prototype switches (perf/run-efficiency): ODIA_OSW_LOG=<prefix> logs the
+    // windows and stock OpenSWATH's per-batch lines; ODIA_OSW_ORDER=n|t|ns
+    // hands the MS2 windows to each call in descending estimated cost
+    // (compounds, transitions, or compounds x spectra of the window), so the
+    // dynamic schedule starts the longest windows first.
+    const std::string osw_log = envStr("ODIA_OSW_LOG");
+    const std::string osw_order = envStr("ODIA_OSW_ORDER");
+    std::ofstream osw_lines;
+    if (!osw_log.empty())
+    {
+      std::ofstream table(osw_log + ".windows.tsv");
+      table << "idx\tms1\tlower\tupper\tim_lower\tim_upper\tspectra\n";
+      for (std::size_t m = 0; m < maps.size(); ++m)
+      {
+        const auto& w = maps[m];
+        table << m << '\t' << (w.ms1 ? 1 : 0) << '\t' << w.lower << '\t' << w.upper << '\t' << w.imLower << '\t' << w.imUpper << '\t'
+              << (w.sptr ? w.sptr->getNrSpectra() : 0) << '\n';
+      }
+      osw_lines.open(osw_log + ".lines.tsv");
+      osw_lines << "t_s\ttid\tcall\tline\n";
+      info("search extraction: ODIA_OSW_LOG " + osw_log + " (outer loop " + std::to_string(outer_loop) + ", order '" + osw_order + "')");
+    }
     const float nan = std::numeric_limits<float>::quiet_NaN();
     std::size_t done = 0, nearest_window = 0;
     for (std::size_t c = 0; c < chunks.size(); ++c)
@@ -1881,12 +2187,83 @@ namespace ODIA::search
                  std::to_string(team.requested()) + " threads; stock OpenSWATH does not scale beyond " +
                  std::to_string(SearchParams::openswathThreads()));
           }
-          QuietStreams quiet;
-          trace::Scope extracting("openswath", 2);
-          extracting.fields().rows = static_cast<std::int64_t>(assays.precursor.size());
-          extracting.fields().session = team.used();
-          workflow.performExtraction(maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
-                                     &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);
+          // The windows in the order this call gets them (ODIA_OSW_ORDER).
+          std::vector<std::size_t> order(maps.size());
+          for (std::size_t m = 0; m < maps.size(); ++m) { order[m] = m; }
+          if (!osw_order.empty())
+          {
+            // OpenSWATH's own assignment: pasef, the window holding the
+            // precursor's m/z and 1/K0 with the nearest 1/K0 centre (the
+            // first on ties); otherwise every window holding its m/z.
+            std::vector<double> compounds(maps.size(), 0.0), transitions(maps.size(), 0.0);
+            std::unordered_set<std::string> seen;
+            std::vector<std::size_t> hit;
+            for (const auto& tr : assays.experiment.transitions)
+            {
+              hit.clear();
+              long best = -1;
+              for (std::size_t m = 0; m < maps.size(); ++m)
+              {
+                const auto& w = maps[m];
+                if (w.ms1 || !(w.lower < tr.getPrecursorMZ() && tr.getPrecursorMZ() < w.upper)) { continue; }
+                if (!im) { hit.push_back(m); continue; }
+                if (!(w.imLower < tr.getPrecursorIM() && tr.getPrecursorIM() < w.imUpper)) { continue; }
+                if (best < 0) { best = static_cast<long>(m); continue; }
+                const auto& b = maps[static_cast<std::size_t>(best)];
+                if (std::fabs((b.imLower + b.imUpper) / 2 - tr.getPrecursorIM()) > std::fabs((w.imLower + w.imUpper) / 2 - tr.getPrecursorIM()))
+                { best = static_cast<long>(m); }
+              }
+              if (best >= 0) { hit.push_back(static_cast<std::size_t>(best)); }
+              const bool first = seen.insert(tr.peptide_ref).second;
+              for (const std::size_t m : hit)
+              {
+                transitions[m] += 1.0;
+                if (first) { compounds[m] += 1.0; }
+              }
+            }
+            std::vector<double> cost(maps.size(), 0.0);
+            for (std::size_t m = 0; m < maps.size(); ++m)
+            {
+              const double spectra = maps[m].sptr ? static_cast<double>(maps[m].sptr->getNrSpectra()) : 0.0;
+              cost[m] = osw_order == "t" ? transitions[m] : osw_order == "ns" ? compounds[m] * spectra : compounds[m];
+            }
+            std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+              if (maps[a].ms1 != maps[b].ms1) { return maps[a].ms1; }
+              return cost[a] > cost[b];
+            });
+          }
+          std::vector<OpenSwath::SwathMap> call_maps;
+          call_maps.reserve(maps.size());
+          for (const std::size_t m : order) { call_maps.push_back(maps[m]); }
+          if (osw_lines.is_open())
+          {
+            osw_lines << fixed(stampNow(), 4) << '\t' << kernelTid() << '\t' << c << "\tCALL_START team " << team.used() << " outer "
+                      << outer_loop << " order";
+            for (const std::size_t m : order) { osw_lines << ' ' << m; }
+            osw_lines << '\n';
+          }
+#ifdef _OPENMP
+          const int levels = omp_get_max_active_levels();
+          const int dynamic = omp_get_dynamic();
+#endif
+          {
+            Quiet quiet_err{std::cerr};
+            std::unique_ptr<Quiet> quiet_out;
+            std::unique_ptr<StampLines> stamp_out;
+            if (osw_lines.is_open()) { stamp_out = std::make_unique<StampLines>(std::cout, osw_lines, c); }
+            else { quiet_out = std::make_unique<Quiet>(std::cout); }
+            trace::Scope extracting("openswath", 2);
+            extracting.fields().rows = static_cast<std::int64_t>(assays.precursor.size());
+            extracting.fields().session = team.used();
+            workflow.performExtraction(call_maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
+                                       &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);
+          }
+#ifdef _OPENMP
+          // The nested loop leaves nesting switched on and dynamic teams off.
+          omp_set_max_active_levels(levels);
+          omp_set_dynamic(dynamic);
+#endif
+          if (osw_lines.is_open()) { osw_lines << fixed(stampNow(), 4) << '\t' << kernelTid() << '\t' << c << "\tCALL_END\n"; osw_lines.flush(); }
         }
         flatten_step.start("flatten", 2);
         n_features = features.size();

@@ -32,6 +32,7 @@
 #include <omp.h>
 #endif
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <map>
 #include <random>
@@ -714,6 +715,17 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json tune_prov = json::object();
     json search_prov;
     std::string run_hash;
+    // ODIA_ASYNC_IO=1 (prototype, perf/run-efficiency): the run's and the
+    // library's content hashes (FNV-1a, one byte at a time, ~0.9 GB/s) are
+    // computed on a thread of their own from the start, while the library
+    // and the run are read, instead of on the main thread after the search.
+    const bool async_io = [] { const char* e = std::getenv("ODIA_ASYNC_IO"); return e && std::string(e) == "1"; }();
+    std::future<std::string> run_hash_ahead, library_hash_ahead;
+    if (async_io)
+    {
+      if (!run.empty()) { run_hash_ahead = std::async(std::launch::async, [run] { return ODIA::DIANNLibraryFile::hashFile(run); }); }
+      library_hash_ahead = std::async(std::launch::async, [in] { return ODIA::DIANNLibraryFile::hashFile(in); });
+    }
     // Once the search has written its report, a later failure must say that the
     // report is still there: -out_ids is never overwritten, so the same command
     // would now be refused.
@@ -762,7 +774,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         search_prov = json::parse(found.provenance_json);
         {
           ODIA::trace::Scope hash_phase("run_hash", 0);
-          run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+          run_hash = run_hash_ahead.valid() ? run_hash_ahead.get() : ODIA::DIANNLibraryFile::hashFile(run);
         }
         // The hand-off: the report just written IS the reference from here on,
         // read, gated and hashed by exactly the code that reads -ids.
@@ -1064,7 +1076,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json prov = {
       {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
       {"config", eff},
-      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_fnv1a64", ODIA::DIANNLibraryFile::hashFile(in)},
+      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_fnv1a64", library_hash_ahead.valid() ? library_hash_ahead.get() : ODIA::DIANNLibraryFile::hashFile(in)},
                   {"reference", std::filesystem::absolute(ids).string()}, {"reference_fnv1a64", ODIA::DIANNLibraryFile::hashFile(ids)},
                   {"reference_run", st.run}}},
       {"gates_bypassed", st.gates_bypassed},

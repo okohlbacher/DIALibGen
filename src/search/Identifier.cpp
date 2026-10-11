@@ -17,6 +17,10 @@
 #include <filesystem>
 #include <iostream>
 #include <sstream>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include <stdexcept>
 #include <utility>
 
@@ -233,6 +237,26 @@ namespace ODIA::search
       void remove()
       {
         if (path.empty()) { return; }
+        if (const char* e = std::getenv("ODIA_ASYNC_IO"); e && std::string(e) == "1")
+        {
+          // Prototype (perf/run-efficiency): the files go on a thread of their
+          // own, joined when the process exits.
+          struct Joiner
+          {
+            std::mutex m;
+            std::vector<std::thread> threads;
+            ~Joiner() { for (auto& t : threads) { if (t.joinable()) { t.join(); } } }
+          };
+          static Joiner joiner;
+          std::lock_guard<std::mutex> lock(joiner.m);
+          joiner.threads.emplace_back([p = path] {
+            std::error_code ec;
+            std::filesystem::remove_all(p, ec);
+            if (ec) { std::cerr << "search: could not remove the run's cache directory " << p.string() << ": " << ec.message() << std::endl; }
+          });
+          path.clear();
+          return;
+        }
         trace::Scope removing("cache_remove", 0);
         std::error_code ec;
         std::uintmax_t bytes = 0;

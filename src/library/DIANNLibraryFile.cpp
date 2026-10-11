@@ -60,7 +60,7 @@ namespace ODIA
     {
       double v = 0.0;
       if (s.empty()) { return std::nan(""); }
-      if (s.find_first_not_of("0123456789+-.eE") != std::string_view::npos)
+      if (!onlyDecimalCharacters(s))
       {
         std::string token(s);
         std::transform(token.begin(), token.end(), token.begin(),

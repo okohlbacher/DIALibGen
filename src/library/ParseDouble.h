@@ -33,6 +33,18 @@
 
 namespace ODIA
 {
+  /// True if @p s holds only `0-9 + - . e E`, the characters of a decimal
+  /// number. A loop rather than find_first_not_of, which costs a memchr over
+  /// the character set per character of every field.
+  inline bool onlyDecimalCharacters(std::string_view s)
+  {
+    for (const char c : s)
+    {
+      if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E')) { return false; }
+    }
+    return true;
+  }
+
   /// Parses all of @p s as a decimal floating-point number, correctly rounded.
   ///
   /// Accepts only the characters `0-9 + - . e E` (no whitespace, no `inf`,
@@ -50,7 +62,7 @@ namespace ODIA
   /// 1 µs each, which a whole-proteome TSV pays some 400 million times.
   inline bool parseDouble(std::string_view s, double& v)
   {
-    if (s.empty() || s.find_first_not_of("0123456789+-.eE") != std::string_view::npos) { return false; }
+    if (s.empty() || !onlyDecimalCharacters(s)) { return false; }
 #if ODIA_FLOAT_FROM_CHARS
     const char* first = s.data();
     const char* const last = first + s.size();

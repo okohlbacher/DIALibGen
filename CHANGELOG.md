@@ -111,6 +111,10 @@ This project follows [Semantic Versioning](https://semver.org/).
   `-threads` host threads. One H100 builds a whole-proteome library in
   91 s instead of 154 s (0.11.1 with cuDNN, TF32 on), two H100s in 65 s.
   Refine and tune write their output on `-threads` threads as well.
+- Tune records its training thread count (`threads`, `interop_threads`) in
+  `.tune.json` and the tuned ONNX metadata: the tuned weights depend on it.
+  LibTorch's inter-op pool is one thread (tune never uses it). Tracing
+  (`ODIA_TRACE`) shows a phase per tuned head. The tuned weights are unchanged.
 
 ### Fixed
 

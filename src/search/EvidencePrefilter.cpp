@@ -7,6 +7,8 @@
 #include <odia/search/Scoring.h>
 #include <odia/search/SearchDecoys.h>
 
+#include <odia/Trace.h>
+
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/DataStructures.h>
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/ISpectrumAccess.h>
 
@@ -111,6 +113,7 @@ namespace ODIA::search
                                             const Log& progress)
   {
     const auto started = Clock::now();
+    trace::Scope pairs_step("pairs", 1);
     PrefilterPairs out;
     out.stats = stats;
     SelectionStats& st = out.stats;
@@ -142,6 +145,9 @@ namespace ODIA::search
       const std::size_t last = std::min(n, base + block);
       std::vector<std::string> sequences(predicted ? last - base : 0);
       const auto total = static_cast<std::ptrdiff_t>(last - base);
+      trace::Scope decoys_step("decoys", 2);
+      decoys_step.fields().idx = static_cast<std::int64_t>(base / block);
+      decoys_step.fields().rows = static_cast<std::int64_t>(total);
 #pragma omp parallel for schedule(dynamic, 256)
       for (std::ptrdiff_t s = 0; s < total; ++s)
       {
@@ -172,6 +178,7 @@ namespace ODIA::search
           { if (failure.empty()) { failure = e.what(); } }
         }
       }
+      decoys_step.end();
       if (!failure.empty()) { throw std::runtime_error("search prefilter: " + failure); }
       if (predicted)
       {
@@ -273,6 +280,7 @@ namespace ODIA::search
 
     // 1. One index per window, both classes, sorted by (m/z, code).
     auto t = Clock::now();
+    trace::Scope index_step("index", 1);
     std::vector<WindowIndex> index(bounds.size());
     const auto W = static_cast<std::ptrdiff_t>(bounds.size());
     std::string failure;
@@ -333,9 +341,11 @@ namespace ODIA::search
       ss.index_bytes += x.mz.size() * (sizeof(float) + sizeof(std::uint32_t)) + x.pairs.size() * sizeof(std::uint32_t);
     }
     ss.index_seconds = since(t);
+    index_step.end();
 
     // 2. The sweep, one map at a time per thread, then merged in map order.
     t = Clock::now();
+    trace::Scope sweep_step("sweep", 1);
     const int depth_min = params.prefilter_depth;
     const std::size_t top = params.prefilter_top_peaks;
     const double tol = params.prefilter_ppm * 1e-6;
@@ -721,7 +731,9 @@ namespace ODIA::search
         fixed(sw.sweep_seconds, 1) + " s sweep)");
 
     auto t = Clock::now();
+    trace::Scope choose_step("choose", 1);
     const PrefilterSelection sel = choose(universe, evidence, params, windows);
+    choose_step.end();
     const double choose_s = since(t);
     say("search prefilter: at depth >= " + std::to_string(params.prefilter_depth) + " of " + std::to_string(F) + ": " +
         std::to_string(sel.targets_passing) + " targets, " + std::to_string(sel.decoys_passing) + " decoys (" +
@@ -733,11 +745,18 @@ namespace ODIA::search
     chosen.reserve(sel.kept.size());
     for (const std::size_t k : sel.kept) { chosen.push_back(universe.targets[k]); }
     t = Clock::now();
+    trace::Scope build_step("build", 1);
     SearchSet set = CandidateSelector::fromTargets(library, params, std::move(chosen), ps);
-    if (predicted) { predictSet(set, library, params, universe, *model); }
+    build_step.end();
+    if (predicted)
+    {
+      trace::Scope predict_step("predict_set", 1);
+      predictSet(set, library, params, universe, *model);
+    }
     const double build_s = since(t);
     set.stats.capped = sel.capped;
     checkRatio(set.pairs(), set.size() - set.pairs());
+    trace::Scope seeds_step("seeds", 1);
     set.seeds = seeds(library, universe, evidence, params, set.rt_robust);
     if (!params.entrapment_tag.empty())
     {
@@ -793,6 +812,7 @@ namespace ODIA::search
                           " spectra and >= " + std::to_string(SearchParams::seed_decoy_factor) +
                           "x their decoy's; one per peptide, best (depth, spectra) per bin of the central library-RT range"}}}};
     set.prefilter_json = record.dump();
+    seeds_step.end();
     if (seconds)
     {
       *seconds = json({{"decoys", universe.decoy_seconds}, {"index", sw.index_seconds}, {"sweep", sw.sweep_seconds},

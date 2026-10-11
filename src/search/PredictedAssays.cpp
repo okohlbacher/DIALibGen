@@ -5,6 +5,7 @@
 #include <odia/search/SearchParams.h>
 
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
@@ -159,6 +160,8 @@ namespace ODIA::search
     std::vector<AASequence> peptides(2 * pairs.size());
     std::vector<int> charges(2 * pairs.size(), 0);
     std::vector<char> parsed(pairs.size(), 1);
+    trace::Scope parse_step("parse", 2);
+    parse_step.fields().rows = static_cast<std::int64_t>(2 * pairs.size());
 #pragma omp parallel for schedule(dynamic, 256)
     for (std::ptrdiff_t s = 0; s < m; ++s)
     {
@@ -174,10 +177,16 @@ namespace ODIA::search
       catch (...) { parsed[j] = 0; peptides[2 * j] = peptides[2 * j + 1] = AASequence::fromString("PEPTIDEK"); }
       charges[2 * j] = charges[2 * j + 1] = std::max(1, static_cast<int>(pre.charge[i]));
     }
+    parse_step.end();
+    trace::Scope infer_step("infer", 2);
+    infer_step.fields().rows = static_cast<std::int64_t>(peptides.size());
     const std::vector<PeptDeepPredictor::Spectrum> spectra = model.predict(peptides, charges);
+    infer_step.end();
     if (spectra.size() != peptides.size())
     { throw std::runtime_error("fragment model returned " + std::to_string(spectra.size()) + " spectra for " + std::to_string(peptides.size()) + " peptides"); }
 
+    trace::Scope rank_step("rank", 2);
+    rank_step.fields().rows = static_cast<std::int64_t>(pairs.size());
 #pragma omp parallel for schedule(dynamic, 256)
     for (std::ptrdiff_t s = 0; s < m; ++s)
     {
@@ -235,6 +244,9 @@ namespace ODIA::search
       for (std::size_t k = base; k < last; ++k) { targets.push_back(set.source[k]); }
       std::string failure;
       const auto n = static_cast<std::ptrdiff_t>(last - base);
+      trace::Scope decoys_step("decoys", 2);
+      decoys_step.fields().idx = static_cast<std::int64_t>(base / block_pairs);
+      decoys_step.fields().rows = n;
 #pragma omp parallel for schedule(dynamic, 64)
       for (std::ptrdiff_t s = 0; s < n; ++s)
       {
@@ -249,6 +261,7 @@ namespace ODIA::search
           { if (failure.empty()) { failure = e.what(); } }
         }
       }
+      decoys_step.end();
       if (!failure.empty()) { throw std::runtime_error("search decoys: " + failure); }
       std::vector<PairPrediction> predicted;
       predict(input, targets, decoys, rules, model, predicted, &fixed);

@@ -7,6 +7,8 @@
 #include <odia/search/IonMobility.h>
 #include <odia/search/MemoryCheck.h>
 
+#include <odia/Trace.h>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -231,6 +233,7 @@ namespace ODIA::search
       void remove()
       {
         if (path.empty()) { return; }
+        trace::Scope removing("cache_remove", 0);
         std::error_code ec;
         std::uintmax_t bytes = 0;
         for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
@@ -288,9 +291,11 @@ namespace ODIA::search
 
     // 1. The run, first: candidate selection needs its isolation windows.
     auto t = Clock::now();
+    trace::Scope load_phase("run_load", 0);
     run = loadRun(run_path);
     scratch.path = run.scratch;
     run.meta.reset();   // SwathFile's per-spectrum metadata: nothing reads it (0.56 GB on a 6 GB run)
+    load_phase.end();
     if (run.name.empty()) { run.name = std::filesystem::path(run_path).stem().string(); }
     if (run.path.empty()) { run.path = run_path; }
     timing["load"] = since(t);
@@ -351,6 +356,7 @@ namespace ODIA::search
 
     // 2. Candidates and their in-memory decoys; with search:intensities
     //    predicted, both members of every pair predicted by one model.
+    trace::Scope prefilter_phase("prefilter", 0);
     std::shared_ptr<FragmentModel> model = fragment_model_;
     int prediction_sessions = 0;   // ONNX Runtime sessions of the model built here (0: none built here)
     json intensities_json = {{"source", toString(params_.intensities)}};
@@ -363,6 +369,7 @@ namespace ODIA::search
           params_.instrument = run.ion_mobility ? "timsTOF" : "QE";
           params_.instrument_source = "run (" + std::string(run.ion_mobility ? "ion mobility" : "no ion mobility") + ")";
         }
+        trace::Scope sessions_step("sessions", 1);
         auto peptdeep = std::make_shared<PeptDeepFragmentModel>(params_.ms2_model, params_.instrument, params_.nce, params_.threads);
         prediction_sessions = peptdeep->sessions();
         params_.instrument = peptdeep->instrument();
@@ -384,7 +391,11 @@ namespace ODIA::search
                                       : CandidateSelector::select(library, params_, windows);
     // The model's sessions (weights and arenas, several GB at 16 sessions) are
     // not needed once the searched set carries its assays.
-    model.reset();
+    {
+      trace::Scope release_step("sessions_release", 1);
+      model.reset();
+    }
+    prefilter_phase.end();
     timing["candidates"] = since(t);
     if (!prefilter_seconds.empty()) { timing["prefilter"] = json::parse(prefilter_seconds); }
     const auto& st = set.stats;
@@ -433,7 +444,9 @@ namespace ODIA::search
     // 3-4. Calibration and extraction.
     {
       t = Clock::now();
+      trace::Scope calibration_phase("calibration", 0);
       calibration = calibrate(library, set, run);
+      calibration_phase.end();
       timing["calibrate"] = since(t);
       calibration_json = {{"seeds", calibration.seeds}, {"points", calibration.points}, {"rsq", num(calibration.rsq)},
                           {"points_per_seed", num(calibration.coverage)}, {"bootstrap", calibration.bootstrap},
@@ -457,6 +470,7 @@ namespace ODIA::search
       if (calibration.bootstrap) { warning("the RT calibration FAILED and search:allow_bootstrap replaced it with a linear map"); }
 
       t = Clock::now();
+      trace::Scope extraction_phase("extraction", 0);
       extract(set, run, calibration, groups);
       timing["extract"] = since(t);
       // An MS1 map extract() held in memory is freed when it returns, but
@@ -468,6 +482,7 @@ namespace ODIA::search
         json record = json::parse(run.ms1_memory_json);
         if (record.value("held", false))
         {
+          trace::Scope release_step("ms1_release", 1);
           const std::uint64_t released = releaseFreedMemory();
           record["released_bytes"] = released;
           run.ms1_memory_json = record.dump();
@@ -475,6 +490,7 @@ namespace ODIA::search
                " resident released)");
         }
       }
+      extraction_phase.end();
     }
     // The run's memory and its cache files are not needed for scoring. On an
     // ion-mobility search the report's 1/K0 is re-measured in the run after
@@ -493,7 +509,9 @@ namespace ODIA::search
 
     // 5. Classifier, competition, roll-ups, guards.
     t = Clock::now();
+    trace::Scope scoring_phase("scoring", 0);
     const ScoringOutcome outcome = scorePeakGroups(set, groups, params_);
+    scoring_phase.end();
     timing["score"] = since(t);
     const auto& d = outcome.scored.diagnostics;
     for (const auto& w : outcome.warnings) { warning(w); }
@@ -531,6 +549,7 @@ namespace ODIA::search
 
     // 6. The report.
     t = Clock::now();
+    trace::Scope report_phase("report", 0);
     std::vector<ReportRow> rows = reportRows(set, groups, outcome, params_);
     json mobility_json;
     if (im_search)
@@ -551,9 +570,13 @@ namespace ODIA::search
         apex.push_back(groups.apex_rt[gr.best_row]);
       }
       const auto measured = Clock::now();
-      mobility_json = json::parse(measureReportedMobility(set, run, calibration, precursors, apex, rows));
+      {
+        trace::Scope mobility_step("report_mobility", 1);
+        mobility_json = json::parse(measureReportedMobility(set, run, calibration, precursors, apex, rows));
+      }
       timing["report_mobility"] = since(measured);
       run.maps.clear();
+      report_phase.end();
       scratch.remove();
     }
     IdentificationResult result;
@@ -591,7 +614,11 @@ namespace ODIA::search
                            {"producer", "DIALibGen built-in identification (-run); DIA-NN column names as a compatibility "
                                         "dialect, not a DIA-NN result"},
                            {"search", search}};
-    ReportWriter::write(out_ids, run.name, rows, {{"odia.identifier", embedded.dump()}});
+    report_phase.end();
+    {
+      trace::Scope write_phase("report_write", 0);
+      ReportWriter::write(out_ids, run.name, rows, {{"odia.identifier", embedded.dump()}});
+    }
     if (too_few)
     {
       // The guard fires only now, with the report on disk for inspection. This
@@ -616,7 +643,7 @@ namespace ODIA::search
                         {"targets", result.report_targets}, {"decoys", result.report_decoys}, {"max_q", params_.report_max_q}};
     search["warnings"] = warnings;
     search["resources"] = {{"threads", params_.threads},
-                           {"openswath_threads", std::min(params_.threads, SearchParams::openswath_max_threads)},
+                           {"openswath_threads", std::min(params_.threads, SearchParams::openswathThreads())},
                            {"prediction_sessions", prediction_sessions},
                            {"seconds", timing}};
     // Decided by the free memory of the moment: the sidecar's, never the report's.

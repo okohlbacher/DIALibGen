@@ -772,7 +772,7 @@ namespace ODIA::trace
     for (const char* var : {"ODIA_TRACE", "ODIA_TRACE_INTERVAL_MS", "ODIA_TRACE_SNAPSHOT_MIN_S",
                             "ODIA_ORT_PROFILE", "OMP_NUM_THREADS", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES",
                             "ODIA_NUMA_INTERLEAVE", "ODIA_STREAM", "ODIA_MS2_BLOCK", "ODIA_CCS_BLOCK", "ODIA_ROW_GROUP_ROWS", "OPENBLAS_NUM_THREADS",
-                            "CUDA_VISIBLE_DEVICES"})
+                            "CUDA_VISIBLE_DEVICES", "ODIA_OPENSWATH_THREADS", "OMP_WAIT_POLICY", "GOMP_SPINCOUNT"})
     {
       if (const char* v = std::getenv(var)) { note(std::string("env.") + var, sanitize(v)); }
     }

@@ -227,6 +227,10 @@ namespace ODIA::search
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
     /// a process-wide lock, and more threads only spin (see RunStages.cpp).
     static constexpr int openswath_max_threads = 8;
+    /// The cap OpenSWATH calls use: openswath_max_threads, or the value of
+    /// ODIA_OPENSWATH_THREADS (a measurement switch, read once; docs/tracing.md).
+    /// The result does not depend on it.
+    static int openswathThreads();
     /// The most ONNX Runtime sessions the search's MS2 model gets.
     static constexpr int max_prediction_sessions = 16;
     /// Evidence prefilter: the fragments indexed per pair member, its own most

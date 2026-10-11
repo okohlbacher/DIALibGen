@@ -8,6 +8,7 @@
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/LibraryRefiner.h>
+#include <odia/Trace.h>
 #include <odia/search/Identifier.h>
 #include <odia/search/SearchParams.h>
 
@@ -726,7 +727,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     };
     try
     {
+      ODIA::trace::Scope load_phase("library_load", 0);
       ODIA::DIANNLibraryFile::load(in, library);
+      load_phase.end();
       writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
                     std::to_string(library.transitionCount()) + " transitions");
       if (search)
@@ -757,7 +760,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         const ODIA::search::IdentificationResult found = identifier.identify(library, run, out_ids, DIALIBGEN_VERSION);
         report_written = true;
         search_prov = json::parse(found.provenance_json);
-        run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+        {
+          ODIA::trace::Scope hash_phase("run_hash", 0);
+          run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+        }
         // The hand-off: the report just written IS the reference from here on,
         // read, gated and hashed by exactly the code that reads -ids.
         ids = out_ids;
@@ -765,7 +771,11 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                       " target precursors at q <= 0.01");
       }
       ODIA::LibraryRefiner::ObsMap obs;
-      if (!tune_only) { obs = ODIA::LibraryRefiner::readObservations(ids, p, st); }
+      if (!tune_only)
+      {
+        ODIA::trace::Scope read_phase("apply", 0);
+        obs = ODIA::LibraryRefiner::readObservations(ids, p, st);
+      }
 
 #ifdef DIALIBGEN_WITH_FINETUNE
       if (tune)
@@ -783,6 +793,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         // A foreign library can carry mass-only modifications that the model
         // cannot encode. Reject these before training either head.
+        ODIA::trace::Scope check_phase("tune_check", 0);
         std::unordered_set<std::uint32_t> checked;
         for (const auto sequence_id : library.precursors().modified_sequence)
         {
@@ -793,6 +804,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           { throw std::runtime_error("tuning cannot encode library precursor '" + sequence + "': " + error.what()); }
         }
 
+        check_phase.end();
         const std::string keep = getStringOption_("tune_out_models");
         struct WorkDirectory
         {
@@ -904,7 +916,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         if (want_rt)
         {
+          ODIA::trace::Scope train_phase("tune_rt", 0);
           const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::RT, "peptdeep_rt_dynamic.onnx");
+          train_phase.end();
           writeLogInfo_("tuned RT: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
                         " of " + std::to_string(r.epochs_run));
           // predictRetentionTimes returns what it could NOT predict, not what it
@@ -930,7 +944,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         }
         if (want_ccs)
         {
+          ODIA::trace::Scope train_phase("tune_ccs", 0);
           const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::CCS, "peptdeep_ccs_dynamic.onnx");
+          train_phase.end();
           writeLogInfo_("tuned CCS: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
                         " of " + std::to_string(r.epochs_run));
           // derive_mobility rewrites the WHOLE 1/K0 column, so it runs only when
@@ -978,7 +994,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogInfo_(std::to_string(st.ids_ramp_censored) + " observed 1/K0 values within " + std::to_string(p.im_ramp_margin) +
                       " of the declared ramp top " + std::to_string(p.im_ramp_top) + " treated as censored"); }
 
-      ODIA::LibraryRefiner::refine(library, obs, p, st);
+      {
+        ODIA::trace::Scope apply_phase("apply", 0);
+        ODIA::LibraryRefiner::refine(library, obs, p, st);
+      }
       if (st.lib_unknown_mod_tokens)
       { writeLogWarn_(std::to_string(st.lib_unknown_mod_tokens) + " library modification tokens could not be resolved to UniMod; passed through verbatim and may fail the reference join"); }
       }
@@ -1041,6 +1060,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
     // Provenance: the recipe, the inputs by content hash, the run, the units and every
     // count above -- embedded in the Parquet and always written as a sidecar (M13).
+    ODIA::trace::Scope provenance_phase("provenance", 0);
     json prov = {
       {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
       {"config", eff},
@@ -1101,8 +1121,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       for (const char* key : {"matched_targets", "decoys_kept", "match_fraction"}) { prov["library"].erase(key); }
     }
 
+    provenance_phase.end();
     try
     {
+      ODIA::trace::Scope write_phase("write", 0);
       // The writers' output does not depend on the thread count.
       const unsigned write_threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");

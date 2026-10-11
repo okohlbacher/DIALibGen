@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -98,6 +99,20 @@ namespace ODIA::search
   int SearchParams::resolveThreads(int requested)
   {
     return requested > 0 ? requested : static_cast<int>(std::max(1u, physicalCores()));
+  }
+
+  int SearchParams::openswathThreads()
+  {
+    static const int cap = [] {
+      if (const char* e = std::getenv("ODIA_OPENSWATH_THREADS"); e && *e)
+      {
+        char* end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end && *end == '\0' && v >= 1 && v <= 4096) { return static_cast<int>(v); }
+      }
+      return openswath_max_threads;
+    }();
+    return cap;
   }
 
   int SearchParams::predictionSessions(int threads)

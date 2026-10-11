@@ -39,6 +39,8 @@
 #include <odia/search/MemoryCheck.h>
 #include <odia/search/RobustLine.h>
 
+#include <odia/Trace.h>
+
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathOSWWriter.h>
@@ -774,6 +776,7 @@ namespace ODIA::search
       file.setLogType(OpenMS::ProgressLogger::NONE);
       QuietStreams quiet;
       OpenMSErrors capture(said);
+      trace::Scope reading("cache_write", 1);
       run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode);
     }
     catch (const std::exception& e)
@@ -799,6 +802,7 @@ namespace ODIA::search
     }
     if (!run.scratch.empty())
     {
+      trace::Scope sizing("cache_size", 1);
       run.cache_bytes = directoryBytes(run.scratch);
       info("search run: the cache takes " + gb(static_cast<double>(run.cache_bytes)) + " GB, " +
            fixed(static_cast<double>(run.cache_bytes) / static_cast<double>(std::max<std::uintmax_t>(1, bytes)), 2) + " times the run");
@@ -889,7 +893,9 @@ namespace ODIA::search
           // OpenSWATH. MS1 too when its traces are read with 1/K0.
           const bool ms1_arrays = run.ms1_ion_mobility && params().ms1;
           const auto swept = std::chrono::steady_clock::now();
+          trace::Scope sweeping("im_check", 1);
           const MobilityArrays a = sweepMobilityArrays(run.maps, ms1_arrays);
+          sweeping.end();
           const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - swept).count();
           const double outside = a.ms2_peaks > 0 ? static_cast<double>(a.ms2_peaks_outside) / static_cast<double>(a.ms2_peaks) : 0.0;
           im_json = {{"im_range", {num(im_lo), num(im_hi)}}, {"im_spectra_checked", a.ms2_spectra},
@@ -1267,8 +1273,11 @@ namespace ODIA::search
         OpenMS::TransformationDescription im_trafo;
         const Param ff = featureFinderParam(false, false, false);
         const OpenMS::ChromExtractParams cp_irt = chromParams(calibration_mz_ppm, -1.0, -1.0);
-        const ThreadCap team(SearchParams::openswath_max_threads);
+        const ThreadCap team(SearchParams::openswathThreads());
         QuietStreams quiet;
+        trace::Scope normalizing("openswath", 1);
+        normalizing.fields().rows = static_cast<std::int64_t>(seed.compounds.size());
+        normalizing.fields().session = team.used();
         // pasef on an ion-mobility run searched with it (see the seeds above).
         cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
                                                  params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
@@ -1769,6 +1778,7 @@ namespace ODIA::search
         record["reason"] = decision.reason;
         if (decision.hold)
         {
+          trace::Scope holding("ms1_hold", 1);
           for (auto& m : maps)
           {
             if (m.ms1 && m.sptr) { m.sptr = std::make_shared<OpenMS::SpectrumAccessOpenMSInMemory>(*m.sptr); }
@@ -1796,6 +1806,10 @@ namespace ODIA::search
     for (std::size_t c = 0; c < chunks.size(); ++c)
     {
       const auto started = std::chrono::steady_clock::now();
+      trace::Scope chunk_step("chunk", 1);
+      chunk_step.fields().idx = static_cast<std::int64_t>(c);
+      chunk_step.fields().rows = static_cast<std::int64_t>(chunks[c].size());
+      trace::Scope assays_step("assays", 2);
       AssayChunk assays = AssayBuilder::build(set, chunks[c], assay_options);
       if (im)
       {
@@ -1836,6 +1850,7 @@ namespace ODIA::search
         }
         spread = static_cast<std::size_t>(std::count(used.begin(), used.end(), 1));
       }
+      assays_step.end();
       std::unordered_map<std::string, std::size_t> precursor_of;
       precursor_of.reserve(assays.precursor.size());
       for (std::size_t k = 0; k < assays.precursor.size(); ++k)
@@ -1848,20 +1863,25 @@ namespace ODIA::search
       std::vector<Row> rows;
       std::vector<float> values;
       std::size_t n_features = 0;
+      trace::Scope flatten_step;   // started after OpenSWATH; also times freeing the features
       {
         OpenMS::FeatureMap features;
         {
-          const ThreadCap team(SearchParams::openswath_max_threads);
+          const ThreadCap team(SearchParams::openswathThreads());
           if (c == 0 && team.used() < team.requested())
           {
             info("search extraction: OpenSWATH runs on " + std::to_string(team.used()) + " of the " +
                  std::to_string(team.requested()) + " threads; stock OpenSWATH does not scale beyond " +
-                 std::to_string(SearchParams::openswath_max_threads));
+                 std::to_string(SearchParams::openswathThreads()));
           }
           QuietStreams quiet;
+          trace::Scope extracting("openswath", 2);
+          extracting.fields().rows = static_cast<std::int64_t>(assays.precursor.size());
+          extracting.fields().session = team.used();
           workflow.performExtraction(maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
                                      &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);
         }
+        flatten_step.start("flatten", 2);
         n_features = features.size();
         rows.reserve(features.size());
         values.reserve(features.size() * width);
@@ -1926,6 +1946,8 @@ namespace ODIA::search
                 static_cast<float>(rows[r].left), static_cast<float>(rows[r].right), rows[r].im);
       }
       done += assays.precursor.size();
+      flatten_step.end();
+      chunk_step.end();
       const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
       info("search extraction: chunk " + std::to_string(c + 1) + "/" + std::to_string(chunks.size()) + ", " +
            std::to_string(assays.precursor.size()) + " precursors in " + std::to_string(spread) + " of " +

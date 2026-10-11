@@ -120,6 +120,7 @@ add_library(odia_library STATIC
   src/library/ModifiedSequence.cpp
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
+  src/library/Trace.cpp
 )
 add_library(DIALibGen::odia_library ALIAS odia_library)
 target_compile_features(odia_library PUBLIC cxx_std_23)

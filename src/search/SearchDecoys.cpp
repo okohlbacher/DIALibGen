@@ -3,6 +3,8 @@
 
 #include <odia/search/SearchDecoys.h>
 
+#include <odia/IonLadder.h>
+
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/EmpiricalFormula.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
@@ -14,6 +16,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace ODIA::search
 {
@@ -54,25 +57,46 @@ namespace ODIA::search
       double loss;
     };
 
-    /// m/z of @p slot on @p s; NaN when it cannot be computed.
-    double fragmentMz(const AASequence& s, const Slot& slot)
+    /// m/z of @p slot on @p s, whose IonLadder is @p ladder; NaN when it
+    /// cannot be computed. The ladder's ions are bit for bit
+    /// s.getPrefix(ordinal).getMZ(charge, type) (a, b, c) and
+    /// s.getSuffix(ordinal).getMZ(charge, type) (x, y, z), without a sequence
+    /// copy per slot (IonLadder.h).
+    double fragmentMz(const IonLadder& ladder, const AASequence& s, const Slot& slot)
     {
       try
       {
         double mz = 0.0;
         switch (slot.type)
         {
-          case FragmentType::A: mz = s.getPrefix(slot.ordinal).getMZ(slot.charge, Residue::AIon); break;
-          case FragmentType::B: mz = s.getPrefix(slot.ordinal).getMZ(slot.charge, Residue::BIon); break;
-          case FragmentType::C: mz = s.getPrefix(slot.ordinal).getMZ(slot.charge, Residue::CIon); break;
-          case FragmentType::X: mz = s.getSuffix(slot.ordinal).getMZ(slot.charge, Residue::XIon); break;
-          case FragmentType::Y: mz = s.getSuffix(slot.ordinal).getMZ(slot.charge, Residue::YIon); break;
-          case FragmentType::Z: mz = s.getSuffix(slot.ordinal).getMZ(slot.charge, Residue::ZIon); break;
+          case FragmentType::A: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::AIon); break;
+          case FragmentType::B: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::BIon); break;
+          case FragmentType::C: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::CIon); break;
+          case FragmentType::X: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::XIon); break;
+          case FragmentType::Y: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::YIon); break;
+          case FragmentType::Z: mz = ladder.ion(s, slot.ordinal, slot.charge, Residue::ZIon); break;
           default: return std::numeric_limits<double>::quiet_NaN();
         }
         return mz - slot.loss / slot.charge;
       }
       catch (const std::exception&) { return std::numeric_limits<double>::quiet_NaN(); }
+    }
+
+    /// A residue's token: the one-residue sequence of its one-letter code
+    /// with its modification set by id, as text (C(Carbamidomethyl)). A
+    /// function of the residue alone -- OpenMS keeps one Residue object per
+    /// residue and modification -- so each thread renders it once and keeps
+    /// it: rendering takes ResidueDB's and ModificationsDB's named critical
+    /// sections, which every thread of the decoy loops otherwise queued on
+    /// for every residue of every target. Throws as the rendering does.
+    const std::string& tokenOf(const Residue& residue)
+    {
+      thread_local std::unordered_map<const Residue*, std::string> tokens;
+      const auto it = tokens.find(&residue);
+      if (it != tokens.end()) { return it->second; }
+      auto single = AASequence::fromString(residue.getOneLetterCode());
+      if (residue.isModified()) { single.setModification(0, residue.getModification()->getId()); }
+      return tokens.emplace(&residue, single.toString()).first->second;
     }
 
     bool reproducible(FragmentType t)
@@ -146,9 +170,7 @@ namespace ODIA::search
         for (OpenMS::Size k = 0; k < target.size(); ++k)
         {
           const auto& residue = target[k];
-          auto single = AASequence::fromString(residue.getOneLetterCode());
-          if (residue.isModified()) { single.setModification(0, residue.getModification()->getId()); }
-          tokens.push_back({single.toString(), residue.isModified()});
+          tokens.push_back({tokenOf(residue), residue.isModified()});
         }
       }
       catch (const std::exception&) { out.outcome = DecoyOutcome::Unparsable; return out; }
@@ -198,10 +220,11 @@ namespace ODIA::search
         }
         catch (const std::exception&) { return Try::Invalid; }
         if (decoy == target) { return Try::Same; }
+        const IonLadder ladder(decoy);
         bool copy = true;
         for (std::size_t k = 0; k < slots.size(); ++k)
         {
-          const double mz = fragmentMz(decoy, slots[k]);
+          const double mz = fragmentMz(ladder, decoy, slots[k]);
           const MzFixed fixed = std::isfinite(mz) ? toFixed(mz) : MZ_INVALID;
           if (fixed == MZ_INVALID) { return Try::Invalid; }
           if (fixed < rules.fragment_min || fixed > rules.fragment_max) { return Try::Range; }

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 project(DIALibGen
-  VERSION 0.11.0
+  VERSION 0.11.1
   DESCRIPTION "In-silico DIA spectral library generation from a FASTA, built on OpenMS"
   HOMEPAGE_URL "https://github.com/okohlbacher/DIALibGen"
   LANGUAGES CXX)
@@ -117,8 +117,10 @@ add_library(odia_library STATIC
   src/library/Library.cpp
   src/library/LibraryGenerator.cpp
   src/library/DIANNLibraryFile.cpp
+  src/library/ModifiedSequence.cpp
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
+  src/library/Trace.cpp
   src/library/Hardware.cpp
 )
 add_library(DIALibGen::odia_library ALIAS odia_library)

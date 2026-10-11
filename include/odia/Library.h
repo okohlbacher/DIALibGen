@@ -66,7 +66,7 @@ namespace ODIA
   /// and stop for exactly that reason. It now emits both, because the
   /// alternative measured worse: shipping no mobility at all costs a diaPASEF
   /// consumer the entire mobility dimension, whereas the derived value is good
-  /// to 2.9% against 37,193 measured 1/K0 values on S08 -- and every consumer
+  /// to 2.9% against 37,193 measured 1/K0 values on IH1 -- and every consumer
   /// recalibrates mobility against its own run regardless.
   ///
   /// Fitted against those measurements, the coefficient comes out 1039.07
@@ -245,6 +245,18 @@ namespace ODIA
       std::vector<std::uint8_t> ordinal;
       std::vector<std::int8_t> charge;
       std::vector<LossType> loss;
+    };
+
+    /// Some precursors of a library with transitions held apart from it: the
+    /// MS2 results of one block, handed to a writer while generation goes on.
+    /// precursor[k] indexes the library's precursor arrays; its transitions
+    /// are transitions[begin[k] .. begin[k] + count[k]).
+    struct PrecursorRows
+    {
+      std::vector<std::uint32_t> precursor;
+      std::vector<std::uint32_t> begin;
+      std::vector<std::uint32_t> count;
+      TransitionArrays transitions;
     };
 
     std::size_t precursorCount() const { return precursors_.mz.size(); }

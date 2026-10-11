@@ -15,6 +15,11 @@ binary = str(Path(sys.argv[1]).resolve())
 columns = ['Precursor.Id', 'Modified.Sequence', 'Precursor.Charge', 'Decoy', 'RT', 'IM',
            'Precursor.Mz', 'Product.Mz', 'Relative.Intensity', 'Fragment.Type',
            'Fragment.Charge', 'Fragment.Series.Number', 'Fragment.Loss.Type', 'Protein.Group', 'CCS']
+# The input fixture uses the dotted names DIALibGen wrote up to 0.11.1, which
+# it still reads; its output uses DIA-NN's undotted names, mapped back here.
+LEGACY = {'ModifiedPeptide': 'Modified.Sequence', 'PrecursorCharge': 'Precursor.Charge', 'iRT': 'RT',
+          'IonMobility': 'IM', 'PrecursorMz': 'Precursor.Mz', 'ProductMz': 'Product.Mz',
+          'LibraryIntensity': 'Relative.Intensity'}
 
 with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directory:
     root = Path(directory)
@@ -48,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
             return
         assert result.returncode == 0, (name, result.returncode, log)
         with output.open() as source:
-            actual = list(csv.DictReader(source, delimiter='\t'))
+            actual = [{LEGACY.get(k, k): v for k, v in r.items()} for r in csv.DictReader(source, delimiter='\t')]
         return actual, json.loads(Path(str(output) + '.refine.json').read_text())
 
     actual, provenance = run('basic', [row()], '-write_im')

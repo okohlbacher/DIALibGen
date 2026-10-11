@@ -14,12 +14,20 @@ source is self-contained and can be rebuilt with a C compiler, for example:
 cc -std=gnu99 -O2 -D_FILE_OFFSET_BITS=64 src/AppRun.c -o AppRun
 ```
 
-The runtime is revision `75849dce7cc37e4319b633df1f116ca895c71a12` of
-[AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/tree/75849dce7cc37e4319b633df1f116ca895c71a12).
-The original [build log](https://github.com/AppImage/type2-runtime/actions/runs/28063784345)
+The runtime is revision `8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa` of
+[AppImage/type2-runtime](https://github.com/AppImage/type2-runtime/tree/8f39b89e2ac31e1640b3d3f7e9a5108e6ce805fa).
+The original [build log](https://github.com/AppImage/type2-runtime/actions/runs/36463736478)
 identifies the Alpine image digest and package versions recorded in the pins.
 The runtime links libfuse 3.15.0, squashfuse 0.5.2, musl 1.2.5-r11,
 zstd 1.5.6-r2, zlib 1.3.2-r0 and mimalloc2 2.1.7-r0 statically.
+The packaged binaries are upstream's unmodified `runtime-x86_64` and
+`runtime-aarch64` release assets of that build (signed by upstream key
+`570C77ACEA40C0F1B758902CBF96CCA56490F695`). Upstream replaces its `continuous`
+release on every commit, so DIALibGen keeps these exact files in
+`.github/appimage-runtime/` and passes them to the AppImage packer
+(`LDAI_RUNTIME_FILE`); packaging then checks the embedded runtime against them.
+To move to a newer runtime, review the upstream source changes and build log,
+replace both files and update every runtime pin and source archive together.
 libfuse's library files are LGPL-2.1; its separate tools use GPL-2.0.
 Both original license texts accompany the complete libfuse source.
 

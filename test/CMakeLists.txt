@@ -267,6 +267,106 @@ if(EXISTS "${ODIA_MS2_MODEL_PATH}")
            COMMAND odia_ms2_sessions "${ODIA_MS2_MODEL_PATH}")
 endif()
 
+# -machine:require_gpu must turn a CPU run into an error rather than a
+# warning. With no GPU visible this is the "no CUDA device" case (or a CPU-only
+# ONNX Runtime); both have to fail before anything is written.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}")
+  add_failure_test(generate_require_gpu_without_gpu DIALibGen "the GPU is required (-machine:require_gpu)"
+                   -in "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   -out "${CMAKE_CURRENT_BINARY_DIR}/require_gpu.tsv" -machine:require_gpu)
+  set_tests_properties(generate_require_gpu_without_gpu PROPERTIES
+                       ENVIRONMENT "CUDA_VISIBLE_DEVICES=;DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
+# Byte-identical output at any -threads. Several precursor charges and
+# variable modifications give the enumeration and selection more to reorder.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/threads_identical.json"
+       "{\"precursor_charges\": [2, 3], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+       " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\",\n"
+       " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${ODIA_MS2_MODEL_PATH}\",\n"
+       " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  add_test(NAME generate_threads_identical
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/threads_identical.json"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/threads_identical"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/threads_identical.cmake")
+  # Three MS2 blocks of 10,000, so the pipelined selection hands blocks over.
+  set_tests_properties(generate_threads_identical PROPERTIES ENVIRONMENT "ODIA_MS2_BLOCK=10000")
+endif()
+
+# Streaming (RT and CCS first, the writer behind MS2) writes what the 0.11.1
+# order and the one-pass writer write. See stream_matches_one_pass.cmake.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/stream.json"
+       "{\"precursor_charges\": [2, 3], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+       " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\",\n"
+       " \"min_relative_intensity\": 0.3, \"fragments\": [6, 12],\n"
+       " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${ODIA_MS2_MODEL_PATH}\",\n"
+       " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  add_test(NAME generate_stream_matches_one_pass
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/stream.json"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/stream"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/stream_matches_one_pass.cmake")
+  # The CPU contract. On CUDA the batch composition shapes every value at
+  # float rounding, so CCS predicted before precursors are dropped can differ
+  # in the last bits from CCS predicted after (CcsBatchGuard, LibraryGenerator.h).
+  set_tests_properties(generate_stream_matches_one_pass PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
+endif()
+
+# A process thread limit must not abort generation (thread_limit_test.sh).
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  add_test(NAME generate_under_thread_limit
+           COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/thread_limit_test.sh" $<TARGET_FILE:DIALibGen>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   "${CMAKE_CURRENT_BINARY_DIR}/thread_limit")
+  set_tests_properties(generate_under_thread_limit PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
+# The pruned MS2 graph (data/models/peptdeep_ms2_pruned.onnx, the default) and
+# the full one must give the same library. The TSV carries no provenance, so
+# the two files must be byte-identical; the Parquet differs only in the model
+# hash it records.
+set(ODIA_MS2_PRUNED_PATH "${PROJECT_SOURCE_DIR}/data/models/peptdeep_ms2_pruned.onnx")
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}" AND EXISTS "${ODIA_MS2_PRUNED_PATH}")
+  foreach(variant full pruned)
+    if(variant STREQUAL "full")
+      set(_ms2 "${ODIA_MS2_MODEL_PATH}")
+    else()
+      set(_ms2 "${ODIA_MS2_PRUNED_PATH}")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ms2_${variant}.json"
+         "{\"precursor_charges\": [2, 3, 4], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+         " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\", \"min_relative_intensity\": 0.0,\n"
+         " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${_ms2}\",\n"
+         " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  endforeach()
+  add_test(NAME generate_ms2_pruned_matches_full
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DFULL=${CMAKE_CURRENT_BINARY_DIR}/ms2_full.json"
+                   "-DPRUNED=${CMAKE_CURRENT_BINARY_DIR}/ms2_pruned.json"
+                   "-DFASTA=${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ms2_pruned"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/ms2_pruned_matches_full.cmake")
+endif()
+
+# On a machine with a usable GPU: the default (TF32 off) GPU library equals the
+# CPU library to float rounding, and 1 and 4 CUDA sessions write the same
+# bytes. Skips (77) without one -- the CPU CTest run hides the GPUs.
+if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
+  add_test(NAME gpu_matches_cpu
+           COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/gpu_matches_cpu.py" $<TARGET_FILE:DIALibGen>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta" "${CMAKE_CURRENT_BINARY_DIR}/gpu_matches_cpu")
+  set_tests_properties(gpu_matches_cpu PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.

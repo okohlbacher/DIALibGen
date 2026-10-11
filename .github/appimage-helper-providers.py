@@ -31,6 +31,15 @@ def fetch(url, destination, expected):
     return destination
 
 
+def pinned_runtime(here, pin):
+    # The vendored upstream binary is what the AppImage packer embeds (LDAI_RUNTIME_FILE),
+    # so a rebuilt upstream `continuous` runtime can neither enter nor break a release.
+    reference = (here / pin['file']).read_bytes()
+    if sha256(reference) != pin['sha256']:
+        raise RuntimeError(f"vendored AppImage runtime {pin['file']} differs from its pin")
+    return reference
+
+
 def verify_runtime(actual, reference, pin):
     if len(actual) != pin['size'] or sha256(reference) != pin['sha256']:
         raise RuntimeError('AppImage runtime size or reference hash changed; review its corresponding sources')
@@ -133,7 +142,7 @@ def main():
     arch = arches[0]
     cache = args.tools / 'dialibgen-provenance' / pins['runtime']['revision']
     runtime = {**pins['runtime'], **pins['architectures'][arch]['runtime']}
-    reference = fetch(runtime['url'], cache / ('runtime-' + arch), runtime['sha256']).read_bytes()
+    reference = pinned_runtime(here, runtime)
     offset = int(subprocess.check_output([str(args.appimage.resolve()), '--appimage-offset'], text=True, timeout=30))
     with args.appimage.open('rb') as stream:
         actual = stream.read(offset)

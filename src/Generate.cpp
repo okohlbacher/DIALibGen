@@ -6,11 +6,20 @@
 #include <odia/AtomicFile.h>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
+#include <odia/Hardware.h>
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <filesystem>
 #include <fstream>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string_view>
 #include <cstdint>
 #include <iostream>
 #include <thread>
@@ -22,6 +31,10 @@ namespace
 {
   constexpr const char* kRtModelFile = "peptdeep_rt_dynamic.onnx";
   constexpr const char* kMs2ModelFile = "peptdeep_ms2_dynamic.onnx";
+  /// The MS2 model with its modloss branch removed: channels 0-3 bit-identical
+  /// to kMs2ModelFile, 4-7 exact zeros, and about a fifth fewer FLOPs.
+  /// Generation reads only channels 0-3, so it is the default.
+  constexpr const char* kMs2PrunedModelFile = "peptdeep_ms2_pruned.onnx";
   constexpr const char* kCcsModelFile = "peptdeep_ccs_dynamic.onnx";
 
   constexpr const char* kDecoyMethods[] = {"none", "mutate", "pseudo_reverse",
@@ -93,6 +106,155 @@ namespace
     }
     return {};
   }
+
+  /// The default MS2 model: in the first model directory that holds either,
+  /// the pruned graph, else the full one.
+  std::string findMs2Model()
+  {
+    std::error_code ec;
+    for (const auto& dir : modelDirCandidates())
+    {
+      for (const char* name : {kMs2PrunedModelFile, kMs2ModelFile})
+      {
+        const fs::path c = dir / name;
+        if (fs::exists(c, ec)) { return c.string(); }
+      }
+    }
+    return {};
+  }
+
+  /// Hands MS2 results to the library writer while the prediction goes on.
+  ///
+  /// generate predicts RT and CCS first, so a precursor is complete once its
+  /// MS2 spectrum is in: a consumer thread takes each block's kept precursors
+  /// (a queue bounded at about one row group of precursors, at least two
+  /// blocks: MS2 runs on while a row group is encoded, and the copies held
+  /// stay near 200 MB), settles their CCS batching (CcsBatchGuard, once the old
+  /// order's CCS call they belonged to is complete) and passes them to the
+  /// StreamWriter, which writes every complete row group. Strictly in
+  /// precursor order; the output is the one-pass writer's, byte for byte.
+  class Ms2Stream final : public ODIA::LibraryGenerator::Ms2Sink
+  {
+  public:
+    using Open = std::function<std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter>()>;
+
+    Ms2Stream(ODIA::Library& library, ODIA::LibraryGenerator::CcsBatchGuard& guard, Open open)
+      : library_(library), guard_(guard), open_(std::move(open)), thread_([this] { run(); }) {}
+
+    ~Ms2Stream() override
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        done_ = true;
+        abandon_ = !drained_;
+      }
+      changed_.notify_all();
+      if (thread_.joinable()) { thread_.join(); }
+    }
+
+    void rows(ODIA::Library::PrecursorRows rows) override
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      // On one H100 a two-block bound made MS2 wait while each row group
+      // was encoded (+7 s for the proteome); a row group's worth does not.
+      changed_.wait(lock, [&] { return queue_.size() < 2 || queued_rows_ < QUEUE_ROWS || error_; });
+      if (error_) { std::rethrow_exception(error_); }
+      queued_rows_ += rows.precursor.size();
+      queue_.push_back(std::move(rows));
+      changed_.notify_all();
+    }
+
+    void drain() override
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        done_ = true;
+        drained_ = true;
+      }
+      changed_.notify_all();
+      thread_.join();
+      if (error_) { std::rethrow_exception(error_); }
+    }
+
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> takeWriter() { return std::move(writer_); }
+    std::size_t resettled() const { return resettled_; }
+
+  private:
+    void run()
+    {
+      try
+      {
+        for (;;)
+        {
+          ODIA::Library::PrecursorRows rows;
+          {
+            std::unique_lock<std::mutex> lock(mutex_);
+            changed_.wait(lock, [&] { return !queue_.empty() || done_; });
+            if (abandon_) { return; }
+            if (queue_.empty()) { break; }
+            rows = std::move(queue_.front());
+            queue_.pop_front();
+            queued_rows_ -= rows.precursor.size();
+          }
+          changed_.notify_all();
+          consume(std::move(rows));
+        }
+        // Every kept precursor is known: the last old-order CCS call is complete.
+        resettled_ += guard_.settle(library_, kept_, settled_, kept_.size());
+        settled_ = kept_.size();
+        release();
+      }
+      catch (...)
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        error_ = std::current_exception();
+        changed_.notify_all();
+      }
+    }
+
+    void consume(ODIA::Library::PrecursorRows rows)
+    {
+      kept_.insert(kept_.end(), rows.precursor.begin(), rows.precursor.end());
+      held_end_.push_back(kept_.size());
+      held_.push_back(std::move(rows));
+      const std::size_t complete = kept_.size() / ODIA::LibraryGenerator::ccsBlock() * ODIA::LibraryGenerator::ccsBlock();
+      if (complete > settled_)
+      {
+        resettled_ += guard_.settle(library_, kept_, settled_, complete);
+        settled_ = complete;
+      }
+      release();
+    }
+
+    void release()
+    {
+      while (!held_.empty() && held_end_.front() <= settled_)
+      {
+        if (!writer_) { writer_ = open_(); }
+        writer_->add(std::move(held_.front()));
+        held_.pop_front();
+        held_end_.pop_front();
+      }
+    }
+
+    ODIA::Library& library_;
+    ODIA::LibraryGenerator::CcsBatchGuard& guard_;
+    Open open_;
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer_;
+    std::vector<std::uint32_t> kept_;          ///< kept precursors so far, in order
+    std::deque<ODIA::Library::PrecursorRows> held_;
+    std::deque<std::size_t> held_end_;         ///< kept_.size() after each held block
+    std::size_t settled_ = 0;
+    std::size_t resettled_ = 0;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::deque<ODIA::Library::PrecursorRows> queue_;
+    static constexpr std::size_t QUEUE_ROWS = std::size_t(1) << 20;
+    std::size_t queued_rows_ = 0;
+    bool done_ = false, drained_ = false, abandon_ = false;
+    std::exception_ptr error_;
+    std::thread thread_;   ///< last: starts once everything above exists
+  };
 
   json effectiveConfig(const ODIA::DigestParams& p, const std::string& decoys,
                        const std::string& rt_model, const std::string& ms2_model,
@@ -348,6 +510,8 @@ json DIALibGen::generationValue_(const std::string& key, const json& value)
 }
 OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
   {
+    // Configuration, model lookup and option checks, up to the FASTA read.
+    ODIA::trace::Scope setup_phase("setup", 0);
     ODIA::DigestParams p;                       // defaults live in DigestParams
     std::string decoys = "none", rt_model, ms2_model, ccs_model, instrument = "QE";
     bool recompute_decoy_mz = false;
@@ -371,8 +535,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       const auto base = fs::path(cfg).parent_path();
       for (std::string* m : {&rt_model, &ms2_model, &ccs_model})
       {
-        if (!m->empty() && fs::path(*m).is_relative())
-        { *m = (base / *m).lexically_normal().string(); }
+        if (m->empty() || !fs::path(*m).is_relative()) { continue; }
+        const auto beside = (base / *m).lexically_normal();
+        // A bare file name that is not beside the config names a model in
+        // the model directories (see below).
+        std::error_code ec;
+        if (fs::path(*m).filename() == fs::path(*m) && !fs::exists(beside, ec))
+        {
+          if (const auto found = findModel(m->c_str()); !found.empty()) { *m = found; continue; }
+        }
+        *m = beside.string();
       }
     }
 
@@ -409,11 +581,19 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                     " (recorded as " + nce_source + ")");
 
     }
-    if (instrument == "SciexTOF" || instrument == "ThermoTOF")
-    { writeLogWarn_(instrument + " is in upstream's instrument list but carries no trained weights in the shipped "
-                    "MS2 checkpoint (whose own constants name four instruments, and whose SciexTOF column sits at "
-                    "its initialisation). Predictions will be close to Lumos, the no-correction baseline; name "
-                    "Lumos if that is what you want."); }
+    // Neither instrument has trained weights in the shipped MS2 checkpoint
+    // (its own constants name four instruments). Measured against Lumos at
+    // the same NCE (median spectral cosine per precursor, synthetic
+    // peptides): ThermoTOF 0.993 -- effectively Lumos -- but SciexTOF only
+    // 0.914, with a tenth of the precursors below 0.64.
+    if (instrument == "ThermoTOF")
+    { writeLogWarn_("ThermoTOF carries no trained weights in the shipped MS2 checkpoint; its predictions are "
+                    "effectively Lumos's (median spectral cosine 0.993 at the same NCE). Name Lumos to say so."); }
+    if (instrument == "SciexTOF")
+    { writeLogWarn_("SciexTOF (also TripleTOF and ZenoTOF) carries no trained weights in the shipped MS2 "
+                    "checkpoint, and its predictions are NOT those of Lumos: median spectral cosine 0.914 against "
+                    "Lumos at the same NCE, below 0.64 for a tenth of precursors. Neither has been validated on "
+                    "SCIEX data; name Lumos to get the no-correction baseline instead."); }
 
     struct { const char* name; const char* file; std::string* path; } models[] = {
       {"rt_model", kRtModelFile, &rt_model},
@@ -421,7 +601,18 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       {"ccs_model", kCcsModelFile, &ccs_model}};
     for (auto& m : models)
     {
-      if (m.path->empty()) { *m.path = findModel(m.file); }
+      // A bare file name that does not exist as given names a model in the
+      // model directories: "ms2_model": "peptdeep_ms2_dynamic.onnx" selects
+      // the full MS2 model wherever the install keeps it.
+      if (!m.path->empty() && fs::path(*m.path).filename() == fs::path(*m.path) &&
+          !fs::exists(*m.path))
+      {
+        if (const auto found = findModel(m.path->c_str()); !found.empty()) { *m.path = found; }
+      }
+      if (!m.path->empty()) { continue; }
+      // MS2: the pruned graph where it sits beside the full one, so that a
+      // DIALIBGEN_MODEL_DIR holding only the three stock models is used as is.
+      *m.path = std::string_view(m.file) == kMs2ModelFile ? findMs2Model() : findModel(m.file);
     }
 
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
@@ -484,11 +675,71 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
+    if (threads == 0)
+    { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads (" +
+                    ODIA::physicalCoresReason() + ")"); }
+    {
+      // Above 32 threads on a machine with several NUMA nodes, interleave the
+      // run's memory over the nodes (what numactl --interleave=all does).
+      // Without it the busy sessions crowd onto one node: on 2 x 96 cores at
+      // 96 threads about 55 of them ran on node 0, on 9 of its 24 L3 slices.
+      // Measured there: -10 % wall and -20 % CPU at 96 sessions; +6 % at 16,
+      // hence the threshold. ODIA_NUMA_INTERLEAVE=0 or 1 overrides; the
+      // library does not depend on it.
+      const unsigned workers = threads == 0 ? ODIA::physicalCores() : threads;
+      const char* forced = std::getenv("ODIA_NUMA_INTERLEAVE");
+      const bool want = forced != nullptr && *forced != '\0' ? std::string_view(forced) != "0"
+                                                             : workers > 32;
+      const unsigned nodes = ODIA::numaNodes();
+      const bool interleaved = want && nodes > 1 && ODIA::interleaveMemory();
+      if (interleaved)
+      { writeLogInfo_("memory interleaved over " + std::to_string(nodes) + " NUMA nodes (" +
+                      std::to_string(workers) + " threads; ODIA_NUMA_INTERLEAVE=0 turns it off)"); }
+      ODIA::trace::note("numa_interleave", interleaved ? "on" : "off");
+    }
+    writeLogInfo_("MS2 model: " + ms2_model);
+    std::vector<std::string> device_warnings;
+    const ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
     ODIA::Library library;
     std::string standards;
+    setup_phase.fields().rows = threads;
+    setup_phase.end();
+
+    // The library's identity, known before generation so that the writer can
+    // start while MS2 runs.
+    ODIA::trace::Scope fingerprint_phase("fingerprint", 0);
+    ODIA::DIANNLibraryFile::Fingerprint fp;
+    try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
+    catch (const std::exception& e)
+    { writeLogError_(std::string("cannot fingerprint the FASTA: ") + e.what()); return INPUT_FILE_NOT_FOUND; }
+    fp.target_params = ODIA::LibraryGenerator::fingerprintParams(
+      p, ODIA::DIANNLibraryFile::hashFile(rt_model),
+      ODIA::DIANNLibraryFile::hashFile(ms2_model),
+      ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
+    fp.decoy_method = decoys;
+    fingerprint_phase.end();
+    const auto finishFingerprint = [&]() {
+      if (irt_rescale && fp.target_params.find(";irt_standards=") == std::string::npos)
+      { fp.target_params += ";irt_standards=" + ODIA::DIANNLibraryFile::hashFile(standards); }
+      fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
+                  ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
+    };
+    // Recorded only when there is something to say, so a library built where
+    // nothing fell back is byte-identical to one from a build without this.
+    const auto extraMetadata = [&]() {
+      std::vector<std::pair<std::string, std::string>> extra;
+      if (!device_warnings.empty()) { extra.emplace_back("odia.warnings", json(device_warnings).dump()); }
+      return extra;
+    };
+    // RT and CCS first and MS2 last, with the writer streaming behind MS2.
+    // ODIA_STREAM=0 restores 0.11.1's order (MS2 before CCS) and the one-pass
+    // writer: the same file, for comparison.
+    const char* stream_env = std::getenv("ODIA_STREAM");
+    const bool stream = stream_env == nullptr || std::string_view(stream_env) != "0";
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
     try
     {
-      const auto st = ODIA::LibraryGenerator::generate(fasta, p, library);
+      const auto st = ODIA::LibraryGenerator::generate(fasta, p, library, threads);
       writeLogInfo_("digest: " + std::to_string(st.proteins) + " proteins, " +
                     std::to_string(st.peptides) + " peptides, " +
                     std::to_string(st.precursors) + " precursors, " +
@@ -497,9 +748,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       { writeLogWarn_("digest skipped " + std::to_string(st.dropped_proteins) +
           " invalid proteins and " + std::to_string(st.dropped_ambiguous_peptides) +
           " peptides with ambiguous or undefined residue masses"); }
+      for (const auto& [name, count] : st.variable_modification_precursors)
+      { writeLogInfo_("variable modification '" + name + "': " + std::to_string(count) + " precursors"); }
 
       if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
-            library, rt_model, true, threads, p.free_cysteine_rt_correction); miss)
+            library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
       {
         writeLogError_(std::to_string(miss) + " precursors have no predicted RT. "
                        "Refusing rather than shipping a library with NaN retention "
@@ -518,7 +771,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           writeLogError_(e.str());
           return INPUT_FILE_NOT_FOUND;
         }
-        const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true);
+        const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true, gpu);
         ODIA::LibraryGenerator::applyIrtCalibration(library, cal);
         std::ostringstream m;
         m.setf(std::ios::fixed); m.precision(4);
@@ -534,16 +787,43 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                       "this is the pipeline domain; it is NOT interchangeable with an "
                       "iRT library in another tool.");
       }
+      finishFingerprint();
 
-      if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-            library, ms2_model, p, static_cast<float>(nce), instrument, true, threads); miss)
-      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
-      writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
-      if (library.precursorCount() == 0)
-      { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
-      if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-            library, ccs_model, true, threads, p.derive_ion_mobility); miss)
-      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+      if (stream)
+      {
+        std::vector<std::uint16_t> lengths;
+        bool ccs_on_cpu = false;
+        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+              library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+        ODIA::LibraryGenerator::CcsBatchGuard guard(ccs_model, p.derive_ion_mobility, std::move(lengths), ccs_on_cpu);
+        const std::string config_json = parquet ? eff.dump() : std::string();
+        Ms2Stream sink(library, guard, [&]() {
+          return std::make_unique<ODIA::DIANNLibraryFile::StreamWriter>(out, library, fp, config_json,
+                                                                         extraMetadata(), threads);
+        });
+        if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu, &sink); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        writer = sink.takeWriter();
+        if (sink.resettled())
+        { writeLogInfo_("CCS of " + std::to_string(sink.resettled()) + " precursors predicted again in their 0.11.1 batching"); }
+        writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
+        if (library.precursorCount() == 0)
+        { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
+      }
+      else
+      {
+        if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
+        if (library.precursorCount() == 0)
+        { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
+        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+              library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+      }
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);
       const auto made = ODIA::LibraryGenerator::appendDecoys(library, method, &skipped,
@@ -552,36 +832,49 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       writeLogInfo_("decoys: " + std::to_string(made) + " (" + decoys + "), " +
                     std::to_string(skipped) + " skipped");
     }
+    catch (const std::invalid_argument& e)
+    {
+      // A request the library cannot honour (a modification that modifies
+      // nothing, an unsupported specificity, an impossible charge range).
+      writeLogError_(std::string("library generation refused: ") + e.what());
+      return ILLEGAL_PARAMETERS;
+    }
     catch (const std::exception& e)
     { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }
 
-    ODIA::DIANNLibraryFile::Fingerprint fp;
-    try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
-    catch (const std::exception& e)
-    { writeLogError_(std::string("cannot fingerprint the FASTA: ") + e.what()); return INPUT_FILE_NOT_FOUND; }
-    fp.target_params = ODIA::LibraryGenerator::fingerprintParams(
-      p, ODIA::DIANNLibraryFile::hashFile(rt_model),
-      ODIA::DIANNLibraryFile::hashFile(ms2_model),
-      ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
-    if (irt_rescale)
-    { fp.target_params += ";irt_standards=" + ODIA::DIANNLibraryFile::hashFile(standards); }
-    fp.decoy_method = decoys;
-    fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
-                ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
+    if (!device_warnings.empty())
+    {
+      writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on CUDA ran on the CPU; "
+                    "recorded as odia.warnings" + std::string(parquet ? "" : " (TSV: log only)"));
+    }
 
+    ODIA::trace::Scope write_phase("write", 0);
+    write_phase.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     try
     {
-      if (parquet)
-      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump()); }
-      else
+      if (writer)
       {
-        ODIA::DIANNLibraryFile::storeTSV(out, library);
+        write_phase.fields().idx = static_cast<std::int64_t>(writer->written());
+        writer->finish(library);
+      }
+      else if (parquet)
+      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extraMetadata(), threads); }
+      else { ODIA::DIANNLibraryFile::storeTSV(out, library, threads); }
+      if (!parquet)
+      {
         writeLogWarn_("TSV cannot carry the recipe: the config is NOT embedded and this "
                       "file is not cache-eligible. Use .parquet to keep them together.");
       }
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("cannot write ") + out + ": " + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+    write_phase.end();
     writeLogInfo_("wrote " + out);
+    {
+      // Releasing the library: what the destructor would do on return, done
+      // here so that the trace can time it.
+      ODIA::trace::Scope teardown_phase("teardown", 0);
+      library = ODIA::Library();
+    }
     return EXECUTION_OK;
   }

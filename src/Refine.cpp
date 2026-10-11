@@ -240,7 +240,7 @@ void DIALibGen::registerRefinementOptions_()
                                                           ".trajectory.tsv sidecars here. Default: a scratch "
                                                           "directory, removed on exit -- the deliverable is the library.", false);
     registerFlag_("tune_predict_gpu", "Use the GPU for the re-prediction pass (the ONNX one, not training).");
-    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = default.", false);
+    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = as many as -threads (-threads 0: one per physical core).", false);
     registerFlag_("tune_keep_free_cysteine_offset",
                   "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by "
                   "default: that offset was fitted against the STOCK model, and a model tuned on this run's own "
@@ -278,11 +278,28 @@ void DIALibGen::registerRefinementOptions_()
     registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false);
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
-    registerTOPPSubsection_("machine", "Fine-tuning: device");
+    registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
     registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
     registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+    registerStringOption_("machine:tf32", "<true/false>", "false",
+                          "TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU "
+                          "libraries to float rounding. On: faster (one H100, whole proteome: ~25 s less), but about 1 % "
+                          "of precursors select a different fragment set and CCS moves by up to ~1.9 A^2.", false);
+    setValidStrings_("machine:tf32", {"true", "false"});
+    registerIntOption_("machine:gpu_sessions", "<n>", 4,
+                       "ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: "
+                       "2-4 give RT and CCS +30-45 %, 8 is slower. Does not change the output.", false);
+    setMinInt_("machine:gpu_sessions", 1);
+    setMaxInt_("machine:gpu_sessions", 16);
+    registerIntList_("machine:gpu_devices", "<ids>", OpenMS::IntList(),
+                     "CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible "
+                     "device that works. Does not change the output.", false);
+    setMinInt_("machine:gpu_devices", 0);
+    registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
+                                         "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
+                                         "fallback is a WARNING in the log and in the output's provenance.");
 
     registerTOPPSubsection_("search", "Built-in identification with -run (EXPERIMENTAL): candidates, decoys, extraction, "
                                       "calibration and the run-level guards. See docs/design/built-in-identification.md");
@@ -837,6 +854,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         tp.device = getStringOption_("machine:device");
         tp.threads = getIntOption_("machine:threads");
         tp.cudnn = !getFlag_("machine:no_cudnn");
+        tp.tf32 = getStringOption_("machine:tf32") == "true";
         tp.seed = static_cast<std::uint32_t>(getIntOption_("machine:seed"));
         if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
         { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
@@ -874,7 +892,15 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         const bool free_cys = getFlag_("tune_keep_free_cysteine_offset");
         const bool gpu = getFlag_("tune_predict_gpu");
-        const unsigned sessions = static_cast<unsigned>(std::max(0, getIntOption_("tune_predict_sessions")));
+        std::vector<std::string> device_warnings;
+        const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
+        // 0 follows -threads, the run's CPU budget; 0.11.2 lifted the cap of
+        // 16 sessions, so 0 meaning "all cores" would take a 2 x 96-core node
+        // whatever -threads said. The predictor never exceeds the physical
+        // cores (Hardware.h).
+        const int requested_sessions = getIntOption_("tune_predict_sessions");
+        const unsigned sessions = static_cast<unsigned>(
+          std::max(0, requested_sessions > 0 ? requested_sessions : getIntOption_("threads")));
 
         if (want_rt)
         {
@@ -884,7 +910,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           // predictRetentionTimes returns what it could NOT predict, not what it
           // did -- undocumented, and it reads exactly the other way round.
           const std::size_t unpredicted =
-            ODIA::LibraryGenerator::predictRetentionTimes(library, r.model_out, gpu, sessions, free_cys);
+            ODIA::LibraryGenerator::predictRetentionTimes(library, r.model_out, gpu, sessions, free_cys, gpu_options);
           if (unpredicted) { throw std::runtime_error("tuned RT could not encode " + std::to_string(unpredicted) + " precursors; refusing mixed RT units"); }
           const std::size_t n = library.precursorCount() - unpredicted;
           // The model emits rt_norm = RT / rt_max_minutes, and that denominator
@@ -911,7 +937,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           // the CCS head actually tuned -- otherwise a library that arrived with
           // measured mobilities would lose them to stock predictions.
           const std::size_t unpredicted =
-            ODIA::LibraryGenerator::predictCollisionCrossSections(library, r.model_out, gpu, sessions, true);
+            ODIA::LibraryGenerator::predictCollisionCrossSections(library, r.model_out, gpu, sessions, true, gpu_options);
           if (unpredicted) { throw std::runtime_error("tuned CCS could not encode " + std::to_string(unpredicted) + " precursors; refusing a partially re-predicted library"); }
           const std::size_t n = library.precursorCount() - unpredicted;
           tune_prov["ccs"] = {{"stop_reason", r.stop_reason}, {"best_epoch", r.best_epoch},
@@ -924,6 +950,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                         (unpredicted ? " (" + std::to_string(unpredicted) + " could not be encoded)" : ""));
         }
 
+        if (!device_warnings.empty()) { tune_prov["device_warnings"] = device_warnings; }
         tune_prov["full_fit"] = tp.full_fit;   // recorded for either head, not only when RT was tuned
         tune_prov["models_kept"] = keep.empty() ? json(nullptr) : json(fs::absolute(work).string());
       }
@@ -1076,6 +1103,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
     try
     {
+      // The writers' output does not depend on the thread count.
+      const unsigned write_threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
       if (out.ends_with(".parquet"))
       {
@@ -1084,10 +1113,11 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         // same -run command writes the same library bytes.
         json embedded = prov;
         if (embedded.contains("search") && embedded["search"].is_object()) { embedded["search"].erase("resources"); }
-        ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{}, embedded.dump());
+        ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{},
+                                                    embedded.dump(), {}, write_threads);
       }
       else if (out.ends_with(".tsv"))
-      { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library); }
+      { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library, write_threads); }
       else { writeLogError_("-out must end in .parquet or .tsv"); return ILLEGAL_PARAMETERS; }
       std::ofstream side(sidecar.temporaryPath());
       side << prov.dump(2) << '\n'; side.close();

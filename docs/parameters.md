@@ -1,14 +1,14 @@
 # Parameter reference
 
-Generated from DIALibGen 0.11.0 with `scripts/update-parameters.py`. Do not edit this table by hand.
+Generated from DIALibGen 0.11.1 with `scripts/update-parameters.py`. Do not edit this table by hand.
 
 The schema lists all modes. `-mode generate` is the default; refinement and training options apply to their respective modes. Generation booleans take `true`/`false`; list items are separate arguments. See [usage](usage.md).
 
 | Option | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `-mode` | string | `generate` | generate,refine,tune | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library. |
-| `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune). |
-| `-out` | output-file | (empty) |  | DIA-NN spectral library; Parquet embeds provenance. |
+| `-mode` | string | `generate` | generate,refine,tune,convert | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged. |
+| `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune/convert). |
+| `-out` | output-file | (empty) |  | Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. |
 | `-config` | input-file | (empty) |  | Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON. |
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |
@@ -45,7 +45,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-tune_heads` | string | `both` | rt,ccs,both | Which models to tune. |
 | `-tune_out_models` | string | (empty) |  | Keep the tuned ONNX files and their .tune.json and .trajectory.tsv sidecars here. Default: a scratch directory, removed on exit -- the deliverable is the library. |
 | `-tune_predict_gpu` | bool | `false` |  | Use the GPU for the re-prediction pass (the ONNX one, not training). |
-| `-tune_predict_sessions` | int | `0` | 0: | ONNX Runtime sessions for the re-prediction pass; 0 = default. |
+| `-tune_predict_sessions` | int | `0` | 0: | ONNX Runtime sessions for the re-prediction pass; 0 = as many as -threads (-threads 0: one per physical core). |
 | `-tune_keep_free_cysteine_offset` | bool | `false` |  | Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by default: that offset was fitted against the STOCK model, and a model tuned on this run's own identifications has had the chance to learn the effect itself -- applying both counts it twice. |
 | `-log` | string | (empty) |  | Name of log file (created only when specified) |
 | `-debug` | int | `0` |  | Sets the debug level |
@@ -101,6 +101,10 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:threads` | int | `4` | 1: | CPU threads used for training |
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
+| `-machine:tf32` | bool | `false` |  | TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU libraries to float rounding. On: faster (one H100, whole proteome: ~25 s less), but about 1 % of precursors select a different fragment set and CCS moves by up to ~1.9 A^2. |
+| `-machine:gpu_sessions` | int | `4` | 1:16 | ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: 2-4 give RT and CCS +30-45 %, 8 is slower. Does not change the output. |
+| `-machine:gpu_devices` | int list | (empty) | 0: | CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible device that works. Does not change the output. |
+| `-machine:require_gpu` | bool | `false` |  | Fail instead of running a model on the CPU when its CUDA session cannot be created (missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a fallback is a WARNING in the log and in the output's provenance. |
 | `-search:candidates` | string | `evidence` | evidence,random | Candidate selection: evidence = target-decoy pairs of which the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for both); random = a deterministic, label-blind random subset of pairs (search:subset) |
 | `-search:subset` | int | `0` | 0: | search:candidates random: targets drawn from the library before the cap (0 = every eligible target) |
 | `-search:max_pairs` | int | `200000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge and keeps the pairs with the most evidence |

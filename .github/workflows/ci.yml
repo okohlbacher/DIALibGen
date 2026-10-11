@@ -223,10 +223,15 @@ jobs:
               "library_io_contract", "text_writer_contract", "atomic_file_contract", "refinement_report_contract",
               "peptdeep_reference_encoding", "peptdeep_element_table", "peptdeep_meta_inputs",
               "peptdeep_encoder_matches_reference", "topp_parameters", "parameter_docs_current",
+              "generate_threads_identical", "generate_stream_matches_one_pass",
+              "generate_ms2_pruned_matches_full",
           }
+          # No runner has a GPU: gpu_matches_cpu skips (77) here by design and
+          # runs where one is visible. generate_under_thread_limit is Linux-only.
+          allowed_skips = {"gpu_matches_cpu", "generate_under_thread_limit"}
           assert required <= tests.keys(), f"required tests missing: {required - tests.keys()}"
           for name, case in tests.items():
-              assert case.find("skipped") is None, f"{name} must pass, not skip"
+              assert name in allowed_skips or case.find("skipped") is None, f"{name} must pass, not skip"
           PYTEST
 
       - name: Diagnose an ARM training failure
@@ -308,8 +313,8 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
-          # Require all three bundled prediction models.
-          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
+          # Require all bundled prediction models, the pruned MS2 graph included.
+          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx peptdeep_ms2_pruned.onnx; do
             test -s "$PWD/stage/share/DIALibGen/models/$m" \
               || { echo "::error::$m is not in the install tree"; exit 1; }
           done
@@ -333,7 +338,10 @@ jobs:
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
           BIN="$PWD/stage/bin/DIALibGen"
 
-          "$BIN" -in example/proteins.fasta -out out.parquet
+          "$BIN" -in example/proteins.fasta -out out.parquet > gen.log 2>&1 || { cat gen.log; exit 1; }
+          # The bundled pruned MS2 graph is the default.
+          grep -q "MS2 model: .*peptdeep_ms2_pruned.onnx" gen.log \
+            || { echo "::error::the installed binary does not use the pruned MS2 model"; cat gen.log; exit 1; }
           "$BIN" -in example/proteins.fasta -out out.tsv
 
           test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }
@@ -361,9 +369,9 @@ jobs:
           # The TSV is the DIA-NN dialect: a header and at least one row.
           rows=$(wc -l < out.tsv)
           [ "$rows" -gt 1 ] || { echo "::error::the TSV library has no rows"; exit 1; }
-          # Require DIA-NN column spellings (DIANNLibraryFile::Columns).
-          for col in Precursor.Id Modified.Sequence Precursor.Mz Product.Mz \
-                     Relative.Intensity Fragment.Type Protein.Group; do
+          # Require DIA-NN column spellings (DIANNLibraryFile::TSVColumns).
+          for col in Precursor.Id ModifiedPeptide PrecursorMz ProductMz \
+                     LibraryIntensity FragmentType UniprotID ProteinName Protein.Group; do
             head -1 out.tsv | tr '\t' '\n' | grep -qxF "$col" \
               || { echo "::error::the TSV header has no $col column"; exit 1; }
           done
@@ -788,10 +796,14 @@ jobs:
             || { echo "::error::the cached standalone AppImage output plugin is missing"; exit 1; }
           PACKER_CHECKSUM="$PWD/corresponding-sources/build-instructions/appimage-output-plugin.sha256"
           sha256sum "$PACKER" > "$PACKER_CHECKSUM"
+          # Embed the vendored, pinned type2-runtime instead of upstream's mutable `continuous` build.
+          RUNTIME_FILE="$PWD/.github/appimage-runtime/runtime-$(uname -m)"
+          test -s "$RUNTIME_FILE" \
+            || { echo "::error::no vendored AppImage runtime for $(uname -m)"; exit 1; }
           repack() {
             sha256sum --check "$PACKER_CHECKSUM"
             rm -f "$APPIMAGE"
-            ARCH="$(uname -m)" OUTPUT="$APPIMAGE" APPIMAGE_EXTRACT_AND_RUN=1 \
+            ARCH="$(uname -m)" OUTPUT="$APPIMAGE" APPIMAGE_EXTRACT_AND_RUN=1 LDAI_RUNTIME_FILE="$RUNTIME_FILE" \
               "$PACKER" --appimage-extract-and-run --appdir "$APPDIR"
             test -s "$APPIMAGE"
             diff --no-dereference --brief --recursive stage "$CLI_RESOURCES"

@@ -36,6 +36,16 @@ pub const MODEL_FILES: [&str; 3] = [
     "peptdeep_ccs_dynamic.onnx",
 ];
 
+/// The MS2 model without its modloss branch, bundled beside MODEL_FILES since
+/// 0.11.2. Same library as peptdeep_ms2_dynamic.onnx, faster; the CLI's default.
+pub const MS2_PRUNED_FILE: &str = "peptdeep_ms2_pruned.onnx";
+
+/// The MS2 model file a generation run in @p dir uses: the pruned graph when
+/// the directory has it, as the CLI's own lookup does, else the full model.
+pub fn ms2_model_file(dir: &Path) -> &'static str {
+    if dir.join(MS2_PRUNED_FILE).is_file() { MS2_PRUNED_FILE } else { MODEL_FILES[1] }
+}
+
 /// The single in-flight run. Library generation is long and memory-hungry; a
 /// second `run` while one is live is refused rather than queued.
 #[derive(Default)]
@@ -175,6 +185,13 @@ fn apply_env(cmd: &mut Command, r: &Resolved) {
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW: the GUI owns the log.
+    }
+    // OpenBLAS (pulled in through OpenMS's LAPACK) starts a spinning thread
+    // per hardware thread before main -- ~14 CPU-s per run on a large node
+    // -- for BLAS calls the CLI never makes. Only the starting environment
+    // can prevent it; a value the user set wins.
+    if std::env::var_os("OPENBLAS_NUM_THREADS").is_none() {
+        cmd.env("OPENBLAS_NUM_THREADS", "1");
     }
     if let Some(d) = &r.data {
         cmd.env("OPENMS_DATA_PATH", d);
@@ -642,6 +659,7 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
             // them rather than letting stale/imported paths override the picker.
             // Explicit file paths also stop the CLI's per-head fallback search.
             for (key, file) in ["rt_model", "ms2_model", "ccs_model"].into_iter().zip(MODEL_FILES) {
+                let file = if key == "ms2_model" { ms2_model_file(&selected) } else { file };
                 config.insert(key.into(), Value::String(selected.join(file).display().to_string()));
             }
         }
@@ -825,6 +843,26 @@ mod tests {
             Value::Object(m) => m,
             _ => panic!("not an object"),
         }
+    }
+
+    #[test]
+    fn cli_starts_with_one_openblas_thread_unless_the_user_chose() {
+        let resolved = Resolved { bin: "DIALibGen".into(), data: None, share: None, source: "path" };
+        let mut command = Command::new(&resolved.bin);
+        apply_env(&mut command, &resolved);
+        let value = command.get_envs().find(|(key, _)| *key == "OPENBLAS_NUM_THREADS").and_then(|(_, v)| v);
+        match std::env::var_os("OPENBLAS_NUM_THREADS") {
+            None => assert_eq!(value, Some(std::ffi::OsStr::new("1"))),
+            Some(_) => assert_eq!(value, None),
+        }
+    }
+
+    #[test]
+    fn generation_prefers_the_pruned_ms2_model_beside_the_full_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ms2_model_file(dir.path()), "peptdeep_ms2_dynamic.onnx");
+        std::fs::write(dir.path().join(MS2_PRUNED_FILE), "model").unwrap();
+        assert_eq!(ms2_model_file(dir.path()), MS2_PRUNED_FILE);
     }
 
     #[cfg(target_os = "linux")]

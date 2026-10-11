@@ -67,6 +67,11 @@ def rows(path):
         return list(csv.DictReader(f, delimiter='\t'))
 
 
+def lib_im(r):
+    """A TSV library row's 1/K0: IonMobility since 0.11.2's DIA-NN column names, IM before."""
+    return float(r['IonMobility'] if 'IonMobility' in r else r['IM'])
+
+
 if mode == 'tune' and not (models and (models / 'peptdeep_rt_dynamic.onnx').is_file()):
     print('SKIP: no stock RT model in %s' % models)
     sys.exit(77)
@@ -258,8 +263,8 @@ try:
               (im_cal['im_window'], json.dumps({k: mob.get(k) for k in ('slope', 'intercept', 'inliers', 'window_assignment')}), written))
         if written < 0.7 * len(im_truth):
             fail('%d observed 1/K0 written for %d planted precursors' % (written, len(im_truth)))
-        lib_im = {r['Precursor.Id']: float(r['IM']) for r in rows(im_out) if r['Decoy'] == '0'}
-        errors = sorted(abs(lib_im[k] - v) for k, v in im_truth.items() if k in lib_im and not math.isnan(lib_im[k]))
+        lib_im_of = {r['Precursor.Id']: lib_im(r) for r in rows(im_out) if r['Decoy'] == '0'}
+        errors = sorted(abs(lib_im_of[k] - v) for k, v in im_truth.items() if k in lib_im_of and not math.isnan(lib_im_of[k]))
         within = sum(1 for e in errors if e <= 0.01)
         print('ok   -write_im on the diaPASEF run: %d of %d planted precursors within 0.01 of their true 1/K0 (median %.4f)'
               % (within, len(errors), errors[len(errors) // 2] if errors else float('nan')))
@@ -276,7 +281,7 @@ try:
             reader = csv.DictReader(f, delimiter='\t')
             fields, lib_rows = reader.fieldnames, list(reader)
         with open(d / 'library.tsv', 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[c for c in fields if c != 'IM'], delimiter='\t', lineterminator='\n',
+            writer = csv.DictWriter(f, fieldnames=[c for c in fields if c not in ('IM', 'IonMobility')], delimiter='\t', lineterminator='\n',
                                     extrasaction='ignore')
             writer.writeheader()
             writer.writerows(lib_rows)
@@ -304,7 +309,8 @@ try:
                 writer.writeheader()
                 for r in lib_rows:
                     if r['Precursor.Id'] in dropped:
-                        r = dict(r, IM='', **({'CCS': ''} if 'CCS' in r else {}))
+                        im_column = 'IonMobility' if 'IonMobility' in r else 'IM'
+                        r = dict(r, **{im_column: ''}, **({'CCS': ''} if 'CCS' in r else {}))
                     writer.writerow(r)
             return dd, len(dropped)
 
@@ -349,7 +355,7 @@ try:
         scatter = root / 'pasef-scatter'
         print(run(synth, scatter, peptides, '0.2', '20260921', 'im-scatter').strip())
         s_truth = {r['precursor_id']: float(r['im']) for r in rows(scatter / 'truth.tsv')}
-        s_library = {r['Precursor.Id']: float(r['IM']) for r in rows(scatter / 'library.tsv')}
+        s_library = {r['Precursor.Id']: lib_im(r) for r in rows(scatter / 'library.tsv')}
         d = root / 'im-scatter'
         d.mkdir()
         s_out = d / 'out.tsv'
@@ -361,7 +367,7 @@ try:
         # Observed values only: a precursor refine wrote no 1/K0 for keeps its
         # library's. One point per precursor (the TSV has a row per fragment).
         pts = []
-        s_written = {r['Precursor.Id']: float(r['IM']) for r in rows(s_out) if r['Decoy'] == '0'}
+        s_written = {r['Precursor.Id']: lib_im(r) for r in rows(s_out) if r['Decoy'] == '0'}
         for k, written in sorted(s_written.items()):
             if k not in s_truth or k not in s_library:
                 continue

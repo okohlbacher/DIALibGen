@@ -6,6 +6,9 @@
 #include <OpenMS/FORMAT/ParamXMLFile.h>
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
+#include <odia/DIANNLibraryFile.h>
+#include <odia/Trace.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -25,11 +28,11 @@ DIALibGen::DIALibGen()
 
 void DIALibGen::registerOptionsAndFlags_()
 {
-  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library.", false);
-  setValidStrings_("mode", {"generate", "refine", "tune"});
-  registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune).", false);
+  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged.", false);
+  setValidStrings_("mode", {"generate", "refine", "tune", "convert"});
+  registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
-  registerOutputFile_("out", "<file>", "", "DIA-NN spectral library; Parquet embeds provenance.", false);
+  registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it.", false);
   setValidFormats_("out", {"parquet", "tsv"}, false);
   registerInputFile_("config", "<file>", "", "Optional JSON configuration for the selected mode. Explicit CLI/INI generation settings override JSON.", false);
   setValidFormats_("config", {"json"}, false);
@@ -41,6 +44,8 @@ void DIALibGen::registerOptionsAndFlags_()
 
 OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
 {
+  // ODIA_TRACE=<dir>: phase events and /proc samples for this run (docs/tracing.md).
+  const ODIA::trace::Session trace_session(argc, argv);
   std::string ini, instance = "1";
   for (int i = 1; i < argc; ++i)
   {
@@ -62,6 +67,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   }
   const std::string mode = getStringOption_("mode");
   const auto& parameters = getParam_();
+  // Arrow's pools follow -threads, not the hardware-thread count.
+  try { ODIA::DIANNLibraryFile::useThreads(static_cast<unsigned>(std::max(0, getIntOption_("threads")))); }
+  catch (const std::exception& e) { writeLogWarn_(std::string("cannot size Arrow's thread pools: ") + e.what()); }
   // Inspect the raw path before TOPP's output getter can probe a dangling symlink.
   const std::string write_config = parameters.getValue("write_config").toString();
   if (!write_config.empty() && (fs::exists(write_config) || fs::is_symlink(write_config)))
@@ -69,12 +77,18 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   const bool with_run = !parameters.getValue("run").toString().empty();
   for (const auto& option : supplied_)
   {
+    // The GPU options steer prediction in generate as well as in tune.
+    const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32" ||
+                                   option == "machine:gpu_sessions" || option == "machine:gpu_devices";
+    if (prediction_device && mode == "generate") { continue; }
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
     // The built-in identification's settings: refine and tune, and only with -run.
     const bool search = option.starts_with("search:");
     const bool refinement = refinement_options_.count(option) || training || search;
-    bool wrong_mode = mode == "generate" ? refinement : option.starts_with("generation:") || option == "irt_standards";
+    const bool generation = option.starts_with("generation:") || option == "irt_standards";
+    bool wrong_mode = mode == "generate" ? refinement : generation;
+    if (mode == "convert") { wrong_mode = refinement || generation || option == "config" || option == "write_config"; }
     // -tune_models also names where -run finds the MS2 model (search:intensities predicted).
     if (mode == "refine" && training && !getFlag_("tune") && !(option == "tune_models" && with_run)) { wrong_mode = true; }
     if (mode == "tune" && refinement && !training && !search && option != "ids" && option != "out_report" &&
@@ -98,7 +112,45 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
       return ILLEGAL_PARAMETERS;
     }
   }
+  if (mode == "convert") { return convert_(); }
   return mode == "generate" ? generate_() : refine_(mode == "tune");
+}
+
+OpenMS::TOPPBase::ExitCodes DIALibGen::convert_()
+{
+  // Read the raw path, as refine does: TOPP's writable-file probe would follow
+  // and then remove a dangling symlink before it could be refused.
+  const std::string in = getStringOption_("in");
+  const std::string out = getParam_().getValue("out").toString();
+  if (in.empty() || out.empty()) { writeLogError_("-mode convert needs -in and -out"); return ILLEGAL_PARAMETERS; }
+  if (fs::exists(out) || fs::is_symlink(out))
+  { writeLogError_("refusing to overwrite existing output: " + out); return CANNOT_WRITE_OUTPUT_FILE; }
+  ODIA::Library library;
+  try
+  {
+    ODIA::DIANNLibraryFile::load(in, library);
+    // Parquet output is the compact layout every other mode writes; it carries
+    // no recipe, because conversion changes none.
+    if (out.ends_with(".parquet"))
+    { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, ODIA::DIANNLibraryFile::Fingerprint{}); }
+    else { ODIA::DIANNLibraryFile::store(out, library); }
+  }
+  catch (const std::exception& e) { writeLogError_(e.what()); return INPUT_FILE_CORRUPT; }
+  writeLogInfo_("converted " + std::to_string(library.precursorCount()) + " precursors (" +
+                std::to_string(library.decoyCount()) + " decoys) and " +
+                std::to_string(library.transitionCount()) + " transitions: " + in + " -> " + out);
+  return EXECUTION_OK;
+}
+
+ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
+{
+  ODIA::GpuOptions gpu;
+  gpu.require = getFlag_("machine:require_gpu");
+  gpu.tf32 = getStringOption_("machine:tf32") == "true";
+  gpu.sessions_per_device = getIntOption_("machine:gpu_sessions");
+  for (const int device : getIntList_("machine:gpu_devices")) { gpu.devices.push_back(device); }
+  gpu.warnings = warnings;
+  return gpu;
 }
 
 namespace

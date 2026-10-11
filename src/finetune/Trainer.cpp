@@ -530,8 +530,15 @@ namespace ODIA::tune
     // libraries on the library path cudnnCreate aborts the process (not an
     // exception). The native kernels are slower but always there.
     if (dev.is_cuda()) { at::globalContext().setUserEnabledCuDNN(p.cudnn); }
+    // Both explicitly: libtorch defaults to TF32 off for matmul but ON for
+    // cuDNN, so leaving it alone would be neither strict fp32 nor TF32.
+    if (dev.is_cuda())
+    {
+      at::globalContext().setAllowTF32CuBLAS(p.tf32);
+      at::globalContext().setAllowTF32CuDNN(p.tf32);
+    }
     torch::manual_seed(p.seed);
-    log << "device " << p.device << (dev.is_cpu() ? " (" + std::to_string(torch::get_num_threads()) + " threads)" : (p.cudnn ? " (cuDNN on)" : " (cuDNN off)")) << ", libtorch " << TORCH_VERSION << "\n";
+    log << "device " << p.device << (dev.is_cpu() ? " (" + std::to_string(torch::get_num_threads()) + " threads)" : (std::string(p.cudnn ? " (cuDNN on" : " (cuDNN off") + (p.tf32 ? ", TF32 on)" : ", TF32 off)"))) << ", libtorch " << TORCH_VERSION << "\n";
 
     // data + cohorts
     Dataset d = loadReport(p, log);
@@ -714,7 +721,7 @@ namespace ODIA::tune
 
     nlohmann::json prov = {
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
-      {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn},
+      {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
       {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA kernels may be nondeterministic."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},
                   {"batch_size", p.batch_size}, {"epochs", p.epochs}, {"warmup", p.warmup}, {"schedule", "linear warmup then cosine, stepped per epoch"}, {"dropout", 0.1}, {"seed", p.seed}}},

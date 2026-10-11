@@ -2,15 +2,22 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
+#include <odia/Hardware.h>
 #include <odia/PeptDeepPredictor.h>
+#include <odia/Trace.h>
+
+#include "Parallel.h"
 
 #include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/EmpiricalFormula.h>
+#include <OpenMS/CHEMISTRY/ModificationsDB.h>
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
 #include <OpenMS/CHEMISTRY/ProteaseDigestion.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
+#include <OpenMS/CHEMISTRY/ResidueDB.h>
 #include <OpenMS/CHEMISTRY/ResidueModification.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 
 #include <iostream>
@@ -20,13 +27,16 @@
 #include <sstream>
 #include <thread>
 #include <fstream>
+#include <future>
 #include <string_view>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <random>
 #include <set>
 #include <stdexcept>
+#include <system_error>
 #include <unordered_map>
 
 using namespace OpenMS;
@@ -102,6 +112,67 @@ namespace ODIA
       std::int8_t charge;
     };
 
+    /// b and y ion m/z of one peptide, bit for bit what
+    /// peptide.getPrefix(i).getMZ(z, Residue::BIon) and
+    /// peptide.getSuffix(i).getMZ(z, Residue::YIon) return.
+    ///
+    /// Those build a prefix and a suffix sequence per ordinal (a heap
+    /// allocation each), and every call re-derives the b and y terminal
+    /// offsets from their empirical formulas. Here the offsets are computed
+    /// once per process and shared read-only, and the residue masses once per
+    /// peptide. The sums are formed with the same terms in the same order as
+    /// AASequence::getMonoWeight -- proton mass times charge, terminal
+    /// modification, residues first to last, ion offset, then the division --
+    /// so the result does not change by a bit. In particular a y ion is summed
+    /// from its own first residue, not as a running suffix sum, whose different
+    /// association would change the last bit.
+    class IonLadder
+    {
+    public:
+      explicit IonLadder(const AASequence& peptide)
+      {
+        static const Residue* const unknown = ResidueDB::getInstance()->getResidue("X");
+        mass_.reserve(peptide.size());
+        for (Size k = 0; k < peptide.size(); ++k)
+        {
+          // An X has no mass; OpenMS throws for it, so keep OpenMS's path.
+          if (&peptide[k] == unknown) { exact_ = false; }
+          mass_.push_back(peptide[k].getMonoWeight(Residue::Internal));
+        }
+      }
+
+      double b(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getPrefix(i).getMZ(z, Residue::BIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getNTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = 0; k < i; ++k) { m += mass_[k]; }
+        return (m + offsets().b) / z;
+      }
+
+      double y(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getSuffix(i).getMZ(z, Residue::YIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getCTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = mass_.size() - i; k < mass_.size(); ++k) { m += mass_[k]; }
+        return (m + offsets().y) / z;
+      }
+
+    private:
+      struct Offsets { double b, y; };
+      /// Built once, thread-safely, then only read.
+      static const Offsets& offsets()
+      {
+        static const Offsets o{Residue::getInternalToBIon().getMonoWeight(),
+                               Residue::getInternalToYIon().getMonoWeight()};
+        return o;
+      }
+
+      std::vector<double> mass_;
+      bool exact_ = true;
+    };
+
     void enumerateAllFragments(const AASequence& peptide, const DigestParams& p,
                                int precursor_charge, std::vector<Fragment>& out)
     {
@@ -121,17 +192,18 @@ namespace ODIA
       // z2 channels for every precursor charge, so the restriction was ours
       // alone.
       const int max_z = std::min(p.max_fragment_charge, std::max(1, precursor_charge));
+      const IonLadder ladder(peptide);
       for (int z = 1; z <= max_z; ++z)
       {
         for (Size i = 1; i < n; ++i)
         {
-          const double b = peptide.getPrefix(i).getMZ(z, Residue::BIon);
+          const double b = ladder.b(peptide, i, z);
           if (b >= p.fragment_mz_min && b <= p.fragment_mz_max)
           {
             out.push_back({b, FragmentType::B, static_cast<std::uint8_t>(i),
                            static_cast<std::int8_t>(z)});
           }
-          const double y = peptide.getSuffix(i).getMZ(z, Residue::YIon);
+          const double y = ladder.y(peptide, i, z);
           if (y >= p.fragment_mz_min && y <= p.fragment_mz_max)
           {
             out.push_back({y, FragmentType::Y, static_cast<std::uint8_t>(i),
@@ -184,10 +256,54 @@ namespace ODIA
     return "mutate";
   }
 
+  namespace
+  {
+    /// One protein's digest, before it is merged into the peptide map.
+    struct DigestedProtein
+    {
+      bool invalid = false;               ///< the protein sequence did not parse
+      std::size_t ambiguous = 0;          ///< peptides dropped for X/B/Z/J or no mass
+      std::vector<std::string> peptides;  ///< accepted, in digest order
+    };
+
+    /// One precursor of one modified form, ready to append.
+    struct EnumeratedPrecursor
+    {
+      double mz;
+      int charge;
+      std::vector<Fragment> fragments;
+    };
+
+    struct EnumeratedForm
+    {
+      std::string sequence;
+      std::uint64_t variable_mods = 0;   ///< bit k: carries requested variable modification k
+      std::vector<EnumeratedPrecursor> precursors;
+    };
+
+    /// One peptide's forms and precursors. `parsed` false: skipped entirely,
+    /// its protein group not even interned -- exactly what the serial loop did.
+    struct EnumeratedPeptide
+    {
+      bool parsed = false;
+      std::size_t dropped_precursor_mz = 0;
+      std::size_t dropped_too_few_fragments = 0;
+      std::vector<EnumeratedForm> forms;
+    };
+
+    /// Items per parallel task and per wave. A wave is computed in parallel
+    /// and then merged serially in input order, so memory is bounded by the
+    /// wave and the merge sees exactly the serial order.
+    constexpr std::size_t TASK_ITEMS = 256;
+    constexpr std::size_t TASKS_PER_THREAD = 8;
+  } // namespace
+
   LibraryGenerator::Stats LibraryGenerator::generate(const std::string& fasta_file,
                                                      const DigestParams& params,
-                                                     Library& library)
+                                                     Library& library,
+                                                     unsigned threads)
   {
+    threads = parallel::workers(threads);
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
     std::set<int> charges(params.charges.begin(), params.charges.end());
@@ -196,27 +312,31 @@ namespace ODIA
     { throw std::invalid_argument("precursor_charges must be distinct integers between 1 and 8"); }
     Stats stats;
 
+    // Started on the way out (below) and declared before every local of the
+    // digest, so it ends after their destructors have run: freeing the
+    // peptide map and the parsed sequences is a phase of its own.
+    trace::Scope release_phase;
+    trace::Scope fasta_phase("fasta_read", 0);
     std::vector<FASTAFile::FASTAEntry> entries;
     FASTAFile().load(fasta_file, entries);
     stats.proteins = entries.size();
+    fasta_phase.fields().rows = static_cast<std::int64_t>(entries.size());
+    fasta_phase.end();
 
-    ProteaseDigestion digestion;
-    digestion.setEnzyme(params.enzyme);
-    digestion.setMissedCleavages(params.missed_cleavages);
+    trace::Scope digest_phase("digest", 0);
 
-    // Peptides are deduplicated across proteins; a peptide seen in several
-    // proteins accumulates them, which is what protein inference later needs.
-    std::map<std::string, std::string> peptide_to_proteins;
-    std::vector<AASequence> peptides;
-    for (const auto& entry : entries)
+    // Digest in parallel, merge serially in FASTA order: the peptide map and
+    // its accession lists come out exactly as from the serial loop.
+    const auto digestOne = [&](const ProteaseDigestion& digestion, const FASTAFile::FASTAEntry& entry,
+                               DigestedProtein& out)
     {
       AASequence protein;
       std::string sequence = entry.sequence;
       if (!sequence.empty() && sequence.back() == '*') { sequence.pop_back(); }
       try { protein = AASequence::fromString(sequence); }
-      catch (const std::exception&) { ++stats.dropped_proteins; continue; }
+      catch (const std::exception&) { out.invalid = true; return; }
 
-      peptides.clear();
+      std::vector<AASequence> peptides;
       digestion.digest(protein, peptides, params.min_length, params.max_length);
 
       // Include the Met-excised N-terminus at every allowed missed-cleavage
@@ -239,29 +359,71 @@ namespace ODIA
       {
         // Ambiguous residues have no unique elemental composition. Keep the
         // other peptides from that protein; never guess a mass for X/B/Z/J.
-        const std::string residues = pep.toUnmodifiedString();
+        std::string residues = pep.toUnmodifiedString();
         if (residues.find_first_of("XBZJ") != std::string::npos)
-        { ++stats.dropped_ambiguous_peptides; continue; }
+        { ++out.ambiguous; continue; }
         try
         {
           if (!std::isfinite(pep.getMonoWeight()))
-          { ++stats.dropped_ambiguous_peptides; continue; }
+          { ++out.ambiguous; continue; }
         }
         catch (const std::exception&)
-        { ++stats.dropped_ambiguous_peptides; continue; }
-        auto& proteins = peptide_to_proteins[pep.toUnmodifiedString()];
-        // Compare on ';' boundaries, not by substring: a plain find() drops P1
-        // when P12 is already present, which is routine with isoform accessions
-        // (P12345 / P12345-2) and with the sp|X|Y form we emit.
-        if (proteins.empty()) { proteins = entry.identifier; }
-        else if (!containsAccession(proteins, entry.identifier))
+        { ++out.ambiguous; continue; }
+        out.peptides.push_back(std::move(residues));
+      }
+    };
+
+    // Peptides are deduplicated across proteins; a peptide seen in several
+    // proteins accumulates them, which is what protein inference later needs.
+    std::map<std::string, std::string> peptide_to_proteins;
+    const std::size_t wave = TASK_ITEMS * TASKS_PER_THREAD * threads;
+    // At most 16 digest threads. The digest is cheap (about 9 CPU-s for a
+    // whole human proteome) and beyond 16 threads it got no faster but burnt
+    // CPU waiting: at 96 threads 98 CPU-s for the same 2.3 s (2.2 s and 22
+    // CPU-s at 16).
+    const unsigned digest_threads = std::min(threads, 16u);
+    std::vector<DigestedProtein> digested;
+    for (std::size_t first = 0; first < entries.size(); first += wave)
+    {
+      const std::size_t count = std::min(wave, entries.size() - first);
+      digested.assign(count, DigestedProtein{});
+      parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, digest_threads, [&](std::size_t task)
+      {
+        // One digestion object per task: it is not shared between threads.
+        ProteaseDigestion digestion;
+        digestion.setEnzyme(params.enzyme);
+        digestion.setMissedCleavages(params.missed_cleavages);
+        const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
+        for (std::size_t k = task * TASK_ITEMS; k < end; ++k)
+        { digestOne(digestion, entries[first + k], digested[k]); }
+      });
+
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        const auto& entry = entries[first + k];
+        if (digested[k].invalid) { ++stats.dropped_proteins; continue; }
+        stats.dropped_ambiguous_peptides += digested[k].ambiguous;
+        for (const auto& residues : digested[k].peptides)
         {
-          proteins += ';';
-          proteins += entry.identifier;
+          auto& proteins = peptide_to_proteins[residues];
+          // Compare on ';' boundaries, not by substring: a plain find() drops P1
+          // when P12 is already present, which is routine with isoform accessions
+          // (P12345 / P12345-2) and with the sp|X|Y form we emit.
+          if (proteins.empty()) { proteins = entry.identifier; }
+          else if (!containsAccession(proteins, entry.identifier))
+          {
+            proteins += ';';
+            proteins += entry.identifier;
+          }
         }
       }
     }
     stats.peptides = peptide_to_proteins.size();
+    digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
+    digest_phase.end();
+
+    // Precursors and their m/z-capped placeholder fragments.
+    trace::Scope enumerate_phase("enumerate", 0);
 
     // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
     // the two are distinct types and no implicit conversion exists between the
@@ -276,6 +438,61 @@ namespace ODIA
     ModifiedPeptideGenerator::MapToResidueType variable_map =
       ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
 
+    // Requested modifications that would silently do nothing are refused.
+    // Protein-terminal ones need the peptide's position in its protein,
+    // which generation does not keep; OpenMS's ModifiedPeptideGenerator
+    // applies them nowhere, fixed or variable, so a library "with" protein
+    // N-terminal acetylation came out without it and with exit code 0.
+    std::vector<const ResidueModification*> requested_variable;
+    {
+      const auto* db = ModificationsDB::getInstance();
+      const auto refuseProteinTerminal = [&](const std::string& name, const char* kind) {
+        const auto* mod = db->getModification(name);
+        const auto term = mod->getTermSpecificity();
+        if (term == ResidueModification::PROTEIN_N_TERM || term == ResidueModification::PROTEIN_C_TERM)
+        {
+          throw std::invalid_argument(std::string(kind) + " modification '" + name +
+            "' is protein-terminal; protein-terminal modifications are not supported yet (generation "
+            "does not track where a peptide sits in its protein). The peptide-terminal form, e.g. "
+            "'Acetyl (N-term)', applies to every peptide N-terminus.");
+        }
+        return mod;
+      };
+      for (const auto& name : params.fixed_modifications) { refuseProteinTerminal(name, "fixed"); }
+      for (const auto& name : params.variable_modifications)
+      { requested_variable.push_back(refuseProteinTerminal(name, "variable")); }
+    }
+    if (requested_variable.size() > 64)
+    { throw std::invalid_argument("at most 64 variable modifications can be requested"); }
+    // Residue-less peptide-terminal variable modifications (origin 'X', such
+    // as 'Acetyl (N-term)'). OpenMS's one-modification path places a variable
+    // modification only on a residue it names, so at max_variable_modifications
+    // 1 these were dropped; they are added here, one per form, after the
+    // forms OpenMS made. Its path for 2 or more handles them.
+    std::vector<const ResidueModification*> terminal_variable;
+    for (const auto* mod : requested_variable)
+    {
+      const auto term = mod->getTermSpecificity();
+      if ((term == ResidueModification::N_TERM || term == ResidueModification::C_TERM) && mod->getOrigin() == 'X' &&
+          std::find(terminal_variable.begin(), terminal_variable.end(), mod) == terminal_variable.end())
+      { terminal_variable.push_back(mod); }
+    }
+    const auto variableBits = [&](const AASequence& form) {
+      std::uint64_t bits = 0;
+      const auto mark = [&](const ResidueModification* mod) {
+        if (mod == nullptr) { return; }
+        for (std::size_t k = 0; k < requested_variable.size(); ++k)
+        {
+          if (requested_variable[k] == mod || requested_variable[k]->getFullId() == mod->getFullId())
+          { bits |= std::uint64_t{1} << k; }
+        }
+      };
+      mark(form.getNTerminalModification());
+      mark(form.getCTerminalModification());
+      for (Size k = 0; k < form.size(); ++k) { mark(form[k].getModification()); }
+      return bits;
+    };
+
     // Reject the estimate before multiplying: an extreme fragment cap must
     // not wrap size_t and bypass the 32-bit CSR limit in reserve().
     constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
@@ -285,69 +502,119 @@ namespace ODIA
     { throw std::length_error("library exceeds the 32-bit transition limit (4294967295); split the input FASTA"); }
     library.reserve(estimated_precursors, estimated_precursors * params.max_fragments);
 
-    std::vector<Fragment> fragments;
-    std::vector<AASequence> forms;
-    for (const auto& [sequence, proteins] : peptide_to_proteins)
+    // Enumerate in parallel -- parsing, modifications, precursor m/z and the
+    // fragment ladders are the expensive part -- and append serially in map
+    // order, interning strings in the same order as the serial loop did.
+    const auto enumerateOne = [&](const std::string& sequence, EnumeratedPeptide& out)
     {
       AASequence base;
       try { base = AASequence::fromString(sequence); }
-      catch (const std::exception&) { continue; }
+      catch (const std::exception&) { return; }
+      out.parsed = true;
 
       ModifiedPeptideGenerator::applyFixedModifications(fixed_map, base);
 
-      forms.clear();
+      std::vector<AASequence> forms;
       if (params.variable_modifications.empty()) { forms.push_back(base); }
       else
       {
         ModifiedPeptideGenerator::applyVariableModifications(
           variable_map, base, params.max_variable_modifications, forms, true);
+        if (params.max_variable_modifications == 1)
+        {
+          for (const auto* mod : terminal_variable)
+          {
+            const bool n_term = mod->getTermSpecificity() == ResidueModification::N_TERM;
+            if (n_term ? base.hasNTerminalModification() : base.hasCTerminalModification()) { continue; }
+            AASequence form = base;
+            if (n_term) { form.setNTerminalModification(mod); } else { form.setCTerminalModification(mod); }
+            forms.push_back(std::move(form));
+          }
+        }
       }
 
-      const std::uint32_t protein_handle = library.strings().intern(proteins);
-
+      std::vector<Fragment> fragments;
       for (const auto& form : forms)
       {
-        const std::uint32_t sequence_handle =
-          library.strings().intern(form.toString());
-
+        EnumeratedForm& f = out.forms.emplace_back();
+        f.sequence = form.toString();
+        if (!requested_variable.empty()) { f.variable_mods = variableBits(form); }
         for (int z : params.charges)
         {
           const double precursor_mz = form.getMZ(z);
           if (precursor_mz < params.precursor_mz_min || precursor_mz > params.precursor_mz_max)
           {
-            ++stats.dropped_precursor_mz;
+            ++out.dropped_precursor_mz;
             continue;
           }
 
           enumerateFragments(form, params, z, fragments);
           if (fragments.size() < params.min_fragments)
           {
-            ++stats.dropped_too_few_fragments;
+            ++out.dropped_too_few_fragments;
             continue;
           }
+          f.precursors.push_back({precursor_mz, z, fragments});
+        }
+      }
+    };
 
-          auto& p = library.precursors();
-          auto& t = library.transitions();
-          Library::checkTransitionCapacity(t.product_mz.size(), fragments.size());
-          p.mz.push_back(toFixed(precursor_mz));
-          p.irt.push_back(std::nanf(""));   // filled in by prediction
-          p.im.push_back(std::nanf(""));
-          p.ccs.push_back(std::nanf(""));   // likewise
-          p.charge.push_back(static_cast<std::uint8_t>(z));
-          p.decoy.push_back(0);
-          p.modified_sequence.push_back(sequence_handle);
-          p.protein_group.push_back(protein_handle);
-          p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
-          p.transition_count.push_back(static_cast<std::uint32_t>(fragments.size()));
+    std::vector<const std::pair<const std::string, std::string>*> ordered;
+    ordered.reserve(peptide_to_proteins.size());
+    for (const auto& item : peptide_to_proteins) { ordered.push_back(&item); }
 
-          for (const auto& f : fragments)
+    std::vector<std::size_t> variable_counts(requested_variable.size(), 0);
+    std::vector<EnumeratedPeptide> enumerated;
+    for (std::size_t first = 0; first < ordered.size(); first += wave)
+    {
+      const std::size_t count = std::min(wave, ordered.size() - first);
+      enumerated.assign(count, EnumeratedPeptide{});
+      parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
+      {
+        const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
+        for (std::size_t k = task * TASK_ITEMS; k < end; ++k)
+        { enumerateOne(ordered[first + k]->first, enumerated[k]); }
+      });
+
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        const auto& peptide = enumerated[k];
+        if (!peptide.parsed) { continue; }
+        stats.dropped_precursor_mz += peptide.dropped_precursor_mz;
+        stats.dropped_too_few_fragments += peptide.dropped_too_few_fragments;
+
+        const std::uint32_t protein_handle = library.strings().intern(ordered[first + k]->second);
+        for (const auto& form : peptide.forms)
+        {
+          for (std::size_t k = 0; k < variable_counts.size(); ++k)
+          { if (form.variable_mods >> k & 1) { variable_counts[k] += form.precursors.size(); } }
+          const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
+          for (const auto& precursor : form.precursors)
           {
-            t.product_mz.push_back(toFixed(f.mz));
-            t.library_intensity.push_back(1.0f);  // placeholder until prediction
-            t.type.push_back(f.type);
-            t.ordinal.push_back(f.ordinal);
-            t.charge.push_back(f.charge);
-            t.loss.push_back(LossType::None);
+            const auto& fragments = precursor.fragments;
+            auto& p = library.precursors();
+            auto& t = library.transitions();
+            Library::checkTransitionCapacity(t.product_mz.size(), fragments.size());
+            p.mz.push_back(toFixed(precursor.mz));
+            p.irt.push_back(std::nanf(""));   // filled in by prediction
+            p.im.push_back(std::nanf(""));
+            p.ccs.push_back(std::nanf(""));   // likewise
+            p.charge.push_back(static_cast<std::uint8_t>(precursor.charge));
+            p.decoy.push_back(0);
+            p.modified_sequence.push_back(sequence_handle);
+            p.protein_group.push_back(protein_handle);
+            p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
+            p.transition_count.push_back(static_cast<std::uint32_t>(fragments.size()));
+
+            for (const auto& f : fragments)
+            {
+              t.product_mz.push_back(toFixed(f.mz));
+              t.library_intensity.push_back(1.0f);  // placeholder until prediction
+              t.type.push_back(f.type);
+              t.ordinal.push_back(f.ordinal);
+              t.charge.push_back(f.charge);
+              t.loss.push_back(LossType::None);
+            }
           }
         }
       }
@@ -355,48 +622,73 @@ namespace ODIA
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
+    for (std::size_t k = 0; k < variable_counts.size(); ++k)
+    {
+      stats.variable_modification_precursors.emplace_back(params.variable_modifications[k], variable_counts[k]);
+      if (variable_counts[k] > 0) { continue; }
+      // A modification that modifies nothing is a request the library does
+      // not honour; until 0.11.1 that went by with exit code 0.
+      std::string hint;
+      if (params.max_variable_modifications == 0) { hint = " (max_variable_modifications is 0)"; }
+      else { hint = " (does any peptide in the m/z and length windows have its site?)"; }
+      throw std::invalid_argument("variable modification '" + params.variable_modifications[k] +
+                                  "' produced no modified precursor in the whole library" + hint);
+    }
+    enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
+    enumerate_phase.end();
+    release_phase.start("release", 0);
     return stats;
   }
 
 
   namespace
   {
-    /// Sessions to run inference across, from what the caller asked for.
-    ///
-    /// Capped rather than taken as given: each session holds its own copy of
-    /// the weights plus an ONNX arena sized for a MAX_BATCH_ROWS batch, so
-    /// memory grows about half a gigabyte per session while the throughput
-    /// curve flattens. Measured on the MS2 stage of a 60k-precursor build:
-    ///
-    ///     sessions    MS2      peak RSS
-    ///            1   409.7 s   0.86 GiB
-    ///            8    50.2 s   5.02 GiB   8.2x
-    ///           16    34.6 s   8.82 GiB  11.8x
-    ///           32    32.5 s  16.11 GiB  12.6x
-    ///
-    /// 16 is the knee. Going on to 32 buys 6% more speed for 83% more memory,
-    /// which on a shared node is how a library build starts failing in the
-    /// allocator instead of finishing slightly later.
-    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p)
+    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu)
     {
       std::cerr << "[" << stage << "] provider "
                 << (p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU")
                 << " device " << p.device()
-                << " sessions " << p.sessionCount() << "\n";
+                << " sessions " << p.sessionCount();
+      // Name every device when the sessions span several.
+      const auto& devices = p.sessionDevices();
+      if (std::any_of(devices.begin(), devices.end(), [&](int d) { return d != p.device(); }))
+      {
+        std::cerr << " on devices";
+        for (std::size_t k = 0; k < devices.size(); ++k) { std::cerr << (k ? "," : " ") << devices[k]; }
+      }
+      std::cerr << "\n";
+      // Loud, and recorded: the provider line alone was the only sign that RT
+      // and CCS had silently left the GPU.
+      if (!p.fallbackReason().empty())
+      {
+        const std::string warning = std::string(stage) + ": " + p.fallbackReason();
+        std::cerr << "WARNING: " << warning << "\n";
+        if (gpu.warnings != nullptr) { gpu.warnings->push_back(warning); }
+      }
     }
 
+    /// CPU inference sessions, from -threads: one per thread, 0 meaning one
+    /// per physical core, and never more than the physical cores.
+    ///
+    /// Until 0.11.1 this was capped at 16. Each session then held an ONNX
+    /// arena sized for a 2048-row batch (about 1.9 GB for MS2), and a call
+    /// waited for its largest batch, so sessions beyond 16 bought little speed
+    /// for a lot of memory. With 64-row batches (PeptDeepPredictor::
+    /// CPU_CHUNK_ROWS) an MS2 arena is about 53 MB and every session stays
+    /// busy: on 2 x 96 cores, 96 sessions kept 94 busy through MS2. More
+    /// sessions than physical cores share cores and are slower (Hardware.h).
     int inferenceSessions(unsigned requested)
     {
-      const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
-      const unsigned want = requested == 0 ? hardware : requested;
-      return static_cast<int>(std::min(want, 16u));
+      const unsigned cores = physicalCores();
+      const unsigned want = requested == 0 ? cores : std::min(requested, cores);
+      return static_cast<int>(std::max(1u, want));
     }
   } // namespace
 
   float LibraryGenerator::freeCysteineRtOffset(std::size_t free_cysteines)
   {
     // Pooled medians of (observed - predicted)/slope over the two benchmarks.
-    // Nothing beyond three: 3+ carried 58 peptides on Astral and none on S08,
+    // Nothing beyond three: 3+ carried 58 peptides on Astral and none on IH1,
     // and the effect has plainly saturated by then.
     switch (free_cysteines)
     {
@@ -424,44 +716,71 @@ namespace ODIA
   std::size_t LibraryGenerator::predictRetentionTimes(Library& library,
                                                       const std::string& rt_model_path,
                                                       bool prefer_gpu, unsigned sessions,
-                                                      bool free_cysteine_rt_correction)
+                                                      bool free_cysteine_rt_correction,
+                                                      const GpuOptions& gpu)
   {
     // One prediction per distinct sequence. The RT model has no charge input,
     // so predicting per precursor would repeat identical work for every charge
     // state of the same peptide.
-    std::map<std::uint32_t, std::size_t> handle_to_slot;
-    std::vector<AASequence> unique_peptides;
-    std::vector<std::uint32_t> slot_handle;
-
+    trace::Scope rt_phase("rt", 0);
+    trace::Scope unique_step("unique_parse", 1);
     const auto& p = library.precursors();
+    const unsigned threads = parallel::workers(sessions);
+    // Distinct sequences in order of first appearance, then parsed in
+    // parallel and compacted in that order: the same peptides in the same
+    // order as one serial pass, which the batching depends on. Handles are
+    // dense indices into the string arena, so flat arrays replace the maps.
+    std::vector<std::uint8_t> seen(library.strings().size(), 0);
+    std::vector<std::uint32_t> candidates;
     for (std::size_t i = 0; i < library.precursorCount(); ++i)
     {
       const auto handle = p.modified_sequence[i];
-      if (handle_to_slot.count(handle)) { continue; }
-      AASequence peptide;
+      if (seen[handle]) { continue; }
+      seen[handle] = 1;
+      candidates.push_back(handle);
+    }
+    std::vector<AASequence> parsed(candidates.size());
+    std::vector<std::uint8_t> parsed_ok(candidates.size(), 0);
+    parallel::forEach(candidates.size(), threads, [&](std::size_t k)
+    {
       try
       {
-        peptide = AASequence::fromString(std::string(library.strings().get(handle)));
+        parsed[k] = AASequence::fromString(std::string(library.strings().get(candidates[k])));
+        parsed_ok[k] = 1;
       }
-      catch (const std::exception&)
-      {
-        continue;   // left NaN, and counted below
-      }
-      handle_to_slot.emplace(handle, unique_peptides.size());
-      unique_peptides.push_back(std::move(peptide));
-      slot_handle.push_back(handle);
+      catch (const std::exception&) {}   // left NaN, and counted below
+    });
+    std::vector<AASequence> unique_peptides;
+    std::vector<std::uint32_t> slot_handle;
+    unique_peptides.reserve(candidates.size());
+    slot_handle.reserve(candidates.size());
+    for (std::size_t k = 0; k < candidates.size(); ++k)
+    {
+      if (!parsed_ok[k]) { continue; }
+      unique_peptides.push_back(std::move(parsed[k]));
+      slot_handle.push_back(candidates[k]);
     }
+    parsed.clear(); parsed.shrink_to_fit();
+    unique_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
+    unique_step.end();
     if (unique_peptides.empty()) { return library.precursorCount(); }
 
-    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    trace::Scope sessions_step("sessions", 1);
+    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("RT", predictor);
+    writeDeviceLine("RT", predictor, gpu);
     std::vector<PeptDeepPredictor::Failure> failures;
+    trace::Scope predict_step("predict", 1);
+    predict_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
     const auto predicted = predictor.predictRT(unique_peptides, &failures);
+    predict_step.end();
 
-    std::map<std::uint32_t, float> by_handle;
-    for (std::size_t slot = 0; slot < predicted.size(); ++slot)
+    trace::Scope assign_step("assign", 1);
+    std::vector<float> by_handle(library.strings().size(), std::nanf(""));
+    parallel::forEach(predicted.size(), threads, [&](std::size_t slot)
     {
       float value = predicted[slot];
       // Applied here, in the model's own units, so that any downstream affine
@@ -470,15 +789,14 @@ namespace ODIA
       {
         value += freeCysteineRtOffset(freeCysteines(unique_peptides[slot]));
       }
-      by_handle.emplace(slot_handle[slot], value);
-    }
+      by_handle[slot_handle[slot]] = value;
+    });
 
     std::size_t unpredicted = 0;
     auto& precursors = library.precursors();
     for (std::size_t i = 0; i < library.precursorCount(); ++i)
     {
-      const auto it = by_handle.find(precursors.modified_sequence[i]);
-      const float value = it == by_handle.end() ? std::nanf("") : it->second;
+      const float value = by_handle[precursors.modified_sequence[i]];
       precursors.irt[i] = value;
       if (!std::isfinite(value)) { ++unpredicted; }
     }
@@ -488,9 +806,118 @@ namespace ODIA
   }
 
 
+  namespace
+  {
+    using RankedFragments = std::vector<std::pair<float, Fragment>>;
+
+    /// The fragments a predicted spectrum keeps for one precursor, best
+    /// first: every fragment in range, ranked by predicted intensity, capped
+    /// at max_fragments (with the doubly-charged quota), emptied below
+    /// min_fragments. Pure per precursor, so precursors can run in parallel.
+    void selectFragments(const AASequence& peptide, int charge,
+                         const PeptDeepPredictor::Spectrum& spectrum,
+                         const DigestParams& params,
+                         std::vector<Fragment>& fragments, RankedFragments& ranked)
+    {
+      // Re-enumerate without the m/z cap: the cap is what has to be redone.
+      enumerateAllFragments(peptide, params, charge, fragments);
+
+      const std::size_t residues = peptide.size();
+      // Base-peak relative, so one absolute threshold cannot be right for a
+      // strong precursor and wrong for a weak one.
+      float peak = 0.0f;
+      for (std::size_t q = 0; q < spectrum.positions; ++q)
+      {
+        for (std::size_t ch = 0; ch < 4; ++ch) { peak = std::max(peak, spectrum.at(q, ch)); }
+      }
+      const float floor = peak * static_cast<float>(params.min_relative_intensity);
+      ranked.clear();
+      for (const auto& f : fragments)
+      {
+        // Position and channel follow alphabase's layout: fragment position
+        // q separates prefix q+1 from suffix nAA-q-1, so a b ion of ordinal
+        // o sits at q = o-1 and a y ion of ordinal o at q = nAA-1-o.
+        std::size_t position = 0;
+        std::size_t channel = 0;
+        if (f.type == FragmentType::B)
+        {
+          position = static_cast<std::size_t>(f.ordinal) - 1;
+          channel = f.charge == 1 ? 0 : 1;
+        }
+        else
+        {
+          position = residues - 1 - static_cast<std::size_t>(f.ordinal);
+          channel = f.charge == 1 ? 2 : 3;
+        }
+        if (position >= spectrum.positions) { continue; }
+        const float intensity = spectrum.at(position, channel);
+        // A predicted zero is a fragment the model says is not there, and a
+        // predicted 1e-7 is the same statement in floating point. Ranking on
+        // `> 0` filled spare slots with denormal noise (see
+        // min_relative_intensity); the floor is relative to this precursor's
+        // own base peak, because the spectrum is base-peak normalised.
+        if (!(intensity > floor)) { continue; }
+        ranked.emplace_back(intensity, f);
+      }
+
+      std::sort(ranked.begin(), ranked.end(),
+                [](const auto& a, const auto& b) {
+                  if (a.first != b.first) { return a.first > b.first; }
+                  // Ties broken deterministically, so the library does not
+                  // depend on sort implementation.
+                  if (a.second.mz != b.second.mz) { return a.second.mz > b.second.mz; }
+                  if (a.second.type != b.second.type) { return a.second.type < b.second.type; }
+                  if (a.second.ordinal != b.second.ordinal)
+                  { return a.second.ordinal < b.second.ordinal; }
+                  return a.second.charge < b.second.charge;
+                });
+      // A quota for doubly-charged fragments, when asked for. Applied by
+      // promoting the best unselected z2 ions over the weakest selected z1
+      // ones, so the cap is unchanged and only its composition moves.
+      if (params.reserved_doubly_charged > 0 && ranked.size() > params.max_fragments)
+      {
+        const std::size_t cap = params.max_fragments;
+        const std::size_t want =
+          std::min(params.reserved_doubly_charged, cap);
+        std::size_t have = 0;
+        for (std::size_t r = 0; r < cap; ++r)
+        {
+          if (ranked[r].second.charge >= 2) { ++have; }
+        }
+        for (std::size_t r = cap; r < ranked.size() && have < want; ++r)
+        {
+          if (ranked[r].second.charge < 2) { continue; }
+          // The weakest singly-charged fragment inside the cap makes way.
+          std::size_t victim = cap;
+          for (std::size_t q = cap; q-- > 0;)
+          {
+            if (ranked[q].second.charge < 2) { victim = q; break; }
+          }
+          if (victim == cap) { break; }
+          std::swap(ranked[victim], ranked[r]);
+          ++have;
+        }
+      }
+      if (ranked.size() > params.max_fragments) { ranked.resize(params.max_fragments); }
+
+      // The same bar `enumerateFragments` applied BEFORE prediction. The
+      // base-peak intensity floor above can prune a precursor below it, and
+      // until now nothing re-checked, so the count committed here was
+      // whatever survived. That is where the IH1 library's 366,084 targets
+      // with 0-2 fragments came from -- and `appendDecoys` then refused to
+      // build decoys for them, because it does apply the bar. The result was
+      // 7.3% of targets competing against a null that contained nothing like
+      // them. Emptied rather than kept: a precursor below the bar its decoy
+      // would have to clear is not searchable, and `-min_library_fragments`
+      // drops it symmetrically at load.
+      if (ranked.size() < params.min_fragments) { ranked.clear(); }
+    }
+  } // namespace
+
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
-    float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions)
+    float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
+    const GpuOptions& gpu, Ms2Sink* sink)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
@@ -499,10 +926,16 @@ namespace ODIA
     const std::size_t n = library.precursorCount();
     if (n == 0) { return 0; }
 
-    PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    trace::Scope ms2_phase("ms2", 0);
+    trace::Scope sessions_step("sessions", 1);
+    PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("MS2", predictor);
+    writeDeviceLine("MS2", predictor, gpu);
+
+    trace::Scope reserve_step("reserve", 1);
 
     // The new transition arrays are built alongside the old ones and swapped in
     // at the end. Editing in place is not possible: a precursor's fragment
@@ -517,34 +950,91 @@ namespace ODIA
     built.loss.reserve(t.product_mz.size());
 
     std::vector<std::uint32_t> begin(n, 0), count(n, 0);
+    reserve_step.end();
 
     // Blocked so that peak memory is set by the block, not by the proteome.
-    constexpr std::size_t BLOCK = 20000;
+    //
+    // Pipelined: while the model predicts block k (on the GPU, or on the CPU
+    // sessions), the fragment selection of block k-1 runs on the host
+    // threads, and block k-2's result is appended. Selection is parallel per
+    // precursor and the append is serial in precursor order, so the arrays
+    // come out exactly as from the serial loop, whatever the thread count.
+    //
+    // The block is also the unit every session waits at: 100,000 precursors
+    // on the CPU, so that a call is long against its last batch; 20,000 on
+    // CUDA, as measured there. The library does not depend on it.
+    // ODIA_MS2_BLOCK overrides it, for tests (several blocks from a small
+    // input) and measurements.
+    const std::size_t BLOCK = [&]() -> std::size_t {
+      if (const char* v = std::getenv("ODIA_MS2_BLOCK"); v != nullptr && *v != '\0')
+      {
+        char* end = nullptr;
+        const long long x = std::strtoll(v, &end, 10);
+        if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+      }
+      return predictor.provider() == PeptDeepPredictor::Provider::CUDA ? 20000 : 100000;
+    }();
+    const unsigned threads = parallel::workers(sessions);
     std::size_t unpredicted = 0;
-    std::vector<Fragment> fragments;
-    std::vector<std::pair<float, Fragment>> ranked;
 
-    for (std::size_t base = 0; base < n; base += BLOCK)
+    struct Block
     {
-      const std::size_t last = std::min(base + BLOCK, n);
-
+      std::size_t base = 0, last = 0;
       std::vector<AASequence> peptides;
       std::vector<int> charges;
-      peptides.reserve(last - base);
-      charges.reserve(last - base);
-      for (std::size_t i = base; i < last; ++i)
-      {
-        peptides.push_back(
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i]))));
-        charges.push_back(static_cast<int>(p.charge[i]));
-      }
+      std::vector<PeptDeepPredictor::Spectrum> spectra;
+      std::vector<RankedFragments> ranked;
+    };
 
-      std::vector<PeptDeepPredictor::Failure> failures;
-      const auto spectra = predictor.predictMS2(peptides, charges, nce, instrument, &failures);
-
-      for (std::size_t i = base; i < last; ++i)
+    const auto parse = [&](std::size_t base)
+    {
+      trace::Scope parse_step("parse", 2);
+      parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      parse_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
+      Block block;
+      block.base = base;
+      block.last = std::min(base + BLOCK, n);
+      const std::size_t size = block.last - base;
+      block.peptides.resize(size);
+      block.charges.resize(size);
+      parallel::forEach(size, threads, [&](std::size_t k)
       {
-        const auto& spectrum = spectra[i - base];
+        block.peptides[k] =
+          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
+        block.charges[k] = static_cast<int>(p.charge[base + k]);
+      });
+      return block;
+    };
+
+    const auto select = [&](Block& block)
+    {
+      // On a helper thread, overlapping the next block's prediction.
+      trace::Scope post_step("post", 2);
+      post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
+      const std::size_t size = block.last - block.base;
+      block.ranked.assign(size, RankedFragments{});
+      constexpr std::size_t TASK = 256;
+      parallel::forEach((size + TASK - 1) / TASK, threads, [&](std::size_t task)
+      {
+        std::vector<Fragment> fragments;
+        for (std::size_t k = task * TASK; k < std::min(size, (task + 1) * TASK); ++k)
+        {
+          if (block.spectra[k].positions == 0) { continue; }   // kept as generated, below
+          selectFragments(block.peptides[k], block.charges[k], block.spectra[k], params,
+                          fragments, block.ranked[k]);
+        }
+      });
+    };
+
+    const auto append = [&](const Block& block)
+    {
+      trace::Scope emit_step("emit", 2);
+      emit_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      emit_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
+      for (std::size_t i = block.base; i < block.last; ++i)
+      {
+        const auto& spectrum = block.spectra[i - block.base];
         begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
 
         if (spectrum.positions == 0)
@@ -568,99 +1058,7 @@ namespace ODIA
           continue;
         }
 
-        // Re-enumerate without the m/z cap: the cap is what has to be redone.
-        enumerateAllFragments(peptides[i - base], params, charges[i - base], fragments);
-
-        const std::size_t residues = peptides[i - base].size();
-        // Base-peak relative, so one absolute threshold cannot be right for a
-        // strong precursor and wrong for a weak one.
-        float peak = 0.0f;
-        for (std::size_t q = 0; q < spectrum.positions; ++q)
-        {
-          for (std::size_t ch = 0; ch < 4; ++ch) { peak = std::max(peak, spectrum.at(q, ch)); }
-        }
-        const float floor = peak * static_cast<float>(params.min_relative_intensity);
-        ranked.clear();
-        for (const auto& f : fragments)
-        {
-          // Position and channel follow alphabase's layout: fragment position
-          // q separates prefix q+1 from suffix nAA-q-1, so a b ion of ordinal
-          // o sits at q = o-1 and a y ion of ordinal o at q = nAA-1-o.
-          std::size_t position = 0;
-          std::size_t channel = 0;
-          if (f.type == FragmentType::B)
-          {
-            position = static_cast<std::size_t>(f.ordinal) - 1;
-            channel = f.charge == 1 ? 0 : 1;
-          }
-          else
-          {
-            position = residues - 1 - static_cast<std::size_t>(f.ordinal);
-            channel = f.charge == 1 ? 2 : 3;
-          }
-          if (position >= spectrum.positions) { continue; }
-          const float intensity = spectrum.at(position, channel);
-          // A predicted zero is a fragment the model says is not there, and a
-          // predicted 1e-7 is the same statement in floating point. Ranking on
-          // `> 0` filled spare slots with denormal noise (see
-          // min_relative_intensity); the floor is relative to this precursor's
-          // own base peak, because the spectrum is base-peak normalised.
-          if (!(intensity > floor)) { continue; }
-          ranked.emplace_back(intensity, f);
-        }
-
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& a, const auto& b) {
-                    if (a.first != b.first) { return a.first > b.first; }
-                    // Ties broken deterministically, so the library does not
-                    // depend on sort implementation.
-                    if (a.second.mz != b.second.mz) { return a.second.mz > b.second.mz; }
-                    if (a.second.type != b.second.type) { return a.second.type < b.second.type; }
-                    if (a.second.ordinal != b.second.ordinal)
-                    { return a.second.ordinal < b.second.ordinal; }
-                    return a.second.charge < b.second.charge;
-                  });
-        // A quota for doubly-charged fragments, when asked for. Applied by
-        // promoting the best unselected z2 ions over the weakest selected z1
-        // ones, so the cap is unchanged and only its composition moves.
-        if (params.reserved_doubly_charged > 0 && ranked.size() > params.max_fragments)
-        {
-          const std::size_t cap = params.max_fragments;
-          const std::size_t want =
-            std::min(params.reserved_doubly_charged, cap);
-          std::size_t have = 0;
-          for (std::size_t r = 0; r < cap; ++r)
-          {
-            if (ranked[r].second.charge >= 2) { ++have; }
-          }
-          for (std::size_t r = cap; r < ranked.size() && have < want; ++r)
-          {
-            if (ranked[r].second.charge < 2) { continue; }
-            // The weakest singly-charged fragment inside the cap makes way.
-            std::size_t victim = cap;
-            for (std::size_t q = cap; q-- > 0;)
-            {
-              if (ranked[q].second.charge < 2) { victim = q; break; }
-            }
-            if (victim == cap) { break; }
-            std::swap(ranked[victim], ranked[r]);
-            ++have;
-          }
-        }
-        if (ranked.size() > params.max_fragments) { ranked.resize(params.max_fragments); }
-
-        // The same bar `enumerateFragments` applied BEFORE prediction. The
-        // base-peak intensity floor above can prune a precursor below it, and
-        // until now nothing re-checked, so the count committed here was
-        // whatever survived. That is where the S08 library's 366,084 targets
-        // with 0-2 fragments came from -- and `appendDecoys` then refused to
-        // build decoys for them, because it does apply the bar. The result was
-        // 7.3% of targets competing against a null that contained nothing like
-        // them. Emptied rather than kept: a precursor below the bar its decoy
-        // would have to clear is not searchable, and `-min_library_fragments`
-        // drops it symmetrically at load.
-        if (ranked.size() < params.min_fragments) { ranked.clear(); }
-
+        const auto& ranked = block.ranked[i - block.base];
         Library::checkTransitionCapacity(built.product_mz.size(), ranked.size());
         for (const auto& [intensity, f] : ranked)
         {
@@ -673,8 +1071,79 @@ namespace ODIA
         }
         count[i] = static_cast<std::uint32_t>(ranked.size());
       }
+      if (sink == nullptr) { return; }
+      // The block's kept precursors, handed on with copies of their final
+      // transitions: `built` itself grows on this thread meanwhile.
+      Library::PrecursorRows rows;
+      std::size_t total = 0;
+      for (std::size_t i = block.base; i < block.last; ++i) { total += count[i]; }
+      rows.precursor.reserve(block.last - block.base);
+      rows.begin.reserve(block.last - block.base);
+      rows.count.reserve(block.last - block.base);
+      auto& out = rows.transitions;
+      out.product_mz.reserve(total); out.library_intensity.reserve(total); out.type.reserve(total);
+      out.ordinal.reserve(total); out.charge.reserve(total); out.loss.reserve(total);
+      for (std::size_t i = block.base; i < block.last; ++i)
+      {
+        if (count[i] == 0) { continue; }
+        rows.precursor.push_back(static_cast<std::uint32_t>(i));
+        rows.begin.push_back(static_cast<std::uint32_t>(out.product_mz.size()));
+        rows.count.push_back(count[i]);
+        const auto first = built.product_mz.begin() + begin[i];
+        out.product_mz.insert(out.product_mz.end(), first, first + count[i]);
+        const auto b = static_cast<std::ptrdiff_t>(begin[i]), e = b + static_cast<std::ptrdiff_t>(count[i]);
+        out.library_intensity.insert(out.library_intensity.end(), built.library_intensity.begin() + b, built.library_intensity.begin() + e);
+        out.type.insert(out.type.end(), built.type.begin() + b, built.type.begin() + e);
+        out.ordinal.insert(out.ordinal.end(), built.ordinal.begin() + b, built.ordinal.begin() + e);
+        out.charge.insert(out.charge.end(), built.charge.begin() + b, built.charge.begin() + e);
+        out.loss.insert(out.loss.end(), built.loss.begin() + b, built.loss.begin() + e);
+      }
+      trace::Scope hand_step("hand_over", 2);
+      hand_step.fields().rows = static_cast<std::int64_t>(rows.precursor.size());
+      sink->rows(std::move(rows));
+    };
+
+    Block selecting;              // its selection runs in `selection`
+    std::future<void> selection;
+    for (std::size_t base = 0; base < n; base += BLOCK)
+    {
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
+      Block block = parse(base);
+      std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
+      block.spectra = predictor.predictMS2(block.peptides, block.charges, nce, instrument, &failures);
+      predict_step.end();
+
+      Block done;
+      if (selection.valid()) { selection.get(); done = std::move(selecting); }
+      selecting = std::move(block);
+      try { selection = std::async(std::launch::async, [&] { select(selecting); }); }
+      catch (const std::system_error&)
+      {
+        // No thread to spare (a process or cgroup thread limit): select on
+        // this one, without the overlap.
+        select(selecting);
+        selection = std::async(std::launch::deferred, [] {});
+      }
+      if (done.last > done.base) { append(done); }
+    }
+    if (selection.valid())
+    {
+      trace::Scope drain_step("drain", 1);
+      selection.get();
+      append(selecting);
     }
 
+    if (sink != nullptr)
+    {
+      // Everything handed over is consumed before the library is rewritten.
+      trace::Scope drain_sink("drain_sink", 1);
+      sink->drain();
+    }
+    trace::Scope finalize_step("finalize", 1);
     t = std::move(built);
     p.transition_begin = std::move(begin);
     p.transition_count = std::move(count);
@@ -691,7 +1160,7 @@ namespace ODIA
   LibraryGenerator::IrtCalibration
   LibraryGenerator::fitIrtCalibration(const std::string& rt_model_path,
                                       const std::string& standards_file,
-                                      bool prefer_gpu)
+                                      bool prefer_gpu, const GpuOptions& gpu)
   {
     std::vector<AASequence> peptides;
     std::vector<double> known;
@@ -723,10 +1192,15 @@ namespace ODIA
                                standards_file);
     }
 
-    PeptDeepPredictor predictor(rt_model_path, prefer_gpu);
+    // Eleven peptides: one session is plenty, and each CUDA session costs a
+    // cuDNN set-up.
+    trace::Scope irt_phase("irt_fit", 0);
+    GpuOptions one_session = gpu;
+    one_session.sessions_per_device = 1;
+    PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, one_session);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("IRT-FIT", predictor);
+    writeDeviceLine("IRT-FIT", predictor, gpu);
     // Tolerate a standard that cannot be encoded rather than abandoning the
     // calibration: with eleven points, losing one to an exotic modification
     // should cost precision, not the whole line. Their entries come back NaN
@@ -792,39 +1266,60 @@ namespace ODIA
 
   std::size_t LibraryGenerator::predictCollisionCrossSections(
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
-    unsigned sessions, bool derive_mobility)
+    unsigned sessions, bool derive_mobility, const GpuOptions& gpu,
+    std::vector<std::uint16_t>* lengths, bool* on_cpu)
   {
+    trace::Scope ccs_phase("ccs", 0);
     auto& p = library.precursors();
     const std::size_t n = library.precursorCount();
     p.ccs.assign(n, std::numeric_limits<float>::quiet_NaN());
     if (derive_mobility) { p.im.assign(n, std::numeric_limits<float>::quiet_NaN()); }
     if (n == 0) { return 0; }
 
-    PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions));
+    trace::Scope sessions_step("sessions", 1);
+    PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("CCS", predictor);
+    writeDeviceLine("CCS", predictor, gpu);
+    if (on_cpu != nullptr) { *on_cpu = predictor.provider() == PeptDeepPredictor::Provider::CPU; }
+    if (lengths != nullptr) { lengths->assign(n, 0); }
 
     // Blocked, as the MS2 pass is: the whole proteome at once would hold every
     // parsed AASequence live alongside the library.
-    constexpr std::size_t BLOCK = 200000;
+    const std::size_t BLOCK = ccsBlock();
     std::size_t unpredicted = 0;
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
       const std::size_t last = std::min(base + BLOCK, n);
-      std::vector<AASequence> peptides;
-      std::vector<int> charges;
-      peptides.reserve(last - base);
-      charges.reserve(last - base);
-      for (std::size_t i = base; i < last; ++i)
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(last - base);
+      trace::Scope parse_step("parse", 2);
+      std::vector<AASequence> peptides(last - base);
+      std::vector<int> charges(last - base);
+      parallel::forEach(last - base, parallel::workers(sessions), [&](std::size_t k)
       {
-        peptides.push_back(
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i]))));
-        charges.push_back(static_cast<int>(p.charge[i]));
+        peptides[k] =
+          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
+        charges[k] = static_cast<int>(p.charge[base + k]);
+      });
+      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
+      parse_step.end();
+      if (lengths != nullptr)
+      {
+        for (std::size_t k = 0; k < peptides.size(); ++k)
+        { (*lengths)[base + k] = static_cast<std::uint16_t>(peptides[k].size()); }
       }
 
       std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
       const auto ccs = predictor.predictCCS(peptides, charges, &failures);
+      predict_step.end();
+      trace::Scope post_step("post", 2);
+      post_step.fields().rows = static_cast<std::int64_t>(last - base);
       for (std::size_t i = base; i < last; ++i)
       {
         p.ccs[i] = ccs[i - base];
@@ -842,12 +1337,104 @@ namespace ODIA
     return unpredicted;
   }
 
+  namespace
+  {
+    /// Which of @p count rows -- the i-th of residue count length(i) -- a CPU
+    /// CCS call of rows [0, count) runs as a batch of one: per residue count,
+    /// the predictor cuts the rows into MAX_BATCH_ROWS chunks in order, and
+    /// only a last chunk of exactly one row is a one-row batch (the CPU cut
+    /// into CPU_CHUNK_ROWS pieces never leaves one; PeptDeepPredictor).
+    template <class Length>
+    void markAlone(std::size_t count, const Length& length, std::vector<std::uint8_t>& alone)
+    {
+      std::map<std::size_t, std::pair<std::size_t, std::size_t>> groups;   // length -> (rows, last row)
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        auto& g = groups[length(k)];
+        ++g.first;
+        g.second = k;
+      }
+      alone.assign(count, 0);
+      for (const auto& [len, g] : groups)
+      {
+        if (g.first % PeptDeepPredictor::MAX_BATCH_ROWS == 1) { alone[g.second] = 1; }
+      }
+    }
+  } // namespace
+
+  std::size_t LibraryGenerator::ccsBlock()
+  {
+    static const std::size_t block = [] {
+      if (const char* v = std::getenv("ODIA_CCS_BLOCK"); v != nullptr && *v != '\0')
+      {
+        char* end = nullptr;
+        const long long x = std::strtoll(v, &end, 10);
+        if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+      }
+      return std::size_t{200000};
+    }();
+    return block;
+  }
+
+  LibraryGenerator::CcsBatchGuard::CcsBatchGuard(std::string ccs_model_path, bool derive_mobility,
+                                                 std::vector<std::uint16_t> lengths, bool on_cpu)
+    : model_(std::move(ccs_model_path)), derive_mobility_(derive_mobility), lengths_(std::move(lengths)),
+      on_cpu_(on_cpu)
+  {
+    if (!on_cpu_) { return; }
+    alone_.assign(lengths_.size(), 0);
+    std::vector<std::uint8_t> part;
+    for (std::size_t base = 0; base < lengths_.size(); base += ccsBlock())
+    {
+      const std::size_t count = std::min(ccsBlock(), lengths_.size() - base);
+      markAlone(count, [&](std::size_t k) { return lengths_[base + k]; }, part);
+      std::copy(part.begin(), part.end(), alone_.begin() + static_cast<std::ptrdiff_t>(base));
+    }
+  }
+
+  LibraryGenerator::CcsBatchGuard::~CcsBatchGuard() = default;
+
+  std::size_t LibraryGenerator::CcsBatchGuard::settle(Library& library, const std::vector<std::uint32_t>& kept,
+                                                      std::size_t from, std::size_t to)
+  {
+    if (!on_cpu_ || from >= to) { return 0; }
+    trace::Scope settle_step("ccs_settle", 2);
+    settle_step.fields().rows = static_cast<std::int64_t>(to - from);
+    auto& p = library.precursors();
+    std::vector<std::uint8_t> old_alone;
+    std::size_t redone = 0;
+    for (std::size_t base = from; base < to; base += ccsBlock())
+    {
+      const std::size_t count = std::min(ccsBlock(), to - base);
+      markAlone(count, [&](std::size_t k) { return lengths_[kept[base + k]]; }, old_alone);
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        const std::uint32_t i = kept[base + k];
+        if (old_alone[k] == alone_[i]) { continue; }
+        // Predicted again the old way: alone, or as a batch of two rows (any
+        // batch of two or more gives a row the same value).
+        if (!predictor_) { predictor_ = std::make_unique<PeptDeepPredictor>(model_, false, 1, 1); }
+        const auto peptide = AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i])));
+        const int charge = static_cast<int>(p.charge[i]);
+        const std::size_t rows = old_alone[k] ? 1 : 2;
+        const auto ccs = predictor_->predictCCS(std::vector<AASequence>(rows, peptide), std::vector<int>(rows, charge));
+        p.ccs[i] = ccs.front();
+        if (derive_mobility_ && !std::isnan(p.ccs[i]))
+        { p.im[i] = static_cast<float>(mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i])); }
+        ++redone;
+      }
+    }
+    settle_step.fields().idx = static_cast<std::int64_t>(redone);
+    return redone;
+  }
+
   std::size_t LibraryGenerator::appendDecoys(Library& library, DecoyMethod method,
                                              std::size_t* skipped_out,
                                              std::size_t min_fragments,
                                              bool recompute_decoy_mz)
   {
     if (method == DecoyMethod::None) { return 0; }
+    trace::Scope decoy_phase("decoys", 0);
 
     const std::size_t n_targets = library.precursorCount();
 
@@ -1206,7 +1793,9 @@ namespace ODIA
     };
     // v5 removes duplicate variable-modification forms and empty assays,
     // rejects ambiguous masses, and pins shuffle across standard libraries.
-    ps << "v5"
+    // v6: residue-less peptide-terminal variable modifications are applied at
+    // max_variable_modifications 1 (they were silently dropped before).
+    ps << "v6"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages

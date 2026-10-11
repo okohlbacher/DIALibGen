@@ -5,6 +5,7 @@
 
 #include <odia/PeptDeepEncoder.h>
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -14,6 +15,32 @@ namespace OpenMS { class AASequence; }
 
 namespace ODIA
 {
+
+  /// How the models use a GPU. Only consulted when CUDA is requested.
+  struct GpuOptions
+  {
+    /// Throw instead of running on the CPU when CUDA was requested but no
+    /// CUDA session could be created (missing cuDNN, no visible GPU, a
+    /// CPU-only ONNX Runtime).
+    bool require = false;
+    /// TensorFloat-32 math in the CUDA provider. Off by default: TF32 rounds
+    /// matmul and convolution inputs to 10 mantissa bits, so a TF32 library
+    /// differs from the CPU library (about 1 % of fragment sets, CCS by up
+    /// to ~1.9 A^2), while with it off the GPU agrees with the CPU to float
+    /// rounding. On is faster (one H100, whole proteome: ~25 s less).
+    bool tf32 = false;
+    /// CUDA sessions per device. Each has its own stream, so the host-side
+    /// encoding of one batch overlaps the GPU work of another; measured on an
+    /// H100, 2-4 give RT and CCS +30-45 % and 8 is slower again.
+    int sessions_per_device = 4;
+    /// CUDA devices to spread the sessions over, round robin. Empty: the
+    /// first visible device that constructs a session.
+    std::vector<int> devices;
+    /// Where callers collect "requested CUDA, got the CPU" warnings for the
+    /// output's provenance; may be null. The predictor itself only reports
+    /// them through fallbackReason().
+    std::vector<std::string>* warnings = nullptr;
+  };
 
   /// Runs AlphaPeptDeep's PeptDeep models through ONNX Runtime.
   ///
@@ -41,9 +68,9 @@ namespace ODIA
     /// 2.2x), 16 gives 318 and 32 gives 231 -- past 8 threads it goes
     /// backwards. Sixteen single-threaded sessions on the same cores give
     /// 1760/s, 4.7x the best intra-op configuration, and it keeps scaling to
-    /// 4585/s at 64. Each session costs a copy of the weights and an arena,
-    /// so the count is capped by the caller rather than defaulted to the core
-    /// count.
+    /// 4585/s at 64. CPU sessions share one copy of the weights, and with
+    /// CPU_CHUNK_ROWS batches each arena is small, so generation runs one
+    /// session per thread, up to the physical cores.
     /// @param gpu_device which CUDA device. -1 (default) PROBES: it tries each
     ///        visible device in turn and keeps the first that actually
     ///        constructs a session. Probing rather than trusting device 0 is
@@ -54,8 +81,21 @@ namespace ODIA
                                bool prefer_gpu = true,
                                int intra_op_threads = 0,
                                int sessions = 1,
-                               int gpu_device = -1);
+                               int gpu_device = -1,
+                               const GpuOptions& gpu = {});
     ~PeptDeepPredictor();
+
+    /// Why CUDA was requested but this predictor runs on the CPU (or skips a
+    /// listed GPU), or empty.
+    ///
+    /// Set only when a GPU exists and could not be used (for example the
+    /// CUDA provider found no cuDNN): a machine without a GPU, or a CPU-only
+    /// ONNX Runtime, is the expected CPU case and leaves this empty. With
+    /// GpuOptions::require the constructor throws instead.
+    const std::string& fallbackReason() const;
+    /// The CUDA devices sessions run on, one entry per session; empty on CPU.
+    const std::vector<int>& sessionDevices() const;
+
 
     /// Which CUDA device the session ended up on, or -1 on CPU.
     int device() const;
@@ -80,6 +120,13 @@ namespace ODIA
     /// which stage failed. Capping also fixes the batch size, which the result
     /// depends on at the last bit.
     static constexpr std::size_t MAX_BATCH_ROWS = 2048;
+
+    /// On the CPU, rows per batch within a MAX_BATCH_ROWS chunk (see
+    /// forEachChunk_). Small batches let every session stay busy to the end of
+    /// a call and keep each session's ONNX arena small (about 53 MB for MS2 at
+    /// 64 rows against 1.9 GB at 2048), which is what makes one session per
+    /// core affordable. The result does not change (forEachChunk_).
+    static constexpr std::size_t CPU_CHUNK_ROWS = 64;
 
     /// Peptides that could not be encoded, by index into the input, with the
     /// reason. One unencodable peptide must not discard a whole run's work.
@@ -161,12 +208,19 @@ namespace ODIA
                       const std::vector<std::size_t>& group, std::vector<float>& out);
 
     /// Splits @p count peptides into length-homogeneous chunks of at most
-    /// MAX_BATCH_ROWS and runs @p body over them across sessionCount()
-    /// threads. The chunking is identical to the serial order, so results do
-    /// not depend on how many sessions ran them.
+    /// MAX_BATCH_ROWS (on the CPU cut further into CPU_CHUNK_ROWS pieces) and
+    /// runs @p body over them across sessionCount() threads, costliest first.
+    /// The chunking does not depend on the session count, so neither do the
+    /// results.
     void forEachChunk_(const std::vector<OpenMS::AASequence>& peptides,
                        const std::function<void(std::size_t session,
                                                 const std::vector<std::size_t>& group)>& body);
+
+    /// Hands the float weights of the optimised graph at @p optimized to
+    /// every later CPU session as one shared, read-only copy, with one
+    /// pre-packed-weights container. False if they could not be read, in
+    /// which case nothing is shared.
+    bool shareWeights_(const std::filesystem::path& optimized);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -1,8 +1,14 @@
 #include <odia/DIANNLibraryFile.h>
+#include "../../src/library/Parallel.h"
+#include <parquet/file_reader.h>
+#include <parquet/metadata.h>
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <numeric>
 #include <stdexcept>
 
 using namespace ODIA;
@@ -26,6 +32,45 @@ Library fixture()
   t.charge = {1, 2, 1, 2, 1}; t.ordinal = {2, 4, 2, 4, 3};
   t.loss = {LossType::Water, LossType::None, LossType::Ammonia, LossType::None, LossType::None};
   return lib;
+}
+// One precursor per row and a 2^20-row writer chunk: n = 2^20 + 1 puts the
+// last precursor alone in a second row group. Unique ids, as in a real library.
+Library chunked(std::size_t n)
+{
+  Library lib;
+  auto& p = lib.precursors(); auto& t = lib.transitions();
+  const std::string residues = "ACDEFGHIKLMNPQRSTVWY";
+  for (std::size_t i = 0; i < n; ++i)
+  {
+    std::string seq = "PEP";
+    for (std::size_t k = i; k > 0; k /= residues.size()) { seq += residues[k % residues.size()]; }
+    seq += 'K';
+    p.modified_sequence.push_back(lib.strings().intern(seq));
+    p.protein_group.push_back(lib.strings().intern("P" + std::to_string(i % 5000)));
+    p.mz.push_back(toFixed(400.0 + 0.001 * static_cast<double>(i % 100000)));
+    p.irt.push_back(i % 7 == 0 ? std::nanf("") : static_cast<float>(i % 1000) / 10.0f);
+    // IM and CCS absent together: load() derives either one from the other.
+    p.im.push_back(i % 11 == 0 ? std::nanf("") : 0.8f + static_cast<float>(i % 500) / 1000.0f);
+    p.ccs.push_back(i % 11 == 0 ? std::nanf("") : 300.0f + static_cast<float>(i % 400));
+    p.charge.push_back(static_cast<std::uint8_t>(2 + i % 3)); p.decoy.push_back(static_cast<std::uint8_t>(i % 2));
+    p.transition_begin.push_back(static_cast<std::uint32_t>(i)); p.transition_count.push_back(1);
+    t.product_mz.push_back(toFixed(200.0 + 0.25 * static_cast<double>(i % 997)));
+    t.library_intensity.push_back(1.0f); t.type.push_back(FragmentType::Y);
+    t.charge.push_back(1); t.ordinal.push_back(1); t.loss.push_back(LossType::None);
+  }
+  return lib;
+}
+std::string bytes(const fs::path& path)
+{
+  std::ifstream in(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+std::vector<std::int64_t> rowGroups(const fs::path& path)
+{
+  const auto metadata = parquet::ParquetFileReader::OpenFile(path.string())->metadata();
+  std::vector<std::int64_t> rows;
+  for (int g = 0; g < metadata->num_row_groups(); ++g) { rows.push_back(metadata->RowGroup(g)->num_rows()); }
+  return rows;
 }
 void compare(const Library& actual, const Library& expected)
 {
@@ -61,6 +106,68 @@ int main(int argc, char** argv)
                 << lib.invalidMzCount() << ' ' << lib.invalidMzTransitionCount() << '\n';
       return 0;
     }
+    // The compact writer itself, not pyarrow, across its chunk boundary and empty.
+    if (mode == "compact-chunks" || mode == "compact-empty")
+    {
+      const auto expected = chunked(mode == "compact-chunks" ? (std::size_t(1) << 20) + 1 : 0);
+      DIANNLibraryFile::storeParquetCompact(path.string(), expected, {});
+      const auto rows = rowGroups(path);
+      if (mode == "compact-chunks")
+      { check(rows == std::vector<std::int64_t>{1 << 20, 1}, "compact row groups are not [1048576, 1]"); }
+      else { check(std::accumulate(rows.begin(), rows.end(), std::int64_t{0}) == 0, "empty compact library has rows"); }
+      Library loaded; DIANNLibraryFile::load(path.string(), loaded);
+      check(loaded.precursorCount() == expected.precursorCount(), "compact precursor count changed");
+      compare(loaded, expected);
+      return 0;
+    }
+    // The writers render rows (TSV) and build row groups (Parquet) on several
+    // threads; the files must be the bytes a single thread writes. Three row
+    // groups, the last a partial one, and more TSV blocks than threads.
+    if (mode == "threads-identical")
+    {
+      fs::create_directories(path);
+      const auto library = chunked((std::size_t(2) << 20) + 12345);
+      for (const unsigned threads : {1u, 3u, 8u})
+      {
+        const std::string suffix = std::to_string(threads);
+        DIANNLibraryFile::storeParquetCompact((path / ("t" + suffix + ".parquet")).string(), library, {}, "{}", {}, threads);
+        DIANNLibraryFile::storeTSV((path / ("t" + suffix + ".tsv")).string(), library, threads);
+      }
+      for (const char* ext : {".parquet", ".tsv"})
+      {
+        const auto reference = bytes(path / (std::string("t1") + ext));
+        check(!reference.empty(), std::string("empty ") + ext);
+        for (const char* other : {"t3", "t8"})
+        { check(bytes(path / (other + std::string(ext))) == reference, std::string(other) + ext + " differs from one thread"); }
+      }
+      check(rowGroups(path / "t8.parquet").size() == 3, "expected three row groups");
+      // A failure reports the row a serial writer would have hit first.
+      auto bad = chunked((std::size_t(2) << 20) + 12345);
+      for (const std::size_t row : {std::size_t(1500000), std::size_t(70000)})
+      { bad.precursors().protein_group[row] = bad.strings().intern("bad\tgroup " + std::to_string(row)); }
+      try { DIANNLibraryFile::storeTSV((path / "bad.tsv").string(), bad, 8); check(false, "a tab was written"); }
+      catch (const std::runtime_error& e) { check(std::string(e.what()).find("contains a tab") != std::string::npos, e.what()); }
+      check(!fs::exists(path / "bad.tsv"), "a failed TSV write left a file");
+      return 0;
+    }
+    // parallel::forEach: every index once, and the lowest failure wins.
+    if (mode == "parallel-for-each")
+    {
+      for (const unsigned threads : {1u, 2u, 7u, 64u})
+      {
+        std::vector<int> hits(10007, 0);
+        parallel::forEach(hits.size(), threads, [&](std::size_t i) { ++hits[i]; });
+        check(std::all_of(hits.begin(), hits.end(), [](int h) { return h == 1; }), "an index ran other than once");
+        try
+        {
+          parallel::forEach(hits.size(), threads, [&](std::size_t i)
+          { if (i == 9000 || i == 4242 || i == 5000) { throw std::runtime_error(std::to_string(i)); } });
+          check(false, "no exception");
+        }
+        catch (const std::runtime_error& e) { check(std::string(e.what()) == "4242", std::string("rethrew ") + e.what()); }
+      }
+      return 0;
+    }
     auto original = fixture();
     if (mode == "write")
     {
@@ -73,6 +180,18 @@ int main(int argc, char** argv)
     {
       original.precursors().im.clear(); original.precursors().ccs.clear();
       original.transitions().library_intensity[0] = std::nanf("");
+      DIANNLibraryFile::storeTSV(path.string(), original); return 0;
+    }
+    // OpenMS modification names and UniProt-style protein groups, as a
+    // generated library holds them; the TSV must carry DIA-NN's spelling.
+    if (mode == "openms-names")
+    {
+      auto& p = original.precursors();
+      p.modified_sequence = {original.strings().intern("AC(Carbamidomethyl)DEFGK"),
+                             original.strings().intern("AC(Carbamidomethyl)DEFGK"),
+                             original.strings().intern(".(Acetyl)PEPM(Oxidation)TIDER")};
+      const auto group = original.strings().intern("sp|P00001|ONE_HUMAN;tr|P00002|TWO_HUMAN");
+      p.protein_group[0] = group; p.protein_group[1] = group;
       DIANNLibraryFile::storeTSV(path.string(), original); return 0;
     }
     if (mode == "invalid-text")

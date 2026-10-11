@@ -79,9 +79,16 @@ grep -q '"tool"' "$TMP/refined.tsv.refine.json" || fail "the sidecar names no to
 "$PY" - "$TMP/library.tsv" "$TMP/refined.tsv" "$TMP/report.parquet" <<'PY_RT_UNITS' || exit 1
 import csv, json, math, sys
 import pyarrow.parquet as pq
+# DIALibGen writes DIA-NN's undotted TSV names; the fixture uses the dotted
+# names of 0.11.1 and earlier. Compare both under the dotted ones.
+LEGACY = {"ModifiedPeptide": "Modified.Sequence", "PrecursorCharge": "Precursor.Charge", "iRT": "RT",
+          "IonMobility": "IM", "PrecursorMz": "Precursor.Mz", "ProductMz": "Product.Mz",
+          "LibraryIntensity": "Relative.Intensity", "FragmentType": "Fragment.Type",
+          "FragmentCharge": "Fragment.Charge", "FragmentSeriesNumber": "Fragment.Series.Number",
+          "FragmentLossType": "Fragment.Loss.Type"}
 def rows(path):
     with open(path) as source:
-        return list(csv.DictReader(source, delimiter="\t"))
+        return [{LEGACY.get(k, k): v for k, v in r.items()} for r in csv.DictReader(source, delimiter="\t")]
 before, after = rows(sys.argv[1]), rows(sys.argv[2])
 observed = {(r["Modified.Sequence"], int(r["Precursor.Charge"])): r["RT"]
             for r in pq.read_table(sys.argv[3]).to_pylist()}
@@ -204,9 +211,16 @@ PYEOF2
 import csv, json, math, sys
 import pyarrow.parquet as pq
 
+# DIALibGen writes DIA-NN's undotted TSV names; the fixture uses the dotted
+# names of 0.11.1 and earlier. Compare both under the dotted ones.
+LEGACY = {"ModifiedPeptide": "Modified.Sequence", "PrecursorCharge": "Precursor.Charge", "iRT": "RT",
+          "IonMobility": "IM", "PrecursorMz": "Precursor.Mz", "ProductMz": "Product.Mz",
+          "LibraryIntensity": "Relative.Intensity", "FragmentType": "Fragment.Type",
+          "FragmentCharge": "Fragment.Charge", "FragmentSeriesNumber": "Fragment.Series.Number",
+          "FragmentLossType": "Fragment.Loss.Type"}
 def read(path):
     with open(path) as source:
-        return list(csv.DictReader(source, delimiter="\t"))
+        return [{LEGACY.get(k, k): v for k, v in r.items()} for r in csv.DictReader(source, delimiter="\t")]
 before, after = read(sys.argv[1]), read(sys.argv[2])
 assert len(before) == len(after), "pure tuning changed transition count"
 # The TSV writer uses canonical numeric formatting and omits Stripped.Sequence.

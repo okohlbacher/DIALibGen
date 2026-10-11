@@ -4,9 +4,12 @@
 #pragma once
 
 #include <odia/Library.h>
+#include <odia/PeptDeepPredictor.h>
 
 #include <cstddef>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ODIA
@@ -81,7 +84,7 @@ namespace ODIA
     /// modification is confounded with the residue and free cysteine cannot be
     /// represented. Free cysteine is more hydrophobic than CAM-cysteine, so it
     /// elutes later than either model predicts -- by +0.90 min per cysteine on
-    /// Astral and +0.74 min on S08, and DIA-NN's own predictor misses it by
+    /// Astral and +0.74 min on IH1, and DIA-NN's own predictor misses it by
     /// +0.90 and +1.03 min on the same peptides. Not an ODIA defect, but ODIA
     /// pays for it because it windows on the library RT.
     ///
@@ -97,7 +100,7 @@ namespace ODIA
     /// timsTOF would report for it. Off means the library carries angstroms
     /// only, which is what ODIA did before and which costs a diaPASEF consumer
     /// the entire mobility dimension -- DIA-NN saw `iIM` = 0 for 100% of its
-    /// identifications when searching our library against S08.
+    /// identifications when searching our library against IH1.
     bool derive_ion_mobility = true;
 
     /// Digest the sequence again with the initiator methionine removed.
@@ -133,7 +136,7 @@ namespace ODIA
     /// that may enter the library.
     ///
     /// The guard used to be `intensity > 0`, which admits denormals. Measured
-    /// on the shipped S08 library: 1,980 of 5,000 precursors' transitions had a
+    /// on the shipped IH1 library: 1,980 of 5,000 precursors' transitions had a
     /// stored intensity of median 2.0e-07 against a library median of 0.255 --
     /// six orders of magnitude down, i.e. numerical noise. Only 13.6% of them
     /// were ever observed, against 81.8% for ordinary picks, and 1,081 of them
@@ -181,11 +184,17 @@ namespace ODIA
       std::size_t dropped_precursor_mz = 0;
       std::size_t dropped_proteins = 0;
       std::size_t dropped_ambiguous_peptides = 0;
+      /// Per requested variable modification (as named), the precursors
+      /// carrying it. generate() refuses a library in which one is zero.
+      std::vector<std::pair<std::string, std::size_t>> variable_modification_precursors;
     };
 
+    /// @param threads host threads for digestion and precursor enumeration
+    ///        (0 = all); the library does not depend on it.
     static Stats generate(const std::string& fasta_file,
                           const DigestParams& params,
-                          Library& library);
+                          Library& library,
+                          unsigned threads = 1);
 
     /// The canonical content-affecting parameter string for the library cache.
     ///
@@ -217,17 +226,18 @@ namespace ODIA
                                              const std::string& rt_model_path,
                                              bool prefer_gpu = true,
                                              unsigned sessions = 0,
-                                             bool free_cysteine_rt_correction = true);
+                                             bool free_cysteine_rt_correction = true,
+                                             const GpuOptions& gpu = {});
 
     /// The measured free-cysteine offset, in the RT model's own normalised
     /// units, for a peptide with @p free_cysteines unmodified cysteines.
     ///
     /// Bucketed rather than linear because the effect saturates, and stated in
     /// rt_norm rather than minutes because minutes are gradient-dependent.
-    /// Fitted on Astral (Orbitrap, 8.5-37.9 min) and S08 (timsTOF, 7-30 min)
-    /// and cross-validated by holding each out: fitting on S08 and applying to
+    /// Fitted on Astral (Orbitrap, 8.5-37.9 min) and IH1 (timsTOF, 7-30 min)
+    /// and cross-validated by holding each out: fitting on IH1 and applying to
     /// Astral takes the cysteine-peptide residual p95 from 3.193 to 2.416 min,
-    /// and the reverse takes S08 from 3.327 to 2.678 min.
+    /// and the reverse takes IH1 from 3.327 to 2.678 min.
     static float freeCysteineRtOffset(std::size_t free_cysteines);
 
     /// Replace placeholder intensities with predicted ones, and re-choose the
@@ -249,13 +259,32 @@ namespace ODIA
     ///
     /// @returns the number of precursors left with placeholder intensities
     ///          because prediction failed for them.
+    /// Receives MS2 results while predictFragmentIntensities runs, so that a
+    /// writer can work alongside the prediction (generate predicts RT and CCS
+    /// first, so a precursor is complete once its MS2 spectrum is in).
+    class Ms2Sink
+    {
+    public:
+      virtual ~Ms2Sink() = default;
+      /// One block's kept precursors, in library order, with their final
+      /// transitions; indices refer to the library as it was at the call.
+      /// Called on the calling thread, block after block; may block.
+      virtual void rows(Library::PrecursorRows rows) = 0;
+      /// After the last rows() and before the library is rewritten (dropped
+      /// precursors removed): everything handed over must have been consumed
+      /// when this returns. Rethrows a failure of the consumer.
+      virtual void drain() = 0;
+    };
+
     static std::size_t predictFragmentIntensities(Library& library,
                                                   const std::string& ms2_model_path,
                                                   const DigestParams& params,
                                                   float nce = 30.0f,
                                                   const std::string& instrument = "QE",
                                                   bool prefer_gpu = true,
-                                                  unsigned sessions = 0);
+                                                  unsigned sessions = 0,
+                                                  const GpuOptions& gpu = {},
+                                                  Ms2Sink* sink = nullptr);
 
     /// The line mapping the RT model's raw output onto the iRT scale.
     struct IrtCalibration
@@ -275,7 +304,8 @@ namespace ODIA
     /// would still look like iRT and simply be wrong.
     static IrtCalibration fitIrtCalibration(const std::string& rt_model_path,
                                             const std::string& standards_file,
-                                            bool prefer_gpu = true);
+                                            bool prefer_gpu = true,
+                                            const GpuOptions& gpu = {});
 
     /// Rescale a library's retention times onto the iRT scale in place.
     ///
@@ -304,7 +334,53 @@ namespace ODIA
                                                     const std::string& ccs_model_path,
                                                     bool prefer_gpu = true,
                                                     unsigned sessions = 0,
-                                                    bool derive_mobility = true);
+                                                    bool derive_mobility = true,
+                                                    const GpuOptions& gpu = {},
+                                                    std::vector<std::uint16_t>* lengths = nullptr,
+                                                    bool* on_cpu = nullptr);
+
+    /// Precursors per predictCCS call in predictCollisionCrossSections:
+    /// 200,000, or ODIA_CCS_BLOCK (tests). The CCS of a row can depend on the
+    /// call it shares (CcsBatchGuard).
+    static std::size_t ccsBlock();
+
+    /// Keeps CCS bit-identical when it is predicted before fragment selection.
+    ///
+    /// Until 0.11.1 CCS ran after fragment selection, on the precursors that
+    /// selection kept; generate now runs it first, on every precursor. On the
+    /// CPU the LSTM CCS model gives every batch of two or more rows the same
+    /// answer for a row, but a ONE-row batch a slightly different one, and
+    /// which rows end up alone depends on which precursors share a call. When
+    /// selection drops precursors, a kept one can therefore have been alone in
+    /// one order and not in the other. This finds exactly those -- per CCS call
+    /// of the old order, the last row of each residue-count group of 2048k+1
+    /// rows is alone -- and predicts them again the old way: alone, or in a
+    /// batch of two. Without drops it finds nothing. On CUDA the batch
+    /// composition shapes every value at float rounding anyway, so it does
+    /// nothing there.
+    class CcsBatchGuard
+    {
+    public:
+      /// @param lengths residues of every precursor CCS was predicted for, in
+      ///        library order (predictCollisionCrossSections' @p lengths).
+      /// @param on_cpu whether CCS ran on the CPU.
+      CcsBatchGuard(std::string ccs_model_path, bool derive_mobility, std::vector<std::uint16_t> lengths,
+                    bool on_cpu);
+      ~CcsBatchGuard();
+      /// Settles the CCS of kept precursors kept[from .. to): their old-order
+      /// calls must be complete (from and to multiples of ccsBlock(), or to the
+      /// end of the kept list). Writes p.ccs (and p.im) of @p library where a
+      /// row's batching differed. Returns how many it predicted again.
+      std::size_t settle(Library& library, const std::vector<std::uint32_t>& kept,
+                         std::size_t from, std::size_t to);
+    private:
+      std::string model_;
+      bool derive_mobility_;
+      std::vector<std::uint16_t> lengths_;
+      std::vector<std::uint8_t> alone_;   ///< per precursor: alone in its new-order batch
+      bool on_cpu_;
+      std::unique_ptr<PeptDeepPredictor> predictor_;
+    };
 
     /// Append a decoy for every target currently in @p library.
     ///

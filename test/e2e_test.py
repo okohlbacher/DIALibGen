@@ -26,6 +26,7 @@ except ImportError as e:
     sys.exit(77)
 
 MODELS = ("peptdeep_rt_dynamic.onnx", "peptdeep_ms2_dynamic.onnx", "peptdeep_ccs_dynamic.onnx")
+MS2_PRUNED = "peptdeep_ms2_pruned.onnx"
 
 
 def main(binary, fasta, model_dir, workdir):
@@ -81,8 +82,10 @@ def main(binary, fasta, model_dir, workdir):
     # The recipe must name the models ACTUALLY used, including when they were
     # found via DIALIBGEN_MODEL_DIR rather than written in the config -- a
     # library that does not say what produced it is not reproducible from itself.
+    # MS2: the pruned graph when the model directory holds it, else the full one.
+    ms2 = MS2_PRUNED if os.path.exists(os.path.join(model_dir, MS2_PRUNED)) else MODELS[1]
     check(all(cfg[k].endswith(m) for k, m in
-              (("rt_model", MODELS[0]), ("ms2_model", MODELS[1]), ("ccs_model", MODELS[2]))),
+              (("rt_model", MODELS[0]), ("ms2_model", ms2), ("ccs_model", MODELS[2]))),
           "the embedded recipe names the models that produced the library")
     check(cfg["enzyme"] == "Trypsin/P" and cfg["fixed_modifications"] == ["Carbamidomethyl (C)"],
           "the embedded recipe carries the effective defaults")
@@ -136,7 +139,9 @@ def main(binary, fasta, model_dir, workdir):
     with open("strict.tsv") as handle:
         tsv_ids = {r["Precursor.Id"] for r in csv.DictReader(handle, delimiter="\t")}
     strict_data = pq.read_table("strict.parquet").to_pydict()
-    check(tsv_ids == set(strict_data["Precursor.Id"]), "strict MS2 floor preserves identical TSV/Parquet precursor sets")
+    # The TSV spells modifications as DIA-NN does, by UniMod accession.
+    unimod = lambda s: s.replace("(Carbamidomethyl)", "(UniMod:4)").replace("(Oxidation)", "(UniMod:35)")
+    check(tsv_ids == {unimod(i) for i in strict_data["Precursor.Id"]}, "strict MS2 floor preserves identical TSV/Parquet precursor sets")
     check(all(len(v) > 0 for v in strict_data["Product.Mz"]), "strict floor never writes empty assays")
 
     # Cache keys include calibration data and the decoy precursor mass policy.
@@ -196,8 +201,43 @@ def main(binary, fasta, model_dir, workdir):
     with open("lib.tsv") as fh:
         header = fh.readline().rstrip("\n").split("\t")
         rows = sum(1 for _ in fh)
-    check(rows > 0 and "Precursor.Mz" in header and "Product.Mz" in header,
+    check(rows > 0 and {"ModifiedPeptide", "PrecursorMz", "ProductMz", "UniprotID", "ProteinName"} <= set(header),
           f"the TSV is the DIA-NN dialect with {rows} rows")
+
+    # Every requested variable modification must modify something, and the
+    # residue-less peptide-terminal ones must work at the default
+    # max_variable_modifications (1): until 0.11.1 they were dropped there
+    # silently. The log counts the precursors per modification.
+    mods = ["Oxidation (M)", "Acetyl (N-term)", "Amidated (C-term)"]
+    modlog = run("mods.tsv", {"variable_modifications": mods})
+    for mod in mods:
+        m = re.search(r"variable modification '" + re.escape(mod) + r"': (\d+) precursors", modlog)
+        check(m is not None and int(m.group(1)) > 0,
+              f"variable modification {mod} gives modified precursors ({m.group(1) if m else 'no count'})")
+    with open("mods.tsv") as fh:
+        next(fh)
+        seqs = {line.split("\t")[1] for line in fh}
+    # DIA-NN's notation: UniMod accessions, the N-terminal one before the
+    # first residue without OpenMS's leading dot.
+    check(any(q.startswith("(UniMod:1)") for q in seqs) and not any(q.startswith(".") for q in seqs),
+          "N-terminal acetylation is written (UniMod:1)PEPTIDE")
+    check(any("(UniMod:2)" in q for q in seqs), "C-terminal amidation is written with UniMod:2")
+    for config, what in (({"variable_modifications": ["Acetyl (Protein N-term)"]}, "protein-terminal"),
+                         ({"fixed_modifications": ["Carbamidomethyl (C)", "Acetyl (Protein N-term)"]}, "protein-terminal"),
+                         ({"variable_modifications": ["Oxidation (M)"], "max_variable_modifications": 0},
+                          "produced no modified precursor")):
+        with open("refused.json", "w") as fh:
+            json.dump(config, fh)
+        failure = subprocess.run([binary, "-in", fasta, "-config", "refused.json", "-out", "refused.tsv"],
+                                 capture_output=True, text=True, env=env)
+        check(failure.returncode != 0 and what in failure.stdout + failure.stderr
+              and not os.path.exists("refused.tsv"),
+              f"generation refuses {json.dumps(config)} ({what})")
+
+    # The untrained instruments warn, and SciexTOF is not called Lumos-like.
+    for instrument, says in (("SciexTOF", "NOT those of Lumos"), ("ThermoTOF", "effectively Lumos's")):
+        text = run(f"{instrument}.tsv", {"instrument": instrument})
+        check(says in text, f"{instrument} warning says '{says}'")
 
     print()
     if failures:

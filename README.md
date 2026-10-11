@@ -59,8 +59,8 @@ library can also be searched as it is.
 | `refine` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
 | `tune` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-Version **0.11.0** incorporates library refinement and model training from
-DIALibRefine. See [usage and migration](docs/usage.md),
+Version **0.11.1** incorporates library refinement and model training from
+DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), [changes](CHANGELOG.md) and the
 [backlog](BACKLOG.md).
 
@@ -146,6 +146,11 @@ DIALibGen -in proteins.fasta -config generation.json -out predicted.tsv
 
 A saved recipe fixes the NCE it resolved. When you change the instrument on
 top of it, also pass `-generation:nce -1` (instrument default) or a value.
+`.parquet` preserves the effective recipe and input/model hashes in metadata.
+`.tsv` is DIA-NN's TSV library format, which DIA-NN 1.7 and 2.x read
+completely, protein groups included (see [the column list](docs/usage.md#the-tsv-library));
+retain the config separately. `-mode convert` turns an existing `.parquet` into a `.tsv`. With
+`irt_rescale=false`, predicted RT is the model's normalized output, not iRT.
 
 A complete cycle with DIA-NN 2: predict, search once, adapt to the run, search
 again. `tune` and `refine` need a report of **one** run that carries protein
@@ -362,13 +367,14 @@ DIALibGen -ini DIALibGen.ini -in proteins.fasta -out predicted.tsv
 mkdir -p ctd && DIALibGen -write_ctd ctd/
 ```
 
-`-threads` follows the TOPP default of **1**. Set `-threads 0` to request all
-available CPU inference sessions, capped at 16 to limit memory. Training has
-its own `-machine:threads` setting, and the re-prediction pass of `tune` uses up
-to 16 sessions regardless of `-threads`; limit it with `-tune_predict_sessions`. Explicit generation CLI/INI settings
+`-threads` follows the TOPP default of **1**. Set `-threads 0` for one thread
+per physical core; generation runs one inference session per thread. Training
+has its own `-machine:threads` setting. Explicit generation CLI/INI settings
 override the optional JSON config; CLI settings override INI settings.
 
-Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx`. Override them with
+Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx` and
+`peptdeep_ms2_pruned.onnx`, the MS2 model without its unused neutral-loss
+branch, which generation runs by default (same library, faster). Override them with
 `DIALIBGEN_MODEL_DIR`, the generation model-path options, or `-tune_models`.
 For a source installation, `scripts/fetch-models.sh --dir models` downloads and
 verifies the pinned models. See [building](docs/building.md) and
@@ -407,6 +413,9 @@ separate.
   be split; oversized operations are refused before stored offsets can overflow.
 - Portable release training uses CPU. CUDA training is supported by source
   builds with compatible CUDA LibTorch and runtime libraries.
+- GPU prediction needs an ONNX Runtime with the CUDA provider and cuDNN 9 for
+  CUDA 12; without cuDNN, RT and CCS run on the CPU with a warning
+  ([GPU](docs/usage.md#gpu)).
 - CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
   INI export do not.
 - Windows releases target x64. The macOS desktop app and Homebrew casks

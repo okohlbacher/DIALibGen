@@ -20,6 +20,13 @@ cmake --install build
 ./install/bin/DIALibGen --helphelp
 ```
 
+`fetch-models.sh` downloads the three stock AlphaPeptDeep models against pinned
+SHA256 digests and copies DIALibGen's pruned MS2 graph,
+`data/models/peptdeep_ms2_pruned.onnx`, beside them. The install carries the
+pruned graph in `share/DIALibGen/models` in any case. It is derived from the
+pinned MS2 model by `scripts/prune-ms2-modloss.py` (onnx and onnxruntime for
+Python), which checks the graph against the original before writing it.
+
 Use `-DTorch_DIR=/path/to/libtorch/share/cmake/Torch` if LibTorch is not found.
 To omit training and its runtime dependency, configure with
 `-DDIALIBGEN_BUILD_FINETUNE=OFF`. The resulting executable still generates
@@ -35,8 +42,28 @@ not a prediction or end-to-end validation. See [validation and coverage](testing
 Portable releases bundle CPU training. A source build linked to CUDA-enabled
 LibTorch can use `-machine:device cuda:0`; provide the matching CUDA and cuDNN
 runtime libraries. GPU prediction additionally needs an ONNX Runtime build
-with the CUDA execution provider. The standard CPU archive is not a CUDA
-bundle.
+with the CUDA execution provider (for example conda-forge `onnxruntime-cpp`
+built for CUDA 12) and, at run time, cuDNN 9 for CUDA 12 with the unversioned
+`libcudnn.so`: without it the RT and CCS models fall back to the CPU with a
+warning (see [GPU](usage.md#gpu)). The standard CPU archive is not a CUDA
+bundle, and no package bundles cuDNN.
+
+A tested CUDA build on Linux x86_64 (H100, driver 580, CUDA 12.8 toolkit):
+pytorch.org's `libtorch-shared-with-deps-2.10.0+cu128` (the same LibTorch API
+as the CPU release) with
+
+```bash
+cmake ... -DTorch_DIR=$LIBTORCH/share/cmake/Torch \
+  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+  -DTORCH_CUDA_ARCH_LIST=9.0 -DCMAKE_CUDA_STANDARD=17
+```
+
+`TORCH_CUDA_ARCH_LIST` skips LibTorch's GPU-detection test project, which
+otherwise inherits this project's C++23 setting as a CUDA dialect nvcc does not
+know. That LibTorch ships the complete cuDNN 9 for CUDA 12 (`lib/libcudnn*.so.9`),
+so cuDNN stays on for training. ONNX Runtime can use the same copy: put a
+`libcudnn.so -> $LIBTORCH/lib/libcudnn.so.9` link in a directory on
+`LD_LIBRARY_PATH`, and both libraries share one loaded cuDNN.
 
 Linux ARM64 and Windows use different native runtime packages. The
 [release checks](testing.md#release-verification) require actual CPU training

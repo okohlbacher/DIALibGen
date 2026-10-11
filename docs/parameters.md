@@ -1,6 +1,6 @@
 # Parameter reference
 
-Generated from DIALibGen 0.11.1 with `scripts/update-parameters.py`. Do not edit this table by hand.
+Generated from DIALibGen 0.11.2 with `scripts/update-parameters.py`. Do not edit this table by hand.
 
 The schema lists all modes. `-mode generate` is the default; refinement and training options apply to their respective modes. Generation booleans take `true`/`false`; list items are separate arguments. See [usage](usage.md).
 

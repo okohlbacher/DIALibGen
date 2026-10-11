@@ -7,7 +7,9 @@
 #include <odia/PeptDeepPredictor.h>
 
 #include <cstddef>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ODIA
@@ -254,6 +256,23 @@ namespace ODIA
     ///
     /// @returns the number of precursors left with placeholder intensities
     ///          because prediction failed for them.
+    /// Receives MS2 results while predictFragmentIntensities runs, so that a
+    /// writer can work alongside the prediction (generate predicts RT and CCS
+    /// first, so a precursor is complete once its MS2 spectrum is in).
+    class Ms2Sink
+    {
+    public:
+      virtual ~Ms2Sink() = default;
+      /// One block's kept precursors, in library order, with their final
+      /// transitions; indices refer to the library as it was at the call.
+      /// Called on the calling thread, block after block; may block.
+      virtual void rows(Library::PrecursorRows rows) = 0;
+      /// After the last rows() and before the library is rewritten (dropped
+      /// precursors removed): everything handed over must have been consumed
+      /// when this returns. Rethrows a failure of the consumer.
+      virtual void drain() = 0;
+    };
+
     static std::size_t predictFragmentIntensities(Library& library,
                                                   const std::string& ms2_model_path,
                                                   const DigestParams& params,
@@ -261,7 +280,8 @@ namespace ODIA
                                                   const std::string& instrument = "QE",
                                                   bool prefer_gpu = true,
                                                   unsigned sessions = 0,
-                                                  const GpuOptions& gpu = {});
+                                                  const GpuOptions& gpu = {},
+                                                  Ms2Sink* sink = nullptr);
 
     /// The line mapping the RT model's raw output onto the iRT scale.
     struct IrtCalibration
@@ -312,7 +332,52 @@ namespace ODIA
                                                     bool prefer_gpu = true,
                                                     unsigned sessions = 0,
                                                     bool derive_mobility = true,
-                                                    const GpuOptions& gpu = {});
+                                                    const GpuOptions& gpu = {},
+                                                    std::vector<std::uint16_t>* lengths = nullptr,
+                                                    bool* on_cpu = nullptr);
+
+    /// Precursors per predictCCS call in predictCollisionCrossSections:
+    /// 200,000, or ODIA_CCS_BLOCK (tests). The CCS of a row can depend on the
+    /// call it shares (CcsBatchGuard).
+    static std::size_t ccsBlock();
+
+    /// Keeps CCS bit-identical when it is predicted before fragment selection.
+    ///
+    /// Until 0.11.1 CCS ran after fragment selection, on the precursors that
+    /// selection kept; generate now runs it first, on every precursor. On the
+    /// CPU the LSTM CCS model gives every batch of two or more rows the same
+    /// answer for a row, but a ONE-row batch a slightly different one, and
+    /// which rows end up alone depends on which precursors share a call. When
+    /// selection drops precursors, a kept one can therefore have been alone in
+    /// one order and not in the other. This finds exactly those -- per CCS call
+    /// of the old order, the last row of each residue-count group of 2048k+1
+    /// rows is alone -- and predicts them again the old way: alone, or in a
+    /// batch of two. Without drops it finds nothing. On CUDA the batch
+    /// composition shapes every value at float rounding anyway, so it does
+    /// nothing there.
+    class CcsBatchGuard
+    {
+    public:
+      /// @param lengths residues of every precursor CCS was predicted for, in
+      ///        library order (predictCollisionCrossSections' @p lengths).
+      /// @param on_cpu whether CCS ran on the CPU.
+      CcsBatchGuard(std::string ccs_model_path, bool derive_mobility, std::vector<std::uint16_t> lengths,
+                    bool on_cpu);
+      ~CcsBatchGuard();
+      /// Settles the CCS of kept precursors kept[from .. to): their old-order
+      /// calls must be complete (from and to multiples of ccsBlock(), or to the
+      /// end of the kept list). Writes p.ccs (and p.im) of @p library where a
+      /// row's batching differed. Returns how many it predicted again.
+      std::size_t settle(Library& library, const std::vector<std::uint32_t>& kept,
+                         std::size_t from, std::size_t to);
+    private:
+      std::string model_;
+      bool derive_mobility_;
+      std::vector<std::uint16_t> lengths_;
+      std::vector<std::uint8_t> alone_;   ///< per precursor: alone in its new-order batch
+      bool on_cpu_;
+      std::unique_ptr<PeptDeepPredictor> predictor_;
+    };
 
     /// Append a decoy for every target currently in @p library.
     ///

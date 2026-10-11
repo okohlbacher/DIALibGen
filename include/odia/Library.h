@@ -247,6 +247,18 @@ namespace ODIA
       std::vector<LossType> loss;
     };
 
+    /// Some precursors of a library with transitions held apart from it: the
+    /// MS2 results of one block, handed to a writer while generation goes on.
+    /// precursor[k] indexes the library's precursor arrays; its transitions
+    /// are transitions[begin[k] .. begin[k] + count[k]).
+    struct PrecursorRows
+    {
+      std::vector<std::uint32_t> precursor;
+      std::vector<std::uint32_t> begin;
+      std::vector<std::uint32_t> count;
+      TransitionArrays transitions;
+    };
+
     std::size_t precursorCount() const { return precursors_.mz.size(); }
     std::size_t transitionCount() const { return transitions_.product_mz.size(); }
     std::size_t decoyCount() const;

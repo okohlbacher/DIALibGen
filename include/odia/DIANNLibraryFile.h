@@ -6,6 +6,7 @@
 #include <odia/Library.h>
 #include <arrow/type_fwd.h>
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -189,6 +190,37 @@ namespace ODIA
       { return fasta_hash + ":" + std::to_string(fasta_bytes) + ":" + target_params; }
 
 
+    };
+
+    /// Writes a library while it is still being generated: rows are added in
+    /// library order as their MS2 results arrive, and written as soon as they
+    /// complete a row group (Parquet, compact layout, as storeParquetCompact)
+    /// or at once (TSV, as storeTSV). finish() writes the rest from the final
+    /// library and commits. The file is byte-identical to what the one-pass
+    /// writer makes of the final library, at any thread count; nothing appears
+    /// under the output name before finish() succeeds.
+    class StreamWriter
+    {
+    public:
+      /// The format follows the extension; the metadata are storeParquetCompact's.
+      /// @p library: the library the rows passed to add() index into.
+      StreamWriter(const std::string& filename, const Library& library, const Fingerprint& fp,
+                   const std::string& config_json,
+                   const std::vector<std::pair<std::string, std::string>>& extra_metadata,
+                   unsigned threads);
+      ~StreamWriter();
+      StreamWriter(const StreamWriter&) = delete;
+      StreamWriter& operator=(const StreamWriter&) = delete;
+      /// The next rows of the final library, in order.
+      void add(Library::PrecursorRows rows);
+      /// Rows written so far (Parquet: whole row groups only).
+      std::size_t written() const;
+      /// @p final_library begins with every row add() was given; writes its
+      /// rows from written() on, closes and commits.
+      void finish(const Library& final_library);
+    private:
+      struct Impl;
+      std::unique_ptr<Impl> impl_;
     };
 
     /// Hash a FASTA by content. Throws if it cannot be read.

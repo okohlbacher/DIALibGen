@@ -22,6 +22,7 @@
 #include <arrow/table.h>
 
 #include <array>
+#include <deque>
 #include <atomic>
 #include <charconv>
 #include <algorithm>
@@ -831,20 +832,36 @@ namespace ODIA
     library.markUnsorted();
   }
 
-  void DIANNLibraryFile::storeParquetCompact(const std::string& filename,
-                                             const Library& library,
-                                             const Fingerprint& fp,
-                                             const std::string& config_json,
-                                             const std::vector<std::pair<std::string, std::string>>& extra_metadata,
-                                             unsigned threads)
+  namespace
   {
-    const auto& p = library.precursors();
-    const auto& t = library.transitions();
-    const std::size_t n = library.precursorCount();
-
-    auto ok = [](const arrow::Status& st) {
+    auto okStatus = [](const arrow::Status& st) {
       if (!st.ok()) { throw std::runtime_error("parquet build: " + st.ToString()); }
     };
+
+    /// One precursor row to write: its fields in a library's precursor arrays,
+    /// its transitions in @p transitions. The whole library (begin and count
+    /// from the CSR) and a block of MS2 results held apart from it (a
+    /// streaming generate) are both written through this.
+    struct WriteRow
+    {
+      std::uint32_t precursor;
+      const Library::TransitionArrays* transitions;
+      std::uint32_t begin;
+      std::uint32_t count;
+    };
+
+    std::vector<WriteRow> libraryRows(const Library& library, std::size_t first, std::size_t last)
+    {
+      const auto& p = library.precursors();
+      std::vector<WriteRow> rows;
+      rows.reserve(last - first);
+      for (std::size_t i = first; i < last; ++i)
+      {
+        rows.push_back({static_cast<std::uint32_t>(i), &library.transitions(), p.transition_begin[i],
+                        p.transition_count[i]});
+      }
+      return rows;
+    }
 
     // Precursor-level: ONE value each, not one per transition.
     //
@@ -858,21 +875,36 @@ namespace ODIA
     // dictionary page reaches dictionary_pagesize_limit (1 MiB by default) and
     // writes the rest of that row group as PLAIN.
     //
-    // Arrays are finished per row group (kChunkRows). A plain StringArray holds
-    // at most 2 GiB of characters, so a chunk fails loudly (CapacityError, and
-    // no partial file) if a string column averages 2 KiB or more per row. Real
-    // libraries hold at most ~30 MB per string column and chunk, ~1.4 % of it.
-    constexpr std::size_t kChunkRows = std::size_t(1) << 20;   // = the row-group size passed to WriteTable
-    constexpr std::size_t kColumns = 15;
-    auto pool = arrow::default_memory_pool();
-
-    // Builds the arrays of rows [first, last), one per column in the order of
-    // the schema's fields below; the static_assert there checks the count,
-    // ChunkedArray::Make the types. Chunks are independent, so they are built
-    // in parallel and stitched together in order: the table is the same as
-    // from one sequential pass.
-    const auto buildChunk = [&](std::size_t first, std::size_t last)
+    // Arrays are finished per row group (compactChunkRows()). A plain
+    // StringArray holds at most 2 GiB of characters, so a chunk fails loudly
+    // (CapacityError, and no partial file) if a string column averages 2 KiB or
+    // more per row. Real libraries hold at most ~30 MB per string column and
+    // chunk, ~1.4 % of it.
+    /// Rows per row group: 2^20, or ODIA_ROW_GROUP_ROWS (tests: several row
+    /// groups from a small library).
+    std::size_t compactChunkRows()
     {
+      static const std::size_t rows = [] {
+        if (const char* v = std::getenv("ODIA_ROW_GROUP_ROWS"); v != nullptr && *v != '\0')
+        {
+          char* end = nullptr;
+          const long long x = std::strtoll(v, &end, 10);
+          if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+        }
+        return std::size_t(1) << 20;
+      }();
+      return rows;
+    }
+    constexpr std::size_t kCompactColumns = 15;
+    using CompactChunk = std::array<std::shared_ptr<arrow::Array>, kCompactColumns>;
+
+    /// The arrays of @p count rows, one per column in the order of
+    /// compactSchema()'s fields; the static_assert there checks the count,
+    /// ChunkedArray/RecordBatch the types.
+    CompactChunk buildCompactChunk(const Library& library, const WriteRow* rows, std::size_t count)
+    {
+      auto pool = arrow::default_memory_pool();
+      const auto& p = library.precursors();
       arrow::StringBuilder b_id(pool), b_seq(pool), b_pg(pool);
       arrow::UInt8Builder b_z(pool), b_dec(pool);
       arrow::FloatBuilder b_rt(pool), b_im(pool), b_ccs(pool);
@@ -890,10 +922,14 @@ namespace ODIA
                          b_ft(pool, ft_v), b_fz(pool, fz_v), b_ord(pool, ord_v), b_loss(pool, loss_v);
       arrow::ArrayBuilder* const builders[] = {&b_id, &b_seq, &b_pg, &b_z, &b_dec, &b_rt, &b_im, &b_ccs, &b_pmz,
                                                &b_qmz, &b_int, &b_ft, &b_fz, &b_ord, &b_loss};
-      static_assert(std::extent_v<decltype(builders)> == kColumns, "one builder per column");
+      static_assert(std::extent_v<decltype(builders)> == kCompactColumns, "one builder per column");
+      const auto ok = okStatus;
 
-      for (std::size_t i = first; i < last; ++i)
+      for (std::size_t r = 0; r < count; ++r)
       {
+        const auto& row = rows[r];
+        const std::size_t i = row.precursor;
+        const auto& t = *row.transitions;
         const auto seq = library.strings().get(p.modified_sequence[i]);
         const auto pg = library.strings().get(p.protein_group[i]);
         const std::string seq_s(seq.data(), seq.size());
@@ -915,10 +951,9 @@ namespace ODIA
 
         ok(b_qmz.Append()); ok(b_int.Append()); ok(b_ft.Append());
         ok(b_fz.Append()); ok(b_ord.Append()); ok(b_loss.Append());
-        const std::uint32_t begin = p.transition_begin[i];
-        for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+        for (std::uint32_t k = 0; k < row.count; ++k)
         {
-          const std::uint32_t j = begin + k;
+          const std::uint32_t j = row.begin + k;
           ok(qmz_v->Append(fromFixed(t.product_mz[j])));
           ok(int_v->Append(t.library_intensity[j]));
           // The enum's own value, not its spelling: "noloss" and "y" cost bytes
@@ -930,129 +965,170 @@ namespace ODIA
         }
       }
 
-      std::array<std::shared_ptr<arrow::Array>, kColumns> arrays;
-      const auto rows = static_cast<std::int64_t>(last - first);
-      for (std::size_t c = 0; c < kColumns; ++c)
+      CompactChunk arrays;
+      for (std::size_t c = 0; c < kCompactColumns; ++c)
       {
-        if (builders[c]->length() != rows)
+        if (builders[c]->length() != static_cast<std::int64_t>(count))
         { throw std::logic_error("compact Parquet columns differ in length"); }
         ok(builders[c]->Finish(&arrays[c]));
       }
       return arrays;
-    };
-
-    trace::Scope build_step("build_arrays", 1);
-    build_step.fields().rows = static_cast<std::int64_t>(n);
-    const std::size_t chunk_count = (n + kChunkRows - 1) / kChunkRows;
-    std::vector<std::array<std::shared_ptr<arrow::Array>, kColumns>> built(chunk_count);
-    parallel::forEach(chunk_count, parallel::workers(threads), [&](std::size_t c)
-    { built[c] = buildChunk(c * kChunkRows, std::min(n, (c + 1) * kChunkRows)); });
-    std::vector<arrow::ArrayVector> chunks(kColumns);
-    for (const auto& arrays : built)
-    {
-      for (std::size_t c = 0; c < kColumns; ++c) { chunks[c].push_back(arrays[c]); }
-    }
-    built.clear();
-
-    const std::shared_ptr<arrow::Field> fields[] = {
-      arrow::field(Columns::PRECURSOR_ID, arrow::utf8()),
-      arrow::field(Columns::MODIFIED_SEQUENCE, arrow::utf8()),
-      arrow::field(Columns::PROTEIN_GROUP, arrow::utf8()),
-      arrow::field(Columns::PRECURSOR_CHARGE, arrow::uint8()),
-      arrow::field(Columns::DECOY, arrow::uint8()),
-      arrow::field(Columns::RT, arrow::float32()),
-      arrow::field(Columns::IM, arrow::float32()),
-      arrow::field(Columns::CCS, arrow::float32()),
-      arrow::field(Columns::PRECURSOR_MZ, arrow::float64()),
-      arrow::field(Columns::PRODUCT_MZ, arrow::list(arrow::float64())),
-      arrow::field(Columns::RELATIVE_INTENSITY, arrow::list(arrow::float32())),
-      arrow::field(Columns::FRAGMENT_TYPE, arrow::list(arrow::uint8())),
-      arrow::field(Columns::FRAGMENT_CHARGE, arrow::list(arrow::uint8())),
-      arrow::field(Columns::FRAGMENT_SERIES_NUMBER, arrow::list(arrow::uint8())),
-      arrow::field(Columns::FRAGMENT_LOSS_TYPE, arrow::list(arrow::uint8())),
-    };
-    static_assert(std::extent_v<decltype(fields)> == kColumns, "one builder per schema field");
-    auto schema = arrow::schema(arrow::FieldVector(std::begin(fields), std::end(fields)));
-    std::vector<std::string> md_keys{
-      "odia.fingerprint", "odia.target_fingerprint", "odia.layout",
-      "odia.decoy_semantics", "odia.decoy_method",
-      "odia.fasta_fnv1a64", "odia.fasta_bytes", "odia.params"};
-    schema = schema->WithMetadata(arrow::key_value_metadata(
-      md_keys,
-      // decoy_semantics is stated because a consumer CANNOT infer it and one
-      // already got it wrong: OpenSwathAssayGenerator recomputed fragments from
-      // Modified.Sequence, found the decoys identical to their targets, and
-      // deduplicated them into a PQP with zero decoys. A decoy row here carries
-      // its TARGET's sequence by design -- DIA-NN's convention -- with only the
-      // fragment m/z shifted, so the sequence does NOT generate the fragments.
-      {fp.key(), fp.targetKey(), "compact-v1",
-       "target-sequence-with-shifted-fragments", fp.decoy_method,
-       fp.fasta_hash, std::to_string(fp.fasta_bytes), fp.params}));
-    // The recipe travels with the library. Appended rather than folded into the
-    // list above so the existing keys keep their positions for any reader that
-    // indexes them.
-    if (!config_json.empty())
-    {
-      auto md = schema->metadata()->Copy();
-      md->Append("odia.config_json", config_json);
-      schema = schema->WithMetadata(md);
-    }
-    if (!extra_metadata.empty())
-    {
-      auto md = schema->metadata()->Copy();
-      for (const auto& [key, value] : extra_metadata) { md->Append(key, value); }
-      schema = schema->WithMetadata(md);
     }
 
-    std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
-    for (std::size_t c = 0; c < kColumns; ++c)
+    std::shared_ptr<arrow::Schema> compactSchema(const DIANNLibraryFile::Fingerprint& fp,
+                                                 const std::string& config_json,
+                                                 const std::vector<std::pair<std::string, std::string>>& extra_metadata)
     {
-      auto column = arrow::ChunkedArray::Make(chunks[c], fields[c]->type());
-      ok(column.status());
-      columns.push_back(*column);
+      using Columns = DIANNLibraryFile::Columns;
+      const std::shared_ptr<arrow::Field> fields[] = {
+        arrow::field(Columns::PRECURSOR_ID, arrow::utf8()),
+        arrow::field(Columns::MODIFIED_SEQUENCE, arrow::utf8()),
+        arrow::field(Columns::PROTEIN_GROUP, arrow::utf8()),
+        arrow::field(Columns::PRECURSOR_CHARGE, arrow::uint8()),
+        arrow::field(Columns::DECOY, arrow::uint8()),
+        arrow::field(Columns::RT, arrow::float32()),
+        arrow::field(Columns::IM, arrow::float32()),
+        arrow::field(Columns::CCS, arrow::float32()),
+        arrow::field(Columns::PRECURSOR_MZ, arrow::float64()),
+        arrow::field(Columns::PRODUCT_MZ, arrow::list(arrow::float64())),
+        arrow::field(Columns::RELATIVE_INTENSITY, arrow::list(arrow::float32())),
+        arrow::field(Columns::FRAGMENT_TYPE, arrow::list(arrow::uint8())),
+        arrow::field(Columns::FRAGMENT_CHARGE, arrow::list(arrow::uint8())),
+        arrow::field(Columns::FRAGMENT_SERIES_NUMBER, arrow::list(arrow::uint8())),
+        arrow::field(Columns::FRAGMENT_LOSS_TYPE, arrow::list(arrow::uint8())),
+      };
+      static_assert(std::extent_v<decltype(fields)> == kCompactColumns, "one builder per schema field");
+      auto schema = arrow::schema(arrow::FieldVector(std::begin(fields), std::end(fields)));
+      std::vector<std::string> md_keys{
+        "odia.fingerprint", "odia.target_fingerprint", "odia.layout",
+        "odia.decoy_semantics", "odia.decoy_method",
+        "odia.fasta_fnv1a64", "odia.fasta_bytes", "odia.params"};
+      schema = schema->WithMetadata(arrow::key_value_metadata(
+        md_keys,
+        // decoy_semantics is stated because a consumer CANNOT infer it and one
+        // already got it wrong: OpenSwathAssayGenerator recomputed fragments from
+        // Modified.Sequence, found the decoys identical to their targets, and
+        // deduplicated them into a PQP with zero decoys. A decoy row here carries
+        // its TARGET's sequence by design -- DIA-NN's convention -- with only the
+        // fragment m/z shifted, so the sequence does NOT generate the fragments.
+        {fp.key(), fp.targetKey(), "compact-v1",
+         "target-sequence-with-shifted-fragments", fp.decoy_method,
+         fp.fasta_hash, std::to_string(fp.fasta_bytes), fp.params}));
+      // The recipe travels with the library. Appended rather than folded into the
+      // list above so the existing keys keep their positions for any reader that
+      // indexes them.
+      if (!config_json.empty())
+      {
+        auto md = schema->metadata()->Copy();
+        md->Append("odia.config_json", config_json);
+        schema = schema->WithMetadata(md);
+      }
+      if (!extra_metadata.empty())
+      {
+        auto md = schema->metadata()->Copy();
+        for (const auto& [key, value] : extra_metadata) { md->Append(key, value); }
+        schema = schema->WithMetadata(md);
+      }
+      return schema;
     }
-    auto table = arrow::Table::Make(schema, columns, static_cast<std::int64_t>(n));
-    build_step.end();
 
-    // Encoding, dictionary, ZSTD and the file write.
+    std::shared_ptr<parquet::WriterProperties> compactWriterProperties()
+    {
+      return parquet::WriterProperties::Builder()
+               .compression(parquet::Compression::ZSTD)
+               ->enable_dictionary()
+               ->build();
+    }
+
+    /// The row groups through Arrow's buffered writer, which encodes and
+    /// compresses a row group's columns in parallel (Arrow's CPU pool, sized
+    /// to @p writers); the same bytes as WriteTable with compactChunkRows().
+    std::unique_ptr<parquet::arrow::FileWriter>
+    openCompactWriter(const std::shared_ptr<arrow::Schema>& schema,
+                      const std::shared_ptr<arrow::io::FileOutputStream>& outfile, unsigned writers)
+    {
+      if (writers > 1 && ::arrow::GetCpuThreadPoolCapacity() != static_cast<int>(writers))
+      { okStatus(::arrow::SetCpuThreadPoolCapacity(static_cast<int>(writers))); }
+      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->set_use_threads(writers > 1)->build();
+      auto opened = parquet::arrow::FileWriter::Open(*schema, arrow::default_memory_pool(), outfile,
+                                                     compactWriterProperties(), arrow_props);
+      if (!opened.ok()) { throw std::runtime_error("cannot write Parquet: " + opened.status().ToString()); }
+      return std::move(*opened);
+    }
+
+    void writeCompactRowGroup(parquet::arrow::FileWriter& writer, const std::shared_ptr<arrow::Schema>& schema,
+                              const CompactChunk& chunk)
+    {
+      const std::vector<std::shared_ptr<arrow::Array>> arrays(chunk.begin(), chunk.end());
+      const auto batch = arrow::RecordBatch::Make(schema, arrays.front()->length(), arrays);
+      okStatus(writer.NewBufferedRowGroup());
+      okStatus(writer.WriteRecordBatch(*batch));
+    }
+
+    /// Builds the row groups of library rows [first, last) (a multiple of
+    /// compactChunkRows() from first) in parallel, then writes them in order.
+    void writeCompactLibraryRows(parquet::arrow::FileWriter& writer, const std::shared_ptr<arrow::Schema>& schema,
+                                 const Library& library, std::size_t first, std::size_t last, unsigned threads)
+    {
+      const std::size_t chunk_count = (last - first + compactChunkRows() - 1) / compactChunkRows();
+      std::vector<CompactChunk> built(chunk_count);
+      parallel::forEach(chunk_count, parallel::workers(threads), [&](std::size_t c)
+      {
+        const std::size_t a = first + c * compactChunkRows(), b = std::min(last, a + compactChunkRows());
+        const auto rows = libraryRows(library, a, b);
+        built[c] = buildCompactChunk(library, rows.data(), rows.size());
+      });
+      for (auto& chunk : built) { writeCompactRowGroup(writer, schema, chunk); chunk = CompactChunk{}; }
+    }
+  } // namespace
+
+  void DIANNLibraryFile::storeParquetCompact(const std::string& filename,
+                                             const Library& library,
+                                             const Fingerprint& fp,
+                                             const std::string& config_json,
+                                             const std::vector<std::pair<std::string, std::string>>& extra_metadata,
+                                             unsigned threads)
+  {
+    const std::size_t n = library.precursorCount();
+    auto pool = arrow::default_memory_pool();
+    const auto schema = compactSchema(fp, config_json, extra_metadata);
+
     trace::Scope write_step("write_table", 1);
+    write_step.fields().rows = static_cast<std::int64_t>(n);
     AtomicFile output(filename);
     auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
     if (!outfile.ok()) { throw std::runtime_error("cannot write library: " + filename); }
-    auto props = parquet::WriterProperties::Builder()
-                   .compression(parquet::Compression::ZSTD)
-                   ->enable_dictionary()
-                   ->build();
     const unsigned writers = parallel::workers(threads);
     if (writers <= 1 || n == 0)
     {
+      // Chunks are independent: the table is the same as from one pass.
+      std::vector<arrow::ArrayVector> chunks(kCompactColumns);
+      for (std::size_t first = 0; first < n; first += compactChunkRows())
+      {
+        const auto rows = libraryRows(library, first, std::min(n, first + compactChunkRows()));
+        const auto arrays = buildCompactChunk(library, rows.data(), rows.size());
+        for (std::size_t c = 0; c < kCompactColumns; ++c) { chunks[c].push_back(arrays[c]); }
+      }
+      std::vector<std::shared_ptr<arrow::ChunkedArray>> columns;
+      for (std::size_t c = 0; c < kCompactColumns; ++c)
+      {
+        auto column = arrow::ChunkedArray::Make(chunks[c], schema->field(static_cast<int>(c))->type());
+        okStatus(column.status());
+        columns.push_back(*column);
+      }
+      auto table = arrow::Table::Make(schema, columns, static_cast<std::int64_t>(n));
       auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->build();
-      const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, static_cast<std::int64_t>(kChunkRows),
-                                                 props, arrow_props);
+      const auto st = parquet::arrow::WriteTable(*table, pool, *outfile, static_cast<std::int64_t>(compactChunkRows()),
+                                                 compactWriterProperties(), arrow_props);
       if (!st.ok()) { throw std::runtime_error("cannot write Parquet: " + st.ToString()); }
     }
     else
     {
-      // The same row groups through the buffered writer, which encodes and
-      // compresses a row group's columns in parallel (Arrow's CPU pool, sized
-      // to -threads); WriteTable does them one after the other.
-      if (::arrow::GetCpuThreadPoolCapacity() != static_cast<int>(writers))
-      { ok(::arrow::SetCpuThreadPoolCapacity(static_cast<int>(writers))); }
-      auto arrow_props = parquet::ArrowWriterProperties::Builder().store_schema()->set_use_threads(true)->build();
-      auto opened = parquet::arrow::FileWriter::Open(*schema, pool, *outfile, props, arrow_props);
-      if (!opened.ok()) { throw std::runtime_error("cannot write Parquet: " + opened.status().ToString()); }
-      auto writer = std::move(*opened);
-      for (std::size_t c = 0; c < chunks.front().size(); ++c)
-      {
-        std::vector<std::shared_ptr<arrow::Array>> arrays;
-        for (std::size_t col = 0; col < kColumns; ++col) { arrays.push_back(chunks[col][c]); }
-        const auto batch = arrow::RecordBatch::Make(schema, arrays.front()->length(), arrays);
-        ok(writer->NewBufferedRowGroup());
-        ok(writer->WriteRecordBatch(*batch));
-      }
-      ok(writer->Close());
+      auto writer = openCompactWriter(schema, *outfile, writers);
+      writeCompactLibraryRows(*writer, schema, library, 0, n, threads);
+      okStatus(writer->Close());
     }
-    ok((*outfile)->Close());
+    okStatus((*outfile)->Close());
     write_step.end();
     trace::Scope commit_step("commit", 1);
     output.commit();
@@ -1214,35 +1290,32 @@ namespace ODIA
     output.commit();
   }
 
-  void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library,
-                                   unsigned threads)
+  namespace
   {
-    // Formatting (in parallel blocks) and the ordered, buffered writes.
-    trace::Scope format_step("format_rows", 1);
-    format_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());
-    AtomicFile output(filename);
-    TextWriter out(output.temporaryPath().string());
-
-    using T = TSVColumns;
-    bool first_column = true;
-    for (const char* column : {T::PRECURSOR_ID, T::MODIFIED_PEPTIDE, T::PRECURSOR_CHARGE, T::DECOY,
-                               T::RT, T::IM, T::PRECURSOR_MZ, T::PRODUCT_MZ,
-                               T::RELATIVE_INTENSITY, T::FRAGMENT_TYPE, T::FRAGMENT_CHARGE,
-                               T::FRAGMENT_SERIES_NUMBER, T::FRAGMENT_LOSS_TYPE,
-                               T::PROTEIN_IDS, T::PROTEIN_NAMES, T::PROTEOTYPIC,
-                               T::PROTEIN_GROUP, T::CCS})
+    void writeTsvHeader(TextWriter& out)
     {
-      if (!first_column) { out.put('\t'); }
-      out.put(column);
-      first_column = false;
+      using T = DIANNLibraryFile::TSVColumns;
+      bool first_column = true;
+      for (const char* column : {T::PRECURSOR_ID, T::MODIFIED_PEPTIDE, T::PRECURSOR_CHARGE, T::DECOY,
+                                 T::RT, T::IM, T::PRECURSOR_MZ, T::PRODUCT_MZ,
+                                 T::RELATIVE_INTENSITY, T::FRAGMENT_TYPE, T::FRAGMENT_CHARGE,
+                                 T::FRAGMENT_SERIES_NUMBER, T::FRAGMENT_LOSS_TYPE,
+                                 T::PROTEIN_IDS, T::PROTEIN_NAMES, T::PROTEOTYPIC,
+                                 T::PROTEIN_GROUP, T::CCS})
+      {
+        if (!first_column) { out.put('\t'); }
+        out.put(column);
+        first_column = false;
+      }
+      out.put('\n');
     }
-    out.put('\n');
 
-    // DIA-NN's protein columns from DIALibGen's group "sp|P1|N1_HUMAN;sp|P2|N2_HUMAN":
-    // accessions "P1;P2", entry names "N1_HUMAN;N2_HUMAN". A member without the
-    // db|accession|name form stands for itself in both.
-    // Stateless, so precursors can be rendered on several threads.
-    auto proteins = [](std::string_view group, std::string& ids, std::string& names) -> std::size_t {
+    /// DIA-NN's protein columns from DIALibGen's group "sp|P1|N1_HUMAN;sp|P2|N2_HUMAN":
+    /// accessions "P1;P2", entry names "N1_HUMAN;N2_HUMAN". A member without the
+    /// db|accession|name form stands for itself in both. Stateless, so
+    /// precursors can be rendered on several threads.
+    std::size_t tsvProteins(std::string_view group, std::string& ids, std::string& names)
+    {
       ids.clear(); names.clear();
       std::size_t members = 0;
       std::size_t pos = 0;
@@ -1265,14 +1338,16 @@ namespace ODIA
         ids += accession; names += name;
       }
       return members;
-    };
+    }
 
-    std::atomic<std::size_t> unknown_mods{0};
-    const auto& p = library.precursors();
-    const auto& t = library.transitions();
-    // One precursor's rows, into a TextWriter or a TextBuffer alike.
-    const auto writePrecursor = [&](auto& sink, std::size_t i)
+    /// One precursor's rows, into a TextWriter or a TextBuffer alike.
+    template <class Sink>
+    void writeTsvPrecursor(Sink& sink, const Library& library, const WriteRow& row,
+                           std::atomic<std::size_t>& unknown_mods)
     {
+      const auto& p = library.precursors();
+      const auto& t = *row.transitions;
+      const std::size_t i = row.precursor;
       const auto stored = library.strings().get(p.modified_sequence[i]);
       const auto pg = library.strings().get(p.protein_group[i]);
       if (stored.find_first_of("\t\r\n\0", 0, 4) != std::string_view::npos ||
@@ -1284,14 +1359,13 @@ namespace ODIA
       const std::string seq = canonicalModifiedSequence(stored, &unknown);
       if (unknown) { unknown_mods += unknown; }
       std::string ids, names;
-      const std::size_t members = proteins(pg, ids, names);
+      const std::size_t members = tsvProteins(pg, ids, names);
       const int z = p.charge[i];
       const bool has_im = i < p.im.size() && !std::isnan(p.im[i]);
       const bool has_ccs = i < p.ccs.size() && !std::isnan(p.ccs[i]);
-      const std::uint32_t begin = p.transition_begin[i];
-      for (std::uint32_t k = 0; k < p.transition_count[i]; ++k)
+      for (std::uint32_t k = 0; k < row.count; ++k)
       {
-        const std::uint32_t j = begin + k;
+        const std::uint32_t j = row.begin + k;
         // DIA-NN gives a decoy the same Modified.Sequence, charge and
         // Precursor.Mz as its target, so <sequence><charge> alone is not unique.
         // Without the suffix, reloading our own output merged each such pair and
@@ -1324,18 +1398,20 @@ namespace ODIA
         if (has_ccs) { sink.number(p.ccs[i], 9); }
         sink.put('\n');
       }
-    };
-
-    // Rendering numbers is the cost (see store()), so blocks of precursors are
-    // rendered in parallel and written in order: the same bytes as one pass.
-    const unsigned workers = parallel::workers(threads);
-    const std::size_t n = library.precursorCount();
-    if (workers <= 1)
-    {
-      for (std::size_t i = 0; i < n; ++i) { writePrecursor(out, i); }
     }
-    else
+
+    /// Rendering numbers is the cost (see store()), so blocks of precursors are
+    /// rendered in parallel and written in order: the same bytes as one pass.
+    void writeTsvRows(TextWriter& out, const Library& library, const std::vector<WriteRow>& rows,
+                      unsigned threads, std::atomic<std::size_t>& unknown_mods)
     {
+      const unsigned workers = parallel::workers(threads);
+      const std::size_t n = rows.size();
+      if (workers <= 1)
+      {
+        for (const auto& row : rows) { writeTsvPrecursor(out, library, row, unknown_mods); }
+        return;
+      }
       constexpr std::size_t TASK = 4096;
       const std::size_t wave = TASK * 4 * workers;
       std::vector<TextBuffer> rendered;
@@ -1346,12 +1422,34 @@ namespace ODIA
         parallel::forEach(rendered.size(), workers, [&](std::size_t task)
         {
           const std::size_t end = first + std::min(count, (task + 1) * TASK);
-          for (std::size_t i = first + task * TASK; i < end; ++i) { writePrecursor(rendered[task], i); }
+          for (std::size_t i = first + task * TASK; i < end; ++i)
+          { writeTsvPrecursor(rendered[task], library, rows[i], unknown_mods); }
         });
         for (const auto& block : rendered) { out.put(block.text()); }
       }
     }
 
+    void warnUnknownMods(std::size_t unknown_mods)
+    {
+      if (unknown_mods)
+      {
+        std::cerr << "warning: " << unknown_mods << " modification tokens have no UniMod accession and "
+                     "were written verbatim; DIA-NN may not read those precursors\n";
+      }
+    }
+  } // namespace
+
+  void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library,
+                                   unsigned threads)
+  {
+    // Formatting (in parallel blocks) and the ordered, buffered writes.
+    trace::Scope format_step("format_rows", 1);
+    format_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());
+    AtomicFile output(filename);
+    TextWriter out(output.temporaryPath().string());
+    writeTsvHeader(out);
+    std::atomic<std::size_t> unknown_mods{0};
+    writeTsvRows(out, library, libraryRows(library, 0, library.precursorCount()), threads, unknown_mods);
     format_step.end();
     // A file checked only at open reports success on a full disk, an exceeded
     // quota or a broken mount, leaving a truncated library behind.
@@ -1360,11 +1458,137 @@ namespace ODIA
     close_step.end();
     trace::Scope commit_step("commit", 1);
     output.commit();
-    if (unknown_mods)
+    warnUnknownMods(unknown_mods.load());
+  }
+
+  // ------------------------------------------------------------ StreamWriter
+
+  struct DIANNLibraryFile::StreamWriter::Impl
+  {
+    const Library& library;
+    unsigned threads;
+    bool parquet;
+    AtomicFile output;
+    // Parquet
+    std::shared_ptr<arrow::Schema> schema;
+    std::shared_ptr<arrow::io::FileOutputStream> outfile;
+    std::unique_ptr<parquet::arrow::FileWriter> writer;
+    std::deque<Library::PrecursorRows> pending;
+    std::size_t pending_offset = 0;   ///< rows of pending.front() already written
+    std::size_t pending_rows = 0;     ///< rows in pending, minus pending_offset
+    // TSV
+    std::unique_ptr<TextWriter> text;
+    std::atomic<std::size_t> unknown_mods{0};
+
+    std::size_t written = 0;
+    bool finished = false;
+
+    Impl(const std::string& filename, const Library& lib, unsigned t)
+      : library(lib), threads(t), parquet(filename.ends_with(".parquet")), output(filename) {}
+  };
+
+  DIANNLibraryFile::StreamWriter::StreamWriter(const std::string& filename, const Library& library,
+                                               const Fingerprint& fp, const std::string& config_json,
+                                               const std::vector<std::pair<std::string, std::string>>& extra_metadata,
+                                               unsigned threads)
+    : impl_(std::make_unique<Impl>(filename, library, threads))
+  {
+    auto& m = *impl_;
+    if (m.parquet)
     {
-      std::cerr << "warning: " << unknown_mods.load() << " modification tokens have no UniMod accession and "
-                   "were written verbatim; DIA-NN may not read those precursors\n";
+      m.schema = compactSchema(fp, config_json, extra_metadata);
+      auto opened = arrow::io::FileOutputStream::Open(m.output.temporaryPath().string());
+      if (!opened.ok()) { throw std::runtime_error("cannot write library: " + filename); }
+      m.outfile = *opened;
+      m.writer = openCompactWriter(m.schema, m.outfile, parallel::workers(threads));
     }
+    else
+    {
+      m.text = std::make_unique<TextWriter>(m.output.temporaryPath().string());
+      writeTsvHeader(*m.text);
+    }
+  }
+
+  DIANNLibraryFile::StreamWriter::~StreamWriter() = default;
+
+  std::size_t DIANNLibraryFile::StreamWriter::written() const { return impl_->written; }
+
+  void DIANNLibraryFile::StreamWriter::add(Library::PrecursorRows rows)
+  {
+    auto& m = *impl_;
+    if (m.finished) { throw std::logic_error("StreamWriter::add after finish"); }
+    if (rows.precursor.empty()) { return; }
+    trace::Scope streamed("stream_write", 1);
+    if (!m.parquet)
+    {
+      std::vector<WriteRow> list;
+      list.reserve(rows.precursor.size());
+      for (std::size_t k = 0; k < rows.precursor.size(); ++k)
+      { list.push_back({rows.precursor[k], &rows.transitions, rows.begin[k], rows.count[k]}); }
+      writeTsvRows(*m.text, m.library, list, m.threads, m.unknown_mods);
+      m.written += list.size();
+      streamed.fields().rows = static_cast<std::int64_t>(list.size());
+      return;
+    }
+    // Parquet: whole row groups only, so the file is cut where the one-pass
+    // writer cuts it.
+    m.pending_rows += rows.precursor.size();
+    m.pending.push_back(std::move(rows));
+    std::int64_t done = 0;
+    while (m.pending_rows >= compactChunkRows())
+    {
+      // A row group can span several blocks: it is built before any of them
+      // is dropped.
+      std::vector<WriteRow> list;
+      list.reserve(compactChunkRows());
+      std::size_t block = 0, offset = m.pending_offset;
+      while (list.size() < compactChunkRows())
+      {
+        auto& b = m.pending[block];
+        const std::size_t take = std::min(compactChunkRows() - list.size(), b.precursor.size() - offset);
+        for (std::size_t k = offset; k < offset + take; ++k)
+        { list.push_back({b.precursor[k], &b.transitions, b.begin[k], b.count[k]}); }
+        offset += take;
+        if (offset == b.precursor.size()) { ++block; offset = 0; }
+      }
+      const auto chunk = buildCompactChunk(m.library, list.data(), list.size());
+      writeCompactRowGroup(*m.writer, m.schema, chunk);
+      for (std::size_t k = 0; k < block; ++k) { m.pending.pop_front(); }
+      m.pending_offset = offset;
+      m.pending_rows -= compactChunkRows();
+      m.written += compactChunkRows();
+      done += static_cast<std::int64_t>(compactChunkRows());
+    }
+    streamed.fields().rows = done;
+  }
+
+  void DIANNLibraryFile::StreamWriter::finish(const Library& final_library)
+  {
+    auto& m = *impl_;
+    if (m.finished) { throw std::logic_error("StreamWriter::finish twice"); }
+    m.finished = true;
+    const std::size_t n = final_library.precursorCount();
+    if (n < m.written) { throw std::logic_error("the final library is shorter than what was streamed"); }
+    // Rows held for an incomplete row group are taken from the final library,
+    // where they are the same rows: everything streamed is its first rows.
+    m.pending.clear();
+    trace::Scope write_step("write_tail", 1);
+    write_step.fields().rows = static_cast<std::int64_t>(n - m.written);
+    if (m.parquet)
+    {
+      writeCompactLibraryRows(*m.writer, m.schema, final_library, m.written, n, m.threads);
+      okStatus(m.writer->Close());
+      okStatus(m.outfile->Close());
+    }
+    else
+    {
+      writeTsvRows(*m.text, final_library, libraryRows(final_library, m.written, n), m.threads, m.unknown_mods);
+      m.text->close();
+    }
+    write_step.end();
+    trace::Scope commit_step("commit", 1);
+    m.output.commit();
+    if (!m.parquet) { warnUnknownMods(m.unknown_mods.load()); }
   }
 
 } // namespace ODIA

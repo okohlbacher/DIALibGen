@@ -296,6 +296,23 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
   set_tests_properties(generate_threads_identical PROPERTIES ENVIRONMENT "ODIA_MS2_BLOCK=10000")
 endif()
 
+# Streaming (RT and CCS first, the writer behind MS2) writes what the 0.11.1
+# order and the one-pass writer write. See stream_matches_one_pass.cmake.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/stream.json"
+       "{\"precursor_charges\": [2, 3], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+       " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\",\n"
+       " \"min_relative_intensity\": 0.3, \"fragments\": [6, 12],\n"
+       " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${ODIA_MS2_MODEL_PATH}\",\n"
+       " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  add_test(NAME generate_stream_matches_one_pass
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/stream.json"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/stream"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/stream_matches_one_pass.cmake")
+endif()
+
 # The pruned MS2 graph (data/models/peptdeep_ms2_pruned.onnx, the default) and
 # the full one must give the same library. The TSV carries no provenance, so
 # the two files must be byte-identical; the Parquet differs only in the model

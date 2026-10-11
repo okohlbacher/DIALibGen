@@ -12,7 +12,13 @@
 #include <OpenMS/SYSTEM/File.h>
 #include <filesystem>
 #include <fstream>
+#include <condition_variable>
 #include <cstdlib>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string_view>
 #include <cstdint>
 #include <iostream>
@@ -116,6 +122,132 @@ namespace
     }
     return {};
   }
+
+  /// Hands MS2 results to the library writer while the prediction goes on.
+  ///
+  /// generate predicts RT and CCS first, so a precursor is complete once its
+  /// MS2 spectrum is in: a consumer thread takes each block's kept precursors
+  /// (a bounded queue of two blocks, so the writer cannot fall far behind or
+  /// hold much), settles their CCS batching (CcsBatchGuard, once the old
+  /// order's CCS call they belonged to is complete) and passes them to the
+  /// StreamWriter, which writes every complete row group. Strictly in
+  /// precursor order; the output is the one-pass writer's, byte for byte.
+  class Ms2Stream final : public ODIA::LibraryGenerator::Ms2Sink
+  {
+  public:
+    using Open = std::function<std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter>()>;
+
+    Ms2Stream(ODIA::Library& library, ODIA::LibraryGenerator::CcsBatchGuard& guard, Open open)
+      : library_(library), guard_(guard), open_(std::move(open)), thread_([this] { run(); }) {}
+
+    ~Ms2Stream() override
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        done_ = true;
+        abandon_ = !drained_;
+      }
+      changed_.notify_all();
+      if (thread_.joinable()) { thread_.join(); }
+    }
+
+    void rows(ODIA::Library::PrecursorRows rows) override
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      changed_.wait(lock, [&] { return queue_.size() < 2 || error_; });
+      if (error_) { std::rethrow_exception(error_); }
+      queue_.push_back(std::move(rows));
+      changed_.notify_all();
+    }
+
+    void drain() override
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        done_ = true;
+        drained_ = true;
+      }
+      changed_.notify_all();
+      thread_.join();
+      if (error_) { std::rethrow_exception(error_); }
+    }
+
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> takeWriter() { return std::move(writer_); }
+    std::size_t resettled() const { return resettled_; }
+
+  private:
+    void run()
+    {
+      try
+      {
+        for (;;)
+        {
+          ODIA::Library::PrecursorRows rows;
+          {
+            std::unique_lock<std::mutex> lock(mutex_);
+            changed_.wait(lock, [&] { return !queue_.empty() || done_; });
+            if (abandon_) { return; }
+            if (queue_.empty()) { break; }
+            rows = std::move(queue_.front());
+            queue_.pop_front();
+          }
+          changed_.notify_all();
+          consume(std::move(rows));
+        }
+        // Every kept precursor is known: the last old-order CCS call is complete.
+        resettled_ += guard_.settle(library_, kept_, settled_, kept_.size());
+        settled_ = kept_.size();
+        release();
+      }
+      catch (...)
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        error_ = std::current_exception();
+        changed_.notify_all();
+      }
+    }
+
+    void consume(ODIA::Library::PrecursorRows rows)
+    {
+      kept_.insert(kept_.end(), rows.precursor.begin(), rows.precursor.end());
+      held_end_.push_back(kept_.size());
+      held_.push_back(std::move(rows));
+      const std::size_t complete = kept_.size() / ODIA::LibraryGenerator::ccsBlock() * ODIA::LibraryGenerator::ccsBlock();
+      if (complete > settled_)
+      {
+        resettled_ += guard_.settle(library_, kept_, settled_, complete);
+        settled_ = complete;
+      }
+      release();
+    }
+
+    void release()
+    {
+      while (!held_.empty() && held_end_.front() <= settled_)
+      {
+        if (!writer_) { writer_ = open_(); }
+        writer_->add(std::move(held_.front()));
+        held_.pop_front();
+        held_end_.pop_front();
+      }
+    }
+
+    ODIA::Library& library_;
+    ODIA::LibraryGenerator::CcsBatchGuard& guard_;
+    Open open_;
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer_;
+    std::vector<std::uint32_t> kept_;          ///< kept precursors so far, in order
+    std::deque<ODIA::Library::PrecursorRows> held_;
+    std::deque<std::size_t> held_end_;         ///< kept_.size() after each held block
+    std::size_t settled_ = 0;
+    std::size_t resettled_ = 0;
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    std::deque<ODIA::Library::PrecursorRows> queue_;
+    bool done_ = false, drained_ = false, abandon_ = false;
+    std::exception_ptr error_;
+    std::thread thread_;   ///< last: starts once everything above exists
+  };
 
   json effectiveConfig(const ODIA::DigestParams& p, const std::string& decoys,
                        const std::string& rt_model, const std::string& ms2_model,
@@ -556,6 +688,39 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::string standards;
     setup_phase.fields().rows = threads;
     setup_phase.end();
+
+    // The library's identity, known before generation so that the writer can
+    // start while MS2 runs.
+    ODIA::trace::Scope fingerprint_phase("fingerprint", 0);
+    ODIA::DIANNLibraryFile::Fingerprint fp;
+    try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
+    catch (const std::exception& e)
+    { writeLogError_(std::string("cannot fingerprint the FASTA: ") + e.what()); return INPUT_FILE_NOT_FOUND; }
+    fp.target_params = ODIA::LibraryGenerator::fingerprintParams(
+      p, ODIA::DIANNLibraryFile::hashFile(rt_model),
+      ODIA::DIANNLibraryFile::hashFile(ms2_model),
+      ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
+    fp.decoy_method = decoys;
+    fingerprint_phase.end();
+    const auto finishFingerprint = [&]() {
+      if (irt_rescale && fp.target_params.find(";irt_standards=") == std::string::npos)
+      { fp.target_params += ";irt_standards=" + ODIA::DIANNLibraryFile::hashFile(standards); }
+      fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
+                  ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
+    };
+    // Recorded only when there is something to say, so a library built where
+    // nothing fell back is byte-identical to one from a build without this.
+    const auto extraMetadata = [&]() {
+      std::vector<std::pair<std::string, std::string>> extra;
+      if (!device_warnings.empty()) { extra.emplace_back("odia.warnings", json(device_warnings).dump()); }
+      return extra;
+    };
+    // RT and CCS first and MS2 last, with the writer streaming behind MS2.
+    // ODIA_STREAM=0 restores 0.11.1's order (MS2 before CCS) and the one-pass
+    // writer: the same file, for comparison.
+    const char* stream_env = std::getenv("ODIA_STREAM");
+    const bool stream = stream_env == nullptr || std::string_view(stream_env) != "0";
+    std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
     try
     {
       const auto st = ODIA::LibraryGenerator::generate(fasta, p, library, threads);
@@ -604,16 +769,43 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                       "this is the pipeline domain; it is NOT interchangeable with an "
                       "iRT library in another tool.");
       }
+      finishFingerprint();
 
-      if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-            library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu); miss)
-      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
-      writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
-      if (library.precursorCount() == 0)
-      { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
-      if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-            library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
-      { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+      if (stream)
+      {
+        std::vector<std::uint16_t> lengths;
+        bool ccs_on_cpu = false;
+        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+              library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+        ODIA::LibraryGenerator::CcsBatchGuard guard(ccs_model, p.derive_ion_mobility, std::move(lengths), ccs_on_cpu);
+        const std::string config_json = parquet ? eff.dump() : std::string();
+        Ms2Stream sink(library, guard, [&]() {
+          return std::make_unique<ODIA::DIANNLibraryFile::StreamWriter>(out, library, fp, config_json,
+                                                                         extraMetadata(), threads);
+        });
+        if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu, &sink); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        writer = sink.takeWriter();
+        if (sink.resettled())
+        { writeLogInfo_("CCS of " + std::to_string(sink.resettled()) + " precursors predicted again in their 0.11.1 batching"); }
+        writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
+        if (library.precursorCount() == 0)
+        { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
+      }
+      else
+      {
+        if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
+        if (library.precursorCount() == 0)
+        { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
+        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+              library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
+        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+      }
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);
       const auto made = ODIA::LibraryGenerator::appendDecoys(library, method, &skipped,
@@ -625,41 +817,26 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     catch (const std::exception& e)
     { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }
 
-    // Recorded only when there is something to say, so a library built where
-    // nothing fell back is byte-identical to one from a build without this.
-    std::vector<std::pair<std::string, std::string>> extra_metadata;
     if (!device_warnings.empty())
     {
       writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on CUDA ran on the CPU; "
                     "recorded as odia.warnings" + std::string(parquet ? "" : " (TSV: log only)"));
-      extra_metadata.emplace_back("odia.warnings", json(device_warnings).dump());
     }
-
-    ODIA::trace::Scope fingerprint_phase("fingerprint", 0);
-    ODIA::DIANNLibraryFile::Fingerprint fp;
-    try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
-    catch (const std::exception& e)
-    { writeLogError_(std::string("cannot fingerprint the FASTA: ") + e.what()); return INPUT_FILE_NOT_FOUND; }
-    fp.target_params = ODIA::LibraryGenerator::fingerprintParams(
-      p, ODIA::DIANNLibraryFile::hashFile(rt_model),
-      ODIA::DIANNLibraryFile::hashFile(ms2_model),
-      ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
-    if (irt_rescale)
-    { fp.target_params += ";irt_standards=" + ODIA::DIANNLibraryFile::hashFile(standards); }
-    fp.decoy_method = decoys;
-    fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
-                ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
-    fingerprint_phase.end();
 
     ODIA::trace::Scope write_phase("write", 0);
     write_phase.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     try
     {
-      if (parquet)
-      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extra_metadata, threads); }
-      else
+      if (writer)
       {
-        ODIA::DIANNLibraryFile::storeTSV(out, library, threads);
+        write_phase.fields().idx = static_cast<std::int64_t>(writer->written());
+        writer->finish(library);
+      }
+      else if (parquet)
+      { ODIA::DIANNLibraryFile::storeParquetCompact(out, library, fp, eff.dump(), extraMetadata(), threads); }
+      else { ODIA::DIANNLibraryFile::storeTSV(out, library, threads); }
+      if (!parquet)
+      {
         writeLogWarn_("TSV cannot carry the recipe: the config is NOT embedded and this "
                       "file is not cache-eligible. Use .parquet to keep them together.");
       }

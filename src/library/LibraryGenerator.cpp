@@ -832,7 +832,7 @@ namespace ODIA
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
-    const GpuOptions& gpu)
+    const GpuOptions& gpu, Ms2Sink* sink)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
@@ -986,6 +986,36 @@ namespace ODIA
         }
         count[i] = static_cast<std::uint32_t>(ranked.size());
       }
+      if (sink == nullptr) { return; }
+      // The block's kept precursors, handed on with copies of their final
+      // transitions: `built` itself grows on this thread meanwhile.
+      Library::PrecursorRows rows;
+      std::size_t total = 0;
+      for (std::size_t i = block.base; i < block.last; ++i) { total += count[i]; }
+      rows.precursor.reserve(block.last - block.base);
+      rows.begin.reserve(block.last - block.base);
+      rows.count.reserve(block.last - block.base);
+      auto& out = rows.transitions;
+      out.product_mz.reserve(total); out.library_intensity.reserve(total); out.type.reserve(total);
+      out.ordinal.reserve(total); out.charge.reserve(total); out.loss.reserve(total);
+      for (std::size_t i = block.base; i < block.last; ++i)
+      {
+        if (count[i] == 0) { continue; }
+        rows.precursor.push_back(static_cast<std::uint32_t>(i));
+        rows.begin.push_back(static_cast<std::uint32_t>(out.product_mz.size()));
+        rows.count.push_back(count[i]);
+        const auto first = built.product_mz.begin() + begin[i];
+        out.product_mz.insert(out.product_mz.end(), first, first + count[i]);
+        const auto b = static_cast<std::ptrdiff_t>(begin[i]), e = b + static_cast<std::ptrdiff_t>(count[i]);
+        out.library_intensity.insert(out.library_intensity.end(), built.library_intensity.begin() + b, built.library_intensity.begin() + e);
+        out.type.insert(out.type.end(), built.type.begin() + b, built.type.begin() + e);
+        out.ordinal.insert(out.ordinal.end(), built.ordinal.begin() + b, built.ordinal.begin() + e);
+        out.charge.insert(out.charge.end(), built.charge.begin() + b, built.charge.begin() + e);
+        out.loss.insert(out.loss.end(), built.loss.begin() + b, built.loss.begin() + e);
+      }
+      trace::Scope hand_step("hand_over", 2);
+      hand_step.fields().rows = static_cast<std::int64_t>(rows.precursor.size());
+      sink->rows(std::move(rows));
     };
 
     Block selecting;              // its selection runs in `selection`
@@ -1015,6 +1045,12 @@ namespace ODIA
       append(selecting);
     }
 
+    if (sink != nullptr)
+    {
+      // Everything handed over is consumed before the library is rewritten.
+      trace::Scope drain_sink("drain_sink", 1);
+      sink->drain();
+    }
     trace::Scope finalize_step("finalize", 1);
     t = std::move(built);
     p.transition_begin = std::move(begin);
@@ -1138,7 +1174,8 @@ namespace ODIA
 
   std::size_t LibraryGenerator::predictCollisionCrossSections(
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
-    unsigned sessions, bool derive_mobility, const GpuOptions& gpu)
+    unsigned sessions, bool derive_mobility, const GpuOptions& gpu,
+    std::vector<std::uint16_t>* lengths, bool* on_cpu)
   {
     trace::Scope ccs_phase("ccs", 0);
     auto& p = library.precursors();
@@ -1154,10 +1191,12 @@ namespace ODIA
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("CCS", predictor, gpu);
+    if (on_cpu != nullptr) { *on_cpu = predictor.provider() == PeptDeepPredictor::Provider::CPU; }
+    if (lengths != nullptr) { lengths->assign(n, 0); }
 
     // Blocked, as the MS2 pass is: the whole proteome at once would hold every
     // parsed AASequence live alongside the library.
-    constexpr std::size_t BLOCK = 200000;
+    const std::size_t BLOCK = ccsBlock();
     std::size_t unpredicted = 0;
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
@@ -1176,6 +1215,11 @@ namespace ODIA
       });
       parse_step.fields().rows = static_cast<std::int64_t>(last - base);
       parse_step.end();
+      if (lengths != nullptr)
+      {
+        for (std::size_t k = 0; k < peptides.size(); ++k)
+        { (*lengths)[base + k] = static_cast<std::uint16_t>(peptides[k].size()); }
+      }
 
       std::vector<PeptDeepPredictor::Failure> failures;
       trace::Scope predict_step("predict", 2);
@@ -1199,6 +1243,97 @@ namespace ODIA
       }
     }
     return unpredicted;
+  }
+
+  namespace
+  {
+    /// Which of @p count rows -- the i-th of residue count length(i) -- a CPU
+    /// CCS call of rows [0, count) runs as a batch of one: per residue count,
+    /// the predictor cuts the rows into MAX_BATCH_ROWS chunks in order, and
+    /// only a last chunk of exactly one row is a one-row batch (the CPU cut
+    /// into CPU_CHUNK_ROWS pieces never leaves one; PeptDeepPredictor).
+    template <class Length>
+    void markAlone(std::size_t count, const Length& length, std::vector<std::uint8_t>& alone)
+    {
+      std::map<std::size_t, std::pair<std::size_t, std::size_t>> groups;   // length -> (rows, last row)
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        auto& g = groups[length(k)];
+        ++g.first;
+        g.second = k;
+      }
+      alone.assign(count, 0);
+      for (const auto& [len, g] : groups)
+      {
+        if (g.first % PeptDeepPredictor::MAX_BATCH_ROWS == 1) { alone[g.second] = 1; }
+      }
+    }
+  } // namespace
+
+  std::size_t LibraryGenerator::ccsBlock()
+  {
+    static const std::size_t block = [] {
+      if (const char* v = std::getenv("ODIA_CCS_BLOCK"); v != nullptr && *v != '\0')
+      {
+        char* end = nullptr;
+        const long long x = std::strtoll(v, &end, 10);
+        if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+      }
+      return std::size_t{200000};
+    }();
+    return block;
+  }
+
+  LibraryGenerator::CcsBatchGuard::CcsBatchGuard(std::string ccs_model_path, bool derive_mobility,
+                                                 std::vector<std::uint16_t> lengths, bool on_cpu)
+    : model_(std::move(ccs_model_path)), derive_mobility_(derive_mobility), lengths_(std::move(lengths)),
+      on_cpu_(on_cpu)
+  {
+    if (!on_cpu_) { return; }
+    alone_.assign(lengths_.size(), 0);
+    std::vector<std::uint8_t> part;
+    for (std::size_t base = 0; base < lengths_.size(); base += ccsBlock())
+    {
+      const std::size_t count = std::min(ccsBlock(), lengths_.size() - base);
+      markAlone(count, [&](std::size_t k) { return lengths_[base + k]; }, part);
+      std::copy(part.begin(), part.end(), alone_.begin() + static_cast<std::ptrdiff_t>(base));
+    }
+  }
+
+  LibraryGenerator::CcsBatchGuard::~CcsBatchGuard() = default;
+
+  std::size_t LibraryGenerator::CcsBatchGuard::settle(Library& library, const std::vector<std::uint32_t>& kept,
+                                                      std::size_t from, std::size_t to)
+  {
+    if (!on_cpu_ || from >= to) { return 0; }
+    trace::Scope settle_step("ccs_settle", 2);
+    settle_step.fields().rows = static_cast<std::int64_t>(to - from);
+    auto& p = library.precursors();
+    std::vector<std::uint8_t> old_alone;
+    std::size_t redone = 0;
+    for (std::size_t base = from; base < to; base += ccsBlock())
+    {
+      const std::size_t count = std::min(ccsBlock(), to - base);
+      markAlone(count, [&](std::size_t k) { return lengths_[kept[base + k]]; }, old_alone);
+      for (std::size_t k = 0; k < count; ++k)
+      {
+        const std::uint32_t i = kept[base + k];
+        if (old_alone[k] == alone_[i]) { continue; }
+        // Predicted again the old way: alone, or as a batch of two rows (any
+        // batch of two or more gives a row the same value).
+        if (!predictor_) { predictor_ = std::make_unique<PeptDeepPredictor>(model_, false, 1, 1); }
+        const auto peptide = AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i])));
+        const int charge = static_cast<int>(p.charge[i]);
+        const std::size_t rows = old_alone[k] ? 1 : 2;
+        const auto ccs = predictor_->predictCCS(std::vector<AASequence>(rows, peptide), std::vector<int>(rows, charge));
+        p.ccs[i] = ccs.front();
+        if (derive_mobility_ && !std::isnan(p.ccs[i]))
+        { p.im[i] = static_cast<float>(mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i])); }
+        ++redone;
+      }
+    }
+    settle_step.fields().idx = static_cast<std::int64_t>(redone);
+    return redone;
   }
 
   std::size_t LibraryGenerator::appendDecoys(Library& library, DecoyMethod method,

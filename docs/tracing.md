@@ -22,7 +22,8 @@ Switches for measurements and tests; none changes the library's content:
 | variable | default | effect |
 |---|---|---|
 | `ODIA_STREAM` | on | `0`: 0.11.1's order (MS2, then CCS) and the one-pass writer, instead of RT, CCS, MS2 with the writer streaming behind MS2 |
-| `ODIA_NUMA_INTERLEAVE` | on above 32 threads | `0` or `1`: interleave the run's memory over the NUMA nodes or not |
+| `ODIA_NUMA_INTERLEAVE` | off | `1`: interleave the run's memory over the NUMA nodes (the default above 32 threads until 0.11.2; the worker pool places its workers on the nodes instead) |
+| `ODIA_POOL_PIN` | on | `0`: do not bind pool worker k to NUMA node k mod n |
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA) | precursors per MS2 call |
 | `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
 | `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |

@@ -104,6 +104,10 @@ namespace ODIA::trace
   /// CPU seconds consumed by the calling thread so far (NaN if unavailable).
   double threadCpu() noexcept;
 
+  /// Hand the calling thread's events over now rather than at its exit: for
+  /// threads that outlive the trace session (the worker pool).
+  void flushThread() noexcept;
+
   /// Name the calling thread "odia-<model>-s<session>" (Linux; tracing only),
   /// so the sampler's per-thread rows say which worker a thread was.
   void nameWorker(const char* model, std::size_t session) noexcept;

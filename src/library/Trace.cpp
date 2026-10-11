@@ -721,6 +721,13 @@ namespace ODIA::trace
           state().phase.load(std::memory_order_relaxed), name, fields});
   }
 
+  void flushThread() noexcept
+  {
+    if (!enabled()) { return; }
+    try { buffer().flush(); }
+    catch (...) {}   // out of memory: the events are lost, the run is not
+  }
+
   void nameWorker(const char* model, std::size_t session) noexcept
   {
     if (!enabled()) { return; }

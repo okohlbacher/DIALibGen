@@ -8,6 +8,7 @@
 #include <odia/Trace.h>
 
 #include "../library/Parallel.h"
+#include "../library/ThreadPool.h"
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
@@ -644,11 +645,7 @@ namespace ODIA
             }
           }
         };
-        std::vector<std::thread> pool;
-        pool.reserve(n - 1);
-        parallel::startThreads(pool, n - 1, build);
-        build();
-        for (auto& t : pool) { t.join(); }
+        parallel::team(n, [&](std::size_t) { build(); });
         if (error) { std::rethrow_exception(error); }
       }
     }
@@ -701,11 +698,7 @@ namespace ODIA
             }
           }
         };
-        std::vector<std::thread> pool;
-        pool.reserve(builders - 1);
-        parallel::startThreads(pool, builders - 1, build);
-        build();
-        for (auto& t : pool) { t.join(); }
+        parallel::team(builders, [&](std::size_t) { build(); });
         if (error)
         {
           std::error_code ec;
@@ -945,16 +938,10 @@ namespace ODIA
     };
 
     // Each worker owns one session; a worker that cannot be started leaves
-    // its session idle and the others take its chunks.
-    std::vector<std::thread> threads;
-    threads.reserve(workers - 1);
-    for (std::size_t s = 1; s < workers; ++s)
-    {
-      try { threads.emplace_back(worker, s); }
-      catch (const std::system_error&) { break; }
-    }
-    worker(0);
-    for (auto& t : threads) { t.join(); }
+    // its session idle and the others take its chunks. Session k runs on
+    // the same pool worker call after call (the lowest free ones), so its
+    // arena stays on that worker's NUMA node.
+    parallel::team(workers, worker, true);
     if (tracing) { recordDispatch(); }
 
     if (first_error) { std::rethrow_exception(first_error); }

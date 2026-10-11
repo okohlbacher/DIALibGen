@@ -686,22 +686,20 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads (" +
                     ODIA::physicalCoresReason() + ")"); }
     {
-      // Above 32 threads on a machine with several NUMA nodes, interleave the
-      // run's memory over the nodes (what numactl --interleave=all does).
-      // Without it the busy sessions crowd onto one node: on 2 x 96 cores at
-      // 96 threads about 55 of them ran on node 0, on 9 of its 24 L3 slices.
-      // Measured there: -10 % wall and -20 % CPU at 96 sessions; +6 % at 16,
-      // hence the threshold. ODIA_NUMA_INTERLEAVE=0 or 1 overrides; the
-      // library does not depend on it.
+      // Interleaving the run's memory over the NUMA nodes (what numactl
+      // --interleave=all does) was the default above 32 threads in 0.11.2:
+      // the threads started per call crowded onto one node. Pool workers
+      // alternate between the nodes and touch their own memory first, and
+      // interleaving now costs time: 131.2 s against 123.9 s without, at 96
+      // threads on 2 x 96 cores. ODIA_NUMA_INTERLEAVE=1 still turns it on.
       const unsigned workers = threads == 0 ? ODIA::physicalCores() : threads;
       const char* forced = std::getenv("ODIA_NUMA_INTERLEAVE");
-      const bool want = forced != nullptr && *forced != '\0' ? std::string_view(forced) != "0"
-                                                             : workers > 32;
+      const bool want = forced != nullptr && std::string_view(forced) == "1";
       const unsigned nodes = ODIA::numaNodes();
       const bool interleaved = want && nodes > 1 && ODIA::interleaveMemory();
       if (interleaved)
       { writeLogInfo_("memory interleaved over " + std::to_string(nodes) + " NUMA nodes (" +
-                      std::to_string(workers) + " threads; ODIA_NUMA_INTERLEAVE=0 turns it off)"); }
+                      std::to_string(workers) + " threads; ODIA_NUMA_INTERLEAVE=1)"); }
       ODIA::trace::note("numa_interleave", interleaved ? "on" : "off");
     }
     writeLogInfo_("MS2 model: " + ms2_model);

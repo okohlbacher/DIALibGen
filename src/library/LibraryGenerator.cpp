@@ -359,16 +359,36 @@ namespace ODIA
     /// about a microsecond, too little to hand out one index at a time.
     constexpr std::size_t PARSE_GRAIN = 256;
 
-    /// Runs @p task on a thread of its own, or on this one, without the
-    /// overlap, when no thread can be started (a process or cgroup thread
+    /// Runs @p task on a pool worker, or on this thread, without the
+    /// overlap, when no worker can be started (a process or cgroup thread
     /// limit). The result is the same either way.
-    template <class Task>
-    std::future<void> overlap(const Task& task)
+    ///
+    /// The handle waits for the task when it goes, exceptions or not: the
+    /// task refers to the caller's locals.
+    class Overlapped
     {
-      try { return std::async(std::launch::async, task); }
-      catch (const std::system_error&) {}
-      task();
-      return std::async(std::launch::deferred, [] {});
+    public:
+      Overlapped() = default;
+      explicit Overlapped(std::future<void> f) : f_(std::move(f)) {}
+      Overlapped(Overlapped&&) = default;
+      Overlapped& operator=(Overlapped&& other)
+      {
+        if (f_.valid()) { f_.wait(); }
+        f_ = std::move(other.f_);
+        return *this;
+      }
+      ~Overlapped() { if (f_.valid()) { f_.wait(); } }
+      bool valid() const { return f_.valid(); }
+      void get() { f_.get(); }
+
+    private:
+      std::future<void> f_;
+    };
+
+    template <class Task>
+    Overlapped overlap(const Task& task)
+    {
+      return Overlapped(parallel::async(task));
     }
   } // namespace
 
@@ -665,7 +685,7 @@ namespace ODIA
     std::vector<EnumeratedPeptide> enumerated[2];   // the wave being interned, and the next
     std::vector<std::size_t> precursor_at, transition_at;
     std::size_t precursor_total = p.mz.size(), transition_total = t.product_mz.size();
-    std::future<void> interning;   // after the waves: waited for before they go
+    Overlapped interning;   // after the waves: waited for before they go
     for (std::size_t first = 0; first < ordered.size(); first += wave)
     {
       const std::size_t count = std::min(wave, ordered.size() - first);
@@ -1289,7 +1309,7 @@ namespace ODIA
       next = Block{};
       // Declared after `current`, so that it is waited for before `current`
       // goes, should the prediction throw.
-      std::future<void> host = overlap([&]() {
+      Overlapped host = overlap([&]() {
         if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
         if (previous.last > previous.base)
         {
@@ -1534,7 +1554,7 @@ namespace ODIA
       Block current = std::move(next);
       next = Block{};
       // Declared after `current`: waited for before `current` goes.
-      std::future<void> host = overlap([&]() {
+      Overlapped host = overlap([&]() {
         if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
         if (previous.last > previous.base)
         {

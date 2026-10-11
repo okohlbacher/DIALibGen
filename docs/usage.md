@@ -120,9 +120,9 @@ the result does not depend on the batch size or the thread count. Host work
 threads. RT and CCS are predicted first and MS2 last, and the library is
 written while MS2 runs: each complete Parquet row group, or every TSV row, as
 soon as its MS2 results are in. Nothing appears under the output name before
-the file is complete. Above 32 threads on a machine with several NUMA nodes
-the run's memory is interleaved over the nodes, which on 2 x 96 cores made a
-96-thread run 16 % faster.
+the file is complete. The worker threads are kept for the whole run and, on a
+machine with several NUMA nodes, placed on the nodes in turn, so each keeps
+its memory local.
 
 Measured on 2 x 96-core EPYC 9654 for a 5.8 M-precursor library (Parquet):
 1,156 s and 4.2 GiB peak memory at 8 threads, 595 s and 4.7 GiB at 16, 158 s

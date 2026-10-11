@@ -127,8 +127,9 @@ namespace
   ///
   /// generate predicts RT and CCS first, so a precursor is complete once its
   /// MS2 spectrum is in: a consumer thread takes each block's kept precursors
-  /// (a bounded queue of two blocks, so the writer cannot fall far behind or
-  /// hold much), settles their CCS batching (CcsBatchGuard, once the old
+  /// (a queue bounded at about one row group of precursors, at least two
+  /// blocks: MS2 runs on while a row group is encoded, and the copies held
+  /// stay near 200 MB), settles their CCS batching (CcsBatchGuard, once the old
   /// order's CCS call they belonged to is complete) and passes them to the
   /// StreamWriter, which writes every complete row group. Strictly in
   /// precursor order; the output is the one-pass writer's, byte for byte.
@@ -154,8 +155,11 @@ namespace
     void rows(ODIA::Library::PrecursorRows rows) override
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      changed_.wait(lock, [&] { return queue_.size() < 2 || error_; });
+      // On one H100 a two-block bound made MS2 wait while each row group
+      // was encoded (+7 s for the proteome); a row group's worth does not.
+      changed_.wait(lock, [&] { return queue_.size() < 2 || queued_rows_ < QUEUE_ROWS || error_; });
       if (error_) { std::rethrow_exception(error_); }
+      queued_rows_ += rows.precursor.size();
       queue_.push_back(std::move(rows));
       changed_.notify_all();
     }
@@ -190,6 +194,7 @@ namespace
             if (queue_.empty()) { break; }
             rows = std::move(queue_.front());
             queue_.pop_front();
+            queued_rows_ -= rows.precursor.size();
           }
           changed_.notify_all();
           consume(std::move(rows));
@@ -244,6 +249,8 @@ namespace
     std::mutex mutex_;
     std::condition_variable changed_;
     std::deque<ODIA::Library::PrecursorRows> queue_;
+    static constexpr std::size_t QUEUE_ROWS = std::size_t(1) << 20;
+    std::size_t queued_rows_ = 0;
     bool done_ = false, drained_ = false, abandon_ = false;
     std::exception_ptr error_;
     std::thread thread_;   ///< last: starts once everything above exists

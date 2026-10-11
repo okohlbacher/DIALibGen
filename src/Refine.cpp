@@ -264,7 +264,7 @@ void DIALibGen::registerRefinementOptions_()
 
     registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
     registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
-    registerIntOption_("machine:threads", "<n>", 4, "CPU threads used for training", false);
+    registerIntOption_("machine:threads", "<n>", 16, "CPU threads used for training (a fixed count: the tuned weights depend on it)", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     registerStringOption_("machine:tf32", "<true/false>", "false",

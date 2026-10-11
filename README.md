@@ -114,7 +114,7 @@ DIALibGen -write_ctd ctd/
 
 `-threads` follows the TOPP default of **1**. Set `-threads 0` for one thread
 per physical core; generation runs one inference session per thread. Training
-has its own `-machine:threads` setting. Explicit generation CLI/INI settings
+has its own `-machine:threads` setting (default 16). Explicit generation CLI/INI settings
 override the optional JSON config; CLI settings override INI settings.
 
 Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx` and

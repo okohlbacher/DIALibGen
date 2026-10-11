@@ -171,8 +171,8 @@
   {
     "name": "machine:threads",
     "kind": "int",
-    "value": 4,
-    "description": "CPU threads used for training",
+    "value": 16,
+    "description": "CPU threads used for training (a fixed count: the tuned weights depend on it)",
     "min": 1.0
   },
   {

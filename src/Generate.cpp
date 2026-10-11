@@ -6,11 +6,14 @@
 #include <odia/AtomicFile.h>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
+#include <odia/Hardware.h>
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <filesystem>
 #include <fstream>
 #include <cstdlib>
+#include <string_view>
 #include <cstdint>
 #include <iostream>
 #include <thread>
@@ -348,6 +351,8 @@ json DIALibGen::generationValue_(const std::string& key, const json& value)
 }
 OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
   {
+    // Configuration, model lookup and option checks, up to the FASTA read.
+    ODIA::trace::Scope setup_phase("setup", 0);
     ODIA::DigestParams p;                       // defaults live in DigestParams
     std::string decoys = "none", rt_model, ms2_model, ccs_model, instrument = "QE";
     bool recompute_decoy_mz = false;
@@ -484,10 +489,34 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
+    if (threads == 0)
+    { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads, one per physical core"); }
+    {
+      // Above 32 threads on a machine with several NUMA nodes, interleave the
+      // run's memory over the nodes (what numactl --interleave=all does).
+      // Without it the busy sessions crowd onto one node: on 2 x 96 cores at
+      // 96 threads about 55 of them ran on node 0, on 9 of its 24 L3 slices.
+      // Measured there: -10 % wall and -20 % CPU at 96 sessions; +6 % at 16,
+      // hence the threshold. ODIA_NUMA_INTERLEAVE=0 or 1 overrides; the
+      // library does not depend on it.
+      const unsigned workers = threads == 0 ? ODIA::physicalCores() : threads;
+      const char* forced = std::getenv("ODIA_NUMA_INTERLEAVE");
+      const bool want = forced != nullptr && *forced != '\0' ? std::string_view(forced) != "0"
+                                                             : workers > 32;
+      const unsigned nodes = ODIA::numaNodes();
+      const bool interleaved = want && nodes > 1 && ODIA::interleaveMemory();
+      if (interleaved)
+      { writeLogInfo_("memory interleaved over " + std::to_string(nodes) + " NUMA nodes (" +
+                      std::to_string(workers) + " threads; ODIA_NUMA_INTERLEAVE=0 turns it off)"); }
+      ODIA::trace::note("numa_interleave", interleaved ? "on" : "off");
+    }
+    writeLogInfo_("MS2 model: " + ms2_model);
     std::vector<std::string> device_warnings;
     const ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
     ODIA::Library library;
     std::string standards;
+    setup_phase.fields().rows = threads;
+    setup_phase.end();
     try
     {
       const auto st = ODIA::LibraryGenerator::generate(fasta, p, library, threads);
@@ -567,6 +596,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       extra_metadata.emplace_back("odia.warnings", json(device_warnings).dump());
     }
 
+    ODIA::trace::Scope fingerprint_phase("fingerprint", 0);
     ODIA::DIANNLibraryFile::Fingerprint fp;
     try { fp = ODIA::DIANNLibraryFile::fingerprintFasta(fasta); }
     catch (const std::exception& e)
@@ -580,7 +610,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     fp.decoy_method = decoys;
     fp.params = fp.target_params + ";decoy=" + fp.decoy_method +
                 ";recompute_decoy_mz=" + (recompute_decoy_mz ? "1" : "0");
+    fingerprint_phase.end();
 
+    ODIA::trace::Scope write_phase("write", 0);
+    write_phase.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     try
     {
       if (parquet)
@@ -594,6 +627,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("cannot write ") + out + ": " + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+    write_phase.end();
     writeLogInfo_("wrote " + out);
+    {
+      // Releasing the library: what the destructor would do on return, done
+      // here so that the trace can time it.
+      ODIA::trace::Scope teardown_phase("teardown", 0);
+      library = ODIA::Library();
+    }
     return EXECUTION_OK;
   }

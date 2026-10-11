@@ -292,6 +292,8 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
                    "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/threads_identical.json"
                    "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/threads_identical"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/threads_identical.cmake")
+  # Three MS2 blocks of 10,000, so the pipelined selection hands blocks over.
+  set_tests_properties(generate_threads_identical PROPERTIES ENVIRONMENT "ODIA_MS2_BLOCK=10000")
 endif()
 
 # On a machine with a usable GPU: the default (TF32 off) GPU library equals the

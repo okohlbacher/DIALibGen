@@ -5,6 +5,7 @@
 
 #include <odia/PeptDeepEncoder.h>
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -120,6 +121,13 @@ namespace ODIA
     /// depends on at the last bit.
     static constexpr std::size_t MAX_BATCH_ROWS = 2048;
 
+    /// On the CPU, rows per batch within a MAX_BATCH_ROWS chunk (see
+    /// forEachChunk_). Small batches let every session stay busy to the end of
+    /// a call and keep each session's ONNX arena small (about 53 MB for MS2 at
+    /// 64 rows against 1.9 GB at 2048), which is what makes one session per
+    /// core affordable. The result does not change (forEachChunk_).
+    static constexpr std::size_t CPU_CHUNK_ROWS = 64;
+
     /// Peptides that could not be encoded, by index into the input, with the
     /// reason. One unencodable peptide must not discard a whole run's work.
     struct Failure
@@ -200,12 +208,19 @@ namespace ODIA
                       const std::vector<std::size_t>& group, std::vector<float>& out);
 
     /// Splits @p count peptides into length-homogeneous chunks of at most
-    /// MAX_BATCH_ROWS and runs @p body over them across sessionCount()
-    /// threads. The chunking is identical to the serial order, so results do
-    /// not depend on how many sessions ran them.
+    /// MAX_BATCH_ROWS (on the CPU cut further into CPU_CHUNK_ROWS pieces) and
+    /// runs @p body over them across sessionCount() threads, costliest first.
+    /// The chunking does not depend on the session count, so neither do the
+    /// results.
     void forEachChunk_(const std::vector<OpenMS::AASequence>& peptides,
                        const std::function<void(std::size_t session,
                                                 const std::vector<std::size_t>& group)>& body);
+
+    /// Hands the float weights of the optimised graph at @p optimized to
+    /// every later CPU session as one shared, read-only copy, with one
+    /// pre-packed-weights container. False if they could not be read, in
+    /// which case nothing is shared.
+    bool shareWeights_(const std::filesystem::path& optimized);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

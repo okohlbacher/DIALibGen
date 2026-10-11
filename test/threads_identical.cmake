@@ -4,7 +4,7 @@
 #   -DTOOL=DIALibGen -DWORKDIR=... -DCONFIG=...
 #
 # The input is a synthetic FASTA, large enough for several parallel tasks per
-# stage and for two MS2 blocks (20,000 precursors each), so the pipelined
+# stage and, with ODIA_MS2_BLOCK=10000 (set by the test), for three MS2 blocks, so the pipelined
 # fragment selection hands a block over at least once.
 file(REMOVE_RECURSE "${WORKDIR}")
 file(MAKE_DIRECTORY "${WORKDIR}")

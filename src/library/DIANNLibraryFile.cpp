@@ -3,6 +3,7 @@
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/ModifiedSequence.h>
+#include <odia/Trace.h>
 #include <odia/AtomicFile.h>
 #include <odia/TextWriter.h>
 
@@ -599,6 +600,7 @@ namespace ODIA
     // read-only, so its identity is the install's. Hash it explicitly if a
     // build ever ships more than one.
     if (path.empty()) { return "bundled"; }
+    trace::Scope hashing("hash_model", 1);
     std::ifstream in(path, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot read model: " + path); }
     std::uint64_t h = 14695981039346656037ull;
@@ -619,6 +621,7 @@ namespace ODIA
   DIANNLibraryFile::Fingerprint
   DIANNLibraryFile::fingerprintFasta(const std::string& fasta)
   {
+    trace::Scope hashing("hash_fasta", 1);
     std::ifstream in(fasta, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot read FASTA: " + fasta); }
 
@@ -938,6 +941,8 @@ namespace ODIA
       return arrays;
     };
 
+    trace::Scope build_step("build_arrays", 1);
+    build_step.fields().rows = static_cast<std::int64_t>(n);
     const std::size_t chunk_count = (n + kChunkRows - 1) / kChunkRows;
     std::vector<std::array<std::shared_ptr<arrow::Array>, kColumns>> built(chunk_count);
     parallel::forEach(chunk_count, parallel::workers(threads), [&](std::size_t c)
@@ -1007,7 +1012,10 @@ namespace ODIA
       columns.push_back(*column);
     }
     auto table = arrow::Table::Make(schema, columns, static_cast<std::int64_t>(n));
+    build_step.end();
 
+    // Encoding, dictionary, ZSTD and the file write.
+    trace::Scope write_step("write_table", 1);
     AtomicFile output(filename);
     auto outfile = arrow::io::FileOutputStream::Open(output.temporaryPath().string());
     if (!outfile.ok()) { throw std::runtime_error("cannot write library: " + filename); }
@@ -1045,6 +1053,8 @@ namespace ODIA
       ok(writer->Close());
     }
     ok((*outfile)->Close());
+    write_step.end();
+    trace::Scope commit_step("commit", 1);
     output.commit();
   }
 
@@ -1207,6 +1217,9 @@ namespace ODIA
   void DIANNLibraryFile::storeTSV(const std::string& filename, const Library& library,
                                    unsigned threads)
   {
+    // Formatting (in parallel blocks) and the ordered, buffered writes.
+    trace::Scope format_step("format_rows", 1);
+    format_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());
     AtomicFile output(filename);
     TextWriter out(output.temporaryPath().string());
 
@@ -1339,9 +1352,13 @@ namespace ODIA
       }
     }
 
+    format_step.end();
     // A file checked only at open reports success on a full disk, an exceeded
     // quota or a broken mount, leaving a truncated library behind.
+    trace::Scope close_step("close", 1);
     out.close();
+    close_step.end();
+    trace::Scope commit_step("commit", 1);
     output.commit();
     if (unknown_mods)
     {

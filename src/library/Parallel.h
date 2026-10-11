@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <odia/Hardware.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -14,11 +16,11 @@
 
 namespace ODIA::parallel
 {
-  /// Worker threads for host-side work: `requested`, or every hardware thread
-  /// for 0 (the convention of -threads 0 elsewhere).
+  /// Worker threads for host-side work: `requested`, or every physical core
+  /// for 0 (the meaning of -threads 0; see physicalCores()).
   inline unsigned workers(unsigned requested)
   {
-    return requested != 0 ? requested : std::max(1u, std::thread::hardware_concurrency());
+    return requested != 0 ? requested : physicalCores();
   }
 
   /// Calls body(i) for every i in [0, n) on up to `threads` threads, the

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
+#include <odia/Hardware.h>
 #include <odia/PeptDeepPredictor.h>
+#include <odia/Trace.h>
 
 #include "Parallel.h"
 
@@ -12,7 +14,9 @@
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
 #include <OpenMS/CHEMISTRY/ProteaseDigestion.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
+#include <OpenMS/CHEMISTRY/ResidueDB.h>
 #include <OpenMS/CHEMISTRY/ResidueModification.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 
 #include <iostream>
@@ -25,6 +29,7 @@
 #include <future>
 #include <string_view>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <random>
@@ -105,6 +110,67 @@ namespace ODIA
       std::int8_t charge;
     };
 
+    /// b and y ion m/z of one peptide, bit for bit what
+    /// peptide.getPrefix(i).getMZ(z, Residue::BIon) and
+    /// peptide.getSuffix(i).getMZ(z, Residue::YIon) return.
+    ///
+    /// Those build a prefix and a suffix sequence per ordinal (a heap
+    /// allocation each), and every call re-derives the b and y terminal
+    /// offsets from their empirical formulas. Here the offsets are computed
+    /// once per process and shared read-only, and the residue masses once per
+    /// peptide. The sums are formed with the same terms in the same order as
+    /// AASequence::getMonoWeight -- proton mass times charge, terminal
+    /// modification, residues first to last, ion offset, then the division --
+    /// so the result does not change by a bit. In particular a y ion is summed
+    /// from its own first residue, not as a running suffix sum, whose different
+    /// association would change the last bit.
+    class IonLadder
+    {
+    public:
+      explicit IonLadder(const AASequence& peptide)
+      {
+        static const Residue* const unknown = ResidueDB::getInstance()->getResidue("X");
+        mass_.reserve(peptide.size());
+        for (Size k = 0; k < peptide.size(); ++k)
+        {
+          // An X has no mass; OpenMS throws for it, so keep OpenMS's path.
+          if (&peptide[k] == unknown) { exact_ = false; }
+          mass_.push_back(peptide[k].getMonoWeight(Residue::Internal));
+        }
+      }
+
+      double b(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getPrefix(i).getMZ(z, Residue::BIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getNTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = 0; k < i; ++k) { m += mass_[k]; }
+        return (m + offsets().b) / z;
+      }
+
+      double y(const AASequence& peptide, Size i, int z) const
+      {
+        if (!exact_) { return peptide.getSuffix(i).getMZ(z, Residue::YIon); }
+        double m = Constants::PROTON_MASS_U * z;
+        if (const auto* mod = peptide.getCTerminalModification()) { m += mod->getDiffMonoMass(); }
+        for (Size k = mass_.size() - i; k < mass_.size(); ++k) { m += mass_[k]; }
+        return (m + offsets().y) / z;
+      }
+
+    private:
+      struct Offsets { double b, y; };
+      /// Built once, thread-safely, then only read.
+      static const Offsets& offsets()
+      {
+        static const Offsets o{Residue::getInternalToBIon().getMonoWeight(),
+                               Residue::getInternalToYIon().getMonoWeight()};
+        return o;
+      }
+
+      std::vector<double> mass_;
+      bool exact_ = true;
+    };
+
     void enumerateAllFragments(const AASequence& peptide, const DigestParams& p,
                                int precursor_charge, std::vector<Fragment>& out)
     {
@@ -124,17 +190,18 @@ namespace ODIA
       // z2 channels for every precursor charge, so the restriction was ours
       // alone.
       const int max_z = std::min(p.max_fragment_charge, std::max(1, precursor_charge));
+      const IonLadder ladder(peptide);
       for (int z = 1; z <= max_z; ++z)
       {
         for (Size i = 1; i < n; ++i)
         {
-          const double b = peptide.getPrefix(i).getMZ(z, Residue::BIon);
+          const double b = ladder.b(peptide, i, z);
           if (b >= p.fragment_mz_min && b <= p.fragment_mz_max)
           {
             out.push_back({b, FragmentType::B, static_cast<std::uint8_t>(i),
                            static_cast<std::int8_t>(z)});
           }
-          const double y = peptide.getSuffix(i).getMZ(z, Residue::YIon);
+          const double y = ladder.y(peptide, i, z);
           if (y >= p.fragment_mz_min && y <= p.fragment_mz_max)
           {
             out.push_back({y, FragmentType::Y, static_cast<std::uint8_t>(i),
@@ -242,9 +309,18 @@ namespace ODIA
     { throw std::invalid_argument("precursor_charges must be distinct integers between 1 and 8"); }
     Stats stats;
 
+    // Started on the way out (below) and declared before every local of the
+    // digest, so it ends after their destructors have run: freeing the
+    // peptide map and the parsed sequences is a phase of its own.
+    trace::Scope release_phase;
+    trace::Scope fasta_phase("fasta_read", 0);
     std::vector<FASTAFile::FASTAEntry> entries;
     FASTAFile().load(fasta_file, entries);
     stats.proteins = entries.size();
+    fasta_phase.fields().rows = static_cast<std::int64_t>(entries.size());
+    fasta_phase.end();
+
+    trace::Scope digest_phase("digest", 0);
 
     // Digest in parallel, merge serially in FASTA order: the peptide map and
     // its accession lists come out exactly as from the serial loop.
@@ -298,12 +374,17 @@ namespace ODIA
     // proteins accumulates them, which is what protein inference later needs.
     std::map<std::string, std::string> peptide_to_proteins;
     const std::size_t wave = TASK_ITEMS * TASKS_PER_THREAD * threads;
+    // At most 16 digest threads. The digest is cheap (about 9 CPU-s for a
+    // whole human proteome) and beyond 16 threads it got no faster but burnt
+    // CPU waiting: at 96 threads 98 CPU-s for the same 2.3 s (2.2 s and 22
+    // CPU-s at 16).
+    const unsigned digest_threads = std::min(threads, 16u);
     std::vector<DigestedProtein> digested;
     for (std::size_t first = 0; first < entries.size(); first += wave)
     {
       const std::size_t count = std::min(wave, entries.size() - first);
       digested.assign(count, DigestedProtein{});
-      parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
+      parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, digest_threads, [&](std::size_t task)
       {
         // One digestion object per task: it is not shared between threads.
         ProteaseDigestion digestion;
@@ -335,6 +416,11 @@ namespace ODIA
       }
     }
     stats.peptides = peptide_to_proteins.size();
+    digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
+    digest_phase.end();
+
+    // Precursors and their m/z-capped placeholder fragments.
+    trace::Scope enumerate_phase("enumerate", 0);
 
     // StringList is std::vector<OpenMS::String>, NOT std::vector<std::string>:
     // the two are distinct types and no implicit conversion exists between the
@@ -463,28 +549,15 @@ namespace ODIA
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
+    enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
+    enumerate_phase.end();
+    release_phase.start("release", 0);
     return stats;
   }
 
 
   namespace
   {
-    /// Sessions to run inference across, from what the caller asked for.
-    ///
-    /// Capped rather than taken as given: each session holds its own copy of
-    /// the weights plus an ONNX arena sized for a MAX_BATCH_ROWS batch, so
-    /// memory grows about half a gigabyte per session while the throughput
-    /// curve flattens. Measured on the MS2 stage of a 60k-precursor build:
-    ///
-    ///     sessions    MS2      peak RSS
-    ///            1   409.7 s   0.86 GiB
-    ///            8    50.2 s   5.02 GiB   8.2x
-    ///           16    34.6 s   8.82 GiB  11.8x
-    ///           32    32.5 s  16.11 GiB  12.6x
-    ///
-    /// 16 is the knee. Going on to 32 buys 6% more speed for 83% more memory,
-    /// which on a shared node is how a library build starts failing in the
-    /// allocator instead of finishing slightly later.
     void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu)
     {
       std::cerr << "[" << stage << "] provider "
@@ -509,11 +582,21 @@ namespace ODIA
       }
     }
 
+    /// CPU inference sessions, from -threads: one per thread, 0 meaning one
+    /// per physical core, and never more than the physical cores.
+    ///
+    /// Until 0.11.1 this was capped at 16. Each session then held an ONNX
+    /// arena sized for a 2048-row batch (about 1.9 GB for MS2), and a call
+    /// waited for its largest batch, so sessions beyond 16 bought little speed
+    /// for a lot of memory. With 64-row batches (PeptDeepPredictor::
+    /// CPU_CHUNK_ROWS) an MS2 arena is about 53 MB and every session stays
+    /// busy: on 2 x 96 cores, 96 sessions kept 94 busy through MS2. More
+    /// sessions than physical cores share cores and are slower (Hardware.h).
     int inferenceSessions(unsigned requested)
     {
-      const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
-      const unsigned want = requested == 0 ? hardware : requested;
-      return static_cast<int>(std::min(want, 16u));
+      const unsigned cores = physicalCores();
+      const unsigned want = requested == 0 ? cores : std::min(requested, cores);
+      return static_cast<int>(std::max(1u, want));
     }
   } // namespace
 
@@ -554,39 +637,65 @@ namespace ODIA
     // One prediction per distinct sequence. The RT model has no charge input,
     // so predicting per precursor would repeat identical work for every charge
     // state of the same peptide.
-    std::map<std::uint32_t, std::size_t> handle_to_slot;
-    std::vector<AASequence> unique_peptides;
-    std::vector<std::uint32_t> slot_handle;
-
+    trace::Scope rt_phase("rt", 0);
+    trace::Scope unique_step("unique_parse", 1);
     const auto& p = library.precursors();
+    const unsigned threads = parallel::workers(sessions);
+    // Distinct sequences in order of first appearance, then parsed in
+    // parallel and compacted in that order: the same peptides in the same
+    // order as one serial pass, which the batching depends on. Handles are
+    // dense indices into the string arena, so flat arrays replace the maps.
+    std::vector<std::uint8_t> seen(library.strings().size(), 0);
+    std::vector<std::uint32_t> candidates;
     for (std::size_t i = 0; i < library.precursorCount(); ++i)
     {
       const auto handle = p.modified_sequence[i];
-      if (handle_to_slot.count(handle)) { continue; }
-      AASequence peptide;
+      if (seen[handle]) { continue; }
+      seen[handle] = 1;
+      candidates.push_back(handle);
+    }
+    std::vector<AASequence> parsed(candidates.size());
+    std::vector<std::uint8_t> parsed_ok(candidates.size(), 0);
+    parallel::forEach(candidates.size(), threads, [&](std::size_t k)
+    {
       try
       {
-        peptide = AASequence::fromString(std::string(library.strings().get(handle)));
+        parsed[k] = AASequence::fromString(std::string(library.strings().get(candidates[k])));
+        parsed_ok[k] = 1;
       }
-      catch (const std::exception&)
-      {
-        continue;   // left NaN, and counted below
-      }
-      handle_to_slot.emplace(handle, unique_peptides.size());
-      unique_peptides.push_back(std::move(peptide));
-      slot_handle.push_back(handle);
+      catch (const std::exception&) {}   // left NaN, and counted below
+    });
+    std::vector<AASequence> unique_peptides;
+    std::vector<std::uint32_t> slot_handle;
+    unique_peptides.reserve(candidates.size());
+    slot_handle.reserve(candidates.size());
+    for (std::size_t k = 0; k < candidates.size(); ++k)
+    {
+      if (!parsed_ok[k]) { continue; }
+      unique_peptides.push_back(std::move(parsed[k]));
+      slot_handle.push_back(candidates[k]);
     }
+    parsed.clear(); parsed.shrink_to_fit();
+    unique_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
+    unique_step.end();
     if (unique_peptides.empty()) { return library.precursorCount(); }
 
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("RT", predictor, gpu);
     std::vector<PeptDeepPredictor::Failure> failures;
+    trace::Scope predict_step("predict", 1);
+    predict_step.fields().rows = static_cast<std::int64_t>(unique_peptides.size());
     const auto predicted = predictor.predictRT(unique_peptides, &failures);
+    predict_step.end();
 
-    std::map<std::uint32_t, float> by_handle;
-    for (std::size_t slot = 0; slot < predicted.size(); ++slot)
+    trace::Scope assign_step("assign", 1);
+    std::vector<float> by_handle(library.strings().size(), std::nanf(""));
+    parallel::forEach(predicted.size(), threads, [&](std::size_t slot)
     {
       float value = predicted[slot];
       // Applied here, in the model's own units, so that any downstream affine
@@ -595,15 +704,14 @@ namespace ODIA
       {
         value += freeCysteineRtOffset(freeCysteines(unique_peptides[slot]));
       }
-      by_handle.emplace(slot_handle[slot], value);
-    }
+      by_handle[slot_handle[slot]] = value;
+    });
 
     std::size_t unpredicted = 0;
     auto& precursors = library.precursors();
     for (std::size_t i = 0; i < library.precursorCount(); ++i)
     {
-      const auto it = by_handle.find(precursors.modified_sequence[i]);
-      const float value = it == by_handle.end() ? std::nanf("") : it->second;
+      const float value = by_handle[precursors.modified_sequence[i]];
       precursors.irt[i] = value;
       if (!std::isfinite(value)) { ++unpredicted; }
     }
@@ -733,10 +841,16 @@ namespace ODIA
     const std::size_t n = library.precursorCount();
     if (n == 0) { return 0; }
 
+    trace::Scope ms2_phase("ms2", 0);
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("MS2", predictor, gpu);
+
+    trace::Scope reserve_step("reserve", 1);
 
     // The new transition arrays are built alongside the old ones and swapped in
     // at the end. Editing in place is not possible: a precursor's fragment
@@ -751,6 +865,7 @@ namespace ODIA
     built.loss.reserve(t.product_mz.size());
 
     std::vector<std::uint32_t> begin(n, 0), count(n, 0);
+    reserve_step.end();
 
     // Blocked so that peak memory is set by the block, not by the proteome.
     //
@@ -759,7 +874,21 @@ namespace ODIA
     // threads, and block k-2's result is appended. Selection is parallel per
     // precursor and the append is serial in precursor order, so the arrays
     // come out exactly as from the serial loop, whatever the thread count.
-    constexpr std::size_t BLOCK = 20000;
+    //
+    // The block is also the unit every session waits at: 100,000 precursors
+    // on the CPU, so that a call is long against its last batch; 20,000 on
+    // CUDA, as measured there. The library does not depend on it.
+    // ODIA_MS2_BLOCK overrides it, for tests (several blocks from a small
+    // input) and measurements.
+    const std::size_t BLOCK = [&]() -> std::size_t {
+      if (const char* v = std::getenv("ODIA_MS2_BLOCK"); v != nullptr && *v != '\0')
+      {
+        char* end = nullptr;
+        const long long x = std::strtoll(v, &end, 10);
+        if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+      }
+      return predictor.provider() == PeptDeepPredictor::Provider::CUDA ? 20000 : 100000;
+    }();
     const unsigned threads = parallel::workers(sessions);
     std::size_t unpredicted = 0;
 
@@ -774,6 +903,9 @@ namespace ODIA
 
     const auto parse = [&](std::size_t base)
     {
+      trace::Scope parse_step("parse", 2);
+      parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      parse_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
       Block block;
       block.base = base;
       block.last = std::min(base + BLOCK, n);
@@ -791,6 +923,10 @@ namespace ODIA
 
     const auto select = [&](Block& block)
     {
+      // On a helper thread, overlapping the next block's prediction.
+      trace::Scope post_step("post", 2);
+      post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
       const std::size_t size = block.last - block.base;
       block.ranked.assign(size, RankedFragments{});
       constexpr std::size_t TASK = 256;
@@ -808,6 +944,9 @@ namespace ODIA
 
     const auto append = [&](const Block& block)
     {
+      trace::Scope emit_step("emit", 2);
+      emit_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      emit_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
       for (std::size_t i = block.base; i < block.last; ++i)
       {
         const auto& spectrum = block.spectra[i - block.base];
@@ -853,9 +992,15 @@ namespace ODIA
     std::future<void> selection;
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
       Block block = parse(base);
       std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
       block.spectra = predictor.predictMS2(block.peptides, block.charges, nce, instrument, &failures);
+      predict_step.end();
 
       Block done;
       if (selection.valid()) { selection.get(); done = std::move(selecting); }
@@ -865,10 +1010,12 @@ namespace ODIA
     }
     if (selection.valid())
     {
+      trace::Scope drain_step("drain", 1);
       selection.get();
       append(selecting);
     }
 
+    trace::Scope finalize_step("finalize", 1);
     t = std::move(built);
     p.transition_begin = std::move(begin);
     p.transition_count = std::move(count);
@@ -919,6 +1066,7 @@ namespace ODIA
 
     // Eleven peptides: one session is plenty, and each CUDA session costs a
     // cuDNN set-up.
+    trace::Scope irt_phase("irt_fit", 0);
     GpuOptions one_session = gpu;
     one_session.sessions_per_device = 1;
     PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, one_session);
@@ -992,13 +1140,17 @@ namespace ODIA
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
     unsigned sessions, bool derive_mobility, const GpuOptions& gpu)
   {
+    trace::Scope ccs_phase("ccs", 0);
     auto& p = library.precursors();
     const std::size_t n = library.precursorCount();
     p.ccs.assign(n, std::numeric_limits<float>::quiet_NaN());
     if (derive_mobility) { p.im.assign(n, std::numeric_limits<float>::quiet_NaN()); }
     if (n == 0) { return 0; }
 
+    trace::Scope sessions_step("sessions", 1);
     PeptDeepPredictor predictor(ccs_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
+    sessions_step.end();
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
     writeDeviceLine("CCS", predictor, gpu);
@@ -1010,6 +1162,10 @@ namespace ODIA
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
       const std::size_t last = std::min(base + BLOCK, n);
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(last - base);
+      trace::Scope parse_step("parse", 2);
       std::vector<AASequence> peptides(last - base);
       std::vector<int> charges(last - base);
       parallel::forEach(last - base, parallel::workers(sessions), [&](std::size_t k)
@@ -1018,9 +1174,16 @@ namespace ODIA
           AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
         charges[k] = static_cast<int>(p.charge[base + k]);
       });
+      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
+      parse_step.end();
 
       std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
       const auto ccs = predictor.predictCCS(peptides, charges, &failures);
+      predict_step.end();
+      trace::Scope post_step("post", 2);
+      post_step.fields().rows = static_cast<std::int64_t>(last - base);
       for (std::size_t i = base; i < last; ++i)
       {
         p.ccs[i] = ccs[i - base];
@@ -1044,6 +1207,7 @@ namespace ODIA
                                              bool recompute_decoy_mz)
   {
     if (method == DecoyMethod::None) { return 0; }
+    trace::Scope decoy_phase("decoys", 0);
 
     const std::size_t n_targets = library.precursorCount();
 

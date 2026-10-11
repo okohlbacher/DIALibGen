@@ -11,6 +11,7 @@
 
 #include <cctype>
 #include <map>
+#include <unordered_map>
 #include <stdexcept>
 
 using namespace OpenMS;
@@ -87,83 +88,124 @@ namespace ODIA
     return feature;
   }
 
-  void PeptDeepEncoder::addModification_(Batch& batch, std::size_t row,
-                                         std::size_t site, const std::string& mod_id)
+  namespace
   {
-    const auto feature = modificationVector(mod_id);
-    const std::size_t base =
-      (row * batch.sequence_length + site) * PEPTDEEP_MOD_ELEMENTS.size();
-    for (std::size_t i = 0; i < feature.size(); ++i)
+    /// modificationVector(mod->getFullId()), remembered per thread.
+    ///
+    /// The lookup behind it takes ModificationsDB's process-wide lock (an
+    /// OpenMP critical section, on every getModification call), and encoding
+    /// asked once per modified residue -- for a carbamidomethylated proteome,
+    /// roughly once per peptide, from every inference thread at once. The
+    /// feature vector of a modification never changes, so each thread asks
+    /// once per modification and then reads its own copy; nothing shared is
+    /// written and no lock is taken after the first sight. A failure is not
+    /// remembered, so an unencodable modification throws every time, as before.
+    const std::vector<float>& modificationFeatures(const ResidueModification* mod)
     {
-      // Accumulates: two modifications on one site add, they do not overwrite.
-      batch.mod_x[base + i] += feature[i];
+      thread_local std::unordered_map<const ResidueModification*, std::vector<float>> known;
+      auto it = known.find(mod);
+      if (it == known.end())
+      {
+        it = known.emplace(mod, PeptDeepEncoder::modificationVector(mod->getFullId())).first;
+      }
+      return it->second;
     }
-  }
+
+    void addModification(PeptDeepEncoder::Batch& batch, std::size_t row,
+                         std::size_t site, const ResidueModification* mod)
+    {
+      const auto& feature = modificationFeatures(mod);
+      const std::size_t base =
+        (row * batch.sequence_length + site) * PEPTDEEP_MOD_ELEMENTS.size();
+      for (std::size_t i = 0; i < feature.size(); ++i)
+      {
+        // Accumulates: two modifications on one site add, they do not overwrite.
+        batch.mod_x[base + i] += feature[i];
+      }
+    }
+
+    /// The batch for @p count peptides, the i-th being @p at(i). Callers pass
+    /// either a whole vector or a chunk's rows of one, so that a chunk is
+    /// encoded where it lies instead of being copied out first.
+    template <class At>
+    PeptDeepEncoder::Batch encodeRows(std::size_t count, const At& at)
+    {
+      if (count == 0) { throw std::invalid_argument("empty peptide batch"); }
+
+      const std::size_t n = at(0).size();
+      if (n == 0) { throw std::invalid_argument("empty peptide sequence"); }
+      for (std::size_t row = 0; row < count; ++row)
+      {
+        if (at(row).size() != n)
+        {
+          throw std::invalid_argument(
+            "a batch must be length-homogeneous: padding is not inert, so mixing "
+            "lengths changes the prediction");
+        }
+      }
+
+      PeptDeepEncoder::Batch batch;
+      batch.rows = count;
+      batch.sequence_length = n + 2;      // one terminal token at each end
+      batch.aa_indices.assign(batch.rows * batch.sequence_length, 0);
+      batch.mod_x.assign(batch.rows * batch.sequence_length * PEPTDEEP_MOD_ELEMENTS.size(),
+                         0.0f);
+
+      for (std::size_t row = 0; row < count; ++row)
+      {
+        const AASequence& peptide = at(row);
+
+        for (std::size_t k = 0; k < n; ++k)
+        {
+          const auto& letter = peptide[k].getOneLetterCode();
+          if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z')
+          {
+            throw std::invalid_argument("residue outside A-Z in " + peptide.toString());
+          }
+          // A->1 .. Z->26; 0 is the pad and terminal token. Residue k sits at
+          // index k+1, so index 0 stays the N-terminal slot.
+          batch.aa_indices[row * batch.sequence_length + k + 1] =
+            static_cast<std::int64_t>(letter[0] - 'A' + 1);
+
+          if (const auto* mod = peptide[k].getModification(); mod != nullptr)
+          {
+            addModification(batch, row, k + 1, mod);
+          }
+        }
+
+        // Terminal modifications belong on the terminal rows, not on the adjacent
+        // residue. Placing a C-terminal modification on the last residue instead
+        // of row nAA+1 shifted a predicted iRT by more than the modification's
+        // own effect.
+        if (const auto* mod = peptide.getNTerminalModification(); mod != nullptr)
+        {
+          addModification(batch, row, 0, mod);
+        }
+        if (const auto* mod = peptide.getCTerminalModification(); mod != nullptr)
+        {
+          addModification(batch, row, n + 1, mod);
+        }
+      }
+      return batch;
+    }
+  } // namespace
 
   PeptDeepEncoder::Batch PeptDeepEncoder::encode(const AASequence& peptide)
   {
-    return encode(std::vector<AASequence>{peptide});
+    return encodeRows(1, [&](std::size_t) -> const AASequence& { return peptide; });
   }
 
   PeptDeepEncoder::Batch PeptDeepEncoder::encode(const std::vector<AASequence>& peptides)
   {
-    if (peptides.empty()) { throw std::invalid_argument("empty peptide batch"); }
+    return encodeRows(peptides.size(),
+                      [&](std::size_t i) -> const AASequence& { return peptides[i]; });
+  }
 
-    const std::size_t n = peptides.front().size();
-    if (n == 0) { throw std::invalid_argument("empty peptide sequence"); }
-    for (const auto& p : peptides)
-    {
-      if (p.size() != n)
-      {
-        throw std::invalid_argument(
-          "a batch must be length-homogeneous: padding is not inert, so mixing "
-          "lengths changes the prediction");
-      }
-    }
-
-    Batch batch;
-    batch.rows = peptides.size();
-    batch.sequence_length = n + 2;      // one terminal token at each end
-    batch.aa_indices.assign(batch.rows * batch.sequence_length, 0);
-    batch.mod_x.assign(batch.rows * batch.sequence_length * PEPTDEEP_MOD_ELEMENTS.size(),
-                       0.0f);
-
-    for (std::size_t row = 0; row < peptides.size(); ++row)
-    {
-      const auto& peptide = peptides[row];
-
-      for (std::size_t k = 0; k < n; ++k)
-      {
-        const auto letter = peptide[k].getOneLetterCode();
-        if (letter.size() != 1 || letter[0] < 'A' || letter[0] > 'Z')
-        {
-          throw std::invalid_argument("residue outside A-Z in " + peptide.toString());
-        }
-        // A->1 .. Z->26; 0 is the pad and terminal token. Residue k sits at
-        // index k+1, so index 0 stays the N-terminal slot.
-        batch.aa_indices[row * batch.sequence_length + k + 1] =
-          static_cast<std::int64_t>(letter[0] - 'A' + 1);
-
-        if (const auto* mod = peptide[k].getModification(); mod != nullptr)
-        {
-          addModification_(batch, row, k + 1, mod->getFullId());
-        }
-      }
-
-      // Terminal modifications belong on the terminal rows, not on the adjacent
-      // residue. Placing a C-terminal modification on the last residue instead
-      // of row nAA+1 shifted a predicted iRT by more than the modification's
-      // own effect.
-      if (const auto* mod = peptide.getNTerminalModification(); mod != nullptr)
-      {
-        addModification_(batch, row, 0, mod->getFullId());
-      }
-      if (const auto* mod = peptide.getCTerminalModification(); mod != nullptr)
-      {
-        addModification_(batch, row, n + 1, mod->getFullId());
-      }
-    }
-    return batch;
+  PeptDeepEncoder::Batch PeptDeepEncoder::encode(const std::vector<AASequence>& peptides,
+                                                 const std::vector<std::size_t>& rows)
+  {
+    return encodeRows(rows.size(),
+                      [&](std::size_t i) -> const AASequence& { return peptides[rows[i]]; });
   }
 
   namespace
@@ -298,13 +340,32 @@ namespace ODIA
     {
       throw std::invalid_argument("one charge per peptide is required");
     }
-    Batch batch = encode(peptides);
+    return addMeta_(encode(peptides), charges.data(), nullptr, nce, instrument);
+  }
 
+  PeptDeepEncoder::Batch
+  PeptDeepEncoder::encode(const std::vector<AASequence>& peptides,
+                          const std::vector<std::size_t>& rows,
+                          const std::vector<int>& charges,
+                          float nce, const std::string& instrument)
+  {
+    if (charges.size() != peptides.size())
+    {
+      throw std::invalid_argument("one charge per peptide is required");
+    }
+    return addMeta_(encode(peptides, rows), charges.data(), rows.data(), nce, instrument);
+  }
+
+  PeptDeepEncoder::Batch
+  PeptDeepEncoder::addMeta_(Batch batch, const int* charges, const std::size_t* rows,
+                            float nce, const std::string& instrument)
+  {
     batch.charges.reserve(batch.rows);
     batch.nces.assign(batch.rows, nce * NCE_SCALE);
     batch.instrument_indices.assign(batch.rows, instrumentIndex(instrument));
-    for (const int z : charges)
+    for (std::size_t row = 0; row < batch.rows; ++row)
     {
+      const int z = charges[rows == nullptr ? row : rows[row]];
       // A charge below 1 is not a charge, and the model does not say so: it
       // returns a plausible, base-peak-normalised spectrum for 0 and for -3
       // alike. The DIA-NN reader has a live path to charge 0, because a null

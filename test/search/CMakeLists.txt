@@ -9,6 +9,11 @@ add_executable(identify_subset_pairing identify_subset_pairing.cpp)
 target_link_libraries(identify_subset_pairing PRIVATE odia_search)
 add_test(NAME identify_subset_pairing COMMAND identify_subset_pairing)
 
+# IonLadder: every fragment ion type bit-identical to OpenMS's getPrefix/getSuffix.
+add_executable(identify_ion_ladder identify_ion_ladder.cpp)
+target_link_libraries(identify_ion_ladder PRIVATE odia_search)
+add_test(NAME identify_ion_ladder COMMAND identify_ion_ladder)
+
 add_executable(identify_decoy_symmetry identify_decoy_symmetry.cpp)
 target_link_libraries(identify_decoy_symmetry PRIVATE odia_search)
 add_test(NAME identify_decoy_symmetry COMMAND identify_decoy_symmetry)

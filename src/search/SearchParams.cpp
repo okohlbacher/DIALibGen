@@ -117,7 +117,12 @@ namespace ODIA::search
 
   int SearchParams::predictionSessions(int threads)
   {
-    return std::clamp(threads, 1, max_prediction_sessions);
+    // One per thread, never more than the physical cores, as generate runs
+    // them since 0.11.2 (LibraryGenerator inferenceSessions): with 64-row
+    // batches (PeptDeepPredictor::CPU_CHUNK_ROWS) a session's MS2 arena is
+    // about 53 MB, so the cap of 16 sessions that kept 2048-row arenas in
+    // memory is gone; sessions on SMT siblings share a core and are slower.
+    return std::clamp(threads, 1, static_cast<int>(std::max(1u, physicalCores())));
   }
 
   void SearchParams::validate() const

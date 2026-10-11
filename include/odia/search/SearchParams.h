@@ -191,7 +191,8 @@ namespace ODIA::search
     /// counts it (Hardware.h).
     static int resolveThreads(int requested);
     /// ONNX Runtime sessions of the search's PeptDeep MS2 model at @p threads:
-    /// one per thread (one intra-op thread each), at most max_prediction_sessions.
+    /// one per thread (one intra-op thread each), at most the physical cores
+    /// (ODIA::physicalCores(), as generate counts them).
     static int predictionSessions(int threads);
 
     /// Why the caller needs observed 1/K0 values (e.g. "-write_im"); empty =
@@ -231,8 +232,6 @@ namespace ODIA::search
     /// ODIA_OPENSWATH_THREADS (a measurement switch, read once; docs/tracing.md).
     /// The result does not depend on it.
     static int openswathThreads();
-    /// The most ONNX Runtime sessions the search's MS2 model gets.
-    static constexpr int max_prediction_sessions = 16;
     /// Evidence prefilter: the fragments indexed per pair member, its own most
     /// intense (search:intensities predicted: each member by its own
     /// prediction; library: by the target's library intensity, in the same

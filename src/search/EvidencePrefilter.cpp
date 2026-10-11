@@ -3,6 +3,7 @@
 
 #include <odia/search/EvidencePrefilter.h>
 
+#include <odia/search/MemoryCheck.h>
 #include <odia/search/PredictedAssays.h>
 #include <odia/search/Scoring.h>
 #include <odia/search/SearchDecoys.h>
@@ -137,7 +138,13 @@ namespace ODIA::search
     std::vector<std::uint8_t> count(n, 0), assay(n, 0);
     std::vector<float> mz(n * 2 * F, std::numeric_limits<float>::quiet_NaN());
     std::string failure;
-    const std::size_t block = predicted ? PredictedAssays::block_pairs : std::max<std::size_t>(1, n);
+    // Predicted: blocks sized to the model's sessions and the free memory;
+    // a draw that stops early (stop_after, search:candidates random) stops
+    // after a whole block, so it keeps the fixed block that its counts were
+    // defined with.
+    const std::size_t block = !predicted ? std::max<std::size_t>(1, n)
+                              : stop_after != 0 ? PredictedAssays::block_pairs
+                                                : PredictedAssays::blockPairs(model->parallelism(), availableMemoryBytes());
     std::size_t processed = 0, made_so_far = 0;
     auto reported = Clock::now();
     for (std::size_t base = 0; base < n; base += block)

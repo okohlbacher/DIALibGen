@@ -76,6 +76,9 @@ namespace ODIA::search
     /// One line for the log and the report: nothing that depends on the
     /// thread count (the report must not).
     virtual std::string describe() const = 0;
+    /// How many peptides it predicts at once (its sessions): sizes the blocks
+    /// it is fed (PredictedAssays::blockPairs). Speed only.
+    virtual std::size_t parallelism() const { return 1; }
   };
 
   /// PeptDeep's MS2 model (PeptDeepPredictor::predictMS2) on the CPU.
@@ -88,6 +91,7 @@ namespace ODIA::search
     std::vector<PeptDeepPredictor::Spectrum> predict(const std::vector<OpenMS::AASequence>& peptides,
                                                      const std::vector<int>& charges) override;
     std::string describe() const override;
+    std::size_t parallelism() const override { return static_cast<std::size_t>(sessions_); }
     const std::string& instrument() const { return instrument_; }
     float nce() const { return nce_; }
     /// The ONNX Runtime sessions it predicts with (SearchParams::predictionSessions).
@@ -125,8 +129,25 @@ namespace ODIA::search
     /// Base-peak fraction a predicted fragment must exceed to count as
     /// "above the floor" (LibraryGenerator's min_relative_intensity).
     static constexpr float predicted_floor = 1e-4f;
-    /// Pairs predicted per model call.
+    /// Pairs predicted per model call: the least, and the block of
+    /// search:candidates random, whose draw stops after a whole block.
     static constexpr std::size_t block_pairs = 8192;
+    /// The most pairs per model call.
+    static constexpr std::size_t max_block_pairs = 262144;
+    /// Transient memory a pair of the block holds while it is predicted (both
+    /// members' sequences, spectra and ranked fragments), an upper estimate.
+    static constexpr std::size_t block_bytes_per_pair = 4096;
+
+    /// Pairs per model call for a model of @p parallelism sessions with
+    /// @p available bytes of free memory (0 = unknown): 4,096 pairs per
+    /// session -- 128 batches of PeptDeepPredictor::CPU_CHUNK_ROWS per session
+    /// and call, so the call's last batches leave few sessions idle, and the
+    /// OpenMP loops around each call (decoys, parsing, ranking) run as often
+    /// as needed and no more -- within [block_pairs, max_block_pairs], and so
+    /// that a block holds at most a sixteenth of the free memory. MS2
+    /// predictions do not depend on the batch (PeptDeepPredictor), so the
+    /// block size changes the speed only.
+    static std::size_t blockPairs(std::size_t parallelism, std::uint64_t available);
 
     /// @p peptide's fragment universe with @p spectrum's intensities, in rank
     /// order (see the file comment); @p above_floor receives how many lead

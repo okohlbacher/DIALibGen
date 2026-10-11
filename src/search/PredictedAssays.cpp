@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/search/PredictedAssays.h>
+#include <odia/search/MemoryCheck.h>
 #include <odia/search/SearchParams.h>
 
+#include <odia/IonLadder.h>
 #include <odia/PeptDeepEncoder.h>
 #include <odia/Trace.h>
 
@@ -22,7 +24,6 @@ namespace ODIA::search
   namespace
   {
     using OpenMS::AASequence;
-    using OpenMS::Residue;
 
     /// LibraryGenerator::predictFragmentIntensities's order: intensity, then
     /// m/z (both descending), then type, ordinal, charge.
@@ -104,21 +105,23 @@ namespace ODIA::search
     // rounding above the library's own extreme fragment and drop it.
     const MzFixed lo = toFixed(mz_min), hi = toFixed(mz_max);
     auto inRange = [&](double mz) { const MzFixed f = toFixed(mz); return f != MZ_INVALID && f >= lo && f <= hi; };
+    // getPrefix(o).getMZ(z, BIon) and getSuffix(o).getMZ(z, YIon), bit for
+    // bit, without a sequence copy per ordinal (IonLadder.h).
+    const IonLadder ladder(peptide);
     for (std::size_t o = 1; o < n; ++o)
     {
       // Position q separates prefix q + 1 from suffix n - q - 1 (alphabase's
       // layout, as in LibraryGenerator): b_o at o - 1, y_o at n - 1 - o.
       const std::size_t b_position = o - 1, y_position = n - 1 - o;
-      const AASequence prefix = peptide.getPrefix(o), suffix = peptide.getSuffix(o);
       for (int z = 1; z <= max_z; ++z)
       {
-        const double b = prefix.getMZ(z, Residue::BIon);
+        const double b = ladder.b(peptide, o, z);
         if (inRange(b) && b_position < spectrum.positions)
         {
           out.push_back({b, std::max(0.0f, spectrum.at(b_position, z == 1 ? 0 : 1)), FragmentType::B,
                          static_cast<std::uint8_t>(o), static_cast<std::int8_t>(z)});
         }
-        const double y = suffix.getMZ(z, Residue::YIon);
+        const double y = ladder.y(peptide, o, z);
         if (inRange(y) && y_position < spectrum.positions)
         {
           out.push_back({y, std::max(0.0f, spectrum.at(y_position, z == 1 ? 2 : 3)), FragmentType::Y,
@@ -139,6 +142,17 @@ namespace ODIA::search
   }
 
   // ---- pairs -----------------------------------------------------------------------
+
+  std::size_t PredictedAssays::blockPairs(std::size_t parallelism, std::uint64_t available)
+  {
+    std::size_t block = std::clamp<std::size_t>(parallelism * 4096, block_pairs, max_block_pairs);
+    if (available > 0)
+    {
+      const std::uint64_t affordable = available / 16 / block_bytes_per_pair;
+      block = static_cast<std::size_t>(std::min<std::uint64_t>(block, std::max<std::uint64_t>(block_pairs, affordable)));
+    }
+    return block;
+  }
 
   void PredictedAssays::predict(const Library& library, const std::vector<std::size_t>& targets, const std::vector<std::string>& decoys,
                                 const DecoyRules& rules, FragmentModel& model, std::vector<PairPrediction>& out,
@@ -235,9 +249,10 @@ namespace ODIA::search
     std::vector<std::uint32_t> begin(2 * P, 0), count(2 * P, 0);
     std::vector<std::vector<PredictedFragment>> assays(2 * P);
 
-    for (std::size_t base = 0; base < P; base += block_pairs)
+    const std::size_t block = blockPairs(model.parallelism(), availableMemoryBytes());
+    for (std::size_t base = 0; base < P; base += block)
     {
-      const std::size_t last = std::min(P, base + block_pairs);
+      const std::size_t last = std::min(P, base + block);
       std::vector<std::size_t> targets;
       std::vector<std::string> decoys(last - base);
       std::vector<std::uint8_t> fixed(counts.begin() + static_cast<std::ptrdiff_t>(base), counts.begin() + static_cast<std::ptrdiff_t>(last));
@@ -245,7 +260,7 @@ namespace ODIA::search
       std::string failure;
       const auto n = static_cast<std::ptrdiff_t>(last - base);
       trace::Scope decoys_step("decoys", 2);
-      decoys_step.fields().idx = static_cast<std::int64_t>(base / block_pairs);
+      decoys_step.fields().idx = static_cast<std::int64_t>(base / block);
       decoys_step.fields().rows = n;
 #pragma omp parallel for schedule(dynamic, 64)
       for (std::ptrdiff_t s = 0; s < n; ++s)

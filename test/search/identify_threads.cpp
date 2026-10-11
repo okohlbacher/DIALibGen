@@ -41,8 +41,8 @@ int main(int argc, char** argv)
         "-threads 0 is the physical cores: " + std::to_string(SearchParams::resolveThreads(0)));
   check(SearchParams::predictionSessions(1) == 1 && SearchParams::predictionSessions(8) == 8 &&
           SearchParams::predictionSessions(0) == 1 &&
-          SearchParams::predictionSessions(1000) == SearchParams::max_prediction_sessions,
-        "one prediction session per thread, at least 1, at most " + std::to_string(SearchParams::max_prediction_sessions));
+          SearchParams::predictionSessions(100000) == cores,
+        "one prediction session per thread, at least 1, at most the " + std::to_string(cores) + " physical cores");
   const int sessions = SearchParams::predictionSessions(SearchParams::resolveThreads(0));
   if (std::thread::hardware_concurrency() >= 4)
   { check(sessions > 1, "-threads 0 predicts with more than one session on this multi-core machine: " + std::to_string(sessions)); }

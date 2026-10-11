@@ -213,12 +213,12 @@ CPU training.
 `-machine:threads` (default 4) is the number of CPU threads LibTorch trains
 with. Each training step is a chain of small operations, so the count stops
 paying early: for the RT head on an Astral run (77,029 sequences) on a
-2 x 96-core EPYC 9654, an epoch took 16.7 s at 4 threads, 12.1 s at 8, 9.1 s
-at 16, 9.0 s at 32 and 10.8 s at 64, while training kept 3.8, 7.3, 14, 28
-and 56 cores busy. Above 16 threads the extra cores only wait. The tuned weights
-depend on the thread count (it fixes the order of LibTorch's reductions):
-they are reproducible with the same build at the same count, which
-`.tune.json` records as `threads`.
+2 x 96-core EPYC 9654, an epoch took 11.3 s at 4 threads, 6.7 s at 8, 4.4 s
+at 16, 3.7 s at 32 and 3.5 s at 64, for 380, 450, 600, 990 and 1,850
+CPU-seconds of training over 8 epochs. The tuned weights depend on the thread
+count (it fixes the order of LibTorch's reductions): they are reproducible
+with the same build at the same count, which `.tune.json` records as
+`threads`.
 
 Tune mode uses training filters such as `-filter:q_value`. Refinement-only
 settings such as `-q_precursor`, `-q_global`, `-q_protein` and observed-value

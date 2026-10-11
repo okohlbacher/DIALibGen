@@ -111,6 +111,13 @@ This project follows [Semantic Versioning](https://semver.org/).
   `-threads` host threads. One H100 builds a whole-proteome library in
   91 s instead of 154 s (0.11.1 with cuDNN, TF32 on), two H100s in 65 s.
   Refine and tune write their output on `-threads` threads as well.
+- **CPU training on Linux is 1.5 to 3 times faster per epoch** (RT head, Astral run,
+  2 x 96-core EPYC: 16.7 -> 11.3 s at 4 threads, 9.1 -> 4.4 s at 16,
+  10.8 -> 3.5 s at 64) with bit-identical tuned weights: glibc kept handing the
+  training tensors back to the system and faulting them in again at every
+  step (30-37 % of training CPU was system time). It now keeps freed memory
+  while a head trains (about 2 GB more resident during training) and returns
+  it afterwards.
 - Tune records its training thread count (`threads`, `interop_threads`) in
   `.tune.json` and the tuned ONNX metadata: the tuned weights depend on it.
   LibTorch's inter-op pool is one thread (tune never uses it). Tracing

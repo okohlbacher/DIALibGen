@@ -21,7 +21,8 @@
 //   ODIA_MS2_BLOCK=N     precursors per MS2 call instead of 20000.
 //   ODIA_LPT=1           dispatch chunks longest peptide first (order only).
 //   ODIA_INTERLEAVE=1    interleave all later allocations over the NUMA nodes
-//                        (what numactl --interleave=all does).
+//                        (what numactl --interleave=all does); under
+//                        ODIA_SOLUTIONS on only above 32 threads.
 //   ODIA_PAR_POST=1      MS2 post-processing (annotation, floor, ranking) on
 //                        all worker threads, concatenated in order.
 //   ODIA_PAR_ENUM=1      digest and precursor enumeration on all worker
@@ -72,7 +73,15 @@ namespace ODIA::perf
   inline std::size_t lstmRows()  { static const long v = knob("ODIA_LSTM_ROWS", solutions() ? 64 : 0); return v > 0 ? std::size_t(v) : 0; }
   inline std::size_t ms2Block()  { static const long v = knob("ODIA_MS2_BLOCK", solutions() ? 100000 : 20000); return v > 0 ? std::size_t(v) : 20000; }
   inline bool lpt()              { static const bool v = flag("ODIA_LPT"); return v; }
-  inline bool interleave()       { static const bool v = flag("ODIA_INTERLEAVE"); return v; }
+  /// Interleave: explicit 0/1 wins; under ODIA_SOLUTIONS it is on only above
+  /// 32 worker threads. Measured on sub10: +6 % at 16 sessions (2048 rows), but
+  /// at 96 sessions it spreads the busy threads over both sockets.
+  inline bool interleave(unsigned threads)
+  {
+    static const long v = knob("ODIA_INTERLEAVE", -1);
+    if (v >= 0) { return v > 0; }
+    return solutions() && (threads == 0 || threads > 32);
+  }
   inline bool parPost()          { static const bool v = flag("ODIA_PAR_POST"); return v; }
   inline bool parEnum()          { static const bool v = flag("ODIA_PAR_ENUM"); return v; }
   inline bool parWrite()         { static const bool v = flag("ODIA_PAR_WRITE"); return v; }

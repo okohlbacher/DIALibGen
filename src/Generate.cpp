@@ -354,7 +354,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     ODIA::trace::Scope setup_phase("setup", 0);
     // perf/generate-solutions: ODIA_INTERLEAVE spreads the pages (and with
     // them, through NUMA balancing, the inference threads) over all nodes.
-    if (ODIA::perf::interleave())
+    if (ODIA::perf::interleave(static_cast<unsigned>(std::max(0, getIntOption_("threads")))))
     {
       const bool ok = ODIA::perf::interleaveMemory();
       ODIA::trace::note("perf.interleave", ok ? "1" : "failed");

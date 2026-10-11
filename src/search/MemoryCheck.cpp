@@ -21,19 +21,36 @@
 #  include <mach/mach.h>
 #  include <mach/mach_host.h>
 #  include <unistd.h>
+#elif defined(__linux__)
+#  include <malloc.h>   // malloc_trim (glibc)
+#  include <unistd.h>
 #endif
 
 namespace ODIA::search
 {
+  std::string memorySize(std::uint64_t bytes)
+  {
+    char buffer[32];
+    if (bytes < 1000000000ull) { std::snprintf(buffer, sizeof buffer, "%.1f MB", static_cast<double>(bytes) / 1e6); }
+    else { std::snprintf(buffer, sizeof buffer, "%.1f GB", static_cast<double>(bytes) / 1e9); }
+    return buffer;
+  }
+
   namespace
   {
-    std::string gigabytes(std::uint64_t bytes)
+    std::string gigabytes(std::uint64_t bytes) { return memorySize(bytes); }
+
+#if defined(__linux__)
+    /// Resident bytes of this process (/proc/self/statm), 0 when unreadable.
+    std::uint64_t residentBytes()
     {
-      char buffer[32];
-      if (bytes < 1000000000ull) { std::snprintf(buffer, sizeof buffer, "%.1f MB", static_cast<double>(bytes) / 1e6); }
-      else { std::snprintf(buffer, sizeof buffer, "%.1f GB", static_cast<double>(bytes) / 1e9); }
-      return buffer;
+      std::ifstream statm("/proc/self/statm");
+      std::uint64_t size = 0, resident = 0;
+      if (!(statm >> size >> resident)) { return 0; }
+      const long page = sysconf(_SC_PAGESIZE);
+      return page > 0 ? resident * static_cast<std::uint64_t>(page) : 0;
     }
+#endif
 
 #if defined(__linux__)
     /// The cgroup v2 limit's room (memory.max - memory.current), or 0 when
@@ -89,6 +106,20 @@ namespace ODIA::search
     if (available == 0) { return 0; }
     const std::uint64_t room = cgroupRoom();
     return room > 0 ? std::min(available, room) : available;
+#else
+    return 0;
+#endif
+  }
+
+  std::uint64_t releaseFreedMemory()
+  {
+#if defined(__linux__)
+    const std::uint64_t before = residentBytes();
+#  if defined(__GLIBC__)
+    malloc_trim(0);
+#  endif
+    const std::uint64_t after = residentBytes();
+    return before > after ? before - after : 0;
 #else
     return 0;
 #endif

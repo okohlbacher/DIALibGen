@@ -2,14 +2,22 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 // search:ms1_in_memory: the decision rule (auto holds the MS1 map when the
-// free memory is at least twice its estimated size; on and off are obeyed)
-// and that the free memory can be read on the platforms the tool ships for.
+// free memory is at least twice its estimated size; on and off are obeyed),
+// that the free memory can be read on the platforms the tool ships for, and,
+// with glibc, that memory freed but kept by the allocator is given back.
 // That on and off write the same report is identify_e2e's.
 
 #include <odia/search/MemoryCheck.h>
 
+#if defined(__linux__)
+#  include <malloc.h>
+#endif
+
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <vector>
 #include <stdexcept>
 #include <string>
 
@@ -56,6 +64,33 @@ int main()
   std::cout << "     free memory: " << static_cast<double>(free_bytes) / 1e9 << " GB\n";
 #if defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
   check(free_bytes > 0, "the free memory is known on this platform");
+#endif
+
+#if defined(__GLIBC__)
+  {
+    // What extraction leaves behind: many large blocks from the heap (glibc's
+    // dynamic mmap threshold puts them there once a block that size was
+    // freed; fixed here), freed below a block still in use, so free() cannot
+    // shrink the heap and the pages stay resident.
+    mallopt(M_MMAP_THRESHOLD, 64 << 20);
+    mallopt(M_TRIM_THRESHOLD, 1 << 30);
+    constexpr std::size_t blocks = 256, block = 1 << 20;
+    std::vector<char*> held;
+    for (std::size_t k = 0; k < blocks; ++k)
+    {
+      held.push_back(static_cast<char*>(std::malloc(block)));
+      std::memset(held.back(), 1, block);
+    }
+    char* pin = static_cast<char*>(std::malloc(4096));
+    std::memset(pin, 1, 4096);
+    for (char* p : held) { std::free(p); }
+    const std::uint64_t released = releaseFreedMemory();
+    std::free(pin);
+    check(released >= blocks * block / 2, "freed heap memory kept by glibc is given back: " + memorySize(released) + " of " +
+                                            memorySize(blocks * block));
+  }
+#else
+  check(releaseFreedMemory() == 0, "nothing to give back without glibc");
 #endif
 
   if (failures) { std::cerr << failures << " check(s) failed\n"; return 1; }

@@ -22,6 +22,16 @@ namespace ODIA::search
   /// - Windows: ullAvailPhys of GlobalMemoryStatusEx.
   std::uint64_t availableMemoryBytes();
 
+  /// Gives memory that was freed but that the allocator keeps for reuse back
+  /// to the system, and returns how many resident bytes that released (0
+  /// where the system does not say). glibc keeps freed pages in the arena
+  /// that allocated them (malloc_trim releases them); macOS and Windows
+  /// return large blocks on free, and this does nothing there.
+  std::uint64_t releaseFreedMemory();
+
+  /// @p bytes as "12.3 GB", or "6.3 MB" below 1 GB (decimal units).
+  std::string memorySize(std::uint64_t bytes);
+
   /// What auto asks of the free memory: this many times the estimated size of
   /// the MS1 map in memory (owner decision D7: room for the map and as much
   /// again for everything else that grows while it is held).

@@ -5,6 +5,7 @@
 
 #include <odia/search/EvidencePrefilter.h>
 #include <odia/search/IonMobility.h>
+#include <odia/search/MemoryCheck.h>
 
 #include <nlohmann/json.hpp>
 
@@ -456,6 +457,22 @@ namespace ODIA::search
       t = Clock::now();
       extract(set, run, calibration, groups);
       timing["extract"] = since(t);
+      // An MS1 map extract() held in memory is freed when it returns, but
+      // glibc keeps the freed pages in the extracting thread's arena: about
+      // the map's size (20 GB on a diaPASEF run) would stay resident under
+      // scoring and tuning, which allocate on other threads. Given back here.
+      if (!run.ms1_memory_json.empty())
+      {
+        json record = json::parse(run.ms1_memory_json);
+        if (record.value("held", false))
+        {
+          const std::uint64_t released = releaseFreedMemory();
+          record["released_bytes"] = released;
+          run.ms1_memory_json = record.dump();
+          info("search extraction: the MS1 map's memory is given back to the system (" + memorySize(released) +
+               " resident released)");
+        }
+      }
     }
     // The run's memory and its cache files are not needed for scoring. On an
     // ion-mobility search the report's 1/K0 is re-measured in the run after

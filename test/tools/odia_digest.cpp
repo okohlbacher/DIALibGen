@@ -80,12 +80,54 @@ int main(int argc, char** argv)
     params.n_terminal_methionine_excision = false;
     params.missed_cleavages = 0;
     params.variable_modifications = {"Oxidation (M)"};
-    for (const std::size_t maximum : {0u, 1u, 2u})
+    // A requested variable modification that modifies nothing is refused
+    // (max 0 here); until 0.11.1 it was ignored with exit code 0.
+    {
+      params.max_variable_modifications = 0;
+      ODIA::Library library;
+      bool refused = false;
+      try { ODIA::LibraryGenerator::generate(argv[1], params, library); }
+      catch (const std::invalid_argument& e)
+      { refused = std::string(e.what()).find("produced no modified precursor") != std::string::npos; }
+      if (!refused) { throw std::runtime_error("a variable modification that modifies nothing was not refused"); }
+    }
+    // Residue-less peptide-terminal modifications at the default maximum 1
+    // (dropped by OpenMS's one-modification path) and at 2; protein-terminal
+    // ones are refused.
+    for (const std::size_t maximum : {1u, 2u})
+    {
+      for (const char* mod : {"Acetyl (N-term)", "Amidated (C-term)"})
+      {
+        ODIA::DigestParams terminal = params;
+        terminal.variable_modifications = {mod};
+        terminal.max_variable_modifications = maximum;
+        ODIA::Library library;
+        const auto st = ODIA::LibraryGenerator::generate(argv[1], terminal, library);
+        if (library.precursorCount() != 2u || st.variable_modification_precursors.size() != 1 ||
+            st.variable_modification_precursors.front().second != 1u)
+        { throw std::runtime_error(std::string(mod) + " at max " + std::to_string(maximum) + " did not give one modified form"); }
+      }
+    }
+    for (const char* mod : {"Acetyl (Protein N-term)"})
+    {
+      for (const bool fixed : {false, true})
+      {
+        ODIA::DigestParams protein = params;
+        (fixed ? protein.fixed_modifications : protein.variable_modifications) = {mod};
+        ODIA::Library library;
+        bool refused = false;
+        try { ODIA::LibraryGenerator::generate(argv[1], protein, library); }
+        catch (const std::invalid_argument& e)
+        { refused = std::string(e.what()).find("protein-terminal") != std::string::npos; }
+        if (!refused) { throw std::runtime_error(std::string(mod) + " was not refused"); }
+      }
+    }
+    for (const std::size_t maximum : {1u, 2u})
     {
       params.max_variable_modifications = maximum;
       ODIA::Library library;
       ODIA::LibraryGenerator::generate(argv[1], params, library);
-      if (library.precursorCount() != (maximum == 0 ? 1u : 2u))
+      if (library.precursorCount() != 2u)
       { throw std::runtime_error("variable modifications duplicated or lost the base form"); }
       const std::string tsv = std::string(argv[1]) + ".tsv";
       ODIA::DIANNLibraryFile::storeTSV(tsv, library);

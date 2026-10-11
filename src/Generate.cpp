@@ -732,6 +732,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       { writeLogWarn_("digest skipped " + std::to_string(st.dropped_proteins) +
           " invalid proteins and " + std::to_string(st.dropped_ambiguous_peptides) +
           " peptides with ambiguous or undefined residue masses"); }
+      for (const auto& [name, count] : st.variable_modification_precursors)
+      { writeLogInfo_("variable modification '" + name + "': " + std::to_string(count) + " precursors"); }
 
       if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
             library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
@@ -813,6 +815,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                                                              recompute_decoy_mz);
       writeLogInfo_("decoys: " + std::to_string(made) + " (" + decoys + "), " +
                     std::to_string(skipped) + " skipped");
+    }
+    catch (const std::invalid_argument& e)
+    {
+      // A request the library cannot honour (a modification that modifies
+      // nothing, an unsupported specificity, an impossible charge range).
+      writeLogError_(std::string("library generation refused: ") + e.what());
+      return ILLEGAL_PARAMETERS;
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }

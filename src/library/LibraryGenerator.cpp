@@ -11,6 +11,7 @@
 #include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/CHEMISTRY/EmpiricalFormula.h>
+#include <OpenMS/CHEMISTRY/ModificationsDB.h>
 #include <OpenMS/CHEMISTRY/ModifiedPeptideGenerator.h>
 #include <OpenMS/CHEMISTRY/ProteaseDigestion.h>
 #include <OpenMS/CHEMISTRY/Residue.h>
@@ -275,6 +276,7 @@ namespace ODIA
     struct EnumeratedForm
     {
       std::string sequence;
+      std::uint64_t variable_mods = 0;   ///< bit k: carries requested variable modification k
       std::vector<EnumeratedPrecursor> precursors;
     };
 
@@ -435,6 +437,61 @@ namespace ODIA
     ModifiedPeptideGenerator::MapToResidueType variable_map =
       ModifiedPeptideGenerator::getModifications(toStringList(params.variable_modifications));
 
+    // Requested modifications that would silently do nothing are refused.
+    // Protein-terminal ones need the peptide's position in its protein,
+    // which generation does not keep; OpenMS's ModifiedPeptideGenerator
+    // applies them nowhere, fixed or variable, so a library "with" protein
+    // N-terminal acetylation came out without it and with exit code 0.
+    std::vector<const ResidueModification*> requested_variable;
+    {
+      const auto* db = ModificationsDB::getInstance();
+      const auto refuseProteinTerminal = [&](const std::string& name, const char* kind) {
+        const auto* mod = db->getModification(name);
+        const auto term = mod->getTermSpecificity();
+        if (term == ResidueModification::PROTEIN_N_TERM || term == ResidueModification::PROTEIN_C_TERM)
+        {
+          throw std::invalid_argument(std::string(kind) + " modification '" + name +
+            "' is protein-terminal; protein-terminal modifications are not supported yet (generation "
+            "does not track where a peptide sits in its protein). The peptide-terminal form, e.g. "
+            "'Acetyl (N-term)', applies to every peptide N-terminus.");
+        }
+        return mod;
+      };
+      for (const auto& name : params.fixed_modifications) { refuseProteinTerminal(name, "fixed"); }
+      for (const auto& name : params.variable_modifications)
+      { requested_variable.push_back(refuseProteinTerminal(name, "variable")); }
+    }
+    if (requested_variable.size() > 64)
+    { throw std::invalid_argument("at most 64 variable modifications can be requested"); }
+    // Residue-less peptide-terminal variable modifications (origin 'X', such
+    // as 'Acetyl (N-term)'). OpenMS's one-modification path places a variable
+    // modification only on a residue it names, so at max_variable_modifications
+    // 1 these were dropped; they are added here, one per form, after the
+    // forms OpenMS made. Its path for 2 or more handles them.
+    std::vector<const ResidueModification*> terminal_variable;
+    for (const auto* mod : requested_variable)
+    {
+      const auto term = mod->getTermSpecificity();
+      if ((term == ResidueModification::N_TERM || term == ResidueModification::C_TERM) && mod->getOrigin() == 'X' &&
+          std::find(terminal_variable.begin(), terminal_variable.end(), mod) == terminal_variable.end())
+      { terminal_variable.push_back(mod); }
+    }
+    const auto variableBits = [&](const AASequence& form) {
+      std::uint64_t bits = 0;
+      const auto mark = [&](const ResidueModification* mod) {
+        if (mod == nullptr) { return; }
+        for (std::size_t k = 0; k < requested_variable.size(); ++k)
+        {
+          if (requested_variable[k] == mod || requested_variable[k]->getFullId() == mod->getFullId())
+          { bits |= std::uint64_t{1} << k; }
+        }
+      };
+      mark(form.getNTerminalModification());
+      mark(form.getCTerminalModification());
+      for (Size k = 0; k < form.size(); ++k) { mark(form[k].getModification()); }
+      return bits;
+    };
+
     // Reject the estimate before multiplying: an extreme fragment cap must
     // not wrap size_t and bypass the 32-bit CSR limit in reserve().
     constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
@@ -462,6 +519,17 @@ namespace ODIA
       {
         ModifiedPeptideGenerator::applyVariableModifications(
           variable_map, base, params.max_variable_modifications, forms, true);
+        if (params.max_variable_modifications == 1)
+        {
+          for (const auto* mod : terminal_variable)
+          {
+            const bool n_term = mod->getTermSpecificity() == ResidueModification::N_TERM;
+            if (n_term ? base.hasNTerminalModification() : base.hasCTerminalModification()) { continue; }
+            AASequence form = base;
+            if (n_term) { form.setNTerminalModification(mod); } else { form.setCTerminalModification(mod); }
+            forms.push_back(std::move(form));
+          }
+        }
       }
 
       std::vector<Fragment> fragments;
@@ -469,6 +537,7 @@ namespace ODIA
       {
         EnumeratedForm& f = out.forms.emplace_back();
         f.sequence = form.toString();
+        if (!requested_variable.empty()) { f.variable_mods = variableBits(form); }
         for (int z : params.charges)
         {
           const double precursor_mz = form.getMZ(z);
@@ -493,6 +562,7 @@ namespace ODIA
     ordered.reserve(peptide_to_proteins.size());
     for (const auto& item : peptide_to_proteins) { ordered.push_back(&item); }
 
+    std::vector<std::size_t> variable_counts(requested_variable.size(), 0);
     std::vector<EnumeratedPeptide> enumerated;
     for (std::size_t first = 0; first < ordered.size(); first += wave)
     {
@@ -515,6 +585,8 @@ namespace ODIA
         const std::uint32_t protein_handle = library.strings().intern(ordered[first + k]->second);
         for (const auto& form : peptide.forms)
         {
+          for (std::size_t k = 0; k < variable_counts.size(); ++k)
+          { if (form.variable_mods >> k & 1) { variable_counts[k] += form.precursors.size(); } }
           const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
           for (const auto& precursor : form.precursors)
           {
@@ -549,6 +621,18 @@ namespace ODIA
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
+    for (std::size_t k = 0; k < variable_counts.size(); ++k)
+    {
+      stats.variable_modification_precursors.emplace_back(params.variable_modifications[k], variable_counts[k]);
+      if (variable_counts[k] > 0) { continue; }
+      // A modification that modifies nothing is a request the library does
+      // not honour; until 0.11.1 that went by with exit code 0.
+      std::string hint;
+      if (params.max_variable_modifications == 0) { hint = " (max_variable_modifications is 0)"; }
+      else { hint = " (does any peptide in the m/z and length windows have its site?)"; }
+      throw std::invalid_argument("variable modification '" + params.variable_modifications[k] +
+                                  "' produced no modified precursor in the whole library" + hint);
+    }
     enumerate_phase.fields().rows = static_cast<std::int64_t>(stats.precursors);
     enumerate_phase.end();
     release_phase.start("release", 0);
@@ -1701,7 +1785,9 @@ namespace ODIA
     };
     // v5 removes duplicate variable-modification forms and empty assays,
     // rejects ambiguous masses, and pins shuffle across standard libraries.
-    ps << "v5"
+    // v6: residue-less peptide-terminal variable modifications are applied at
+    // max_variable_modifications 1 (they were silently dropped before).
+    ps << "v6"
        << ";enz=" << p.enzyme
        << ";len=" << p.min_length << "-" << p.max_length
        << ";mc=" << p.missed_cleavages

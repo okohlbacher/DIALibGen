@@ -184,6 +184,9 @@ namespace ODIA
       std::size_t dropped_precursor_mz = 0;
       std::size_t dropped_proteins = 0;
       std::size_t dropped_ambiguous_peptides = 0;
+      /// Per requested variable modification (as named), the precursors
+      /// carrying it. generate() refuses a library in which one is zero.
+      std::vector<std::pair<std::string, std::size_t>> variable_modification_precursors;
     };
 
     /// @param threads host threads for digestion and precursor enumeration

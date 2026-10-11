@@ -204,6 +204,36 @@ def main(binary, fasta, model_dir, workdir):
     check(rows > 0 and {"ModifiedPeptide", "PrecursorMz", "ProductMz", "UniprotID", "ProteinName"} <= set(header),
           f"the TSV is the DIA-NN dialect with {rows} rows")
 
+    # Every requested variable modification must modify something, and the
+    # residue-less peptide-terminal ones must work at the default
+    # max_variable_modifications (1): until 0.11.1 they were dropped there
+    # silently. The log counts the precursors per modification.
+    mods = ["Oxidation (M)", "Acetyl (N-term)", "Amidated (C-term)"]
+    modlog = run("mods.tsv", {"variable_modifications": mods})
+    for mod in mods:
+        m = re.search(r"variable modification '" + re.escape(mod) + r"': (\d+) precursors", modlog)
+        check(m is not None and int(m.group(1)) > 0,
+              f"variable modification {mod} gives modified precursors ({m.group(1) if m else 'no count'})")
+    with open("mods.tsv") as fh:
+        next(fh)
+        seqs = {line.split("\t")[1] for line in fh}
+    # DIA-NN's notation: UniMod accessions, the N-terminal one before the
+    # first residue without OpenMS's leading dot.
+    check(any(q.startswith("(UniMod:1)") for q in seqs) and not any(q.startswith(".") for q in seqs),
+          "N-terminal acetylation is written (UniMod:1)PEPTIDE")
+    check(any("(UniMod:2)" in q for q in seqs), "C-terminal amidation is written with UniMod:2")
+    for config, what in (({"variable_modifications": ["Acetyl (Protein N-term)"]}, "protein-terminal"),
+                         ({"fixed_modifications": ["Carbamidomethyl (C)", "Acetyl (Protein N-term)"]}, "protein-terminal"),
+                         ({"variable_modifications": ["Oxidation (M)"], "max_variable_modifications": 0},
+                          "produced no modified precursor")):
+        with open("refused.json", "w") as fh:
+            json.dump(config, fh)
+        failure = subprocess.run([binary, "-in", fasta, "-config", "refused.json", "-out", "refused.tsv"],
+                                 capture_output=True, text=True, env=env)
+        check(failure.returncode != 0 and what in failure.stdout + failure.stderr
+              and not os.path.exists("refused.tsv"),
+              f"generation refuses {json.dumps(config)} ({what})")
+
     print()
     if failures:
         print("e2e: FAILED")

@@ -17,6 +17,16 @@ ODIA_TRACE=trace-dir DIALibGen -in proteins.fasta -config cfg.json -out lib.parq
 | `ODIA_TRACE_SNAPSHOT_MIN_S` | 30 | least time between two phase-boundary snapshots (`numa.tsv`, `smaps.tsv`, `mallocinfo.tsv`); 0 takes one at every phase start, `off` or a negative value none |
 | `ODIA_ORT_PROFILE` | unset | path prefix; every ONNX Runtime session writes its per-operator profile to `<prefix>_<model>_i<instance>_s<session>_<time>.json` |
 
+Switches for measurements and tests; none changes the library's content:
+
+| variable | default | effect |
+|---|---|---|
+| `ODIA_STREAM` | on | `0`: 0.11.1's order (MS2, then CCS) and the one-pass writer, instead of RT, CCS, MS2 with the writer streaming behind MS2 |
+| `ODIA_NUMA_INTERLEAVE` | on above 32 threads | `0` or `1`: interleave the run's memory over the NUMA nodes or not |
+| `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA) | precursors per MS2 call |
+| `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
+| `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |
+
 `ODIA_ORT_PROFILE` works without `ODIA_TRACE`. It keeps every operator call in
 memory until the predictor is destroyed, so use it on small inputs.
 
@@ -89,21 +99,16 @@ Regions recorded by `generate`:
 
 | level | names |
 |---|---|
-| 0 | `setup`, `fasta_read`, `digest`, `enumerate`, `release`, `rt`, `irt_fit`, `ms2`, `ccs`, `decoys`, `fingerprint`, `write`, `teardown`; and the tracer's own `trace_snapshot` |
-| 1 | `rt`: `unique_parse`, `sessions`, `predict`, `assign`; `ms2`: `sessions`, `reserve`, `block`, `finalize`; `ccs`: `sessions`, `block`; `fingerprint`: `hash_fasta`, `hash_model`; `write`: `build_arrays`, `finish_arrays`, `write_table`, `commit` (Parquet) or `format_rows`, `close`, `commit` (TSV) |
-| 2 | inside each `block`: `parse` (AASequence::fromString), `predict`, `post` (fragment enumeration, base-peak floor, ranking and cap for MS2; ion mobility for CCS) |
-| 3 | `session_create`, `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch); inside each MS2 `post`: `post_enumerate`, `post_rank`, `post_select`, `post_emit` (aggregates, below) |
+| 0 | `setup`, `fingerprint`, `fasta_read`, `digest`, `enumerate`, `release`, `rt`, `irt_fit`, `ccs`, `ms2`, `decoys`, `write`, `teardown` (in this order; with `ODIA_STREAM=0`, `ms2` before `ccs`); and the tracer's own `trace_snapshot` |
+| 1 | `rt`: `unique_parse`, `sessions`, `predict`, `assign`; `ccs`: `sessions`, `block`; `ms2`: `sessions`, `reserve`, `block`, `drain`, `drain_sink`, `finalize`, and the writer's `stream_write` (on its own thread); `fingerprint`: `hash_fasta`, `hash_model`; `write`: `write_tail` and `commit` after streaming, or `write_table` and `commit` (Parquet) / `format_rows`, `close` and `commit` (TSV) for the one-pass writer |
+| 2 | inside each `block`: `parse` (AASequence::fromString) and `predict`; MS2 also `post` (fragment selection, on a helper thread overlapping the next block's prediction), `emit` (appending the block in order) and `hand_over` (to the writer); CCS also `post` (ion mobility); `ccs_settle` (CcsBatchGuard, on the writer's thread; `idx` = rows predicted again) |
+| 3 | `session_create`, `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch) |
 | 4 | `encode` (tokenisation and tensors), `ort_run` (ONNX Runtime `Run`), `unpack` (validation and copy-out) |
 
-The four `post_*` rows of an MS2 block are sums, not intervals: the post step
-loops over precursors, so each part is timed per precursor and summed over the
-block. `t0_s` is the start of the block's `post` step, `dur_s` the summed time,
-`t1_s = t0_s + dur_s`, and `cpu_s` is -1. `post_enumerate` is the fragment
-enumeration without the m/z cap; `post_rank` the base-peak floor and the
-lookup of each fragment's predicted intensity; `post_select` the sort, the
-doubly-charged quota, the cap and the minimum-fragment check; `post_emit`
-appending the transitions. Precursors whose prediction failed are copied
-unchanged and fall in none of the four.
+An event is filed under the level-0 phase that is open when it ends, on any
+thread. The streaming writer's `stream_write` and `ccs_settle` events therefore
+count to `ms2`, where the library is now written; `write` holds only what is
+left after MS2 (the last, partial row group and the decoys) and the commit.
 
 Phases follow one another on the main thread. Time between them (log output)
 belongs to no phase. `release` is the digest freeing its peptide map and parsed

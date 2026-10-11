@@ -5,10 +5,45 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- **TSV column names.** The `.tsv` library is now DIA-NN's TSV format under
+  the column names that both DIA-NN 1.7 and 2.x read: `ModifiedPeptide`,
+  `PrecursorCharge`, `PrecursorMz`, `iRT`, `IonMobility`, `ProductMz`,
+  `LibraryIntensity`, `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber`,
+  `FragmentLossType`, `Decoy`, instead of the dotted names (`Modified.Sequence`,
+  `Precursor.Mz`, ...). DIA-NN 1.7 could not read the dotted names at all. New
+  columns `UniprotID` (accessions), `ProteinName` (entry names) and
+  `Proteotypic` give DIA-NN its protein groups; with `Protein.Group` alone both
+  versions reported "0 protein groups" unless searched with `--fasta
+  --reannotate`. Modifications are written as UniMod accessions
+  (`C(UniMod:4)`, `(UniMod:1)PEPTIDE`) instead of OpenMS names.
+  `Precursor.Id`, `Protein.Group` and `CCS` stay. **Scripts that read
+  DIALibGen TSVs by the dotted names must switch to the new ones**; DIALibGen
+  itself reads both. The Parquet layout is unchanged.
+- **Exit code.** Generation now refuses, with exit code 6 (ILLEGAL_PARAMETERS)
+  and no output, a requested modification it would silently not apply: a
+  protein-terminal specificity (`Acetyl (Protein N-term)`, fixed or variable;
+  not supported yet), or a variable modification that leaves no modified
+  precursor in the whole library. Until 0.11.1 such runs exited 0 with an
+  unmodified library.
+
 ### Added
 
 - `-mode convert` rewrites a library in the format of `-out` without
   changing its content, e.g. Parquet to DIA-NN TSV.
+- `peptdeep_ms2_pruned.onnx`: the MS2 model without its unused
+  modification-neutral-loss branch, shipped beside the three stock models and
+  run by default. The b/y channels generation reads are bit-identical to the
+  full model's, so the library content is the same; MS2 needs about 15 % less
+  CPU. The recipe names and hashes the model that ran (so a library equals
+  0.11.1's in content, not byte for byte). `"ms2_model":
+  "peptdeep_ms2_dynamic.onnx"` selects the full model. Made by
+  `scripts/prune-ms2-modloss.py`; `dialibgen-fetch-models` verifies it.
+- Opt-in performance tracing: `ODIA_TRACE=<dir>` writes phase, call, batch and
+  ONNX Runtime events with /proc samples, `ODIA_ORT_PROFILE` ONNX Runtime's
+  per-operator profile ([tracing](docs/tracing.md)). Off, it costs nothing
+  measurable.
 - `-machine:require_gpu`: fail instead of running a model on the CPU when its
   CUDA session cannot be created.
 - `-machine:tf32 true|false` (default `false`): TensorFloat-32 on NVIDIA GPUs,
@@ -19,18 +54,50 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- The `.tsv` library is now DIA-NN's TSV format under the column names that
-  both DIA-NN 1.7 and 2.x read: `ModifiedPeptide`, `PrecursorCharge`,
-  `PrecursorMz`, `iRT`, `IonMobility`, `ProductMz`, `LibraryIntensity`,
-  `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber`,
-  `FragmentLossType`, `Decoy`. DIA-NN 1.7 could not read the dotted names at
-  all. New columns `UniprotID` (accessions), `ProteinName` (entry names) and
-  `Proteotypic` give DIA-NN its protein groups; with `Protein.Group` alone both
-  versions reported "0 protein groups" unless searched with `--fasta
-  --reannotate`. Modifications are written as UniMod accessions
-  (`C(UniMod:4)`) instead of OpenMS names. `Precursor.Id`, `Protein.Group`
-  and `CCS` stay. Scripts that read DIALibGen TSVs by the dotted names must
-  switch to the new ones; DIALibGen itself reads both.
+- **Generation on the CPU is 6.5 times faster at 96 threads** (whole human-sized
+  proteome, 5.8 M precursors, 2 x 96-core EPYC: 1,025 -> 158 s),
+  1.7 times at 16 threads (1,018 -> 595 s) and 1.5 times at 8 (1,729 -> 1,156 s),
+  with the same library content:
+  - one ONNX Runtime session per thread instead of at most 16, sharing one
+    copy of the weights, fed 64-row batches costliest first, so that every
+    session stays busy to the end of each call;
+  - the pruned MS2 graph (above);
+  - RT and CCS predicted first and MS2 last, with the library written while
+    MS2 runs; nothing appears under the output name before it is complete;
+  - fragment m/z without per-ordinal sequence copies, the encoder without
+    ModificationsDB's lock, parallel RT parsing, at most 16 digest threads;
+  - above 32 threads on a multi-socket machine the run's memory is
+    interleaved over the NUMA nodes (-16 % at 96 threads; `ODIA_NUMA_INTERLEAVE`
+    overrides).
+  The output does not depend on `-threads`. Peak memory at 96 threads is
+  9.5 GiB (0.11.1: 14.0), at 16 threads 4.7 GiB (13.9).
+- `-threads 0` means one thread per **physical** core of the effective CPU
+  budget, not per hardware thread: SMT siblings share a core's arithmetic
+  units, and sessions on them ran slower. On Linux that is the cores of the
+  affinity mask (cgroup cpusets included), capped by a cgroup CPU quota
+  (`docker --cpus`, Kubernetes limits); on Windows the cores of all processor
+  groups; on macOS `hw.physicalcpu`. The log says how the count was arrived at.
+- Tune's re-prediction (`-tune_predict_sessions 0`, the default) uses
+  `-threads` sessions; until 0.11.1 it used up to 16 whatever `-threads` said.
+  Set `-threads` (or `-tune_predict_sessions`) to the CPUs it may use.
+- When a thread cannot be started (a process or cgroup thread limit), the
+  work runs on the threads that exist instead of the process aborting.
+- The TSV writer holds at most ~0.7 GB of rendered text, whatever the thread
+  count (about 4 GB at 96 threads before), and formats each precursor's
+  repeated fields once per precursor; the bytes are unchanged.
+- ONNX Runtime thread pools never spin while waiting (where more than one
+  intra-op thread is used, spinning cost 29-43 % more CPU); Arrow's thread
+  pools follow `-threads` instead of the hardware-thread count. The desktop
+  app starts the CLI with `OPENBLAS_NUM_THREADS=1` (OpenBLAS otherwise starts
+  a spinning thread per hardware thread, ~14 CPU-s per run on a large node);
+  command-line users can set it themselves.
+- Residue-less peptide-terminal variable modifications (`Acetyl (N-term)`,
+  `Amidated (C-term)`) are applied at the default `max_variable_modifications`
+  1; they were dropped silently. The log counts the precursors per variable
+  modification. Generation cache key v6.
+- The `SciexTOF` warning no longer says its predictions are close to Lumos:
+  at the same NCE their median spectral cosine to Lumos is 0.914 (ThermoTOF:
+  0.993, which is now its own warning).
 - The `-out` help text says what each format is: `.tsv` is DIA-NN's TSV
   format, `.parquet` DIALibGen's own layout, which DIA-NN does not read.
 - A model requested on CUDA that falls back to the CPU on a machine with a GPU
@@ -39,20 +106,26 @@ This project follows [Semantic Versioning](https://semver.org/).
   it as `odia.warnings`. Previously the only sign was `[RT] provider CPU`.
 - GPU prediction no longer uses TF32 by default (ONNX Runtime's CUDA provider
   enabled it). GPU libraries now equal CPU libraries to float rounding.
-- Digestion, precursor enumeration, MS2 fragment selection (now overlapped with
-  the next block's prediction) and the Parquet and TSV writers run on `-threads`
-  host threads. Output is byte-identical to 0.11.1 at any thread count. One
-  H100 builds a whole-proteome library in 106 s instead of 154 s (0.11.1 with
-  cuDNN, TF32 on), two H100s in 76 s. Refine and tune write their output on
-  `-threads` threads as well.
+- Digestion, precursor enumeration, MS2 fragment selection (overlapped with
+  the next block's prediction) and the Parquet and TSV writers run on
+  `-threads` host threads. One H100 builds a whole-proteome library in
+  91 s instead of 154 s (0.11.1 with cuDNN, TF32 on), two H100s in 65 s.
+  Refine and tune write their output on `-threads` threads as well.
+
+### Fixed
+
+- A CUDA build of ONNX Runtime on a machine without an NVIDIA driver no longer
+  reports a GPU fallback: no `WARNING`, no `odia.warnings` in the library.
 
 ### Documentation
 
-- GPU section in the usage guide (cuDNN 9 for CUDA 12, fallback warnings,
-  TF32, sessions); a tested CUDA LibTorch build recipe. On one H100, tuning the
-  RT head and re-predicting a 3.5 M-precursor library takes about a minute
-  instead of 12.5 min on 64 CPU threads, with the same held-out accuracy.
-
+- Usage: speed, threads and memory; modifications (what is refused, DIA-NN's
+  `--mod` for UniMod accessions it does not know, such as `UniMod:2`); the MS2
+  model. Tracing guide. GPU section (cuDNN 9 for CUDA 12, fallback warnings,
+  TF32, sessions); a tested CUDA LibTorch build recipe. On one H100, tuning
+  the RT head and re-predicting a 3.5 M-precursor library takes about a
+  minute instead of 12.5 min on 64 CPU threads, with the same held-out
+  accuracy.
 
 ## [0.11.1] — 2026-10-10
 

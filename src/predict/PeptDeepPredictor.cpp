@@ -13,9 +13,11 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <limits>
 #include <stdexcept>
@@ -45,6 +47,25 @@ namespace
     return what.find("no CUDA-capable device") != std::string::npos ||
            what.find("invalid device ordinal") != std::string::npos ||
            what.find("CUDA driver version is insufficient") != std::string::npos;
+  }
+
+  /// Whether an NVIDIA GPU can be visible to this process at all: not when
+  /// CUDA_VISIBLE_DEVICES hides every device, and on Linux only with the
+  /// NVIDIA kernel driver loaded. Elsewhere assumed, so a failure there still
+  /// warns.
+  bool nvidiaGpuVisible()
+  {
+    if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES"); visible != nullptr)
+    {
+      const std::string_view v(visible);
+      if (v.empty() || v == "-1" || v == "none" || v == "NoDevFiles") { return false; }
+    }
+#if defined(__linux__)
+    std::error_code ec;
+    return std::filesystem::exists("/proc/driver/nvidia/version", ec);
+#else
+    return true;
+#endif
   }
 
   /// ONNX Runtime's message without the source path, function signature and
@@ -175,11 +196,16 @@ namespace ODIA
           {
             // Keep the first real failure: it is the one the user can fix. A
             // device the user listed by hand is never "absent by design".
-            if ((listed || !noSuchDevice(e.what())) && !gpu_present)
+            // A CUDA build of ONNX Runtime on a machine without an NVIDIA
+            // driver fails to load its CUDA libraries: no GPU, the expected
+            // CPU case, not a GPU that cannot be used.
+            if ((listed || (!noSuchDevice(e.what()) && nvidiaGpuVisible())) && !gpu_present)
             {
               gpu_present = true;
               reason = "CUDA device " + std::to_string(dev) + ": " + conciseOrtError(e.what());
             }
+            else if (reason.empty())
+            { reason = "CUDA device " + std::to_string(dev) + ": " + conciseOrtError(e.what()); }
           }
         }
         if (!impl_->session_devices.empty())

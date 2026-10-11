@@ -68,9 +68,9 @@ namespace ODIA
     /// 2.2x), 16 gives 318 and 32 gives 231 -- past 8 threads it goes
     /// backwards. Sixteen single-threaded sessions on the same cores give
     /// 1760/s, 4.7x the best intra-op configuration, and it keeps scaling to
-    /// 4585/s at 64. Each session costs a copy of the weights and an arena,
-    /// so the count is capped by the caller rather than defaulted to the core
-    /// count.
+    /// 4585/s at 64. CPU sessions share one copy of the weights, and with
+    /// CPU_CHUNK_ROWS batches each arena is small, so generation runs one
+    /// session per thread, up to the physical cores.
     /// @param gpu_device which CUDA device. -1 (default) PROBES: it tries each
     ///        visible device in turn and keeps the first that actually
     ///        constructs a session. Probing rather than trusting device 0 is

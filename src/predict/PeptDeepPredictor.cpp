@@ -91,6 +91,20 @@ namespace
     return last == std::string::npos ? what : what.substr(last + 3);
   }
 
+  /// Options every session shares. Generation runs one intra-op thread per
+  /// session (sessions, not intra-op threads, scale these models); where a
+  /// caller asks for more (0 = ONNX Runtime's default, all cores), the pool's
+  /// threads must not spin while they wait for work: spinning cost 29-43 %
+  /// more CPU at the same speed (16 sessions x 6 threads, perf report). The
+  /// result does not depend on it.
+  void configureSession(Ort::SessionOptions& options, int intra_op_threads)
+  {
+    options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    if (intra_op_threads > 0) { options.SetIntraOpNumThreads(intra_op_threads); }
+    options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+    options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+  }
+
   /// Registers the CUDA provider for one device. Through the V2 options,
   /// because the legacy struct cannot switch TF32 off: ONNX Runtime's CUDA
   /// provider enables it by default.
@@ -307,8 +321,7 @@ namespace ODIA
                                        const GpuOptions& gpu)
     : impl_(std::make_unique<Impl>())
   {
-    if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
-    impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    configureSession(impl_->options, intra_op_threads);
 
     // ODIA_ORT_PROFILE=<prefix>: ONNX Runtime's own per-operator profile, one
     // JSON per session. Each session needs its own prefix -- ONNX Runtime
@@ -468,8 +481,7 @@ namespace ODIA
         impl_->device = -1;
         impl_->session_devices.clear();
         impl_->options = Ort::SessionOptions{};
-        impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
+        configureSession(impl_->options, intra_op_threads);
       }
       else
       {
@@ -578,8 +590,7 @@ namespace ODIA
         impl_->session_devices.push_back(dev);
         if (k == 0) { continue; }   // `session`, created above
         Ort::SessionOptions options;
-        options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        if (intra_op_threads > 0) { options.SetIntraOpNumThreads(intra_op_threads); }
+        configureSession(options, intra_op_threads);
         appendCuda(options, dev, gpu.tf32);
         impl_->replicas.push_back(makeSession(k, options));
       }
@@ -600,8 +611,7 @@ namespace ODIA
         // options over without the shared weights.
         impl_->prepacked = Ort::PrepackedWeightsContainer{nullptr};
         impl_->options = Ort::SessionOptions{};
-        impl_->options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        if (intra_op_threads > 0) { impl_->options.SetIntraOpNumThreads(intra_op_threads); }
+        configureSession(impl_->options, intra_op_threads);
         impl_->shared_values.clear();
         impl_->shared_buffers.clear();
         impl_->shared_bytes = 0;

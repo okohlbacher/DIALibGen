@@ -54,6 +54,8 @@ dirs = [(os.path.join(A, "runs", x), x) for x in sorted(os.listdir(os.path.join(
 for d, label in dirs:
     if not os.path.exists(os.path.join(d, "time.txt")) or not os.path.exists(os.path.join(d, "meta.txt")):
         continue
+    if "Elapsed" not in open(os.path.join(d, "time.txt")).read():
+        continue   # still running
     m = meta(d)
     cmd = m.get("cmd", "")
     inp = "sub10" if "sub10.fasta" in cmd else ("full" if "proteome.fasta" in cmd else "other")

@@ -8,7 +8,7 @@ Writes
   A/results/full_compare.tsv : full proteome, every engine/build at 8/16/96 threads
       system, threads, format, elapsed_s, user_s, maxrss_gib, md5, equal_ref, source
       systems: baseline (bid10-instrument traced, e82ce88), shared-data (bid10-shared-data traced, d64c70a),
-      solutions (this branch, ODIA_SOLUTIONS=1 [+ pruned MS2 graph]), DIA-NN 2.0
+      solutions v3/v4 (this branch at 1dea09b / 039b1d3, ODIA_SOLUTIONS=1 [+ pruned MS2 graph]), DIA-NN 2.0
   A/results/full_phases.tsv : level-0 phase wall s per full-proteome run (run, phase, wall_s, cpu_s, cores, peak_rss_gb)
 """
 import csv, os, re, sys
@@ -56,10 +56,13 @@ srcs = [("baseline", INSTR, {"full_t96_pq": (96, "parquet"), "full_t16_pq": (16,
                              "full_t96_tsv": (96, "tsv")}),
         ("shared-data", SD, {"sd_full_t96_pq": (96, "parquet"), "sd_full_t16_pq": (16, "parquet"),
                              "sd_full_t8_pq": (8, "parquet"), "sd_full_t96_tsv": (96, "tsv")}),
-        ("solutions+pruned", A, {"f_combop_t96_pq": (96, "parquet"), "f_combop_t16_pq": (16, "parquet"),
-                                 "f_combop_t8_pq": (8, "parquet"), "f_combop_t96_tsv": (96, "tsv"),
-                                 "f_combop_t16_tsv": (16, "tsv")}),
-        ("solutions", A, {"f_combo_t96_pq": (96, "parquet")}),
+        ("solutions v3 (+pruned)", A, {"f_combop_t96_pq": (96, "parquet"), "f_combop_t16_pq": (16, "parquet"),
+                                       "f_combop_t8_pq": (8, "parquet"), "f_combop_t96_tsv": (96, "tsv"),
+                                       "f_combop_t16_tsv": (16, "tsv")}),
+        ("solutions v3 (unpruned)", A, {"f_combo_t96_pq": (96, "parquet")}),
+        ("solutions v4 (+pruned)", A, {"f4_combop_t96_pq": (96, "parquet"), "f4_combop_t16_pq": (16, "parquet"),
+                                       "f4_combop_t8_pq": (8, "parquet"), "f4_combop_t96_tsv": (96, "tsv"),
+                                       "f4_combop_t8_tsv": (8, "tsv")}),
         ("DIA-NN 2.0", A, {"dn_full_t96": (96, "parquet"), "dn_full_t16": (16, "parquet"), "dn_full_t8": (8, "parquet")})]
 for system, root, labs in srcs:
     for lab, (t, fmt) in labs.items():

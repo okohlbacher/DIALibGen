@@ -1,0 +1,14 @@
+bid10-solutions (kim): plot data and tables; every run traced (ODIA_TRACE), once, under flock /scratch/kohlbach/bid10.lock.
+Binaries: bin/DIALibGen-sol-v1 (8bf8c60), -v2 (3c707cd, LPT by cost), -v3 (1dea09b, interleave only > 32 threads), -v4 (039b1d3, final).
+Pruned MS2 graph: models/peptdeep_ms2_pruned.onnx (md5 cd01660b..., tools/prune_modloss.py).
+results/runs.tsv          one row per run: label,input,threads,format,env,binary,elapsed_s,user_s,sys_s,cpu_s,mean_cores,maxrss_gib,
+                          md5,ref_md5,equal(1=byte-identical),load1_max,other_cores_mean,digest,enumerate,rt,ms2,ccs,write (phase wall s),serial_s
+results/changes_sub10.tsv change,threads,env,elapsed_s,base_elapsed_s,delta_pct,cpu_s,base_cpu_s,maxrss_gib,base_maxrss_gib,equal,serial_s,base_serial_s
+                          (base = s_base_t<N> / s_base_tsv_t<N>, same thread count)
+results/full_compare.tsv  system,threads,format,elapsed_s,user_s,maxrss_gib,md5,equal_ref,source  (full proteome; baseline = bid10-instrument,
+                          shared-data = bid10-shared-data, solutions v3/v4, DIA-NN 2.0)
+results/full_phases.tsv   system,run,threads,format,phase,wall_s,cpu_s,cores,peak_rss_gb (level-0 trace phases)
+results/timeline_full.tsv run,system,threads,t_s,phase,cores,threads_running,rss_gib (1-s bins of trace/proc.tsv)
+results/*.png             timeline_full_t{96,16,8}, phases_full, changes_sub10 (tools/plots.py); runs/<label>/timeline.png per run
+results/diann_full_speclib_md5.txt  md5 of DIA-NN's predicted.speclib at 96/16/8 threads
+Note: queue.sh's "CONTAMINATED" flag uses a strict 16-core threshold; other users kept 16.5-47 cores busy (<= 0.12 per hardware thread).

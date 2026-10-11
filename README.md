@@ -10,7 +10,7 @@ runtime.
 | `refine` | Library and one run's identification report | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
 | `tune` | Library and one run's identification report | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-Version **0.11.2** incorporates library refinement and model training from
+Version **0.11.3** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), and [changes](CHANGELOG.md).
 

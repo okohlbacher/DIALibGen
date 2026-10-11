@@ -1,6 +1,6 @@
 [package]
 name = "dialibgen-gui"
-version = "0.11.2"
+version = "0.11.3"
 description = "DIALibGen desktop GUI"
 authors = ["Oliver Kohlbacher and contributors"]
 license = "BSD-3-Clause"

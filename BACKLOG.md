@@ -162,3 +162,34 @@ host work. Decision (owner, 2026-10-10, revised): TF32 is an option and
 OFF by default, so GPU libraries match CPU libraries; ON (opt-in) saves
 ~26 s per proteome on one H100 but changes ~1 % of fragment sets and CCS
 by up to ~1.9 A^2.
+
+## Performance follow-ups after 0.11.2 (from the generate performance analysis, 2026-10-11)
+
+0.11.2 carries the scheduling changes, shared read-only data, parallel phases,
+the pruned MS2 model, streamed writing during MS2, and the small items
+(OpenBLAS threads, error flag, Arrow pool). Still open, in order:
+
+1. **Persistent worker pool** instead of a `std::thread` per call: node-level
+   affinity, half the workers per socket, each worker first-touching its own
+   arena. This removes about 5,600 thread creations and 97 glibc arenas (4.3-5.5 GB
+   retained) per whole-proteome run, and the NUMA-interleave workaround.
+   Estimated at least the interleave gain at 96 sessions (-10 % wall, -20 % CPU).
+   Acceptance: no slower than 0.11.2 at 16 threads, and at or below the
+   interleaved time at 96, with identical output.
+2. **The same speed-ups for `-run` and tune** (feature/builtin-identification):
+   IonLadder in `PredictedAssays::rank`, the session cap and chunking in the
+   search-decoy prediction, and a larger prefilter block than 8,192 pairs. The
+   prediction step is about 1,464 s of the timsTOF `-run`; an estimated -500 s.
+   Acceptance: `ids.parquet` identical on a reduced cell and on one full run.
+3. **CPU cost per prediction**, the remaining ~1.3x gap to DIA-NN at 8-16 threads
+   (9,100 vs 6,386 CPU-s at 8 threads). First profile ONNX Runtime per operation
+   (MS2 transformer layers, RT/CCS LSTMs). Anything that changes outputs
+   (reduced precision; int8 was rejected) needs an owner decision.
+4. **GPU re-benchmark** once 0.11.2's host-side changes are in (target: well
+   under 100 s per whole proteome on one H100), and decide on bundling
+   cuDNN 9 for CUDA 12 with a GPU package (about 1.5 GB of NVIDIA libraries,
+   licence notices, no GPU runner in CI).
+5. **Reuse predictions across runs** (`-run` predicts the same library for every run).
+6. **Hardware cache counters** (`perf`) once IBMI allows them, to plot cache
+   misses per phase. The 2026-10-11 analysis inferred cache behaviour from
+   placement and batch-size experiments instead.

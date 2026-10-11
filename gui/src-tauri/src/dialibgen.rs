@@ -193,6 +193,14 @@ fn apply_env(cmd: &mut Command, r: &Resolved) {
     if std::env::var_os("OPENBLAS_NUM_THREADS").is_none() {
         cmd.env("OPENBLAS_NUM_THREADS", "1");
     }
+    // OpenMP (LibTorch's training, OpenMS) keeps idle workers spinning after
+    // each parallel region by default; tune's many tiny per-step regions then
+    // burn system and user time on waiting. libgomp reads the policy once,
+    // when it is loaded, so only the starting environment can set it. It does
+    // not change any result; a value the user set wins.
+    if std::env::var_os("OMP_WAIT_POLICY").is_none() {
+        cmd.env("OMP_WAIT_POLICY", "passive");
+    }
     if let Some(d) = &r.data {
         cmd.env("OPENMS_DATA_PATH", d);
     }
@@ -853,6 +861,18 @@ mod tests {
         let value = command.get_envs().find(|(key, _)| *key == "OPENBLAS_NUM_THREADS").and_then(|(_, v)| v);
         match std::env::var_os("OPENBLAS_NUM_THREADS") {
             None => assert_eq!(value, Some(std::ffi::OsStr::new("1"))),
+            Some(_) => assert_eq!(value, None),
+        }
+    }
+
+    #[test]
+    fn cli_starts_with_a_passive_openmp_wait_policy_unless_the_user_chose() {
+        let resolved = Resolved { bin: "DIALibGen".into(), data: None, share: None, source: "path" };
+        let mut command = Command::new(&resolved.bin);
+        apply_env(&mut command, &resolved);
+        let value = command.get_envs().find(|(key, _)| *key == "OMP_WAIT_POLICY").and_then(|(_, v)| v);
+        match std::env::var_os("OMP_WAIT_POLICY") {
+            None => assert_eq!(value, Some(std::ffi::OsStr::new("passive"))),
             Some(_) => assert_eq!(value, None),
         }
     }

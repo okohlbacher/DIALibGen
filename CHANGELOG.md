@@ -41,6 +41,28 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Generation on the CPU is faster again** (whole human-sized proteome,
+  2 x 96-core EPYC: 158 -> 124 s at 96 threads, 595 -> 575 s at 16), with
+  the same library content and bytes as 0.11.2:
+  - parallel work runs on a persistent worker pool instead of threads started
+    for every step; worker k is bound to NUMA node k mod n (Linux;
+    `ODIA_POOL_PIN=0` turns it off). Memory is no longer interleaved over the
+    NUMA nodes above 32 threads, which with the pool cost time
+    (`ODIA_NUMA_INTERLEAVE=1` still does it);
+  - modified sequences are parsed without OpenMS's process-wide ResidueDB
+    lock (`ODIA_PARSE_CHECK=1` compares every parse with OpenMS's);
+  - the digest merges its peptide map in parallel shards, and enumeration
+    appends precursors and fragments in parallel;
+  - MS2 and CCS: parsing, fragment selection and appending of the
+    neighbouring blocks overlap each prediction;
+  - CUDA: the probe session is kept as the first session, and the other
+    sessions are built per device concurrently.
+- **Libraries load in parallel**: the TSV is parsed on `-threads` threads and
+  Parquet columns are decoded in parallel (`-mode convert`, `refine` and
+  `tune`). Numbers are parsed with `std::from_chars` (or `strtod_l` in the C
+  locale) instead of a stream per number. The loaded library is the same at
+  every thread count. A report number that underflows to zero (below
+  4.9e-324) is now rejected by refine on Linux too.
 - C-terminal modifications are written as DIA-NN writes them,
   `PEPTIDEK(UniMod:2)` instead of `PEPTIDEK.(UniMod:2)`, in the TSV and the
   DIA-NN Parquet. DIA-NN 2.0 reads both and reports `PEPTIDEK(UniMod:2)`, so its

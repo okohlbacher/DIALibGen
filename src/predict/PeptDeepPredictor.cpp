@@ -441,6 +441,10 @@ namespace ODIA
     // machine without one does not -- the same binary serves both.
     std::string reason;
     bool gpu_present = false;
+    // CUDA: the session of each device that worked, in device order. The
+    // probe is a real session built with the final options, so it is kept:
+    // the k-th one is session k, the first session on that device.
+    std::vector<std::unique_ptr<Ort::Session>> probed;
     if (prefer_gpu)
     {
       // Ask before attempting. Registering CUDA blindly on a CPU-only build
@@ -468,12 +472,14 @@ namespace ODIA
         if (!listed && gpu_device < 0) { for (int dev = 0; dev <= 7; ++dev) { candidates.push_back(dev); } }
         for (const int dev : candidates)
         {
+          trace::Scope probe_step("session_probe", 3);
+          probe_step.fields().idx = dev;
           try
           {
-            Ort::SessionOptions probe;
-            probe.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-            appendCuda(probe, dev, gpu.tf32);
-            Ort::Session test(impl_->env, ortPath(model_path).c_str(), probe);   // the real check
+            Ort::SessionOptions options;
+            configureSession(options, intra_op_threads);
+            appendCuda(options, dev, gpu.tf32);
+            probed.push_back(makeSession(probed.size(), options));   // the real check
             impl_->session_devices.push_back(dev);
             if (!listed) { break; }
           }
@@ -498,34 +504,21 @@ namespace ODIA
           appendCuda(impl_->options, impl_->session_devices.front(), gpu.tf32);
           impl_->provider = Provider::CUDA;
           impl_->device = impl_->session_devices.front();
+          impl_->session = std::move(probed.front());
         }
         if (impl_->provider != Provider::CUDA && reason.empty())
         { reason = "no usable CUDA device is visible"; }
       }
     }
 
-    try
+    // On CUDA session 0 is the first probe, above: registering the provider
+    // can succeed while creating a session with it fails, and the probe
+    // covers both.
+    if (impl_->provider != Provider::CUDA)
     {
-      impl_->session = impl_->provider == Provider::CUDA ? makeSession(0, impl_->options) : firstCpuSession();
-    }
-    catch (const Ort::Exception& e)
-    {
-      if (impl_->provider == Provider::CUDA)
-      {
-        // Registering the provider can succeed while creating the session with
-        // it fails, so the fallback has to cover both.
-        gpu_present = true;
-        reason = "CUDA device " + std::to_string(impl_->device) + ": " + conciseOrtError(e.what());
-        impl_->provider = Provider::CPU;
-        impl_->device = -1;
-        impl_->session_devices.clear();
-        impl_->options = Ort::SessionOptions{};
-        configureSession(impl_->options, intra_op_threads);
-      }
-      else
-      {
-        throw std::runtime_error("cannot open model " + model_path + ": " + e.what());
-      }
+      try { impl_->session = firstCpuSession(); }
+      catch (const Ort::Exception& e)
+      { throw std::runtime_error("cannot open model " + model_path + ": " + e.what()); }
     }
 
     if (prefer_gpu && impl_->provider == Provider::CPU)
@@ -553,16 +546,6 @@ namespace ODIA
       if (gpu.require)
       { throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model + " cannot use " + reason); }
       impl_->fallback = model + " skips an unusable GPU: " + reason;
-    }
-
-    if (!impl_->session)
-    {
-      try
-      {
-        impl_->session = firstCpuSession();
-      }
-      catch (const Ort::Exception& retry)
-      { throw std::runtime_error("cannot open model " + model_path + ": " + retry.what()); }
     }
 
     Ort::AllocatorWithDefaultOptions allocator;
@@ -618,20 +601,55 @@ namespace ODIA
     // one session's host-side encoding and copies overlap another's kernels:
     // on an H100, 2-4 sessions gave RT and CCS +30-45 % and 8 was slower. The
     // output does not depend on the count: chunks are cut before dispatch.
+    //
+    // The probes are sessions 0 to n-1. The others are built concurrently,
+    // one builder per device creating that device's sessions in order: CUDA
+    // session creation (cuDNN, the device arena) costs about a second each,
+    // and one device's builds do not wait for another's.
     if (impl_->provider == Provider::CUDA)
     {
       const std::vector<int> devices = impl_->session_devices;
+      const std::size_t n = devices.size();
       impl_->session_devices.clear();
-      const std::size_t total = devices.size() * static_cast<std::size_t>(std::max(1, gpu.sessions_per_device));
-      for (std::size_t k = 0; k < total; ++k)
+      const std::size_t total = n * static_cast<std::size_t>(std::max(1, gpu.sessions_per_device));
+      for (std::size_t k = 0; k < total; ++k) { impl_->session_devices.push_back(devices[k % n]); }
+      impl_->replicas.resize(total - 1);
+      for (std::size_t k = 1; k < n; ++k) { impl_->replicas[k - 1] = std::move(probed[k]); }
+      probed.clear();
+      if (total > n)
       {
-        const int dev = devices[k % devices.size()];
-        impl_->session_devices.push_back(dev);
-        if (k == 0) { continue; }   // `session`, created above
-        Ort::SessionOptions options;
-        configureSession(options, intra_op_threads);
-        appendCuda(options, dev, gpu.tf32);
-        impl_->replicas.push_back(makeSession(k, options));
+        std::atomic<std::size_t> next{0};
+        std::mutex error_mutex;
+        std::exception_ptr error;
+        std::size_t error_session = total;
+        const auto build = [&]() {
+          for (std::size_t d = next++; d < n; d = next++)
+          {
+            for (std::size_t k = n + d; k < total; k += n)
+            {
+              try
+              {
+                Ort::SessionOptions options;
+                configureSession(options, intra_op_threads);
+                appendCuda(options, devices[d], gpu.tf32);
+                impl_->replicas[k - 1] = makeSession(k, options);
+              }
+              catch (...)
+              {
+                // The lowest failing session is reported, as one builder would.
+                const std::lock_guard<std::mutex> lock(error_mutex);
+                if (k < error_session) { error_session = k; error = std::current_exception(); }
+                break;
+              }
+            }
+          }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(n - 1);
+        parallel::startThreads(pool, n - 1, build);
+        build();
+        for (auto& t : pool) { t.join(); }
+        if (error) { std::rethrow_exception(error); }
       }
     }
     else

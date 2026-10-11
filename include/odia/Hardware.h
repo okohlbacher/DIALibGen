@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+
 namespace ODIA
 {
   /// Physical CPU cores this process may run on: hardware threads, not
@@ -14,12 +16,20 @@ namespace ODIA
   /// sessions on all 384 hardware threads of a 192-core machine were 12 %
   /// slower than 48 on the physical cores.
   ///
-  /// Linux: the CPUs in the affinity mask (taskset, cgroup cpusets), counted
-  /// once per core by their sysfs `thread_siblings_list`. macOS:
-  /// `hw.physicalcpu`. Windows: the processor cores reported by
-  /// GetLogicalProcessorInformation. Anything that cannot be read falls back
-  /// to std::thread::hardware_concurrency(). Computed once; at least 1.
+  /// The effective budget, not the machine. Linux: the CPUs in the affinity
+  /// mask (taskset; cgroup cpusets, i.e. cpuset.cpus.effective, show up
+  /// there), counted once per core by their sysfs `thread_siblings_list`
+  /// (without sysfs topology: the CPUs of the mask), and no more than the
+  /// cgroup CPU quota allows (v2 cpu.max on the cgroup and its ancestors, v1
+  /// cfs quota; rounded down, at least 1). macOS: `hw.physicalcpu`,
+  /// performance and efficiency cores alike (batches are handed out one at a
+  /// time, so a slower core takes fewer). Windows: the processor cores of all
+  /// processor groups (GetLogicalProcessorInformationEx). If nothing can be
+  /// read, std::thread::hardware_concurrency(). Computed once; at least 1.
   unsigned physicalCores();
+
+  /// How physicalCores() was arrived at, for the log.
+  const std::string& physicalCoresReason();
 
   /// NUMA nodes with memory that this machine has online (Linux sysfs); 1
   /// elsewhere or when it cannot be read.

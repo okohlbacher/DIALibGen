@@ -676,7 +676,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
 
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
     if (threads == 0)
-    { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads, one per physical core"); }
+    { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads (" +
+                    ODIA::physicalCoresReason() + ")"); }
     {
       // Above 32 threads on a machine with several NUMA nodes, interleave the
       // run's memory over the nodes (what numactl --interleave=all does).

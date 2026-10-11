@@ -3,6 +3,29 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **`-machine:threads` (CPU training threads) defaults to 16** instead of 4.
+  The tuned weights depend on the thread count (it fixes the order of
+  LibTorch's reductions), so at default settings the tuned models and the
+  re-predicted RT/CCS differ from 0.11.2's; `-machine:threads 4` reproduces
+  0.11.2's training. The default is a fixed number, independent of `-threads`
+  and of the machine, and `.tune.json` and the tuned ONNX metadata record it.
+- **CPU training on Linux is 1.5 to 3 times faster per epoch** (RT head, Astral run,
+  2 x 96-core EPYC: 16.7 -> 11.3 s at 4 threads, 9.1 -> 4.4 s at 16,
+  10.8 -> 3.5 s at 64) with bit-identical tuned weights at the same count: glibc kept handing the
+  training tensors back to the system and faulting them in again at every
+  step (30-37 % of training CPU was system time). It now keeps freed memory
+  while a head trains (about 2 GB more resident during training) and returns
+  it afterwards.
+- Tune records its training thread count (`threads`, `interop_threads`) in
+  `.tune.json` and the tuned ONNX metadata.
+  LibTorch's inter-op pool is one thread (tune never uses it). Tracing
+  (`ODIA_TRACE`) shows a phase per tuned head. At a given thread count none of
+  this changes the tuned weights.
+
 ## [0.11.2] — 2026-10-11
 
 ### Breaking

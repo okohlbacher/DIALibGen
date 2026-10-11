@@ -8,6 +8,7 @@
 
 #include <odia/Library.h>
 #include <odia/PeptDeepEncoder.h>
+#include <odia/Trace.h>
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
@@ -30,10 +31,16 @@
 #include <fstream>
 #include <map>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace ODIA::tune
 {
@@ -44,6 +51,37 @@ namespace ODIA::tune
   {
     using Clock = std::chrono::steady_clock;
     double seconds(Clock::time_point a) { return std::chrono::duration<double>(Clock::now() - a).count(); }
+
+    /// While alive, glibc keeps freed memory instead of handing it back.
+    /// Each training step allocates and frees the same tensors (megabytes
+    /// each); by default glibc serves them with mmap or trims them off the
+    /// heap top on free, so every step faulted them in again: ~750,000 minor
+    /// faults/s and 30 % system time at 16 threads. Kept, an epoch took half
+    /// the time, with identical weights, for ~2 GB more resident memory.
+    /// On destruction the limits go back to roughly glibc's steady state
+    /// (its dynamic thresholds end at 32 MiB / 64 MiB once a large block was
+    /// freed) and the kept memory is returned.
+    class KeepFreedMemory
+    {
+    public:
+      KeepFreedMemory()
+      {
+#if defined(__GLIBC__)
+        mallopt(M_MMAP_THRESHOLD, 256 << 20);
+        mallopt(M_TRIM_THRESHOLD, std::numeric_limits<int>::max());
+#endif
+      }
+      ~KeepFreedMemory()
+      {
+#if defined(__GLIBC__)
+        mallopt(M_MMAP_THRESHOLD, 32 << 20);
+        mallopt(M_TRIM_THRESHOLD, 64 << 20);
+        malloc_trim(0);
+#endif
+      }
+      KeepFreedMemory(const KeepFreedMemory&) = delete;
+      KeepFreedMemory& operator=(const KeepFreedMemory&) = delete;
+    };
 
     std::string sha256File(const std::string& path)
     {
@@ -507,6 +545,8 @@ namespace ODIA::tune
   {
     const auto started = Clock::now();
     const bool ccs = p.head == HeadKind::CCS;
+    // ODIA_TRACE: one phase per head, the epoch loop as its step.
+    trace::Scope tune_phase(ccs ? "tune_ccs" : "tune_rt", 0);
     {
       std::error_code ec;
       const auto a = std::filesystem::weakly_canonical(p.model_in, ec), b = std::filesystem::weakly_canonical(p.model_out, ec);
@@ -524,7 +564,18 @@ namespace ODIA::tune
       dev = torch::Device(p.device);
     }
     else if (p.device != "cpu") { throw std::runtime_error("unknown device " + p.device); }
+    // Inter-op pool: nothing here launches inter-op work (no at::launch, no
+    // TorchScript fork), but ATen sizes the pool to the hardware threads when
+    // something first asks for it. ATen accepts the size once per process and
+    // only before inter-op work started -- the CCS head runs in the same
+    // process as the RT head. Intra-op threads (-machine:threads) are what
+    // the training loop uses; their count fixes ATen's reduction order and
+    // with it the tuned weights, so it is recorded in the provenance.
+    static std::once_flag interop_once;
+    std::call_once(interop_once, [] { try { at::set_num_interop_threads(1); } catch (const c10::Error&) {} });
     if (dev.is_cpu()) { torch::set_num_threads(std::max(1, p.threads)); }
+    std::optional<KeepFreedMemory> keep_freed;
+    if (dev.is_cpu()) { keep_freed.emplace(); }
     if (const char* e = std::getenv("DLR_NO_MKLDNN"); e && *e && *e != '0') { at::globalContext().setUserEnabledMkldnn(false); log << "oneDNN disabled (DLR_NO_MKLDNN)\n"; }
     // pytorch.org's CUDA zips ship only cuDNN's loader shim; without the sub-
     // libraries on the library path cudnnCreate aborts the process (not an
@@ -636,6 +687,7 @@ namespace ODIA::tune
     std::iota(block_order.begin(), block_order.end(), 0);
     const int no_stop_before = std::max(p.min_epochs, p.warmup);
 
+    trace::Scope train_step("train", 1);
     for (int epoch = 0; epoch < p.epochs; ++epoch)
     {
       const double lr = p.lr * lrLambda(epoch, p.warmup, p.epochs);
@@ -703,6 +755,7 @@ namespace ODIA::tune
       log << "  train " << res.train_seconds << " s\n";
       if (!stop.empty()) { break; }
     }
+    train_step.end();
     res.stop_reason = stop;
     traj.close();
     if (!traj) { throw std::runtime_error("cannot write " + p.model_out + ".trajectory.tsv"); }
@@ -722,6 +775,7 @@ namespace ODIA::tune
     nlohmann::json prov = {
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
       {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
+      {"threads", dev.is_cpu() ? torch::get_num_threads() : 0}, {"interop_threads", at::get_num_interop_threads()},
       {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA kernels may be nondeterministic."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},
                   {"batch_size", p.batch_size}, {"epochs", p.epochs}, {"warmup", p.warmup}, {"schedule", "linear warmup then cosine, stepped per epoch"}, {"dropout", 0.1}, {"seed", p.seed}}},

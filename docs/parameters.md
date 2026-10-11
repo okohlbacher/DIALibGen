@@ -96,7 +96,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-stop:max_seconds` | double | `0.0` |  | Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none) |
 | `-stop:select` | string | `calibrated_sd` | calibrated_sd,rmse | Selection metric on the validation cohort |
 | `-machine:device` | string | `cpu` |  | cpu or cuda[:N] |
-| `-machine:threads` | int | `4` | 1: | CPU threads used for training |
+| `-machine:threads` | int | `16` | 1: | CPU threads used for training (a fixed count: the tuned weights depend on it) |
 | `-machine:no_cudnn` | bool | `false` |  | CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: | Seed for the training subsample and batch order |
 | `-machine:tf32` | bool | `false` |  | TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU libraries to float rounding. On: faster (one H100, whole proteome: ~25 s less), but about 1 % of precursors select a different fragment set and CCS moves by up to ~1.9 A^2. |

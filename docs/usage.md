@@ -181,7 +181,7 @@ validate downstream error rates with controls appropriate to that comparison.
 ```bash
 DIALibGen -mode tune -in predicted.parquet -ids report.parquet \
   -out tuned.parquet -tune_out_models tuned-models \
-  -train:lr 0.0001 -machine:threads 4
+  -train:lr 0.0001 -machine:threads 16
 ```
 
 Tuning adapts RT and CCS with LibTorch and re-predicts the complete input
@@ -209,6 +209,20 @@ run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
 took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
 CPU training.
+
+`-machine:threads` (default 16) is the number of CPU threads LibTorch trains
+with. Each training step is a chain of small operations, so the count stops
+paying early: for the RT head on an Astral run (77,029 sequences) on a
+2 x 96-core EPYC 9654, an epoch took 11.3 s at 4 threads, 6.7 s at 8, 4.4 s
+at 16, 3.7 s at 32 and 3.5 s at 64, for 380, 450, 600, 990 and 1,850
+CPU-seconds of training over 8 epochs. The tuned weights depend on the thread
+count (it fixes the order of LibTorch's reductions): they are reproducible
+with the same build at the same count, which `.tune.json` and the tuned ONNX
+metadata record as `threads`. The default is a fixed number, not derived from
+`-threads` or the machine, so the same command trains the same model
+anywhere the build is the same. Up to 0.11.2 the default was 4: tuned models
+made with default settings differ from 0.11.2's, and `-machine:threads 4`
+reproduces them.
 
 Tune mode uses training filters such as `-filter:q_value`. Refinement-only
 settings such as `-q_precursor`, `-q_global`, `-q_protein` and observed-value

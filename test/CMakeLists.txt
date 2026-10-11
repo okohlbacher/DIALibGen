@@ -317,6 +317,17 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
   set_tests_properties(generate_stream_matches_one_pass PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 endif()
 
+# A process thread limit must not abort generation (thread_limit_test.sh).
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  add_test(NAME generate_under_thread_limit
+           COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/thread_limit_test.sh" $<TARGET_FILE:DIALibGen>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   "${CMAKE_CURRENT_BINARY_DIR}/thread_limit")
+  set_tests_properties(generate_under_thread_limit PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
 # The pruned MS2 graph (data/models/peptdeep_ms2_pruned.onnx, the default) and
 # the full one must give the same library. The TSV carries no provenance, so
 # the two files must be byte-identical; the Parquet differs only in the model

@@ -462,10 +462,15 @@ jobs:
               "library_io_contract", "text_writer_contract", "atomic_file_contract", "refinement_report_contract",
               "peptdeep_reference_encoding", "peptdeep_element_table", "peptdeep_meta_inputs",
               "peptdeep_encoder_matches_reference", "topp_parameters", "parameter_docs_current",
+              "generate_threads_identical", "generate_stream_matches_one_pass",
+              "generate_ms2_pruned_matches_full",
           }
+          # No runner has a GPU: gpu_matches_cpu skips (77) here by design and
+          # runs where one is visible.
+          allowed_skips = {"gpu_matches_cpu"}
           assert required <= tests.keys(), f"required tests missing: {required - tests.keys()}"
           for name, case in tests.items():
-              assert case.find("skipped") is None, f"{name} must pass, not skip"
+              assert name in allowed_skips or case.find("skipped") is None, f"{name} must pass, not skip"
           PYTEST
 
       - name: Diagnose a Windows report-reader crash

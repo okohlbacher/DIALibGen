@@ -22,6 +22,7 @@
 #include <string_view>
 #include <cstdint>
 #include <iostream>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <algorithm>
@@ -138,8 +139,14 @@ namespace
   public:
     using Open = std::function<std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter>()>;
 
-    Ms2Stream(ODIA::Library& library, ODIA::LibraryGenerator::CcsBatchGuard& guard, Open open)
-      : library_(library), guard_(guard), open_(std::move(open)), thread_([this] { run(); }) {}
+    /// Starts the consumer thread at once, so that a process without a
+    /// thread to spare finds out before CCS is predicted in the new order
+    /// (std::system_error) and can keep 0.11.1's order instead.
+    Ms2Stream(ODIA::Library& library, Open open)
+      : library_(library), open_(std::move(open)), thread_([this] { run(); }) {}
+
+    /// Before the first rows(); the consumer reads it only after that.
+    void setGuard(ODIA::LibraryGenerator::CcsBatchGuard* guard) { guard_ = guard; }
 
     ~Ms2Stream() override
     {
@@ -200,7 +207,7 @@ namespace
           consume(std::move(rows));
         }
         // Every kept precursor is known: the last old-order CCS call is complete.
-        resettled_ += guard_.settle(library_, kept_, settled_, kept_.size());
+        resettled_ += guard_->settle(library_, kept_, settled_, kept_.size());
         settled_ = kept_.size();
         release();
       }
@@ -220,7 +227,7 @@ namespace
       const std::size_t complete = kept_.size() / ODIA::LibraryGenerator::ccsBlock() * ODIA::LibraryGenerator::ccsBlock();
       if (complete > settled_)
       {
-        resettled_ += guard_.settle(library_, kept_, settled_, complete);
+        resettled_ += guard_->settle(library_, kept_, settled_, complete);
         settled_ = complete;
       }
       release();
@@ -238,7 +245,7 @@ namespace
     }
 
     ODIA::Library& library_;
-    ODIA::LibraryGenerator::CcsBatchGuard& guard_;
+    ODIA::LibraryGenerator::CcsBatchGuard* guard_ = nullptr;
     Open open_;
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer_;
     std::vector<std::uint32_t> kept_;          ///< kept precursors so far, in order
@@ -789,25 +796,41 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       finishFingerprint();
 
+      // Guard before sink: the sink's thread may use it until the sink is gone.
+      std::unique_ptr<ODIA::LibraryGenerator::CcsBatchGuard> guard;
+      std::unique_ptr<Ms2Stream> sink;
+      const std::string config_json = parquet ? eff.dump() : std::string();
       if (stream)
+      {
+        try
+        {
+          sink = std::make_unique<Ms2Stream>(library, [&]() {
+            return std::make_unique<ODIA::DIANNLibraryFile::StreamWriter>(out, library, fp, config_json,
+                                                                           extraMetadata(), threads);
+          });
+        }
+        catch (const std::system_error& e)
+        {
+          writeLogWarn_(std::string("no thread for the streaming writer (") + e.what() +
+                        "); predicting in 0.11.1's order and writing after MS2");
+        }
+      }
+      if (sink)
       {
         std::vector<std::uint16_t> lengths;
         bool ccs_on_cpu = false;
         if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
               library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
         { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
-        ODIA::LibraryGenerator::CcsBatchGuard guard(ccs_model, p.derive_ion_mobility, std::move(lengths), ccs_on_cpu);
-        const std::string config_json = parquet ? eff.dump() : std::string();
-        Ms2Stream sink(library, guard, [&]() {
-          return std::make_unique<ODIA::DIANNLibraryFile::StreamWriter>(out, library, fp, config_json,
-                                                                         extraMetadata(), threads);
-        });
+        guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
+                                                                         std::move(lengths), ccs_on_cpu);
+        sink->setGuard(guard.get());
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu, &sink); miss)
+              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu, sink.get()); miss)
         { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
-        writer = sink.takeWriter();
-        if (sink.resettled())
-        { writeLogInfo_("CCS of " + std::to_string(sink.resettled()) + " precursors predicted again in their 0.11.1 batching"); }
+        writer = sink->takeWriter();
+        if (sink->resettled())
+        { writeLogInfo_("CCS of " + std::to_string(sink->resettled()) + " precursors predicted again in their 0.11.1 batching"); }
         writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
         if (library.precursorCount() == 0)
         { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }

@@ -317,6 +317,25 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
   set_tests_properties(generate_stream_matches_one_pass PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 endif()
 
+# The library does not depend on the MS2 block size or the order (pipelined
+# blocks against one block, streamed against one-pass). See
+# block_size_invariance.cmake.
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/block_size.json"
+       "{\"precursor_charges\": [2, 3], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+       " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\",\n"
+       " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${ODIA_MS2_MODEL_PATH}\",\n"
+       " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  add_test(NAME generate_block_size_invariant
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/block_size.json"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/block_size"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/block_size_invariance.cmake")
+  # The CPU contract: on CUDA the batch composition shapes every value.
+  set_tests_properties(generate_block_size_invariant PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
+endif()
+
 # A process thread limit must not abort generation (thread_limit_test.sh).
 if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
    AND EXISTS "${ODIA_CCS_MODEL_PATH}")

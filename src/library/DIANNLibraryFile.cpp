@@ -8,6 +8,7 @@
 #include <odia/TextWriter.h>
 
 #include "Parallel.h"
+#include "ParseDouble.h"
 
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
@@ -59,7 +60,7 @@ namespace ODIA
     {
       double v = 0.0;
       if (s.empty()) { return std::nan(""); }
-      if (s.find_first_not_of("0123456789+-.eE") != std::string_view::npos)
+      if (!onlyDecimalCharacters(s))
       {
         std::string token(s);
         std::transform(token.begin(), token.end(), token.begin(),
@@ -67,19 +68,8 @@ namespace ODIA
         if (token == "nan" || token == "+nan" || token == "-nan") { return std::nan(""); }
         throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s));
       }
-#ifdef __APPLE__
-      // Apple's deployment SDKs do not yet provide floating-point from_chars.
-      std::istringstream input{std::string(s)};
-      input.imbue(std::locale::classic());
-      input >> std::noskipws >> v;
-      if (!input || input.peek() != std::char_traits<char>::eof() || std::isinf(v))
-#else
-      const auto* first = s.data();
-      const auto* last = first + s.size();
-      if (*first == '+' && s.size() > 1 && s[1] != '-') { ++first; }
-      const auto parsed = std::from_chars(first, last, v, std::chars_format::general);
-      if (parsed.ec != std::errc{} || parsed.ptr != last || std::isinf(v))
-#endif
+      // Correctly rounded on every platform; see ParseDouble.h.
+      if (!parseDouble(s, v) || std::isinf(v))
       { throw std::runtime_error(std::string("invalid numeric value in ") + column + ": " + std::string(s)); }
       return v;
     }
@@ -119,14 +109,28 @@ namespace ODIA
     /// One parsed row, in the order the builder needs it.
     struct Row
     {
+      static constexpr std::size_t kUnknown = static_cast<std::size_t>(-1);
+
       std::string_view precursor_id;
       std::string_view modified_sequence;
       std::string_view protein_group;
       double precursor_mz = 0, product_mz = 0;
       double rt = 0, im = 0, ccs = 0, intensity = 0;
       long precursor_charge = 0, fragment_charge = 0, ordinal = 0, decoy = 0;
-      std::string_view fragment_type, loss_type;
+      FragmentType fragment_type = FragmentType::Unknown;
+      LossType loss_type = LossType::None;
+      /// residueCount(modified_sequence), when the reader already has it.
+      std::size_t residues = kUnknown;
     };
+
+    /// The precursor-charge rule, checked where a row is parsed: the TSV
+    /// reader parses on several threads and must report the first bad line
+    /// a serial read would have met, whichever check that line fails.
+    void checkPrecursorCharge(long charge)
+    {
+      if (charge < 1 || charge > 255)
+      { throw std::runtime_error("invalid precursor charge: expected an integer between 1 and 255"); }
+    }
 
     /// Appends rows to the library, starting a new precursor when the
     /// Precursor.Id changes.
@@ -137,8 +141,7 @@ namespace ODIA
 
       void append(const Row& r)
       {
-        if (r.precursor_charge < 1 || r.precursor_charge > 255)
-        { throw std::runtime_error("invalid precursor charge: expected an integer between 1 and 255"); }
+        checkPrecursorCharge(r.precursor_charge);
         if (!have_current_ || r.precursor_id != current_id_ || (r.decoy != 0) != current_decoy_)
         {
           closeCurrent();
@@ -162,7 +165,7 @@ namespace ODIA
         // peptide length, and a non-positive charge are not fragments at all.
         if (r.ordinal <= 0 || r.ordinal > 255 ||
             r.fragment_charge <= 0 || r.fragment_charge > 127 ||
-            static_cast<std::size_t>(r.ordinal) >= residueCount(r.modified_sequence))
+            static_cast<std::size_t>(r.ordinal) >= residues(r))
         {
           ++out_of_range_;
           return;
@@ -172,10 +175,10 @@ namespace ODIA
         Library::checkTransitionCapacity(t.product_mz.size(), 1);
         t.product_mz.push_back(toFixed(r.product_mz));
         t.library_intensity.push_back(static_cast<float>(r.intensity));
-        t.type.push_back(parseFragmentType(r.fragment_type));
+        t.type.push_back(r.fragment_type);
         t.ordinal.push_back(static_cast<std::uint8_t>(r.ordinal));
         t.charge.push_back(static_cast<std::int8_t>(r.fragment_charge));
-        t.loss.push_back(parseLossType(r.loss_type));
+        t.loss.push_back(r.loss_type);
         ++count_;
       }
 
@@ -188,6 +191,20 @@ namespace ODIA
       std::size_t outOfRange() const { return out_of_range_; }
 
     private:
+      /// Residues of the row's sequence, counted once per distinct sequence
+      /// run rather than once per transition.
+      std::size_t residues(const Row& r)
+      {
+        if (r.residues != Row::kUnknown) { return r.residues; }
+        if (!have_residues_ || r.modified_sequence != residue_sequence_)
+        {
+          residue_sequence_.assign(r.modified_sequence);
+          residue_count_ = residueCount(r.modified_sequence);
+          have_residues_ = true;
+        }
+        return residue_count_;
+      }
+
       void startPrecursor(const Row& r)
       {
         Library::checkTransitionCapacity(lib_.transitionCount());
@@ -238,6 +255,9 @@ namespace ODIA
       bool have_current_ = false;
       bool current_decoy_ = false;
       std::size_t count_ = 0;
+      std::string residue_sequence_;
+      std::size_t residue_count_ = 0;
+      bool have_residues_ = false;
     };
   } // namespace
 
@@ -259,10 +279,10 @@ namespace ODIA
     }
   }
 
-  void DIANNLibraryFile::load(const std::string& filename, Library& library)
+  void DIANNLibraryFile::load(const std::string& filename, Library& library, unsigned threads)
   {
-    if (isParquet(filename)) { loadParquet(filename, library); }
-    else { loadTSV(filename, library); }
+    if (isParquet(filename)) { loadParquet(filename, library, threads); }
+    else { loadTSV(filename, library, threads); }
     // A library that carries only one of the two mobility quantities gets the
     // other derived, so a consumer never has to know which the producer chose.
     // Measured need: our own generated library reached DIA-NN with 1/K0 absent
@@ -276,9 +296,250 @@ namespace ODIA
     library.strings().releaseLookup();
   }
 
-  void DIANNLibraryFile::loadTSV(const std::string& filename, Library& library)
+  namespace
   {
-    std::ifstream in(filename);
+    /// Column positions of a TSV library, -1 for an absent column.
+    struct TsvLayout
+    {
+      std::size_t width = 0;
+      int id = -1, seq = -1, pg = -1, pmz = -1, qmz = -1, rt = -1, im = -1, ccs = -1, intensity = -1;
+      int z = -1, fz = -1, ord = -1, dec = -1, ft = -1, lt = -1;
+    };
+
+    /// Bytes of text one parse task covers: 4 MiB, or ODIA_TSV_RANGE_BYTES
+    /// (tests: many ranges and reads from a small file).
+    std::size_t tsvRangeBytes()
+    {
+      static const std::size_t bytes = [] {
+        if (const char* v = std::getenv("ODIA_TSV_RANGE_BYTES"); v != nullptr && *v != '\0')
+        {
+          char* end = nullptr;
+          const long long x = std::strtoll(v, &end, 10);
+          if (end != v && x > 0) { return static_cast<std::size_t>(x); }
+        }
+        return std::size_t(4) << 20;
+      }();
+      return bytes;
+    }
+
+    /// Whole lines of a TSV library, parsed on their own: the rows, the
+    /// synthesized ids they point into, and the first line that failed.
+    struct TsvRange
+    {
+      const char* begin = nullptr;
+      const char* end = nullptr;
+      std::vector<Row> rows;
+      std::string ids;
+      /// Lines in the range, empty ones included: what getline would count.
+      std::size_t lines = 0;
+      /// The first failure: its exception, or a row width that differs from
+      /// the header (whose message needs the file's line number), at
+      /// 0-based line `error_line` of the range. The rows before it are kept.
+      std::exception_ptr error;
+      bool width_error = false;
+      std::size_t error_line = 0;
+    };
+
+    /// Parses one range into Rows, exactly as the serial reader parsed each
+    /// line: every field of every row, precursor-level ones included, so a
+    /// malformed value on any row is still reported. Never throws.
+    void parseTsvRange(TsvRange& range, const TsvLayout& c)
+    {
+      range.rows.clear();
+      range.ids.clear();
+      range.lines = 0;
+      range.error = nullptr;
+      range.width_error = false;
+      std::vector<std::string_view> f;
+      f.reserve(c.width);
+      // Synthesized ids live in range.ids, which may reallocate while it
+      // grows; rows record offsets and get their views at the end.
+      std::vector<std::pair<std::size_t, std::size_t>> id_spans;
+      std::string_view residue_sequence;
+      std::size_t residues = 0;
+      bool have_residues = false;
+
+      try
+      {
+        const char* p = range.begin;
+        while (p < range.end)
+        {
+          const auto* nl = static_cast<const char*>(std::memchr(p, '\n', static_cast<std::size_t>(range.end - p)));
+          const char* stop = nl != nullptr ? nl : range.end;
+          std::string_view line(p, static_cast<std::size_t>(stop - p));
+          p = nl != nullptr ? nl + 1 : range.end;
+          ++range.lines;
+          if (!line.empty() && line.back() == '\r') { line.remove_suffix(1); }
+          if (line.empty()) { continue; }
+
+          f.clear();
+          std::size_t pos = 0;
+          while (pos <= line.size())
+          {
+            const std::size_t tab = line.find('\t', pos);
+            const std::size_t end = tab == std::string_view::npos ? line.size() : tab;
+            f.push_back(line.substr(pos, end - pos));
+            if (tab == std::string_view::npos) { break; }
+            pos = tab + 1;
+          }
+          if (f.size() != c.width)
+          {
+            range.width_error = true;
+            range.error_line = range.lines - 1;
+            break;
+          }
+
+          auto get = [&](int i) -> std::string_view {
+            return (i >= 0 && static_cast<std::size_t>(i) < f.size()) ? f[static_cast<std::size_t>(i)] : std::string_view{};
+          };
+
+          Row r;
+          r.modified_sequence = get(c.seq);
+          r.protein_group = get(c.pg);
+          r.precursor_mz = toDouble(get(c.pmz), DIANNLibraryFile::Columns::PRECURSOR_MZ);
+          r.product_mz = toDouble(get(c.qmz), DIANNLibraryFile::Columns::PRODUCT_MZ);
+          r.rt = toDouble(get(c.rt), DIANNLibraryFile::Columns::RT);
+          r.im = toDouble(get(c.im), DIANNLibraryFile::Columns::IM);
+          r.ccs = toDouble(get(c.ccs), DIANNLibraryFile::Columns::CCS);
+          r.intensity = toDouble(get(c.intensity), DIANNLibraryFile::Columns::RELATIVE_INTENSITY);
+          r.precursor_charge = toLong(get(c.z), "precursor charge");
+          r.fragment_charge = toLong(get(c.fz), "fragment charge");
+          r.ordinal = toLong(get(c.ord), DIANNLibraryFile::Columns::FRAGMENT_SERIES_NUMBER);
+          {
+            // DIA-NN also writes and accepts True/False here.
+            const auto d = get(c.dec);
+            if (!d.empty() && (d[0] == 't' || d[0] == 'T')) { r.decoy = 1; }
+            else if (!d.empty() && (d[0] == 'f' || d[0] == 'F')) { r.decoy = 0; }
+            else { r.decoy = toLong(d, DIANNLibraryFile::Columns::DECOY); }
+          }
+          r.fragment_type = parseFragmentType(get(c.ft));
+          r.loss_type = parseLossType(get(c.lt));
+          // Once per run of rows with the same sequence -- a precursor's
+          // transitions -- instead of once per transition.
+          if (!have_residues || r.modified_sequence != residue_sequence)
+          {
+            residue_sequence = r.modified_sequence;
+            residues = residueCount(r.modified_sequence);
+            have_residues = true;
+          }
+          r.residues = residues;
+          if (c.id >= 0) { r.precursor_id = get(c.id); }
+          else
+          {
+            // The id storeTSV would have written, so a library without the
+            // column groups its rows exactly as one with it. A precursor's
+            // rows share one copy.
+            const bool same = !range.rows.empty() && !id_spans.empty() &&
+                              range.rows.back().modified_sequence == r.modified_sequence &&
+                              range.rows.back().precursor_charge == r.precursor_charge &&
+                              (range.rows.back().decoy != 0) == (r.decoy != 0);
+            if (same) { id_spans.push_back(id_spans.back()); }
+            else
+            {
+              const std::size_t at = range.ids.size();
+              range.ids.append(r.modified_sequence);
+              range.ids += std::to_string(r.precursor_charge);
+              if (r.decoy != 0) { range.ids += "_decoy"; }
+              id_spans.emplace_back(at, range.ids.size() - at);
+            }
+          }
+          checkPrecursorCharge(r.precursor_charge);
+          range.rows.push_back(r);
+        }
+      }
+      catch (...)
+      {
+        range.error = std::current_exception();
+        range.error_line = range.lines - 1;
+      }
+      if (c.id < 0)
+      {
+        for (std::size_t i = 0; i < range.rows.size(); ++i)
+        { range.rows[i].precursor_id = std::string_view(range.ids).substr(id_spans[i].first, id_spans[i].second); }
+      }
+    }
+
+    /// The last '\n' in [begin, end), or nullptr.
+    const char* lastNewline(const char* begin, const char* end)
+    {
+      for (const char* p = end; p != begin; --p)
+      {
+        if (p[-1] == '\n') { return p - 1; }
+      }
+      return nullptr;
+    }
+
+    /// A block of a TSV library's text, cut into ranges and parsed: whole
+    /// lines in [0, complete), the start of the next line after that.
+    struct TsvBlock
+    {
+      std::vector<char> text;
+      std::size_t have = 0;
+      std::size_t complete = 0;
+      std::size_t used = 0;           // ranges in use
+      std::vector<TsvRange> ranges;
+    };
+
+    /// Reads the next block -- the partial line @p previous ended with, then
+    /// as much of @p in as fits -- and parses its ranges on @p workers
+    /// threads. Leaves `have` 0 at the end of the file.
+    void readTsvBlock(std::istream& in, const std::string& filename, TsvBlock& block,
+                      const TsvBlock* previous, const TsvLayout& layout, unsigned workers,
+                      std::size_t range_bytes)
+    {
+      block.have = 0;
+      block.complete = 0;
+      block.used = 0;
+      if (previous != nullptr && previous->have > previous->complete)
+      {
+        const std::size_t tail = previous->have - previous->complete;
+        if (block.text.size() < tail * 2) { block.text.resize(std::max(block.text.size(), tail) * 2); }
+        std::memcpy(block.text.data(), previous->text.data() + previous->complete, tail);
+        block.have = tail;
+      }
+      for (;;)
+      {
+        bool eof = !in;
+        if (!eof && block.have < block.text.size())
+        {
+          in.read(block.text.data() + block.have, static_cast<std::streamsize>(block.text.size() - block.have));
+          block.have += static_cast<std::size_t>(in.gcount());
+          if (!in)
+          {
+            if (in.bad()) { throw std::runtime_error("error reading library: " + filename); }
+            eof = true;
+          }
+        }
+        if (block.have == 0) { return; }
+        if (eof) { block.complete = block.have; break; }
+        const char* nl = lastNewline(block.text.data(), block.text.data() + block.have);
+        if (nl != nullptr) { block.complete = static_cast<std::size_t>(nl - block.text.data()) + 1; break; }
+        // A line longer than the whole buffer: read more of it.
+        block.text.resize(block.text.size() * 2);
+      }
+
+      const char* const end = block.text.data() + block.complete;
+      for (const char* p = block.text.data(); p < end; ++block.used)
+      {
+        const char* cut = end;
+        if (static_cast<std::size_t>(end - p) > range_bytes)
+        {
+          const char* from = p + range_bytes - 1;
+          const auto* nl = static_cast<const char*>(std::memchr(from, '\n', static_cast<std::size_t>(end - from)));
+          cut = nl != nullptr ? nl + 1 : end;
+        }
+        if (block.used == block.ranges.size()) { block.ranges.emplace_back(); }
+        block.ranges[block.used].begin = p;
+        block.ranges[block.used].end = cut;
+        p = cut;
+      }
+      parallel::forEach(block.used, workers, [&](std::size_t i) { parseTsvRange(block.ranges[i], layout); });
+    }
+  } // namespace
+
+  void DIANNLibraryFile::loadTSV(const std::string& filename, Library& library, unsigned threads)
+  {
+    std::ifstream in(filename, std::ios::binary);
     if (!in) { throw std::runtime_error("cannot open library: " + filename); }
 
     std::string header;
@@ -343,67 +604,71 @@ namespace ODIA
     }
     if (c_seq < 0) { throw std::runtime_error("missing Modified.Sequence (or ModifiedPeptide) in library: " + filename); }
 
+    TsvLayout layout;
+    layout.width = index.size();
+    layout.id = c_id; layout.seq = c_seq; layout.pg = c_pg; layout.pmz = c_pmz; layout.qmz = c_qmz;
+    layout.rt = c_rt; layout.im = c_im; layout.ccs = c_ccs; layout.intensity = c_int; layout.z = c_z;
+    layout.fz = c_fz; layout.ord = c_ord; layout.dec = c_dec; layout.ft = c_ft; layout.lt = c_lt;
+
+    // Parsing is the cost -- splitting, six numbers and four integers per
+    // row -- and it is row-local, so the text is read in blocks, cut into
+    // ranges at newlines, and the ranges are parsed on all workers. The rows
+    // then enter the library in file order on one thread, which is all
+    // Builder::append needs to group, intern and number them exactly as a
+    // serial read does. A range keeps the rows before its first bad line, so
+    // the error and everything appended before it are the serial reader's.
+    //
+    // With more than one thread, appending block k (one thread) overlaps
+    // reading and parsing block k+1 (the others); appending is about half of
+    // what is left once parsing is parallel.
+    const unsigned workers = parallel::workers(threads);
+    const bool overlap = workers > 1;
+    const unsigned parsers = overlap ? workers - 1 : 1;
+    const std::size_t range_bytes = tsvRangeBytes();
+    const std::size_t ranges_per_block = std::clamp<std::size_t>(std::size_t(workers) * 2, 2, 64);
+    TsvBlock blocks[2];
+    for (auto& block : blocks) { block.text.resize(range_bytes * ranges_per_block); }
+
     Builder builder(library);
-    std::string line, synthesized_id;
-    std::vector<std::string_view> f;
-    std::size_t line_number = 1;
-    while (std::getline(in, line))
+    std::size_t lines_before = 1;  // the header
+    const auto append = [&](const TsvBlock& block) {
+      for (std::size_t i = 0; i < block.used; ++i)
+      {
+        const auto& range = block.ranges[i];
+        for (const auto& row : range.rows) { builder.append(row); }
+        if (range.width_error)
+        {
+          throw std::runtime_error("TSV row width differs from header at line " +
+                                   std::to_string(lines_before + range.error_line + 1));
+        }
+        if (range.error) { std::rethrow_exception(range.error); }
+        lines_before += range.lines;
+      }
+    };
+
+    readTsvBlock(in, filename, blocks[0], nullptr, layout, parsers, range_bytes);
+    for (std::size_t k = 0; blocks[k % 2].have != 0; ++k)
     {
-      ++line_number;
-      if (!line.empty() && line.back() == '\r') { line.pop_back(); }
-      if (line.empty()) { continue; }
-
-      f.clear();
-      std::size_t pos = 0;
-      while (pos <= line.size())
+      TsvBlock& current = blocks[k % 2];
+      TsvBlock& next = blocks[(k + 1) % 2];
+      if (!overlap)
       {
-        const std::size_t tab = line.find('\t', pos);
-        const std::size_t end = tab == std::string::npos ? line.size() : tab;
-        f.emplace_back(line.data() + pos, end - pos);
-        if (tab == std::string::npos) { break; }
-        pos = tab + 1;
+        append(current);
+        readTsvBlock(in, filename, next, &current, layout, parsers, range_bytes);
+        continue;
       }
-      if (f.size() != index.size())
-      { throw std::runtime_error("TSV row width differs from header at line " + std::to_string(line_number)); }
-
-      auto get = [&](int i) -> std::string_view {
-        return (i >= 0 && static_cast<std::size_t>(i) < f.size()) ? f[i] : std::string_view{};
-      };
-
-      Row r;
-      r.modified_sequence = get(c_seq);
-      r.protein_group = get(c_pg);
-      r.precursor_mz = toDouble(get(c_pmz), Columns::PRECURSOR_MZ);
-      r.product_mz = toDouble(get(c_qmz), Columns::PRODUCT_MZ);
-      r.rt = toDouble(get(c_rt), Columns::RT);
-      r.im = toDouble(get(c_im), Columns::IM);
-      r.ccs = toDouble(get(c_ccs), Columns::CCS);
-      r.intensity = toDouble(get(c_int), Columns::RELATIVE_INTENSITY);
-      r.precursor_charge = toLong(get(c_z), "precursor charge");
-      r.fragment_charge = toLong(get(c_fz), "fragment charge");
-      r.ordinal = toLong(get(c_ord), Columns::FRAGMENT_SERIES_NUMBER);
-      {
-        // DIA-NN also writes and accepts True/False here.
-        const auto d = get(c_dec);
-        if (!d.empty() && (d[0] == 't' || d[0] == 'T')) { r.decoy = 1; }
-        else if (!d.empty() && (d[0] == 'f' || d[0] == 'F')) { r.decoy = 0; }
-        else { r.decoy = toLong(d, Columns::DECOY); }
-      }
-      r.fragment_type = get(c_ft);
-      r.loss_type = get(c_lt);
-      if (c_id >= 0) { r.precursor_id = get(c_id); }
-      else
-      {
-        // The id storeTSV would have written, so a library without the column
-        // groups its rows exactly as one with it.
-        synthesized_id.assign(r.modified_sequence);
-        synthesized_id += std::to_string(r.precursor_charge);
-        if (r.decoy != 0) { synthesized_id += "_decoy"; }
-        r.precursor_id = synthesized_id;
-      }
-      builder.append(r);
+      std::exception_ptr append_error;
+      std::thread appender;
+      try { appender = std::thread([&] { try { append(current); } catch (...) { append_error = std::current_exception(); } }); }
+      catch (const std::system_error&) { append(current); }  // no thread to spare: in turn
+      // The block before is the one a serial read fails in first.
+      std::exception_ptr read_error;
+      try { readTsvBlock(in, filename, next, &current, layout, parsers, range_bytes); }
+      catch (...) { read_error = std::current_exception(); }
+      if (appender.joinable()) { appender.join(); }
+      if (append_error) { std::rethrow_exception(append_error); }
+      if (read_error) { std::rethrow_exception(read_error); }
     }
-    if (in.bad()) { throw std::runtime_error("error reading library: " + filename); }
     builder.finish();
     if (builder.outOfRange())
     {
@@ -420,14 +685,59 @@ namespace ODIA
     }
   }
 
-  void DIANNLibraryFile::loadParquet(const std::string& filename, Library& library)
+  void DIANNLibraryFile::loadParquet(const std::string& filename, Library& library, unsigned threads)
   {
     auto infile = arrow::io::ReadableFile::Open(filename);
     if (!infile.ok()) { throw std::runtime_error("cannot open library: " + filename); }
 
-    auto reader_result = parquet::arrow::OpenFile(*infile, arrow::default_memory_pool());
-    if (!reader_result.ok()) { throw std::runtime_error("not a Parquet file: " + filename); }
-    std::unique_ptr<parquet::arrow::FileReader> reader = std::move(*reader_result);
+    // The default reader decodes a batch's columns one after another on the
+    // calling thread. use_threads spreads them over Arrow's CPU pool, which
+    // useThreads() sizes to -threads; pre_buffer fetches each row group's
+    // column chunks in a few coalesced reads instead of one per page.
+    parquet::ArrowReaderProperties properties = parquet::default_arrow_reader_properties();
+    properties.set_use_threads(parallel::workers(threads) > 1);
+    properties.set_pre_buffer(true);
+    std::unique_ptr<parquet::arrow::FileReader> reader;
+    {
+      parquet::arrow::FileReaderBuilder open;
+      if (!open.Open(*infile).ok() ||
+          !open.memory_pool(arrow::default_memory_pool())->properties(properties)->Build(&reader).ok() || !reader)
+      { throw std::runtime_error("not a Parquet file: " + filename); }
+    }
+
+    // Size the library once from the footer instead of doubling every array
+    // its way up: rows are transitions in the flat layout; in the compact one
+    // they are precursors, and the values of the Product.Mz list are the
+    // transitions. Capacity only -- the content does not depend on it.
+    {
+      const auto metadata = reader->parquet_reader()->metadata();
+      std::shared_ptr<arrow::Schema> schema;
+      if (metadata && reader->GetSchema(&schema).ok() && schema)
+      {
+        const auto rows = static_cast<std::size_t>(std::max<std::int64_t>(0, metadata->num_rows()));
+        const int qi = schema->GetFieldIndex(Columns::PRODUCT_MZ);
+        const bool compact = qi >= 0 && schema->field(qi)->type()->id() == arrow::Type::LIST;
+        std::size_t precursors = 0, transitions = rows;
+        if (compact)
+        {
+          precursors = rows;
+          transitions = 0;
+          const auto* columns = metadata->schema();
+          for (int j = 0; j < columns->num_columns(); ++j)
+          {
+            const auto path = columns->Column(j)->path()->ToDotVector();
+            if (path.empty() || path.front() != Columns::PRODUCT_MZ) { continue; }
+            for (int g = 0; g < metadata->num_row_groups(); ++g)
+            { transitions += static_cast<std::size_t>(std::max<std::int64_t>(0, metadata->RowGroup(g)->ColumnChunk(j)->num_values())); }
+            break;
+          }
+        }
+        const std::size_t limit = std::numeric_limits<std::uint32_t>::max();
+        const std::size_t have = library.transitionCount();
+        transitions = have >= limit ? have : std::min(have + transitions, limit);
+        library.reserve(library.precursorCount() + precursors, transitions);
+      }
+    }
 
     // Bound decoded input memory independently of the full spectral library.
     // The Builder spans batches so a precursor split at a boundary stays intact.
@@ -539,8 +849,8 @@ namespace ODIA
         r.precursor_id = sv(a_id, i);
         r.modified_sequence = sv(a_seq, i);
         r.protein_group = sv(a_pg, i);
-        r.fragment_type = sv(a_ft, i);
-        r.loss_type = sv(a_lt, i);
+        r.fragment_type = parseFragmentType(sv(a_ft, i));
+        r.loss_type = parseLossType(sv(a_lt, i));
         r.precursor_mz = at(a_pmz, i);
         r.product_mz = at(a_qmz, i);
         r.rt = at(a_rt, i);
@@ -685,9 +995,17 @@ namespace ODIA
   void DIANNLibraryFile::loadParquetCompact(const std::shared_ptr<arrow::Table>& table_in,
                                             Library& library)
   {
-    auto combined = table_in->CombineChunks(arrow::default_memory_pool());
-    if (!combined.ok()) { throw std::runtime_error("cannot combine Parquet chunks"); }
-    auto table = *combined;
+    // loadParquet hands over one record batch, i.e. one chunk per column, so
+    // nothing needs combining; anything else is combined first.
+    std::shared_ptr<arrow::Table> table = table_in;
+    for (const auto& column : table_in->columns())
+    {
+      if (column->num_chunks() == 1) { continue; }
+      auto combined = table_in->CombineChunks(arrow::default_memory_pool());
+      if (!combined.ok()) { throw std::runtime_error("cannot combine Parquet chunks"); }
+      table = *combined;
+      break;
+    }
 
     std::vector<std::shared_ptr<arrow::Array>> keep_alive;
     auto col = [&](const char* n) -> std::shared_ptr<arrow::Array> {
@@ -805,6 +1123,7 @@ namespace ODIA
         std::string_view(pg.data(), pg.size())));
 
       const int64_t b = l_qmz->value_offset(i), e = l_qmz->value_offset(i + 1);
+      const std::size_t residues = v_ord ? residueCount(seq) : 0;
       Library::checkTransitionCapacity(t.product_mz.size(), static_cast<std::size_t>(e - b));
       p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
       for (int64_t k = b; k < e; ++k)
@@ -818,7 +1137,7 @@ namespace ODIA
         if (type > static_cast<std::uint8_t>(FragmentType::Precursor))
         { throw std::runtime_error("invalid compact fragment type"); }
         if (charge < 1 || charge > 127) { throw std::runtime_error("invalid compact fragment charge"); }
-        if (v_ord && (ordinal < 1 || ordinal >= residueCount(seq)))
+        if (v_ord && (ordinal < 1 || ordinal >= residues))
         { throw std::runtime_error("invalid compact fragment ordinal"); }
         t.type.push_back(static_cast<FragmentType>(type));
         t.charge.push_back(static_cast<std::int8_t>(charge));

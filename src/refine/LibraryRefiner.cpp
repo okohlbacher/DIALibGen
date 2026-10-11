@@ -3,6 +3,8 @@
 
 #include <odia/LibraryRefiner.h>
 
+#include "../library/ParseDouble.h"
+
 #include <arrow/api.h>
 #include <arrow/compute/api.h>
 #include <arrow/io/file.h>
@@ -98,14 +100,15 @@ namespace ODIA
       return out;
     }
 
-    // Classic-locale streams also work on macOS SDKs without floating from_chars.
+    // Three per fragment of every report row. A classic-locale istringstream
+    // per number did this before; the parse below is the same correctly
+    // rounded one without the stream (ParseDouble.h).
     bool number(std::string_view t, double& v)
     {
-      if (t.empty() || t.find_first_not_of("0123456789+-.eE") != std::string_view::npos) { return false; }
-      std::istringstream input{std::string(t)};
-      input.imbue(std::locale::classic());
-      input >> std::noskipws >> v;
-      return input && input.peek() == std::char_traits<char>::eof() && std::isfinite(v);
+      double parsed = 0.0;
+      if (!ODIA::parseDouble(t, parsed) || !std::isfinite(parsed)) { return false; }
+      v = parsed;
+      return true;
     }
 
     // Shared identity parser for DIA-NN 1.9 lists and 2.x Fr.N.Id columns.

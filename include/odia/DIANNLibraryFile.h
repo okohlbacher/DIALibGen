@@ -117,7 +117,12 @@ namespace ODIA
     /// `RelativeIntensity`, ...). Without a Precursor.Id column the id is
     /// built from sequence, charge and decoy flag; without Protein.Group the
     /// protein group is taken from Protein.Ids/UniprotID.
-    static void load(const std::string& filename, Library& library);
+    ///
+    /// @param threads host threads for parsing (0 = one per physical core,
+    /// as -threads 0). The library does not depend on it: rows are parsed in
+    /// parallel and appended in file order, and an error names the line a
+    /// one-thread read stops at.
+    static void load(const std::string& filename, Library& library, unsigned threads = 1);
 
     /// Fill in whichever of 1/K0 and CCS the file omitted, from the other.
     ///
@@ -126,8 +131,8 @@ namespace ODIA
     /// one wants the same completion.
     static void completeMobility(Library& library);
 
-    static void loadTSV(const std::string& filename, Library& library);
-    static void loadParquet(const std::string& filename, Library& library);
+    static void loadTSV(const std::string& filename, Library& library, unsigned threads = 1);
+    static void loadParquet(const std::string& filename, Library& library, unsigned threads = 1);
 
     /// Write in DIA-NN's TSV dialect, with the `TSVColumns` header.
     ///

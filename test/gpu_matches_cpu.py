@@ -50,7 +50,8 @@ def rows(path):
 
 a, b = rows(cpu), rows(gpu1)
 assert len(a) == len(b), f"{len(a)} CPU rows, {len(b)} GPU rows"
-tolerance = {"RT": 1e-4, "IM": 1e-4, "CCS": 0.01, "Relative.Intensity": 1e-4}
+# The TSV's DIA-NN column names (iRT, IonMobility, LibraryIntensity).
+tolerance = {"iRT": 1e-4, "IonMobility": 1e-4, "CCS": 0.01, "LibraryIntensity": 1e-4}
 for x, y in zip(a, b):
     for key in x:
         if key in tolerance and x[key] != "":

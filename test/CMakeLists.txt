@@ -311,6 +311,10 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
                    "-DCONFIG=${CMAKE_CURRENT_BINARY_DIR}/stream.json"
                    "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/stream"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/stream_matches_one_pass.cmake")
+  # The CPU contract. On CUDA the batch composition shapes every value at
+  # float rounding, so CCS predicted before precursors are dropped can differ
+  # in the last bits from CCS predicted after (CcsBatchGuard, LibraryGenerator.h).
+  set_tests_properties(generate_stream_matches_one_pass PROPERTIES ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
 endif()
 
 # The pruned MS2 graph (data/models/peptdeep_ms2_pruned.onnx, the default) and

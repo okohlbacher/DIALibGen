@@ -25,6 +25,10 @@ namespace
 {
   constexpr const char* kRtModelFile = "peptdeep_rt_dynamic.onnx";
   constexpr const char* kMs2ModelFile = "peptdeep_ms2_dynamic.onnx";
+  /// The MS2 model with its modloss branch removed: channels 0-3 bit-identical
+  /// to kMs2ModelFile, 4-7 exact zeros, and about a fifth fewer FLOPs.
+  /// Generation reads only channels 0-3, so it is the default.
+  constexpr const char* kMs2PrunedModelFile = "peptdeep_ms2_pruned.onnx";
   constexpr const char* kCcsModelFile = "peptdeep_ccs_dynamic.onnx";
 
   constexpr const char* kDecoyMethods[] = {"none", "mutate", "pseudo_reverse",
@@ -93,6 +97,22 @@ namespace
     {
       const fs::path c = dir / name;
       if (fs::exists(c, ec)) { return c.string(); }
+    }
+    return {};
+  }
+
+  /// The default MS2 model: in the first model directory that holds either,
+  /// the pruned graph, else the full one.
+  std::string findMs2Model()
+  {
+    std::error_code ec;
+    for (const auto& dir : modelDirCandidates())
+    {
+      for (const char* name : {kMs2PrunedModelFile, kMs2ModelFile})
+      {
+        const fs::path c = dir / name;
+        if (fs::exists(c, ec)) { return c.string(); }
+      }
     }
     return {};
   }
@@ -376,8 +396,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       const auto base = fs::path(cfg).parent_path();
       for (std::string* m : {&rt_model, &ms2_model, &ccs_model})
       {
-        if (!m->empty() && fs::path(*m).is_relative())
-        { *m = (base / *m).lexically_normal().string(); }
+        if (m->empty() || !fs::path(*m).is_relative()) { continue; }
+        const auto beside = (base / *m).lexically_normal();
+        // A bare file name that is not beside the config names a model in
+        // the model directories (see below).
+        std::error_code ec;
+        if (fs::path(*m).filename() == fs::path(*m) && !fs::exists(beside, ec))
+        {
+          if (const auto found = findModel(m->c_str()); !found.empty()) { *m = found; continue; }
+        }
+        *m = beside.string();
       }
     }
 
@@ -426,7 +454,18 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       {"ccs_model", kCcsModelFile, &ccs_model}};
     for (auto& m : models)
     {
-      if (m.path->empty()) { *m.path = findModel(m.file); }
+      // A bare file name that does not exist as given names a model in the
+      // model directories: "ms2_model": "peptdeep_ms2_dynamic.onnx" selects
+      // the full MS2 model wherever the install keeps it.
+      if (!m.path->empty() && fs::path(*m.path).filename() == fs::path(*m.path) &&
+          !fs::exists(*m.path))
+      {
+        if (const auto found = findModel(m.path->c_str()); !found.empty()) { *m.path = found; }
+      }
+      if (!m.path->empty()) { continue; }
+      // MS2: the pruned graph where it sits beside the full one, so that a
+      // DIALIBGEN_MODEL_DIR holding only the three stock models is used as is.
+      *m.path = std::string_view(m.file) == kMs2ModelFile ? findMs2Model() : findModel(m.file);
     }
 
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())

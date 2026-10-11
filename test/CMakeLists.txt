@@ -296,6 +296,34 @@ if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MO
   set_tests_properties(generate_threads_identical PROPERTIES ENVIRONMENT "ODIA_MS2_BLOCK=10000")
 endif()
 
+# The pruned MS2 graph (data/models/peptdeep_ms2_pruned.onnx, the default) and
+# the full one must give the same library. The TSV carries no provenance, so
+# the two files must be byte-identical; the Parquet differs only in the model
+# hash it records.
+set(ODIA_MS2_PRUNED_PATH "${PROJECT_SOURCE_DIR}/data/models/peptdeep_ms2_pruned.onnx")
+if(TARGET DIALibGen AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}"
+   AND EXISTS "${ODIA_CCS_MODEL_PATH}" AND EXISTS "${ODIA_MS2_PRUNED_PATH}")
+  foreach(variant full pruned)
+    if(variant STREQUAL "full")
+      set(_ms2 "${ODIA_MS2_MODEL_PATH}")
+    else()
+      set(_ms2 "${ODIA_MS2_PRUNED_PATH}")
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/ms2_${variant}.json"
+         "{\"precursor_charges\": [2, 3, 4], \"variable_modifications\": [\"Oxidation (M)\"],\n"
+         " \"instrument\": \"timsTOF\", \"decoys\": \"mutate\", \"min_relative_intensity\": 0.0,\n"
+         " \"rt_model\": \"${ODIA_RT_MODEL_PATH}\", \"ms2_model\": \"${_ms2}\",\n"
+         " \"ccs_model\": \"${ODIA_CCS_MODEL_PATH}\"}\n")
+  endforeach()
+  add_test(NAME generate_ms2_pruned_matches_full
+           COMMAND ${CMAKE_COMMAND} -DTOOL=$<TARGET_FILE:DIALibGen>
+                   "-DFULL=${CMAKE_CURRENT_BINARY_DIR}/ms2_full.json"
+                   "-DPRUNED=${CMAKE_CURRENT_BINARY_DIR}/ms2_pruned.json"
+                   "-DFASTA=${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta"
+                   "-DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ms2_pruned"
+                   -P "${CMAKE_CURRENT_SOURCE_DIR}/ms2_pruned_matches_full.cmake")
+endif()
+
 # On a machine with a usable GPU: the default (TF32 off) GPU library equals the
 # CPU library to float rounding, and 1 and 4 CUDA sessions write the same
 # bytes. Skips (77) without one -- the CPU CTest run hides the GPUs.

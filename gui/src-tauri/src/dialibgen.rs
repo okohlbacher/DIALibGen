@@ -36,6 +36,16 @@ pub const MODEL_FILES: [&str; 3] = [
     "peptdeep_ccs_dynamic.onnx",
 ];
 
+/// The MS2 model without its modloss branch, bundled beside MODEL_FILES since
+/// 0.11.2. Same library as peptdeep_ms2_dynamic.onnx, faster; the CLI's default.
+pub const MS2_PRUNED_FILE: &str = "peptdeep_ms2_pruned.onnx";
+
+/// The MS2 model file a generation run in @p dir uses: the pruned graph when
+/// the directory has it, as the CLI's own lookup does, else the full model.
+pub fn ms2_model_file(dir: &Path) -> &'static str {
+    if dir.join(MS2_PRUNED_FILE).is_file() { MS2_PRUNED_FILE } else { MODEL_FILES[1] }
+}
+
 /// The single in-flight run. Library generation is long and memory-hungry; a
 /// second `run` while one is live is refused rather than queued.
 #[derive(Default)]
@@ -642,6 +652,7 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
             // them rather than letting stale/imported paths override the picker.
             // Explicit file paths also stop the CLI's per-head fallback search.
             for (key, file) in ["rt_model", "ms2_model", "ccs_model"].into_iter().zip(MODEL_FILES) {
+                let file = if key == "ms2_model" { ms2_model_file(&selected) } else { file };
                 config.insert(key.into(), Value::String(selected.join(file).display().to_string()));
             }
         }
@@ -825,6 +836,14 @@ mod tests {
             Value::Object(m) => m,
             _ => panic!("not an object"),
         }
+    }
+
+    #[test]
+    fn generation_prefers_the_pruned_ms2_model_beside_the_full_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(ms2_model_file(dir.path()), "peptdeep_ms2_dynamic.onnx");
+        std::fs::write(dir.path().join(MS2_PRUNED_FILE), "model").unwrap();
+        assert_eq!(ms2_model_file(dir.path()), MS2_PRUNED_FILE);
     }
 
     #[cfg(target_os = "linux")]

@@ -308,8 +308,8 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
-          # Require all three bundled prediction models.
-          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
+          # Require all bundled prediction models, the pruned MS2 graph included.
+          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx peptdeep_ms2_pruned.onnx; do
             test -s "$PWD/stage/share/DIALibGen/models/$m" \
               || { echo "::error::$m is not in the install tree"; exit 1; }
           done
@@ -333,7 +333,10 @@ jobs:
           export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
           BIN="$PWD/stage/bin/DIALibGen"
 
-          "$BIN" -in example/proteins.fasta -out out.parquet
+          "$BIN" -in example/proteins.fasta -out out.parquet > gen.log 2>&1 || { cat gen.log; exit 1; }
+          # The bundled pruned MS2 graph is the default.
+          grep -q "MS2 model: .*peptdeep_ms2_pruned.onnx" gen.log \
+            || { echo "::error::the installed binary does not use the pruned MS2 model"; cat gen.log; exit 1; }
           "$BIN" -in example/proteins.fasta -out out.tsv
 
           test -s out.parquet || { echo "::error::no Parquet library"; exit 1; }

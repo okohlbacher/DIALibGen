@@ -340,7 +340,14 @@ namespace ODIA::search
     /// take a process-wide critical section (MetaInfoRegistry); above about
     /// eight threads the team mostly spins on it. Measured on an Astral slice
     /// (40,000 pairs): extraction 108 s at 4 threads, 62-64 s at 8, 57 s at 16
-    /// and 94-106 s at 32, with 3x the CPU of 16. The result does not depend on it.
+    /// and 94-106 s at 32, with 3x the CPU of 16. Measured again on 0.11.2's
+    /// base (dax, traced, ODIA_OPENSWATH_THREADS; docs/design/built-in-
+    /// identification.md, "The OpenSWATH team"): 16 beat 8 nowhere -- Astral
+    /// 40,000 pairs 153 s at 8, 169 s at 16 with twice the CPU, 297 s at 32;
+    /// timsTOF 30,000 pairs 496 / 536 / 589 s, where one straggling window
+    /// ends every call -- and OMP_WAIT_POLICY=passive with GOMP_SPINCOUNT=10000
+    /// changed none of it (it removed only the calibration's idle spinning).
+    /// The result does not depend on the team.
     class ThreadCap
     {
     public:

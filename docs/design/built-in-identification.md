@@ -1222,6 +1222,53 @@ where it asks 60 minutes on 8 cores (prediction, about 1,330 s, is now the
 largest single step after extraction). On a machine with less than about
 49 GB free `auto` streams, and the run takes the time it took before.
 
+### The OpenSWATH team (`SearchParams::openswath_max_threads`), re-measured
+
+Stock OpenSWATH calls (calibration, extraction) run on at most 8 OpenMP
+threads. The cap came from one Astral measurement in which 16 threads beat 8
+by 8-11 % and 32 collapsed; the audit of 2026-10-11 asked whether a passive
+OpenMP wait policy (`OMP_WAIT_POLICY=passive`, `GOMP_SPINCOUNT=10000`, set at
+launch) removes the collapse, and whether the cap can then be raised.
+Measured on 0.11.2's base (perf/run-speed 6a88ab1, traced; the team set with
+`ODIA_OPENSWATH_THREADS`, `-threads` the same number), dax, one run per
+setting, one after the other under the timing lock. Reduced timsTOF cell:
+the M2 run and library, `-mode refine`, 30,000 pairs, library intensities
+(3 extraction calls of 20,000 precursors). Reduced Astral cell: the
+Orbitrap Astral run and library, `-mode refine`, 40,000 pairs, library
+intensities (4 calls). CPU is the process's over the phase (`proc.tsv`).
+
+| cell | team | wait policy | extraction wall | CPU | active cores | calibration's OpenSWATH: wall, CPU |
+|---|---|---|---|---|---|---|
+| timsTOF | 8 | default | 496 s | 3,202 s | 6.5 | 274 s, 488 s |
+| timsTOF | 16 | default | 536 s | 3,652 s | 6.8 | 272 s, 725 s |
+| timsTOF | 32 | default | 589 s | 6,260 s | 10.6 | 271 s, 1,177 s |
+| timsTOF | 8 | passive | 506 s | 3,220 s | 6.4 | 272 s, 299 s |
+| timsTOF | 16 | passive | 524 s | 3,667 s | 7.0 | 271 s, 312 s |
+| timsTOF | 32 | passive | 599 s | 6,400 s | 10.7 | 271 s, 346 s |
+| Astral | 8 | default | 153 s | 1,184 s | 7.8 | 119 s, 326 s |
+| Astral | 16 | default | 169 s | 2,488 s | 14.7 | 120 s, 555 s |
+| Astral | 32 | default | 297 s | 8,337 s | 28.1 | 120 s, 1,003 s |
+| Astral | 8 | passive | 154 s | 1,190 s | 7.7 | 120 s, 135 s |
+| Astral | 16 | passive | 158 s | 2,291 s | 14.5 | 118 s, 146 s |
+| Astral | 32 | passive | 294 s | 8,266 s | 28.1 | 119 s, 162 s |
+
+16 threads beat 8 on neither run, and 32 collapses with and without the
+passive policy. On Astral, 16 threads keep 14.7 cores busy for twice the
+CPU of 8 and a longer wall: the extra threads work against each other, and
+not by libgomp spin-waiting, which the passive policy would have removed. On
+the timsTOF cell every call ends with one window running alone: the count of
+running threads falls from 16 to 1 over the last 70 % of each call at 16
+threads (at 8 over the last 20-25 %), so more threads cannot help there
+either. The passive policy only removed idle spinning around the
+calibration's mostly serial OpenSWATH call (488 -> 299 CPU-s at 8 threads,
+the same wall). The reports were identical in every setting (md5 per cell).
+Decision: the cap stays at 8 and no launcher sets a wait policy; the policy
+also slows LibTorch's CPU training, which `-run -tune` runs in the same
+process (+30 % per epoch at 16 threads, measured on dax by the training
+work). What would help is better balance across windows inside a call
+(the timsTOF straggler) and the calibration's OpenSWATH call, which runs on
+1.8 cores for 270 s on the timsTOF run.
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged

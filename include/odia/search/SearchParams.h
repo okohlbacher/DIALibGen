@@ -226,7 +226,9 @@ namespace ODIA::search
     static constexpr std::size_t min_assay_fragments = 3;
     /// The most OpenMP threads a stock OpenSWATH call (calibration, extraction)
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
-    /// a process-wide lock, and more threads only spin (see RunStages.cpp).
+    /// a process-wide lock, and more threads only spin (see RunStages.cpp;
+    /// re-measured on 0.11.2's base at 8, 16 and 32 threads with and without
+    /// a passive OpenMP wait policy: 8 stays the fastest).
     static constexpr int openswath_max_threads = 8;
     /// The cap OpenSWATH calls use: openswath_max_threads, or the value of
     /// ODIA_OPENSWATH_THREADS (a measurement switch, read once; docs/tracing.md).

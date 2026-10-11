@@ -4,6 +4,7 @@
 #include <odia/LibraryGenerator.h>
 #include <odia/Hardware.h>
 #include <odia/PeptDeepPredictor.h>
+#include <odia/PeptideParser.h>
 #include <odia/Trace.h>
 
 #include "Parallel.h"
@@ -353,6 +354,10 @@ namespace ODIA
     /// the merge sees exactly the serial order.
     constexpr std::size_t TASK_ITEMS = 256;
     constexpr std::size_t TASKS_PER_THREAD = 8;
+
+    /// Sequences per forEach grain when parsing (parsePeptide): a parse is
+    /// about a microsecond, too little to hand out one index at a time.
+    constexpr std::size_t PARSE_GRAIN = 256;
 
     /// Runs @p task on a thread of its own, or on this one, without the
     /// overlap, when no thread can be started (a process or cgroup thread
@@ -918,11 +923,11 @@ namespace ODIA
     {
       try
       {
-        parsed[k] = AASequence::fromString(std::string(library.strings().get(candidates[k])));
+        parsed[k] = parsePeptide(library.strings().get(candidates[k]));
         parsed_ok[k] = 1;
       }
       catch (const std::exception&) {}   // left NaN, and counted below
-    });
+    }, PARSE_GRAIN);
     std::vector<AASequence> unique_peptides;
     std::vector<std::uint32_t> slot_handle;
     unique_peptides.reserve(candidates.size());
@@ -963,7 +968,7 @@ namespace ODIA
         value += freeCysteineRtOffset(freeCysteines(unique_peptides[slot]));
       }
       by_handle[slot_handle[slot]] = value;
-    });
+    }, 4096);
 
     std::size_t unpredicted = 0;
     auto& precursors = library.precursors();
@@ -1173,10 +1178,9 @@ namespace ODIA
       block.charges.resize(size);
       parallel::forEach(size, team, [&](std::size_t k)
       {
-        block.peptides[k] =
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
+        block.peptides[k] = parsePeptide(library.strings().get(p.modified_sequence[base + k]));
         block.charges[k] = static_cast<int>(p.charge[base + k]);
-      });
+      }, PARSE_GRAIN);
       return block;
     };
 
@@ -1492,10 +1496,9 @@ namespace ODIA
       block.charges.resize(block.last - base);
       parallel::forEach(block.last - base, team, [&](std::size_t k)
       {
-        block.peptides[k] =
-          AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
+        block.peptides[k] = parsePeptide(library.strings().get(p.modified_sequence[base + k]));
         block.charges[k] = static_cast<int>(p.charge[base + k]);
-      });
+      }, PARSE_GRAIN);
       if (lengths != nullptr)
       {
         for (std::size_t k = 0; k < block.peptides.size(); ++k)
@@ -1631,7 +1634,7 @@ namespace ODIA
         // Predicted again the old way: alone, or as a batch of two rows (any
         // batch of two or more gives a row the same value).
         if (!predictor_) { predictor_ = std::make_unique<PeptDeepPredictor>(model_, false, 1, 1); }
-        const auto peptide = AASequence::fromString(std::string(library.strings().get(p.modified_sequence[i])));
+        const auto peptide = parsePeptide(library.strings().get(p.modified_sequence[i]));
         const int charge = static_cast<int>(p.charge[i]);
         const std::size_t rows = old_alone[k] ? 1 : 2;
         const auto ccs = predictor_->predictCCS(std::vector<AASequence>(rows, peptide), std::vector<int>(rows, charge));
@@ -1682,7 +1685,7 @@ namespace ODIA
       // Parse with OpenMS so terminal and nested modification names cannot
       // become bogus residue tokens. Terminal modifications stay terminal.
       AASequence target;
-      try { target = AASequence::fromString(sequence); }
+      try { target = parsePeptide(sequence); }
       catch (const std::exception&) { ++skipped; continue; }
       struct Token { std::string text; char residue; bool modified; };
       std::vector<Token> tokens;

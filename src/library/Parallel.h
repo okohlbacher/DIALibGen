@@ -53,10 +53,16 @@ namespace ODIA::parallel
   /// If bodies throw, the exception of the LOWEST failing index is rethrown
   /// once all threads have stopped -- the one a serial loop would have hit
   /// first -- so the error message does not depend on scheduling either.
+  ///
+  /// Indices are handed out @p grain at a time, in order within a grain: one
+  /// shared counter increment per index costs more than a body of a few
+  /// hundred nanoseconds once dozens of threads contend for its cache line.
   template <class Body>
-  void forEach(std::size_t n, unsigned threads, Body&& body)
+  void forEach(std::size_t n, unsigned threads, Body&& body, std::size_t grain = 1)
   {
-    const std::size_t count = std::min<std::size_t>(std::max(1u, threads), n);
+    grain = std::max<std::size_t>(1, grain);
+    const std::size_t grains = (n + grain - 1) / grain;
+    const std::size_t count = std::min<std::size_t>(std::max(1u, threads), grains);
     if (count <= 1)
     {
       for (std::size_t i = 0; i < n; ++i) { body(i); }
@@ -71,17 +77,23 @@ namespace ODIA::parallel
 
     const auto run = [&]
     {
-      for (std::size_t i = next++; i < n && i < stop_at.load(); i = next++)
+      for (std::size_t g = next.fetch_add(1, std::memory_order_relaxed); g < grains;
+           g = next.fetch_add(1, std::memory_order_relaxed))
       {
-        try { body(i); }
-        catch (...)
+        const std::size_t end = std::min(n, (g + 1) * grain);
+        for (std::size_t i = g * grain; i < end && i < stop_at.load(std::memory_order_relaxed); ++i)
         {
-          const std::lock_guard<std::mutex> lock(error_mutex);
-          if (i < error_index) { error_index = i; error = std::current_exception(); }
-          // Indices below i are still run, so a lower failure is still found.
-          std::size_t current = stop_at.load();
-          while (i < current && !stop_at.compare_exchange_weak(current, i)) {}
+          try { body(i); }
+          catch (...)
+          {
+            const std::lock_guard<std::mutex> lock(error_mutex);
+            if (i < error_index) { error_index = i; error = std::current_exception(); }
+            // Indices below i are still run, so a lower failure is still found.
+            std::size_t current = stop_at.load();
+            while (i < current && !stop_at.compare_exchange_weak(current, i)) {}
+          }
         }
+        if (g * grain >= stop_at.load(std::memory_order_relaxed)) { break; }
       }
     };
 

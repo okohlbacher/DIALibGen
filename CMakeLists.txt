@@ -118,6 +118,7 @@ add_library(odia_library STATIC
   src/library/LibraryGenerator.cpp
   src/library/DIANNLibraryFile.cpp
   src/library/ModifiedSequence.cpp
+  src/library/PeptideParser.cpp
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
   src/library/Trace.cpp

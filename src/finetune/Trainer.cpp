@@ -33,9 +33,14 @@
 #include <limits>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <set>
 #include <stdexcept>
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace ODIA::tune
 {
@@ -46,6 +51,37 @@ namespace ODIA::tune
   {
     using Clock = std::chrono::steady_clock;
     double seconds(Clock::time_point a) { return std::chrono::duration<double>(Clock::now() - a).count(); }
+
+    /// While alive, glibc keeps freed memory instead of handing it back.
+    /// Each training step allocates and frees the same tensors (megabytes
+    /// each); by default glibc serves them with mmap or trims them off the
+    /// heap top on free, so every step faulted them in again: ~750,000 minor
+    /// faults/s and 30 % system time at 16 threads. Kept, an epoch took half
+    /// the time, with identical weights, for ~2 GB more resident memory.
+    /// On destruction the limits go back to roughly glibc's steady state
+    /// (its dynamic thresholds end at 32 MiB / 64 MiB once a large block was
+    /// freed) and the kept memory is returned.
+    class KeepFreedMemory
+    {
+    public:
+      KeepFreedMemory()
+      {
+#if defined(__GLIBC__)
+        mallopt(M_MMAP_THRESHOLD, 256 << 20);
+        mallopt(M_TRIM_THRESHOLD, std::numeric_limits<int>::max());
+#endif
+      }
+      ~KeepFreedMemory()
+      {
+#if defined(__GLIBC__)
+        mallopt(M_MMAP_THRESHOLD, 32 << 20);
+        mallopt(M_TRIM_THRESHOLD, 64 << 20);
+        malloc_trim(0);
+#endif
+      }
+      KeepFreedMemory(const KeepFreedMemory&) = delete;
+      KeepFreedMemory& operator=(const KeepFreedMemory&) = delete;
+    };
 
     std::string sha256File(const std::string& path)
     {
@@ -538,6 +574,8 @@ namespace ODIA::tune
     static std::once_flag interop_once;
     std::call_once(interop_once, [] { try { at::set_num_interop_threads(1); } catch (const c10::Error&) {} });
     if (dev.is_cpu()) { torch::set_num_threads(std::max(1, p.threads)); }
+    std::optional<KeepFreedMemory> keep_freed;
+    if (dev.is_cpu()) { keep_freed.emplace(); }
     if (const char* e = std::getenv("DLR_NO_MKLDNN"); e && *e && *e != '0') { at::globalContext().setUserEnabledMkldnn(false); log << "oneDNN disabled (DLR_NO_MKLDNN)\n"; }
     // pytorch.org's CUDA zips ship only cuDNN's loader shim; without the sub-
     // libraries on the library path cudnnCreate aborts the process (not an

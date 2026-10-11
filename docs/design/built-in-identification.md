@@ -1271,6 +1271,70 @@ work). What would help is better balance across windows inside a call
 (the timsTOF straggler) and the calibration's OpenSWATH call, which runs on
 1.8 cores for 270 s on the timsTOF run.
 
+### The prediction port and the decoys (perf/run-speed)
+
+On top of 0.11.2 (its predictor: one ONNX Runtime session per thread
+sharing one copy of the weights, 64-row batches, no spinning thread pools),
+three changes to the prefilter, each keeping the report identical:
+
+- prediction: `PredictedAssays::rank` reads b and y m/z from `IonLadder`
+  (now `odia/IonLadder.h`, every ion type bit-identical to OpenMS, tested);
+  sessions up to the physical cores instead of at most 16; 4,096 pairs per
+  session and model call (at least 8,192, at most 262,144, at most a
+  sixteenth of the free memory) instead of 8,192;
+- decoys (audit B2): each thread renders a residue's token once
+  (`tokenOf`), and fragment m/z come from an `IonLadder` of the
+  arrangement instead of `getPrefix`/`getSuffix` per slot;
+- the searched pairs (audit B3) take the assays the prefilter predicted
+  (`KeptAssays`, 12 bytes per fragment, 1.52 GB for the 5.1 M pairs here,
+  kept when their upper bound fits a quarter of the free memory) instead of
+  a second `searchDecoy` and prediction.
+
+Every run traced (`ODIA_TRACE`), dax, one run per configuration. Reduced
+timsTOF cell with predicted intensities (30,000 pairs, 16 threads, team 8),
+spans of the prefilter's `pairs` step (5.1 M pairs, 10.3 M peptides):
+
+| build | pairs | decoys | parse | infer (the model) | rank | searched set's prediction | report md5 |
+|---|---|---|---|---|---|---|---|
+| 0.11.2 merged (6a88ab1) | 1,030 s | 5.5 s | 3.7 s | 1,016 s | 4.6 s | 5.7 s | 6ebddf84... |
+| + prediction port (38f73a7) | 1,023 s | 4.6 s | 3.3 s | 1,013 s | 1.9 s | 5.6 s | the same |
+| + B2 and B3 (16dcbff) | 1,016 s | 3.4 s | 3.5 s | 1,001 s | 1.9 s | 0.7 s | the same |
+
+The model keeps its 16 sessions busy (15.9 to 16.0 active cores in
+`infer`), so the prefilter is the model's CPU cost: 1.56 CPU-ms per
+peptide. The block size (632 calls -> 80) and the session cap (16 = the
+threads here) change little at 16 threads; the cap matters at `-threads`
+above 16. The reduced timsTOF cell with library intensities (8 threads)
+kept its report md5 (06a0b223...) with all of it; its decoys took 3.1 s
+instead of 5.1 s.
+
+The full timsTOF `-run` (the M2 acceptance command, `-mode tune
+-tune_heads both`, 200,000 pairs, 16 threads, team 8), against the
+MS1-in-memory measurement above (build f365ba3, tims_auto), both on dax:
+
+| | f365ba3 (tims_auto) | perf/run-speed 16dcbff |
+|---|---|---|
+| whole invocation, wall | 1:26:29 (5,189 s) | 1:16:16 (4,576 s, -11.8 %) |
+| CPU user / system | 42,110 s / 1,158 s | 38,471 s / 1,273 s |
+| peak resident memory | 37.5 GB | 28.9 GB |
+| run load and cache | 242 s | 239 s |
+| prefilter in all | 1,427 s | 1,028 s |
+| - decoys and prediction of every pair | 1,329 s | 1,008 s (the model 991 s, decoys 3.9 s) |
+| - the searched set (decoys, prediction) | 80 s | 1.8 s |
+| calibration | 273 s | 275 s |
+| extraction | 2,337 s | 2,297 s |
+| search in all | 4,303 s | 3,863 s |
+| after the search (run hash, tuning, re-prediction, write) | 886 s | 714 s |
+| report | 909c95b4... | 1cbf491a...: the same table; only the embedded tool_version differs (0.11.0 -> 0.11.1) |
+| tuned library | 8fa82a45... (0.11.1 TSV columns) | ece0d219..., which is exactly f365ba3's library converted to 0.11.2's TSV dialect (`-mode convert`) |
+
+Most of the prefilter's gain is 0.11.2's predictor; this branch adds the
+searched set (-78 s) and a few seconds in decoys and ranking. What remains:
+extraction (50 %), the model in the prefilter (22 %), tuning (13 %),
+calibration (6 %, on 1.8 cores) and the serial reading and hashing (run
+cache 239 s on 5.9 cores, library 39 s, run hash 36 s, input hashes 12 s,
+cache removal 14 s).
+
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged

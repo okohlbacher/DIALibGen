@@ -181,6 +181,17 @@ the pruned MS2 model, streamed writing during MS2, and the small items
    search-decoy prediction, and a larger prefilter block than 8,192 pairs. The
    prediction step is about 1,464 s of the timsTOF `-run`; an estimated -500 s.
    Acceptance: `ids.parquet` identical on a reduced cell and on one full run.
+   **Done on perf/run-speed** (with B2 decoy tokens and IonLadder, and B3:
+   the searched pairs keep the prefilter's assays): the full timsTOF run
+   1:26:29 -> 1:16:16, the prefilter 1,427 -> 1,028 s, mostly 0.11.2's
+   predictor; report table identical (design document, "The prediction port
+   and the decoys"). The OpenSWATH cap stays at 8 (B1 re-measured: 16 is
+   slower on both runs, a passive wait policy changes nothing). Next for
+   `-run`: the extraction straggler window (one window ends each timsTOF call
+   alone), the calibration's OpenSWATH call (270 s on 1.8 cores), the pruned
+   MS2 model in the search (bit-identical b/y channels, about -15 % CPU, but
+   the report's ms2_model_hash changes), and the serial hashing and loading
+   (about 100 s).
 3. **CPU cost per prediction**, the remaining ~1.3x gap to DIA-NN at 8-16 threads
    (9,100 vs 6,386 CPU-s at 8 threads). First profile ONNX Runtime per operation
    (MS2 transformer layers, RT/CCS LSTMs). Anything that changes outputs

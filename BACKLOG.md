@@ -193,3 +193,37 @@ the pruned MS2 model, streamed writing during MS2, and the small items
 6. **Hardware cache counters** (`perf`) once IBMI allows them, to plot cache
    misses per phase. The 2026-10-11 analysis inferred cache behaviour from
    placement and batch-size experiments instead.
+
+## Final performance comparison: four platform arms
+
+The final performance report compares the same workloads on four arms:
+
+| Arm | Machine | Compute used |
+|---|---|---|
+| Laptop CPU | MacBook Pro, Apple M4 Max (12 performance + 4 efficiency cores, 128 GB) | CPU only |
+| Laptop CPU + GPU | same MacBook Pro, 40-core Apple GPU | CPU plus GPU (ONNX Runtime CoreML execution provider for prediction; LibTorch MPS for fine-tuning) |
+| Server CPU | IBMI H100 node (2 x AMD EPYC 9654, 192 cores) | CPU only |
+| Server CPU + GPU | same node, NVIDIA H100 (one and two GPUs) | CPU plus CUDA, cuDNN 9 for CUDA 12 |
+
+Workloads: whole-proteome `generate`, `tune` of the RT (and CCS) model on one
+run's identifications, and `refine`; the prediction step of `-run` once it is
+on main. Compare each arm against DIA-NN 2.0 on the same machine (its predictor
+is CPU-only) and report wall time, CPU time, peak memory, energy where the
+platform reports it (macOS powermetrics, nvidia-smi power draw), and output
+equivalence against the server-CPU library (byte- or content-identical on CPU;
+per-column differences for GPU paths, TF32 off by default).
+
+Rules as for the 2026-10-11 analysis: every DIALibGen run traced, at least
+4 threads, one run per configuration plus a stated noise measurement for the
+headline numbers, quiet machines (load recorded), the same FASTA, settings and
+binaries per release.
+
+Open work before this can run:
+- **Apple GPU path.** DIALibGen has no CoreML/MPS execution path yet. ONNX
+  Runtime's CoreML provider must support the PeptDeep graphs (check operator
+  coverage; fall back loudly per model); LibTorch MPS for training. Equivalence
+  against the CPU output must be measured.
+- **A signed macOS build with the speed changes,** which 0.11.2 provides for the
+  CPU arm.
+- **Server arm:** spock or data. Both need cuDNN 9 for CUDA 12; see
+  HANDOFF-cuDNN-GPU-nodes.md. Timing must avoid other users' load.

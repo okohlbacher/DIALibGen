@@ -264,7 +264,7 @@ export default function App(): JSX.Element {
       {mode !== 'generate' && <PathField id="out-report" label="residual report (optional TSV)" value={outReport} set={setOutReport} />}
       <div className="field"><label htmlFor="threads">threads</label><input id="threads" type="number" min={0} max={2147483647} step={1}
         value={threads ?? ''} aria-invalid={!threadsValid} onChange={(e) => setThreads(e.target.value === '' ? null : Number(e.target.value))} />
-        <p className={`help${threadsValid ? '' : ' bad'}`}>{threadsValid ? '1 is the default. 0 uses all available cores, with more memory.' : 'Enter a whole number of threads (0 or more).'}</p></div>
+        <p className={`help${threadsValid ? '' : ' bad'}`}>{threadsValid ? '1 is the default. 0 uses one thread per physical core.' : 'Enter a whole number of threads (0 or more).'}</p></div>
       {validation && <p className="help bad" role="alert">{validation}</p>}
       {mode !== 'generate' && outReport && !/\.tsv$/.test(outReport) && <p className="help bad">The residual report name must end in .tsv.</p>}
       <div className="row"><button type="button" disabled={!canRun} onClick={() => void start()}>{running ? 'Running…' : mode === 'generate' ? 'Generate library' : mode === 'refine' ? 'Refine library' : 'Fine-tune library'}</button>

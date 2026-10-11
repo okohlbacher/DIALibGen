@@ -266,6 +266,34 @@ namespace ODIA
 {
   namespace
   {
+#if ORT_API_VERSION < 23
+    /// ONNX Runtime's pre-packed-weights container through the C API: before
+    /// 1.23 the C++ API has no wrapper class (Ort::PrepackedWeightsContainer),
+    /// and conda-forge's macOS x64 build is still 1.22.
+    class PrepackedWeights
+    {
+    public:
+      PrepackedWeights() = default;
+      PrepackedWeights(const PrepackedWeights&) = delete;
+      PrepackedWeights& operator=(const PrepackedWeights&) = delete;
+      ~PrepackedWeights() { reset(); }
+      void create()
+      {
+        reset();
+        Ort::ThrowOnError(Ort::GetApi().CreatePrepackedWeightsContainer(&container_));
+      }
+      void reset()
+      {
+        if (container_ != nullptr) { Ort::GetApi().ReleasePrepackedWeightsContainer(container_); }
+        container_ = nullptr;
+      }
+      OrtPrepackedWeightsContainer* get() const { return container_; }
+      explicit operator bool() const { return container_ != nullptr; }
+    private:
+      OrtPrepackedWeightsContainer* container_ = nullptr;
+    };
+#endif
+
     /// Stamps a chunk-level trace scope with its model, session and rows.
     void tag(trace::Scope& scope, const char* kind, std::size_t session, std::size_t rows)
     {
@@ -286,7 +314,11 @@ namespace ODIA
     /// are destroyed after.
     std::vector<std::vector<float>> shared_buffers;
     std::vector<Ort::Value> shared_values;
+#if ORT_API_VERSION >= 23
     Ort::PrepackedWeightsContainer prepacked{nullptr};
+#else
+    PrepackedWeights prepacked;
+#endif
     std::size_t shared_bytes = 0;
     Ort::SessionOptions options;
     std::unique_ptr<Ort::Session> session;
@@ -347,7 +379,11 @@ namespace ODIA
       created.fields().session = static_cast<std::int64_t>(index);
       const auto open = [&](const Ort::SessionOptions& o) {
         return impl_->prepacked
+#if ORT_API_VERSION >= 23
           ? std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), o, impl_->prepacked)
+#else
+          ? std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), o, impl_->prepacked.get())
+#endif
           : std::make_unique<Ort::Session>(impl_->env, ortPath(model_path).c_str(), o);
       };
       if (!impl_->ort_profiling && optimized.empty()) { return open(options); }
@@ -609,7 +645,11 @@ namespace ODIA
       {
         // Not sharing is slower to build and larger, never wrong: start the
         // options over without the shared weights.
+#if ORT_API_VERSION >= 23
         impl_->prepacked = Ort::PrepackedWeightsContainer{nullptr};
+#else
+        impl_->prepacked.reset();
+#endif
         impl_->options = Ort::SessionOptions{};
         configureSession(impl_->options, intra_op_threads);
         impl_->shared_values.clear();
@@ -702,7 +742,11 @@ namespace ODIA
       impl_->options.AddInitializer(w.name.c_str(), impl_->shared_values.back());
       impl_->shared_bytes += w.raw.size();
     }
+#if ORT_API_VERSION >= 23
     impl_->prepacked = Ort::PrepackedWeightsContainer();
+#else
+    impl_->prepacked.create();
+#endif
     return true;
   }
 

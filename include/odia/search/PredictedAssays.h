@@ -114,6 +114,32 @@ namespace ODIA::search
     std::int8_t charge = 1;
   };
 
+  /// One predicted fragment as a searched assay stores it: the m/z in the
+  /// library's fixed point (toFixed of PredictedFragment::mz).
+  struct StoredFragment
+  {
+    MzFixed mz = MZ_INVALID;
+    float intensity = 0.0f;
+    FragmentType type = FragmentType::Y;
+    std::uint8_t ordinal = 0;
+    std::int8_t charge = 1;
+  };
+
+  /// The prefilter's predicted assays of every pair it indexed, kept so that
+  /// the searched pairs need neither their decoys nor their predictions a
+  /// second time: pair k's target fragments are fragments[begin[k] ..
+  /// begin[k] + n), its decoy's the next n, n = (end - begin[k]) / 2 with
+  /// end = begin[k + 1] (or fragments.size() for the last pair). Empty when
+  /// they were not kept (the memory gate, EvidencePrefilter::pairsOf).
+  struct KeptAssays
+  {
+    std::vector<std::uint64_t> begin;
+    std::vector<StoredFragment> fragments;
+    bool empty() const { return begin.empty(); }
+    std::size_t bytes() const
+    { return begin.capacity() * sizeof(std::uint64_t) + fragments.capacity() * sizeof(StoredFragment); }
+  };
+
   /// One pair's predicted assays: both members' fragments in rank order,
   /// already cut to the pair's count (empty unless outcome is Made).
   struct PairPrediction
@@ -178,5 +204,14 @@ namespace ODIA::search
     /// when a pair cannot be predicted now although it could before.
     static void apply(SearchSet& set, const Library& input, const DecoyRules& rules, FragmentModel& model,
                       const std::vector<std::uint8_t>& counts);
+
+    /// apply() without predicting: pair k of @p set takes pair @p pair[k] of
+    /// @p kept, which must hold @p counts[k] fragments per member -- the
+    /// assays apply() would predict again, from the same sequences with the
+    /// same model (MS2 predictions do not depend on the batch), so the set
+    /// is the same. Throws std::logic_error on a count that differs, as
+    /// apply() does.
+    static void applyKept(SearchSet& set, const KeptAssays& kept, const std::vector<std::size_t>& pair,
+                          const std::vector<std::uint8_t>& counts);
   };
 }

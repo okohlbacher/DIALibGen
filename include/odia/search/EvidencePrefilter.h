@@ -79,6 +79,10 @@ namespace ODIA::search
     SelectionStats stats;                  ///< eligibility and decoy counts
     std::size_t processed = 0;             ///< targets of the ordered input examined (all unless stopped early)
     double decoy_seconds = 0.0;
+    /// search:intensities predicted: every pair's predicted assays, when the
+    /// free memory allowed keeping them (PredictedAssays::KeptAssays); the
+    /// searched set then takes its assays from here.
+    KeptAssays kept;
 
     std::size_t size() const { return targets.size(); }
     const float* mz(std::size_t member) const { return fragment_mz.data() + member * SearchParams::prefilter_fragments; }

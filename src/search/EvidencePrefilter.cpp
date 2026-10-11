@@ -137,6 +137,27 @@ namespace ODIA::search
     std::vector<DecoyOutcome> outcome(n, DecoyOutcome::Made);
     std::vector<std::uint8_t> count(n, 0), assay(n, 0);
     std::vector<float> mz(n * 2 * F, std::numeric_limits<float>::quiet_NaN());
+    // Predicted: keep every pair's predicted assays for the searched set
+    // (KeptAssays), unless their upper bound -- each member at most its
+    // target's library transitions -- exceeds a quarter of the free memory.
+    // Kept, the searched pairs are neither predicted nor given decoys again.
+    bool keep = false;
+    std::vector<std::uint64_t> kept_at;   // per ordered target: where its kept fragments begin
+    KeptAssays kept;
+    if (predicted)
+    {
+      std::uint64_t fragments = 0;
+      for (const auto& o : ordered) { fragments += 2ull * pre.transition_count[o.second]; }
+      const std::uint64_t bound = n * (sizeof(std::uint64_t) * 2) + fragments * sizeof(StoredFragment);
+      const std::uint64_t available = availableMemoryBytes();
+      keep = available > 0 && bound <= available / 4;
+      if (keep)
+      {
+        kept_at.assign(n, 0);
+        kept.fragments.reserve(fragments);
+        kept.begin.reserve(n);
+      }
+    }
     std::string failure;
     // Predicted: blocks sized to the model's sessions and the free memory;
     // a draw that stops early (stop_after, search:candidates random) stops
@@ -208,6 +229,15 @@ namespace ODIA::search
           }
           count[k] = static_cast<std::uint8_t>(m);
           assay[k] = static_cast<std::uint8_t>(std::min<std::size_t>(255, p.count()));
+          if (keep)
+          {
+            kept_at[k] = kept.fragments.size();
+            for (const auto* member : {&p.target, &p.decoy})
+            {
+              for (const PredictedFragment& f : *member)
+              { kept.fragments.push_back({toFixed(f.mz), f.intensity, f.type, f.ordinal, f.charge}); }
+            }
+          }
         }
       }
       processed = last;
@@ -253,7 +283,9 @@ namespace ODIA::search
       out.precursor_mz.push_back(fromFixed(pre.mz[i]));
       out.library_rt.push_back(pre.irt[i]);
       out.charge.push_back(pre.charge[i]);
+      if (keep) { kept.begin.push_back(kept_at[k]); }
     }
+    if (keep) { out.kept = std::move(kept); }
     out.decoy_seconds = since(started);
     return out;
   }
@@ -674,20 +706,32 @@ namespace ODIA::search
   {
     /// The searched set's predicted assays: pair k takes the count its
     /// target got in @p universe.
-    void predictSet(SearchSet& set, const Library& library, const SearchParams& params, const PrefilterPairs& universe,
+    /// The searched set's predicted assays: pair k takes the count its
+    /// target got in @p universe -- and, when the universe kept its
+    /// predictions, those assays themselves (PredictedAssays::applyKept);
+    /// otherwise they are predicted again (apply). The kept assays are
+    /// released here.
+    void predictSet(SearchSet& set, const Library& library, const SearchParams& params, PrefilterPairs& universe,
                     FragmentModel& model)
     {
-      std::unordered_map<std::size_t, std::uint8_t> count_of;
-      count_of.reserve(universe.size());
-      for (std::size_t k = 0; k < universe.size(); ++k) { count_of.emplace(universe.targets[k].second, universe.assay_fragments[k]); }
+      std::unordered_map<std::size_t, std::size_t> pair_of;
+      pair_of.reserve(universe.size());
+      for (std::size_t k = 0; k < universe.size(); ++k) { pair_of.emplace(universe.targets[k].second, k); }
       std::vector<std::uint8_t> counts(set.pairs(), 0);
+      std::vector<std::size_t> pair(set.pairs(), 0);
       for (std::size_t k = 0; k < set.pairs(); ++k)
       {
-        const auto it = count_of.find(set.source[k]);
-        if (it == count_of.end()) { throw std::logic_error("search: a searched pair is not in the prefilter's universe"); }
-        counts[k] = it->second;
+        const auto it = pair_of.find(set.source[k]);
+        if (it == pair_of.end()) { throw std::logic_error("search: a searched pair is not in the prefilter's universe"); }
+        pair[k] = it->second;
+        counts[k] = universe.assay_fragments[it->second];
       }
-      PredictedAssays::apply(set, library, CandidateSelector::decoyRules(library, params), model, counts);
+      if (!universe.kept.empty())
+      {
+        PredictedAssays::applyKept(set, universe.kept, pair, counts);
+        universe.kept = KeptAssays();
+      }
+      else { PredictedAssays::apply(set, library, CandidateSelector::decoyRules(library, params), model, counts); }
       set.stats.fragment_slots_dropped = 0;   // a library-slot notion; predicted assays drop none
     }
   }
@@ -703,7 +747,7 @@ namespace ODIA::search
     if (params.subset != 0 && params.subset < draws.size()) { draws.resize(params.subset); }
     st.drawn = draws.size();
     const std::size_t cap = params.max_pairs != 0 ? params.max_pairs : std::numeric_limits<std::size_t>::max();
-    const PrefilterPairs universe = pairsOf(library, params, draws, st, &model, cap == std::numeric_limits<std::size_t>::max() ? 0 : cap);
+    PrefilterPairs universe = pairsOf(library, params, draws, st, &model, cap == std::numeric_limits<std::size_t>::max() ? 0 : cap);
     std::vector<std::pair<std::uint64_t, std::size_t>> chosen(universe.targets.begin(),
                                                               universe.targets.begin() + static_cast<std::ptrdiff_t>(std::min(cap, universe.size())));
     SearchSet set = CandidateSelector::fromTargets(library, params, chosen, universe.stats);
@@ -720,7 +764,8 @@ namespace ODIA::search
     auto say = [&](const std::string& m) { if (info) { info(m); } };
     const auto started = Clock::now();
     const bool predicted = params.intensities == Intensities::Predicted;
-    const PrefilterPairs universe = pairs(library, params, windows, model, info);
+    PrefilterPairs universe = pairs(library, params, windows, model, info);
+    const std::size_t kept_bytes = universe.kept.bytes();
     const SelectionStats& ps = universe.stats;
     say("search prefilter: " + std::to_string(universe.size()) + " target-decoy pairs indexed from " + std::to_string(ps.eligible) +
         " eligible targets (" + std::to_string(ps.no_decoy) + " without a decoy; " + std::to_string(ps.ineligible_window) +
@@ -823,7 +868,8 @@ namespace ODIA::search
     if (seconds)
     {
       *seconds = json({{"decoys", universe.decoy_seconds}, {"index", sw.index_seconds}, {"sweep", sw.sweep_seconds},
-                       {"choose", choose_s}, {"build", build_s}, {"total", since(started)}, {"index_bytes", sw.index_bytes}})
+                       {"choose", choose_s}, {"build", build_s}, {"total", since(started)}, {"index_bytes", sw.index_bytes},
+                       {"kept_assay_bytes", kept_bytes}})
                    .dump();
     }
     say("search prefilter: " + std::to_string(set.pairs()) + " pairs searched, " + std::to_string(set.seeds.size()) +

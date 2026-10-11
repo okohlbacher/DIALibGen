@@ -323,4 +323,60 @@ namespace ODIA::search
     pre.transition_count = std::move(count);
     lib.shrinkToFit();
   }
+
+  void PredictedAssays::applyKept(SearchSet& set, const KeptAssays& kept, const std::vector<std::size_t>& pair,
+                                  const std::vector<std::uint8_t>& counts)
+  {
+    const std::size_t P = set.pairs();
+    if (counts.size() != P || pair.size() != P) { throw std::invalid_argument("PredictedAssays::applyKept: one pair and count per searched pair"); }
+    Library& lib = set.library;
+    auto& pre = lib.precursors();
+    // Member i's fragments: targets [0, P), decoys [P, 2P), as apply() lays them out.
+    std::vector<const StoredFragment*> first(2 * P, nullptr);
+    std::vector<std::uint32_t> n(2 * P, 0);
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < P; ++k)
+    {
+      const std::size_t u = pair[k];
+      if (u >= kept.begin.size()) { throw std::logic_error("search: a searched pair has no kept assay"); }
+      const std::uint64_t b = kept.begin[u], e = u + 1 < kept.begin.size() ? kept.begin[u + 1] : kept.fragments.size();
+      const std::uint64_t m = (e - b) / 2;
+      if (e < b || (e - b) % 2 != 0 || m != counts[k] || m == 0)
+      {
+        throw std::logic_error("search: pair " + std::to_string(k) + " (" + std::string(set.modifiedSequence(k)) +
+                               ") could not be predicted with its " + std::to_string(counts[k]) + " fragments again");
+      }
+      first[k] = kept.fragments.data() + b;
+      first[P + k] = kept.fragments.data() + b + m;
+      n[k] = n[P + k] = static_cast<std::uint32_t>(m);
+      total += 2 * m;
+    }
+    Library::checkTransitionCapacity(0, total);
+    Library::TransitionArrays built;
+    std::vector<std::uint32_t> begin(2 * P, 0);
+    built.product_mz.reserve(total);
+    built.library_intensity.reserve(total);
+    built.type.reserve(total);
+    built.ordinal.reserve(total);
+    built.charge.reserve(total);
+    built.loss.reserve(total);
+    for (std::size_t i = 0; i < 2 * P; ++i)
+    {
+      begin[i] = static_cast<std::uint32_t>(built.product_mz.size());
+      for (std::uint32_t j = 0; j < n[i]; ++j)
+      {
+        const StoredFragment& f = first[i][j];
+        built.product_mz.push_back(f.mz);
+        built.library_intensity.push_back(f.intensity);
+        built.type.push_back(f.type);
+        built.ordinal.push_back(f.ordinal);
+        built.charge.push_back(f.charge);
+        built.loss.push_back(LossType::None);
+      }
+    }
+    lib.transitions() = std::move(built);
+    pre.transition_begin = std::move(begin);
+    pre.transition_count = std::move(n);
+    lib.shrinkToFit();
+  }
 }

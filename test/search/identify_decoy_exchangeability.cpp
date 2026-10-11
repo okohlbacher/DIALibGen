@@ -230,6 +230,35 @@ int main()
       const std::size_t predicted_now = model.peptides_seen - seen_before;
       std::cout << "predicted " << predicted_now << " peptides for " << universe.size() << " pairs\n";
       CHECK(predicted_now >= 2 * universe.size() && predicted_now <= 2 * universe.processed);
+
+      // The searched set takes the assays the prefilter kept (applyKept)
+      // instead of predicting them again (apply): the same set, to the bit.
+      CHECK(!universe.kept.empty());
+      std::vector<std::pair<std::uint64_t, std::size_t>> chosen;
+      for (std::size_t k = 0; k < universe.size(); k += 7) { chosen.push_back(universe.targets[k]); }
+      SearchSet again = CandidateSelector::fromTargets(lib, p, chosen, universe.stats);
+      SearchSet kept = CandidateSelector::fromTargets(lib, p, chosen, universe.stats);
+      std::vector<std::size_t> pair(again.pairs());
+      std::vector<std::uint8_t> counts(again.pairs());
+      for (std::size_t k = 0; k < again.pairs(); ++k)
+      {
+        pair[k] = static_cast<std::size_t>(std::find_if(universe.targets.begin(), universe.targets.end(), [&](const auto& t) {
+                                             return t.second == again.source[k]; }) - universe.targets.begin());
+        counts[k] = universe.assay_fragments[pair[k]];
+      }
+      const std::size_t before = model.peptides_seen;
+      PredictedAssays::apply(again, lib, CandidateSelector::decoyRules(lib, p), model, counts);
+      CHECK(model.peptides_seen == before + 2 * again.pairs());
+      PredictedAssays::applyKept(kept, universe.kept, pair, counts);
+      CHECK(model.peptides_seen == before + 2 * again.pairs());
+      const auto& ta = again.library.transitions();
+      const auto& tk = kept.library.transitions();
+      CHECK(again.library.precursors().transition_begin == kept.library.precursors().transition_begin &&
+            again.library.precursors().transition_count == kept.library.precursors().transition_count &&
+            ta.product_mz == tk.product_mz && ta.library_intensity == tk.library_intensity && ta.type == tk.type &&
+            ta.ordinal == tk.ordinal && ta.charge == tk.charge && ta.loss == tk.loss);
+      std::cout << "kept assays of " << kept.pairs() << " searched pairs equal their prediction again (" << tk.product_mz.size()
+                << " transitions)\n";
     }
     const std::vector<MemberEvidence> evidence = EvidencePrefilter::sweep(universe, maps, p);
     Sign& sign = by_mode[predicted ? 1 : 0];

@@ -683,6 +683,30 @@ namespace ODIA
       const unsigned want = requested == 0 ? cores : std::min(requested, cores);
       return static_cast<int>(std::max(1u, want));
     }
+
+    /// Host threads for the work that runs beside a prediction call: parsing
+    /// the next block, and selecting and appending the previous one. On the
+    /// CPU every session already holds a core, and the helper has a whole
+    /// block's prediction to finish in, so it gets an eighth of the threads
+    /// instead of a second full team competing with the sessions. On CUDA the
+    /// cores are mostly free while the device computes.
+    unsigned overlapThreads(const PeptDeepPredictor& predictor, unsigned threads)
+    {
+      if (predictor.provider() == PeptDeepPredictor::Provider::CUDA) { return std::max(1u, threads / 2); }
+      return std::max(1u, threads / 8);
+    }
+
+    /// Runs @p task on a thread of its own, or on this one, without the
+    /// overlap, when no thread can be started (a process or cgroup thread
+    /// limit). The result is the same either way.
+    template <class Task>
+    std::future<void> overlap(const Task& task)
+    {
+      try { return std::async(std::launch::async, task); }
+      catch (const std::system_error&) {}
+      task();
+      return std::async(std::launch::deferred, [] {});
+    }
   } // namespace
 
   float LibraryGenerator::freeCysteineRtOffset(std::size_t free_cysteines)
@@ -955,10 +979,11 @@ namespace ODIA
     // Blocked so that peak memory is set by the block, not by the proteome.
     //
     // Pipelined: while the model predicts block k (on the GPU, or on the CPU
-    // sessions), the fragment selection of block k-1 runs on the host
-    // threads, and block k-2's result is appended. Selection is parallel per
-    // precursor and the append is serial in precursor order, so the arrays
-    // come out exactly as from the serial loop, whatever the thread count.
+    // sessions), a helper thread parses block k+1 and then selects and
+    // appends block k-1, so the sessions do not wait for host work between
+    // two calls. Selection is parallel per precursor and the append is serial
+    // in precursor order, one block after the other, so the arrays come out
+    // exactly as from the serial loop, whatever the thread count.
     //
     // The block is also the unit every session waits at: 100,000 precursors
     // on the CPU, so that a call is long against its last batch; 20,000 on
@@ -986,7 +1011,7 @@ namespace ODIA
       std::vector<RankedFragments> ranked;
     };
 
-    const auto parse = [&](std::size_t base)
+    const auto parse = [&](std::size_t base, unsigned team)
     {
       trace::Scope parse_step("parse", 2);
       parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
@@ -997,7 +1022,7 @@ namespace ODIA
       const std::size_t size = block.last - base;
       block.peptides.resize(size);
       block.charges.resize(size);
-      parallel::forEach(size, threads, [&](std::size_t k)
+      parallel::forEach(size, team, [&](std::size_t k)
       {
         block.peptides[k] =
           AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
@@ -1006,16 +1031,15 @@ namespace ODIA
       return block;
     };
 
-    const auto select = [&](Block& block)
+    const auto select = [&](Block& block, unsigned team)
     {
-      // On a helper thread, overlapping the next block's prediction.
       trace::Scope post_step("post", 2);
       post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
       post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
       const std::size_t size = block.last - block.base;
       block.ranked.assign(size, RankedFragments{});
       constexpr std::size_t TASK = 256;
-      parallel::forEach((size + TASK - 1) / TASK, threads, [&](std::size_t task)
+      parallel::forEach((size + TASK - 1) / TASK, team, [&](std::size_t task)
       {
         std::vector<Fragment> fragments;
         for (std::size_t k = task * TASK; k < std::min(size, (task + 1) * TASK); ++k)
@@ -1103,38 +1127,41 @@ namespace ODIA
       sink->rows(std::move(rows));
     };
 
-    Block selecting;              // its selection runs in `selection`
-    std::future<void> selection;
+    const unsigned helper = overlapThreads(predictor, threads);
+    Block next = parse(0, threads);   // nothing to overlap with yet: every thread
+    Block previous;                   // predicted, not yet selected and appended
     for (std::size_t base = 0; base < n; base += BLOCK)
     {
+      Block current = std::move(next);
+      next = Block{};
+      // Declared after `current`, so that it is waited for before `current`
+      // goes, should the prediction throw.
+      std::future<void> host = overlap([&]() {
+        if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
+        if (previous.last > previous.base)
+        {
+          select(previous, helper);
+          append(previous);
+          previous = Block{};   // freed here, not between two calls
+        }
+      });
       trace::Scope block_step("block", 1);
       block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
-      block_step.fields().rows = static_cast<std::int64_t>(std::min(base + BLOCK, n) - base);
-      Block block = parse(base);
+      block_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
       std::vector<PeptDeepPredictor::Failure> failures;
       trace::Scope predict_step("predict", 2);
-      predict_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
-      block.spectra = predictor.predictMS2(block.peptides, block.charges, nce, instrument, &failures);
+      predict_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      current.spectra = predictor.predictMS2(current.peptides, current.charges, nce, instrument, &failures);
       predict_step.end();
-
-      Block done;
-      if (selection.valid()) { selection.get(); done = std::move(selecting); }
-      selecting = std::move(block);
-      try { selection = std::async(std::launch::async, [&] { select(selecting); }); }
-      catch (const std::system_error&)
-      {
-        // No thread to spare (a process or cgroup thread limit): select on
-        // this one, without the overlap.
-        select(selecting);
-        selection = std::async(std::launch::deferred, [] {});
-      }
-      if (done.last > done.base) { append(done); }
+      host.get();
+      previous = std::move(current);
     }
-    if (selection.valid())
+    if (previous.last > previous.base)
     {
+      // The sessions are done: every thread.
       trace::Scope drain_step("drain", 1);
-      selection.get();
-      append(selecting);
+      select(previous, threads);
+      append(previous);
     }
 
     if (sink != nullptr)
@@ -1287,42 +1314,55 @@ namespace ODIA
     if (lengths != nullptr) { lengths->assign(n, 0); }
 
     // Blocked, as the MS2 pass is: the whole proteome at once would hold every
-    // parsed AASequence live alongside the library.
+    // parsed AASequence live alongside the library. Pipelined like it too:
+    // while block k predicts, a helper thread parses block k+1 and stores
+    // block k-1's values. Every row is written by exactly one block, so the
+    // result does not depend on the overlap.
     const std::size_t BLOCK = ccsBlock();
+    const unsigned threads = parallel::workers(sessions);
+    const unsigned helper = overlapThreads(predictor, threads);
     std::size_t unpredicted = 0;
-    for (std::size_t base = 0; base < n; base += BLOCK)
+
+    struct Block
     {
-      const std::size_t last = std::min(base + BLOCK, n);
-      trace::Scope block_step("block", 1);
-      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
-      block_step.fields().rows = static_cast<std::int64_t>(last - base);
+      std::size_t base = 0, last = 0;
+      std::vector<AASequence> peptides;
+      std::vector<int> charges;
+      std::vector<float> ccs;
+    };
+
+    const auto parse = [&](std::size_t base, unsigned team)
+    {
+      Block block;
+      block.base = base;
+      block.last = std::min(base + BLOCK, n);
       trace::Scope parse_step("parse", 2);
-      std::vector<AASequence> peptides(last - base);
-      std::vector<int> charges(last - base);
-      parallel::forEach(last - base, parallel::workers(sessions), [&](std::size_t k)
+      parse_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      parse_step.fields().rows = static_cast<std::int64_t>(block.last - base);
+      block.peptides.resize(block.last - base);
+      block.charges.resize(block.last - base);
+      parallel::forEach(block.last - base, team, [&](std::size_t k)
       {
-        peptides[k] =
+        block.peptides[k] =
           AASequence::fromString(std::string(library.strings().get(p.modified_sequence[base + k])));
-        charges[k] = static_cast<int>(p.charge[base + k]);
+        block.charges[k] = static_cast<int>(p.charge[base + k]);
       });
-      parse_step.fields().rows = static_cast<std::int64_t>(last - base);
-      parse_step.end();
       if (lengths != nullptr)
       {
-        for (std::size_t k = 0; k < peptides.size(); ++k)
-        { (*lengths)[base + k] = static_cast<std::uint16_t>(peptides[k].size()); }
+        for (std::size_t k = 0; k < block.peptides.size(); ++k)
+        { (*lengths)[base + k] = static_cast<std::uint16_t>(block.peptides[k].size()); }
       }
+      return block;
+    };
 
-      std::vector<PeptDeepPredictor::Failure> failures;
-      trace::Scope predict_step("predict", 2);
-      predict_step.fields().rows = static_cast<std::int64_t>(last - base);
-      const auto ccs = predictor.predictCCS(peptides, charges, &failures);
-      predict_step.end();
+    const auto post = [&](const Block& block)
+    {
       trace::Scope post_step("post", 2);
-      post_step.fields().rows = static_cast<std::int64_t>(last - base);
-      for (std::size_t i = base; i < last; ++i)
+      post_step.fields().idx = static_cast<std::int64_t>(block.base / BLOCK);
+      post_step.fields().rows = static_cast<std::int64_t>(block.last - block.base);
+      for (std::size_t i = block.base; i < block.last; ++i)
       {
-        p.ccs[i] = ccs[i - base];
+        p.ccs[i] = block.ccs[i - block.base];
         if (std::isnan(p.ccs[i])) { ++unpredicted; continue; }
         // Derive 1/K0 alongside. CCS stays the authoritative value -- this is
         // the nominal mobility a timsTOF would report for it, which is what a
@@ -1333,7 +1373,35 @@ namespace ODIA
             mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]));
         }
       }
+    };
+
+    Block next = parse(0, threads);   // nothing to overlap with yet: every thread
+    Block previous;                   // predicted, not yet stored
+    for (std::size_t base = 0; base < n; base += BLOCK)
+    {
+      Block current = std::move(next);
+      next = Block{};
+      // Declared after `current`: waited for before `current` goes.
+      std::future<void> host = overlap([&]() {
+        if (base + BLOCK < n) { next = parse(base + BLOCK, helper); }
+        if (previous.last > previous.base)
+        {
+          post(previous);
+          previous = Block{};   // freed here, not between two calls
+        }
+      });
+      trace::Scope block_step("block", 1);
+      block_step.fields().idx = static_cast<std::int64_t>(base / BLOCK);
+      block_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      std::vector<PeptDeepPredictor::Failure> failures;
+      trace::Scope predict_step("predict", 2);
+      predict_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
+      current.ccs = predictor.predictCCS(current.peptides, current.charges, &failures);
+      predict_step.end();
+      host.get();
+      previous = std::move(current);
     }
+    if (previous.last > previous.base) { post(previous); }
     return unpredicted;
   }
 

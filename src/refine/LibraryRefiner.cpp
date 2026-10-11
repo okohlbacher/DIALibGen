@@ -448,6 +448,68 @@ namespace ODIA
       return Trust::Yes;
     }
 
+    /// The key with the other spelling of a modification after the last
+    /// residue: `PEPTIDEK.(UniMod:34)/2` <-> `PEPTIDEK(UniMod:34)/2`. Empty
+    /// when the sequence does not end in a modification.
+    std::string toggleCTerminalDot(const std::string& key)
+    {
+      const auto slash = key.rfind('/');
+      if (slash == std::string::npos || slash == 0) { return {}; }
+      const char close = key[slash - 1];
+      if (close != ')' && close != ']') { return {}; }
+      const char open = close == ')' ? '(' : '[';
+      std::size_t pos = slash - 1;
+      int depth = 0;
+      for (;; --pos)
+      {
+        if (key[pos] == close) { ++depth; }
+        else if (key[pos] == open && --depth == 0) { break; }
+        if (pos == 0) { return {}; }
+      }
+      if (pos == 0) { return {}; }
+      if (key[pos - 1] == '.') { return key.substr(0, pos - 1) + key.substr(pos); }
+      if (std::isupper(static_cast<unsigned char>(key[pos - 1]))) { return key.substr(0, pos) + "." + key.substr(pos); }
+      return {};
+    }
+
+    /// DIA-NN writes a C-terminal modification after the last residue without
+    /// OpenMS's dot. canonicalModifiedSequence gives both spellings one key
+    /// when the modification can only be C-terminal; one that can also sit on
+    /// the last residue (Methyl on K) keeps the spelling's site, so a report and
+    /// a library can spell one precursor two ways. Such observations are joined
+    /// here to the library's spelling, when the library holds only one of the
+    /// two. Returns false, and leaves @p aliased empty, when nothing needed it.
+    bool cTerminalAliases(const Library& library, const LibraryRefiner::ObsMap& observed,
+                          LibraryRefiner::ObsMap& aliased)
+    {
+      const auto& pre = library.precursors();
+      std::unordered_set<std::string> candidates;
+      for (std::size_t i = 0; i < library.precursorCount(); ++i)
+      {
+        const auto sequence = library.strings().get(pre.modified_sequence[i]);
+        if (sequence.empty() || (sequence.back() != ')' && sequence.back() != ']')) { continue; }
+        candidates.insert(LibraryRefiner::key(sequence, static_cast<int>(pre.charge[i])));
+      }
+      std::vector<std::pair<std::string, std::string>> moves;   // library key, observed key
+      for (const auto& k : candidates)
+      {
+        if (observed.count(k)) { continue; }
+        const std::string other = toggleCTerminalDot(k);
+        if (other.empty() || candidates.count(other) || !observed.count(other)) { continue; }
+        moves.emplace_back(k, other);
+      }
+      if (moves.empty()) { return false; }
+      aliased = observed;
+      for (const auto& [k, other] : moves)
+      {
+        auto node = aliased.extract(other);
+        if (node.empty()) { continue; }
+        node.key() = k;
+        aliased.insert(std::move(node));
+      }
+      return true;
+    }
+
     struct Kept { std::uint32_t j; float value; };   ///< source transition, and the intensity it will carry
 
     void applyObservedIntensities(Library& library, const LibraryRefiner::ObsMap& obs,
@@ -664,9 +726,11 @@ namespace ODIA
     }
   }
 
-  void LibraryRefiner::refine(Library& library, const ObsMap& obs,
+  void LibraryRefiner::refine(Library& library, const ObsMap& observed,
                               const RefineParams& p, RefineStats& stats)
   {
+    ObsMap aliased;
+    const ObsMap& obs = cTerminalAliases(library, observed, aliased) ? aliased : observed;
     Library::checkTransitionCapacity(library.transitionCount());
     if (p.write_rt && !p.filter && !p.library_rt_in_minutes)
     { throw std::runtime_error("observed RT with the filter off would mix reference-run minutes with library predictions; "

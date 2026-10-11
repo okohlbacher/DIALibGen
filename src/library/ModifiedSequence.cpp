@@ -85,6 +85,29 @@ namespace ODIA
       return accession;
     }
 
+    /// Whether @p token (a name or a UniMod accession) on @p residue can only
+    /// be a C-terminal modification: OpenMS knows it at the C-terminus (of the
+    /// peptide or the protein) and not on that residue. DIA-NN writes such a
+    /// modification after the last residue without OpenMS's dot,
+    /// `PEPTIDEK(UniMod:2)`; read that way it is the C-terminal one.
+    bool cTerminalOnly(std::string_view token, char residue)
+    {
+      using Mod = OpenMS::ResidueModification;
+      const OpenMS::String name{std::string(token)};
+      const auto* database = OpenMS::ModificationsDB::getInstance();
+      if (!database->has(name)) { return false; }
+      std::set<const Mod*> matches;
+      database->searchModifications(matches, name, std::string(1, residue));
+      bool on_residue = false, c_terminal = false;
+      for (const auto* mod : matches)
+      {
+        const auto term = mod->getTermSpecificity();
+        if (term == Mod::ANYWHERE && mod->getOrigin() == residue) { on_residue = true; }
+        if (term == Mod::C_TERM || term == Mod::PROTEIN_C_TERM) { c_terminal = true; }
+      }
+      return c_terminal && !on_residue;
+    }
+
   }
 
   std::string canonicalModifiedSequence(std::string_view seq, std::size_t* unknown)
@@ -117,6 +140,15 @@ namespace ODIA
       }
 
       const std::string_view body = seq.substr(i + 1, end - i - 1);
+      // A token closing the sequence on its last residue, with no dot, that
+      // can only be C-terminal is the C-terminal modification: written with
+      // the dot, so both spellings give one key.
+      if (residue && !c_term && end + 1 == seq.size())
+      {
+        std::string_view token = body;
+        for (const auto& a : MOD_ALIASES) { if (body == a.unimod) { token = a.name; break; } }
+        if (cTerminalOnly(token, residue)) { out.push_back('.'); c_term = true; }
+      }
       std::string canonical(body);
       bool known = false;
       for (const auto& a : MOD_ALIASES)

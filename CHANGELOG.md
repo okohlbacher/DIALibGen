@@ -44,6 +44,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 - A requested protein-terminal modification that modifies no precursor is
   refused (exit code 6), as a variable one already was.
 
+### Fixed
+
+- Refine joins C-terminally modified precursors of a DIA-NN report
+  to the library. DIA-NN reports `PEPTIDEK(UniMod:2)`, generation stores
+  `PEPTIDEK.(Amidated)`, and until 0.11.2 the two keys differed, so such
+  precursors were silently left unmatched. A modification OpenMS knows only
+  at the C-terminus now has one key in either spelling; one that can also
+  sit on the last residue (`Methyl` on K) is joined to the library's spelling
+  when the library holds only one of the two forms.
+
 ### Documentation
 
 - Usage: the output layouts, the DIA-NN 2.0 Parquet columns, OpenSWATH export

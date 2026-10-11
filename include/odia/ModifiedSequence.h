@@ -17,6 +17,13 @@ namespace ODIA
   /// cysteine-containing precursor -- measured: 3,444 of 37,193 in one run, exactly
   /// the cysteine population -- and a verbatim join drops all of them silently.
   ///
+  /// Terminal modifications have one key whichever way they are written: a
+  /// leading dot is dropped (`.(Acetyl)PEPTIDEK` and `(UniMod:1)PEPTIDEK`
+  /// agree), and a modification after the last residue that OpenMS knows only
+  /// at the C-terminus is written with the dot (`PEPTIDEK(UniMod:2)`, as
+  /// DIA-NN writes it, and `PEPTIDEK.(Amidated)` agree). One that can also sit
+  /// on that residue (`Methyl` on K) keeps the spelling's own site.
+  ///
   /// Brackets are parsed BALANCED, so `K(Label:13C(6)15N(2))` is one token.
   /// A token that is neither a known name nor a `UniMod:` accession is passed
   /// through verbatim and, when @p unknown is given, counted there.

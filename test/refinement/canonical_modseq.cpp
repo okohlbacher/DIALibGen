@@ -66,9 +66,22 @@ int main()
         "protein N-terminal modifications resolve without changing the site");
   check(canonicalModifiedSequence("PEPTIDEK.(Amidated)") == "PEPTIDEK.(UniMod:2)",
         "C-terminal names preserve the explicit terminal marker");
+  // DIA-NN writes a C-terminal modification after the last residue without the
+  // dot. One that OpenMS knows only at the C-terminus is the C-terminal one,
+  // whichever spelling: a DIA-NN report must join the library.
+  std::size_t c_unknown = 0;
+  check(canonicalModifiedSequence("PEPTIDEK(Amidated)", &c_unknown) == "PEPTIDEK.(UniMod:2)" && c_unknown == 0,
+        "a C-terminal-only name after the last residue is the C-terminal modification");
+  check(canonicalModifiedSequence("PEPTIDEK(UniMod:2)") == canonicalModifiedSequence("PEPTIDEK.(Amidated)"),
+        "DIA-NN's PEPTIDEK(UniMod:2) joins OpenMS's PEPTIDEK.(Amidated)");
+  check(LibraryRefiner::key("PEPTIDEK(UniMod:2)", 2) == LibraryRefiner::key("PEPTIDEK.(UniMod:2)", 2),
+        "both C-terminal spellings give one refine key");
+  check(canonicalModifiedSequence("C(UniMod:4)PEPTIDEK(UniMod:2)") == "C(UniMod:4)PEPTIDEK.(UniMod:2)",
+        "with a residue modification earlier in the sequence");
+  // Not on an inner residue: there it cannot be read as C-terminal.
   std::size_t wrong_site = 0;
-  check(canonicalModifiedSequence("PEPTIDEK(Amidated)", &wrong_site) == "PEPTIDEK(Amidated)" && wrong_site == 1,
-        "a terminal-only name must not become a last-residue modification");
+  check(canonicalModifiedSequence("PEPTIDEK(Amidated)R", &wrong_site) == "PEPTIDEK(Amidated)R" && wrong_site == 1,
+        "a terminal-only name on an inner residue stays an unknown residue token");
   std::size_t named_unknown = 0;
   canonicalModifiedSequence("AC(Propionamide)DEK(DIALibGen-unknown-token)", &named_unknown);
   check(named_unknown == 1, "database-resolved names are excluded from the unknown-token count");

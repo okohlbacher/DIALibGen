@@ -94,7 +94,8 @@ The log lists the precursors carrying each variable modification. The TSV and
 the DIA-NN Parquet write modifications as UniMod accessions, terminal ones as
 DIA-NN does: `(UniMod:1)PEPTIDE` for an N-terminal and `PEPTIDE(UniMod:2)` for
 a C-terminal one (0.11.2 wrote `PEPTIDE.(UniMod:2)`; DIA-NN 2.0 reads both and
-reports the former, and OpenMS parses both). DIA-NN knows only some accessions
+reports the former, and OpenMS parses both; refine joins a report to the
+library in either spelling). DIA-NN knows only some accessions
 by default: `(UniMod:1)` loads as is, while for example C-terminal amidation
 needs `--mod UniMod:2,-0.984016` in the DIA-NN command, or DIA-NN 2.0 stops on
 an unknown modification. DIA-NN itself has no C-terminal modifications

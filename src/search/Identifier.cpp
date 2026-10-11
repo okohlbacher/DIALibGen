@@ -599,6 +599,8 @@ namespace ODIA::search
     search["resources"] = {{"threads", params_.threads},
                            {"openswath_threads", std::min(params_.threads, SearchParams::openswath_max_threads)},
                            {"seconds", timing}};
+    // Decided by the free memory of the moment: the sidecar's, never the report's.
+    if (!run.ms1_memory_json.empty()) { search["resources"]["ms1_in_memory"] = json::parse(run.ms1_memory_json); }
     result.provenance_json = search.dump();
     return result;
   }

@@ -343,6 +343,10 @@ void DIALibGen::registerRefinementOptions_()
     setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
     registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the directory of -out_ids); "
                           "they are removed after the search", false);
+    registerStringOption_("search:ms1_in_memory", "<mode>", "auto", "Hold the MS1 map in memory during extraction instead of "
+                          "reading it again for every batch: auto = when the free memory is at least twice its estimated size "
+                          "(the log says which, and why), on, off. Changes the speed and the memory, never the report", false);
+    setValidStrings_("search:ms1_in_memory", {"auto", "on", "off"});
     registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
     registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "
                           "precursors passes q <= 0.01: no honest decoy set looks like that", false);
@@ -414,6 +418,7 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.allow_bootstrap = getFlag_("search:allow_bootstrap");
     s.readoptions = ODIA::search::parseReadMode(getStringOption_("search:readoptions"));
     s.cache_dir = getStringOption_("search:cache_dir");
+    s.ms1_in_memory = ODIA::search::parseMs1InMemory(getStringOption_("search:ms1_in_memory"));
     s.min_ids = count("search:min_ids");
     s.max_target_fraction = getDoubleOption_("search:max_target_fraction");
     s.report_max_q = getDoubleOption_("search:report_max_q");

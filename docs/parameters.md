@@ -123,6 +123,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:allow_bootstrap` | bool | `false` |  | When the RT calibration fails, map the library RT range linearly onto the run instead of aborting. A test hook, recorded in the provenance |
 | `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = cache for runs above 3 GB |
 | `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the directory of -out_ids); they are removed after the search |
+| `-search:ms1_in_memory` | string | `auto` | auto,on,off | Hold the MS1 map in memory during extraction instead of reading it again for every batch: auto = when the free memory is at least twice its estimated size (the log says which, and why), on, off. Changes the speed and the memory, never the report |
 | `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
 | `-search:max_target_fraction` | double | `0.5` | 0.01:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
 | `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |

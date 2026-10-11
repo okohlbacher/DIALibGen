@@ -36,6 +36,7 @@
 #include <odia/search/AssayBuilder.h>
 #include <odia/search/Identifier.h>
 #include <odia/search/IonMobility.h>
+#include <odia/search/MemoryCheck.h>
 #include <odia/search/RobustLine.h>
 
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
@@ -43,6 +44,7 @@
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathOSWWriter.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathWorkflow.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/SwathMapMassCorrection.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/SpectrumAccessOpenMSInMemory.h>
 #include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/CONCEPT/ProgressLogger.h>
@@ -280,6 +282,55 @@ namespace ODIA::search
         if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
       }
       return bytes;
+    }
+
+    /// The estimated size of the run's MS1 maps held in memory as OpenSWATH
+    /// spectra (search:ms1_in_memory), before they are: the peaks' doubles
+    /// (m/z, intensity and, on diaPASEF, 1/K0) plus a per-spectrum overhead.
+    /// A cached run is measured by its MS1 cache file, which SwathFile's cache
+    /// consumer names <basename>_ms1.mzML.cached and which holds the same
+    /// arrays (24.4 GB of cache gave +20.8 GB of RSS on a diaPASEF run); a run
+    /// read into memory by counting its MS1 peaks. @p from says which.
+    std::uint64_t ms1MemoryEstimate(const RunData& run, std::string& from)
+    {
+      constexpr std::uint64_t per_spectrum = 512;   // the Spectrum, its array pointers and descriptions
+      std::uint64_t spectra = 0;
+      for (const auto& m : run.maps)
+      {
+        if (m.ms1 && m.sptr) { spectra += m.sptr->getNrSpectra(); }
+      }
+      if (spectra == 0) { from = "no MS1 spectra"; return 0; }
+      if (!run.scratch.empty())
+      {
+        const std::string suffix = "_ms1.mzML.cached";
+        std::uint64_t bytes = 0;
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(run.scratch, ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+        {
+          const std::string name = it->path().filename().string();
+          std::error_code size_ec;
+          if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+              it->is_regular_file(size_ec))
+          { bytes += it->file_size(size_ec); }
+        }
+        if (bytes > 0) { from = "the MS1 cache file"; return bytes + spectra * per_spectrum; }
+      }
+      std::uint64_t bytes = 0;
+      for (const auto& m : run.maps)
+      {
+        if (!m.ms1 || !m.sptr) { continue; }
+        for (std::size_t k = 0; k < m.sptr->getNrSpectra(); ++k)
+        {
+          const OpenSwath::SpectrumPtr sp = m.sptr->getSpectrumById(static_cast<int>(k));
+          if (!sp) { continue; }
+          for (const auto& a : sp->getDataArrays())
+          {
+            if (a) { bytes += a->data.size() * sizeof(double); }
+          }
+        }
+      }
+      from = "the MS1 peak count";
+      return bytes + spectra * per_spectrum;
     }
 
     /// The OpenMP team for one stock OpenSWATH call, restored afterwards. Stock
@@ -1693,6 +1744,51 @@ namespace ODIA::search
     OpenMS::OpenSwathOSWWriter osw("", 0);   // an empty name: inactive
     OpenMS::NoopMSDataWritingConsumer chromatograms("");
 
+    // The maps extraction reads. With search:ms1_in_memory the MS1 map is
+    // read once into shared in-memory spectra here: stock extraction reads
+    // every MS1 spectrum of the RT window again for every batch, and through
+    // the loader's accessor each read copies the whole spectrum (a diaPASEF
+    // MS1 frame is several MB, from the page cache of the cache file). The
+    // in-memory accessor hands out the stored spectrum instead; OpenSWATH
+    // reads the same values either way. run.maps is not changed, and the
+    // copy is freed when extraction returns.
+    std::vector<OpenSwath::SwathMap> maps = run.maps;
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      json record = {{"mode", toString(params().ms1_in_memory)}, {"held", false}};
+      if (ms1)
+      {
+        std::string from;
+        const std::uint64_t estimate = ms1MemoryEstimate(run, from);
+        const std::uint64_t available = availableMemoryBytes();
+        const Ms1MemoryDecision decision = decideMs1InMemory(params().ms1_in_memory, estimate, available);
+        record["estimate_bytes"] = estimate;
+        record["estimate_from"] = from;
+        record["available_bytes"] = available;
+        record["headroom"] = ms1_in_memory_headroom;
+        record["reason"] = decision.reason;
+        if (decision.hold)
+        {
+          for (auto& m : maps)
+          {
+            if (m.ms1 && m.sptr) { m.sptr = std::make_shared<OpenMS::SpectrumAccessOpenMSInMemory>(*m.sptr); }
+          }
+          const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+          record["held"] = true;
+          record["seconds"] = seconds;
+          info("search extraction: the MS1 map is held in memory, read once in " + fixed(seconds, 1) + " s (" + decision.reason +
+               "; estimated from " + from + ")");
+        }
+        else
+        {
+          info("search extraction: the MS1 map is read per batch, not held in memory (" + decision.reason + "; estimated from " +
+               from + ")");
+        }
+      }
+      else { record["reason"] = "MS1 is not extracted"; }
+      run.ms1_memory_json = record.dump();
+    }
+
     const auto chunks = AssayBuilder::chunks(set, params().chunk, params().batch_size);
     const std::vector<IsolationWindow> windows = isolationWindows(run);
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -1763,7 +1859,7 @@ namespace ODIA::search
                  std::to_string(SearchParams::openswath_max_threads));
           }
           QuietStreams quiet;
-          workflow.performExtraction(run.maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
+          workflow.performExtraction(maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
                                      &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);
         }
         n_features = features.size();

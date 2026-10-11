@@ -29,6 +29,20 @@ namespace ODIA::search
   const char* toString(ReadMode m);
   ReadMode parseReadMode(const std::string& s);   ///< throws std::invalid_argument
 
+  /// Whether extraction holds the MS1 map in memory as shared spectra
+  /// (`search:ms1_in_memory`) instead of reading every MS1 spectrum again for
+  /// every extraction batch. Decides only how fast extraction reads the same
+  /// values: the report is the same either way.
+  enum class Ms1InMemory
+  {
+    Auto,   ///< on when the free memory is at least twice the estimated size of the MS1 map in memory
+    On,     ///< always (needs that memory)
+    Off     ///< never: every read goes through the loader's accessor (the cache files, or a copy per read)
+  };
+
+  const char* toString(Ms1InMemory m);
+  Ms1InMemory parseMs1InMemory(const std::string& s);   ///< throws std::invalid_argument
+
   /// Where the fragments and intensities of both members of a search pair come
   /// from (`search:intensities`).
   enum class Intensities
@@ -145,6 +159,8 @@ namespace ODIA::search
     ReadMode readoptions = ReadMode::Auto;
     /// Where cache files go; empty = the directory of -out_ids.
     std::string cache_dir;
+    /// Hold the MS1 map in memory during extraction (MemoryCheck.h has the rule).
+    Ms1InMemory ms1_in_memory = Ms1InMemory::Auto;
 
     // ---- scoring and run-level guards -----------------------------------------
     /// Abort when fewer target precursors than this are identified at q <= 0.01.
@@ -295,7 +311,9 @@ namespace ODIA::search
     /// The settings as a JSON object. With @p execution false it leaves out the
     /// settings that decide how the search runs but must not change what it
     /// finds -- chunk, batch_size, readoptions (the mode actually used is
-    /// recorded with the run) and cache_dir (a path of this machine) -- which
+    /// recorded with the run), ms1_in_memory (decided by the free memory of
+    /// the moment; the sidecar records the decision) and cache_dir (a path of
+    /// this machine) -- which
     /// is what the report embeds; the provenance sidecar gets everything.
     std::string toJson(bool execution = true) const;
   };

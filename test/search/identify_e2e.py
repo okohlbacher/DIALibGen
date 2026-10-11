@@ -9,7 +9,8 @@ fragments.
 
 refine: -mode refine -run completes, writes the identification report and a
         refined library that consumed it; the report is byte-identical at
-        -threads 1 and 4 and at two search:chunk sizes; with pyarrow, the
+        -threads 1 and 4, at two search:chunk sizes and with
+        search:ms1_in_memory on and off (in memory and cached); with pyarrow, the
         report's identifications are checked against the planted truth.
         Ion mobility: -write_im is refused on the run without it (after it is
         read, before anything is searched) and, on a synthetic diaPASEF run
@@ -17,7 +18,8 @@ refine: -mode refine -run completes, writes the identification report and a
         the observed 1/K0 of the identified precursors, within 0.01 of the
         planted one; a library with 1/K0 for too few targets is refused, one
         with 1/K0 for most searched with the loss counted; the report is
-        byte-identical at -threads 1 and 4 and two search:chunk sizes.
+        byte-identical at -threads 1 and 4, two search:chunk sizes and
+        search:ms1_in_memory on and off.
 tune:   -mode tune -run and the documented -mode refine -tune -no_filter -run
         complete with the RT head (the synthetic run has no ion mobility),
         write their reports and tuned libraries of the full library size.
@@ -161,6 +163,39 @@ try:
             if not filecmp.cmp(ids, other, shallow=False):
                 fail('%s differs from %s' % (other, ids))
         print('ok   report byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
+
+        # search:ms1_in_memory decides how extraction reads the MS1 map, never
+        # what it reads: on and off write the same report, for a run read
+        # into memory and for a cached one (whose MS1 map is otherwise read
+        # from its cache file for every batch). The decision and its numbers
+        # are logged and recorded in the sidecar, never in the report.
+        held_by_default = prov['search']['resources']['ms1_in_memory']
+        if held_by_default.get('mode') != 'auto' or not held_by_default.get('estimate_bytes'):
+            fail('the sidecar does not record the default search:ms1_in_memory decision: %s' % json.dumps(held_by_default))
+        cached_reference = None
+        for name, extra in (('ms1-on', ('-search:ms1_in_memory', 'on')), ('ms1-off', ('-search:ms1_in_memory', 'off')),
+                            ('ms1-on-cache', ('-search:ms1_in_memory', 'on', '-search:readoptions', 'cache')),
+                            ('ms1-off-cache', ('-search:ms1_in_memory', 'off', '-search:readoptions', 'cache'))):
+            _, other, other_prov, other_log = search(name, *extra, threads=4)
+            held = other_prov['search']['resources']['ms1_in_memory']
+            expect_held = 'on' in extra
+            said = 'the MS1 map is held in memory' if expect_held else 'the MS1 map is read per batch'
+            if held.get('held') != expect_held or said not in other_log:
+                print(other_log, file=sys.stderr)
+                fail('%s: the MS1 map must %sbe held in memory, and the log say so: %s'
+                     % (name, '' if expect_held else 'not ', json.dumps(held)))
+            if 'cache' in extra and held.get('estimate_from') != 'the MS1 cache file':
+                fail('%s: a cached run estimates the MS1 map from its cache file: %s' % (name, json.dumps(held)))
+            if 'cache' not in extra and held.get('estimate_from') != 'the MS1 peak count':
+                fail('%s: a run in memory estimates the MS1 map from its peak count: %s' % (name, json.dumps(held)))
+            # The report records the read mode, so a cached search is compared with the other cached one.
+            reference = cached_reference if 'cache' in extra else ids
+            if reference is None:
+                cached_reference = other
+            elif not filecmp.cmp(reference, other, shallow=False):
+                fail('%s: the report differs from that of %s' % (name, reference.parent.name))
+        print('ok   report byte-identical with search:ms1_in_memory on and off, in memory and cached (default: %s, %s)'
+              % ('held' if held_by_default['held'] else 'streamed', held_by_default['reason']))
 
         # -write_im needs observed 1/K0: refused on a run without ion mobility,
         # once the run is read and before anything is searched.
@@ -354,14 +389,31 @@ try:
         print('     report 1/K0: %s' % json.dumps({k: s_rm.get(k) for k in ('rows', 'measured', 'outside_extraction_window')}))
         if not s_rm or s_rm['measured'] < 100 or s_rm['outside_extraction_window'] == 0:
             fail('the determinism check below would not cover the re-measurement and apexes outside the window')
-        for name, threads, extra in (('im-scatter-t1', 1, ()), ('im-scatter-t4-chunk', 4, ('-search:chunk', 600))):
+        for name, threads, extra in (('im-scatter-t1', 1, ()), ('im-scatter-t4-chunk', 4, ('-search:chunk', 600)),
+                                     ('im-scatter-ms1-on', 4, ('-search:ms1_in_memory', 'on')),
+                                     ('im-scatter-ms1-off', 4, ('-search:ms1_in_memory', 'off'))):
             dd = root / name
             dd.mkdir()
             run(tool, '-mode', 'refine', '-in', scatter / 'library.tsv', '-run', scatter / 'run.mzML', '-out', dd / 'out.tsv',
                 '-out_ids', dd / 'ids.parquet', '-write_im', '-q_protein', 1, '-threads', threads, '-search:im_window', 0.06, *extra)
             if not filecmp.cmp(d / 'ids.parquet', dd / 'ids.parquet', shallow=False):
                 fail('with ion mobility the report of %s differs from that at -threads 4, search:chunk 20000' % name)
-        print('ok   with ion mobility the report is byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
+        # ... and with the run cached, where the MS1 map is otherwise read from its cache file for every batch.
+        cached = []
+        for name, mode in (('im-scatter-cache-on', 'on'), ('im-scatter-cache-off', 'off')):
+            dd = root / name
+            dd.mkdir()
+            run(tool, '-mode', 'refine', '-in', scatter / 'library.tsv', '-run', scatter / 'run.mzML', '-out', dd / 'out.tsv',
+                '-out_ids', dd / 'ids.parquet', '-write_im', '-q_protein', 1, '-threads', 4, '-search:im_window', 0.06,
+                '-search:readoptions', 'cache', '-search:ms1_in_memory', mode)
+            held = json.loads((dd / 'out.tsv.refine.json').read_text())['search']['resources']['ms1_in_memory']
+            if held.get('held') != (mode == 'on') or held.get('estimate_from') != 'the MS1 cache file':
+                fail('%s: %s' % (name, json.dumps(held)))
+            cached.append(dd / 'ids.parquet')
+        if not filecmp.cmp(cached[0], cached[1], shallow=False):
+            fail('with ion mobility and a cached run the report differs between search:ms1_in_memory on and off')
+        print('ok   with ion mobility the report is byte-identical at -threads 1 and 4, at search:chunk 20000 and 600, and '
+              'with search:ms1_in_memory on and off (in memory and cached)')
 
         # 40 % planted with ion mobility, where the run-level guards' premise
         # (most candidates null) fails -- max_target_fraction and the label-
@@ -399,7 +451,7 @@ try:
         else:
             table = pq.read_table(ids)
             meta = json.loads(table.schema.metadata[b'odia.identifier'])
-            for key in ('chunk', 'batch_size', 'readoptions', 'cache_dir'):
+            for key in ('chunk', 'batch_size', 'readoptions', 'cache_dir', 'ms1_in_memory'):
                 if key in meta['search']['settings']:
                     fail('the report embeds the execution setting %s' % key)
             r = table.to_pylist()

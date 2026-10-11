@@ -30,6 +30,25 @@ namespace ODIA::search
     throw std::invalid_argument("search:readoptions must be auto, normal or cache, not '" + s + "'");
   }
 
+  const char* toString(Ms1InMemory m)
+  {
+    switch (m)
+    {
+      case Ms1InMemory::On: return "on";
+      case Ms1InMemory::Off: return "off";
+      case Ms1InMemory::Auto: break;
+    }
+    return "auto";
+  }
+
+  Ms1InMemory parseMs1InMemory(const std::string& s)
+  {
+    if (s == "auto") { return Ms1InMemory::Auto; }
+    if (s == "on") { return Ms1InMemory::On; }
+    if (s == "off") { return Ms1InMemory::Off; }
+    throw std::invalid_argument("search:ms1_in_memory must be auto, on or off, not '" + s + "'");
+  }
+
   const char* toString(Intensities i)
   {
     return i == Intensities::Library ? "library" : "predicted";
@@ -137,6 +156,7 @@ namespace ODIA::search
       {"allow_bootstrap", allow_bootstrap},
       {"readoptions", toString(readoptions)},
       {"cache_dir", cache_dir},
+      {"ms1_in_memory", toString(ms1_in_memory)},
       {"min_ids", min_ids},
       {"max_target_fraction", max_target_fraction},
       {"report_max_q", report_max_q},
@@ -149,7 +169,7 @@ namespace ODIA::search
       {"min_assay_fragments", min_assay_fragments}};
     if (!execution)
     {
-      for (const char* key : {"chunk", "batch_size", "readoptions", "cache_dir", "ms2_model"}) { j.erase(key); }
+      for (const char* key : {"chunk", "batch_size", "readoptions", "cache_dir", "ms1_in_memory", "ms2_model"}) { j.erase(key); }
     }
     return j.dump();
   }

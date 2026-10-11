@@ -70,6 +70,9 @@ namespace ODIA::search
     std::filesystem::path scratch;
     /// Anything else the loader wants in the provenance, as a JSON object; may be empty.
     std::string provenance_json;
+    /// Whether extraction held the MS1 map in memory, and why (search:ms1_in_memory),
+    /// as a JSON object for the provenance sidecar only; empty before extraction.
+    std::string ms1_memory_json;
   };
 
   /// A calibrated run: what calibrate() returns and extraction reads.

@@ -49,7 +49,8 @@ builds on all five platforms without patches.
   `im_window` (diaPASEF only: 0 = automatic from the run's 1/K0 calibration,
   > 0 = that full width, -1 = off), `ms1`, `rt_im_scores`,
   `calibration_min_rsq 0.70`, `calibration_min_coverage 0.30`, `readoptions`,
-  `min_ids 200`, `entrapment_tag`, `selftest true`, `chunk`, `batch_size`.
+  `ms1_in_memory auto|on|off` (Resources), `min_ids 200`, `entrapment_tag`,
+  `selftest true`, `chunk`, `batch_size`.
 - Refused with `-run` until later milestones: `-write_intensity`,
   `-empirical_library`, `-min_fragments`. `-write_im` and `-tune_heads
   ccs|both` need observed 1/K0: refused with `search:im_window -1` before the

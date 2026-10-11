@@ -30,6 +30,11 @@ if(EXISTS "${ODIA_MS2_MODEL_PATH}")
   set_tests_properties(identify_predicted_assays_model PROPERTIES TIMEOUT 600 ENVIRONMENT "OMP_NUM_THREADS=2")
 endif()
 
+# search:ms1_in_memory's decision rule and the free-memory query.
+add_executable(identify_ms1_memory identify_ms1_memory.cpp)
+target_link_libraries(identify_ms1_memory PRIVATE odia_search)
+add_test(NAME identify_ms1_memory COMMAND identify_ms1_memory)
+
 # The RT calibration's line-or-LOWESS choice on synthetic calibration points.
 add_executable(identify_rt_model identify_rt_model.cpp)
 target_link_libraries(identify_rt_model PRIVATE odia_search nlohmann_json::nlohmann_json)

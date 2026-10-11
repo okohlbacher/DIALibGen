@@ -1104,7 +1104,7 @@ and the 1/K0 MS1 sub-scores each fetch the apex frame, and OpenSWATH scores
 per OpenSWATH batch (a third of them empty). The rest: PeptDeep prediction
 of both members of every pair 1,464 s (13 %), tuning and writing about
 760 s, calibration 279 s and loading 246 s (each on one thread). The
-fixes, ranked by saving per effort (none measured yet): (1) the MS1 map
+fixes, ranked by saving per effort (none measured yet; (1) since, below): (1) the MS1 map
 held in memory as shared spectra (`SpectrumAccessOpenMSInMemory`: a
 pointer per access, not a copy), an estimated -4,000 to -5,200 s of
 extraction (3.0 h to 1.6-1.9 h) for about +25 GB, results identical by
@@ -1164,6 +1164,63 @@ trained on wherever it lies, and the rows outside the window are counted
 (`outside_extraction_window`), not blanked. The tuner's own TEST SD cannot
 decide this: for (ii) it reads 0.01548 (stock 0.01720) against 0.01709
 (0.01888) for (i), because the same far values leave its test cohort too.
+
+### The MS1 map in memory (`search:ms1_in_memory`)
+
+Fix (1) above, built: before the chunk loop extraction reads the MS1 map
+once into shared in-memory spectra (`SpectrumAccessOpenMSInMemory`; the
+MS2 windows stay where the loader put them), so every MS1 access is a
+pointer instead of a copy of a 6.6-7.6 MB frame. OpenSWATH reads the same
+values either way. `search:ms1_in_memory auto` (the default; owner decision
+D7) holds the map when the free memory is at least twice its estimated size
+in memory, and streams it as before otherwise; `on` and `off` force it.
+Free memory: MemAvailable (Linux; no more than a cgroup v2 limit leaves),
+free plus inactive pages (macOS, vm_stat's figures), `ullAvailPhys`
+(Windows); unknown counts as too little. The estimate is taken before
+anything is read: the MS1 cache file's size for a cached run (24.4 GB here,
+for +20.0 GB of resident memory), the MS1 peaks x 8 bytes per array for a
+run read into memory, plus 512 bytes per spectrum. The log says which way
+it went and why, with the numbers ("the MS1 map is held in memory, read
+once in 11.4 s (search:ms1_in_memory auto: estimated 24.4 GB in memory,
+2357.5 GB free, at least 2x the map; ...)"); the provenance sidecar records
+the same (`search.resources.ms1_in_memory`), the report never does. After
+extraction the freed map is handed back to the system (glibc `malloc_trim`;
+it otherwise stays resident under scoring and tuning, which allocate on
+other threads).
+
+Measured with the M2 acceptance's command (`-mode tune -tune_heads both`,
+timsTOF run and library above, 200,000 pairs, 16 threads, OpenSWATH at 8)
+on dax, one run per setting, one after the other, build 558d01e (before
+the memory hand-back; node load 4-15 from other users, 2,200 GB available):
+
+| | `off` (streamed, as before) | `auto` (held: 24.4 GB estimated, 2,357 GB free) |
+|---|---|---|
+| extraction | 6,053 s | 2,337 s (-61.4 %; the read into memory 11.4 s of it) |
+| search (load, prefilter, calibration, extraction, scoring, report) | 8,007 s | 4,303 s |
+| whole invocation, wall | 2:26:28 | 1:26:29 (-41 %) |
+| CPU user / system | 46,300 s / 21,062 s | 42,110 s / 1,158 s |
+| resident memory during extraction | 6-7 GB | 27.7-28.3 GB |
+| peak resident memory | 18.3 GB (the tuner's re-prediction) | 37.5 GB (the map's freed pages stayed resident under tuning) |
+| report / tuned library md5 | 909c95b4... / 8fa82a45... | the same, and the same as the M2 acceptance's run (fa0d62e, streamed) |
+
+Load, prefilter and calibration took the same time in both (239 / 242 s,
+1,416 / 1,428 s, 276 / 273 s); extraction per chunk 289-403 s streamed and
+112-120 s held. The streamed extraction here (6,053 s) is faster than the
+acceptance's 8,030 s on a busier node (load 23-43). The hand-back, on the
+reduced cell of the time breakdown (30,000 pairs, library intensities,
+`-mode refine`, 8 threads; build aaa152c): 26.2 GB released when extraction
+returned, the resident set from 27.5 GB down to 2.5 GB, report md5
+6c6204b5... as with the prototype held and streamed. With it the full run's
+peak should be the extraction plateau (about 28 GB), not 37.5 GB; that run
+was not repeated. The equivalence is also tested on every build:
+`identify_e2e_refine` compares the report with `on` and `off`, read into
+memory and cached, with and without ion mobility; `identify_ms1_memory`
+checks the rule and the hand-back.
+
+Gate (d) is not met by this: about 28 GB where it asks 16 GB, and 1:26 h
+where it asks 60 minutes on 8 cores (prediction, about 1,330 s, is now the
+largest single step after extraction). On a machine with less than about
+49 GB free `auto` streams, and the run takes the time it took before.
 
 ## Formats
 
@@ -1276,6 +1333,11 @@ native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
    pair's count rule ("The library-assay shortcut, removed"). The decoy in
    its target's slots (`library`) stays as the comparison the exchangeability
    test measures against, and warns loudly on every run that selects it.
+9. The MS1 map is held in memory during extraction when the free memory is
+   at least twice its estimated size (`search:ms1_in_memory auto`, owner
+   decision D7), streamed otherwise, and the choice is logged with its
+   numbers; the report is the same either way (Resources, "The MS1 map in
+   memory").
 
 ## Main risk
 

@@ -26,6 +26,7 @@ except ImportError as e:
     sys.exit(77)
 
 MODELS = ("peptdeep_rt_dynamic.onnx", "peptdeep_ms2_dynamic.onnx", "peptdeep_ccs_dynamic.onnx")
+MS2_PRUNED = "peptdeep_ms2_pruned.onnx"
 
 
 def main(binary, fasta, model_dir, workdir):
@@ -81,8 +82,10 @@ def main(binary, fasta, model_dir, workdir):
     # The recipe must name the models ACTUALLY used, including when they were
     # found via DIALIBGEN_MODEL_DIR rather than written in the config -- a
     # library that does not say what produced it is not reproducible from itself.
+    # MS2: the pruned graph when the model directory holds it, else the full one.
+    ms2 = MS2_PRUNED if os.path.exists(os.path.join(model_dir, MS2_PRUNED)) else MODELS[1]
     check(all(cfg[k].endswith(m) for k, m in
-              (("rt_model", MODELS[0]), ("ms2_model", MODELS[1]), ("ccs_model", MODELS[2]))),
+              (("rt_model", MODELS[0]), ("ms2_model", ms2), ("ccs_model", MODELS[2]))),
           "the embedded recipe names the models that produced the library")
     check(cfg["enzyme"] == "Trypsin/P" and cfg["fixed_modifications"] == ["Carbamidomethyl (C)"],
           "the embedded recipe carries the effective defaults")

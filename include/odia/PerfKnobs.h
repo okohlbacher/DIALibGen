@@ -31,6 +31,7 @@
 //                        column chunks encoded in parallel; TSV rows formatted
 //                        in parallel and written in order.
 //   ODIA_TRIM=1          malloc_trim(0) after every prediction phase.
+//   ODIA_PAR_CREATE=1    ONNX sessions 1..n-1 created concurrently.
 //   ODIA_MS2_PRUNED=path run this MS2 graph (modloss branch removed, channels
 //                        4-7 zero) in place of the configured one; the
 //                        configured file is still the one hashed into the
@@ -85,6 +86,7 @@ namespace ODIA::perf
   inline bool parPost()          { static const bool v = flag("ODIA_PAR_POST"); return v; }
   inline bool parEnum()          { static const bool v = flag("ODIA_PAR_ENUM"); return v; }
   inline bool parWrite()         { static const bool v = flag("ODIA_PAR_WRITE"); return v; }
+  inline bool parCreate()        { static const bool v = flag("ODIA_PAR_CREATE"); return v; }
   inline bool trim()             { static const bool v = flag("ODIA_TRIM"); return v; }
   inline std::string ms2Pruned() { const char* v = std::getenv("ODIA_MS2_PRUNED"); return v ? v : ""; }
 

@@ -282,23 +282,23 @@ namespace ODIA
     // proteins accumulates them, which is what protein inference later needs.
     std::map<std::string, std::string> peptide_to_proteins;
     std::vector<AASequence> peptides;
-    // Adds one accepted peptide's protein to the map, as the serial loop does.
-    const auto addProtein = [&](const std::string& peptide, const std::string& identifier) {
-      auto& proteins = peptide_to_proteins[peptide];
-      if (proteins.empty()) { proteins = identifier; }
-      else if (!containsAccession(proteins, identifier))
-      {
-        proteins += ';';
-        proteins += identifier;
-      }
-    };
     const bool parallel_enum = perf::parEnum() && perf::workerThreads() > 1;
+    // Parallel path only: the peptide map split into shards, and its items in key order.
+    std::vector<std::map<std::string, std::string>> shard_maps;
+    std::vector<const std::pair<const std::string, std::string>*> merged_items;
     if (parallel_enum)
     {
       // perf/generate-solutions: proteins are digested independently on all
       // worker threads; only the map update, which decides the order of the
       // accessions, runs serially and in input order.
-      struct Digested { bool dropped = false; std::size_t ambiguous = 0; std::vector<std::string> accepted; };
+      struct Digested
+      {
+        bool dropped = false;
+        std::size_t ambiguous = 0;
+        std::vector<std::string> accepted;
+        std::vector<std::uint8_t> shard;   // which shard map each accepted peptide goes to
+      };
+      const std::size_t shards = std::min<std::size_t>(perf::workerThreads(), 64);
       std::vector<Digested> digested(entries.size());
       perf::parallelSlices(entries.size(), perf::workerThreads(), [&](std::size_t, std::size_t b, std::size_t e) {
         ProteaseDigestion local_digestion = digestion;
@@ -335,17 +335,60 @@ namespace ODIA
               if (!std::isfinite(pep.getMonoWeight())) { ++out.ambiguous; continue; }
             }
             catch (const std::exception&) { ++out.ambiguous; continue; }
+            out.shard.push_back(static_cast<std::uint8_t>(std::hash<std::string>{}(residues) % shards));
             out.accepted.push_back(std::move(residues));
           }
         }
       });
-      for (std::size_t q = 0; q < entries.size(); ++q)
+      for (const auto& d : digested)
       {
-        auto& d = digested[q];
         if (d.dropped) { ++stats.dropped_proteins; continue; }
         stats.dropped_ambiguous_peptides += d.ambiguous;
-        for (const auto& pep : d.accepted) { addProtein(pep, entries[q].identifier); }
-        d = Digested{};
+      }
+      // Every peptide lives in exactly one shard, and each shard visits the
+      // proteins in input order, so each peptide's accession list is built in
+      // the same order as by one serial pass. The shards are merged by key
+      // below, which is the order the single map would iterate in.
+      shard_maps.resize(shards);
+      perf::parallelSlices(shards, shards, [&](std::size_t sh, std::size_t, std::size_t) {
+        auto& map = shard_maps[sh];
+        for (std::size_t q = 0; q < entries.size(); ++q)
+        {
+          const auto& d = digested[q];
+          for (std::size_t k = 0; k < d.accepted.size(); ++k)
+          {
+            if (d.shard[k] != sh) { continue; }
+            auto& proteins = map[d.accepted[k]];
+            if (proteins.empty()) { proteins = entries[q].identifier; }
+            else if (!containsAccession(proteins, entries[q].identifier))
+            {
+              proteins += ';';
+              proteins += entries[q].identifier;
+            }
+          }
+        }
+      });
+      perf::parallelSlices(digested.size(), perf::workerThreads(), [&](std::size_t, std::size_t b, std::size_t e) {
+        for (std::size_t q = b; q < e; ++q) { digested[q] = Digested{}; }
+      });
+      // k-way merge of the shards by key.
+      using Item = const std::pair<const std::string, std::string>*;
+      std::size_t total = 0;
+      for (const auto& m : shard_maps) { total += m.size(); }
+      merged_items.reserve(total);
+      std::vector<std::map<std::string, std::string>::const_iterator> at, end;
+      for (const auto& m : shard_maps) { at.push_back(m.begin()); end.push_back(m.end()); }
+      const auto later = [&](std::size_t a, std::size_t b) { return at[a]->first > at[b]->first; };
+      std::vector<std::size_t> heap;
+      for (std::size_t sh = 0; sh < shard_maps.size(); ++sh) { if (at[sh] != end[sh]) { heap.push_back(sh); } }
+      std::make_heap(heap.begin(), heap.end(), later);
+      while (!heap.empty())
+      {
+        std::pop_heap(heap.begin(), heap.end(), later);
+        const std::size_t sh = heap.back();
+        merged_items.push_back(static_cast<Item>(&*at[sh]));
+        if (++at[sh] != end[sh]) { std::push_heap(heap.begin(), heap.end(), later); }
+        else { heap.pop_back(); }
       }
     }
     for (const auto& entry : entries)
@@ -402,7 +445,8 @@ namespace ODIA
         }
       }
     }
-    stats.peptides = peptide_to_proteins.size();
+    const std::size_t peptide_count = parallel_enum ? merged_items.size() : peptide_to_proteins.size();
+    stats.peptides = peptide_count;
     digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
     digest_phase.end();
 
@@ -425,8 +469,8 @@ namespace ODIA
     // Reject the estimate before multiplying: an extreme fragment cap must
     // not wrap size_t and bypass the 32-bit CSR limit in reserve().
     constexpr auto transition_limit = std::numeric_limits<std::uint32_t>::max();
-    Library::checkTransitionCapacity(peptide_to_proteins.size());
-    const auto estimated_precursors = peptide_to_proteins.size() * params.charges.size();
+    Library::checkTransitionCapacity(peptide_count);
+    const auto estimated_precursors = peptide_count * params.charges.size();
     if (params.max_fragments && estimated_precursors > transition_limit / params.max_fragments)
     { throw std::length_error("library exceeds the 32-bit transition limit (4294967295); split the input FASTA"); }
     library.reserve(estimated_precursors, estimated_precursors * params.max_fragments);
@@ -439,27 +483,38 @@ namespace ODIA
       // fragments are computed on all worker threads, in rounds; the strings
       // are interned and the arrays appended serially in the map's order, so
       // every handle and every array is what the serial loop produces.
-      struct Prec { double mz; int z; int status; std::vector<Fragment> fragments; };   // 0 kept, 1 m/z, 2 too few
-      struct Form { std::string sequence; std::vector<Prec> precursors; };
-      struct Pep { bool ok = false; std::vector<Form> forms; };
-      std::vector<const std::pair<const std::string, std::string>*> items;
-      items.reserve(peptide_to_proteins.size());
-      for (const auto& kv : peptide_to_proteins) { items.push_back(&kv); }
-      constexpr std::size_t ROUND = 65536;
-      std::vector<Pep> round;
+      struct Prec { double mz; int z; int status; std::uint32_t fb, fc; };   // status 0 kept, 1 m/z, 2 too few
+      struct Form { std::string sequence; std::uint32_t pb, pc; };
+      struct Pep { bool ok; std::uint32_t fb, fc; };
+      // One slice's results, flat, so a round costs a handful of allocations
+      // per slice instead of several per precursor.
+      struct Slice
+      {
+        std::vector<Pep> peps;
+        std::vector<Form> forms;
+        std::vector<Prec> precs;
+        std::vector<Fragment> frags;
+        void clear() { peps.clear(); forms.clear(); precs.clear(); frags.clear(); }
+      };
+      const auto& items = merged_items;
+      constexpr std::size_t ROUND = 262144;
+      const std::size_t nslices = perf::workerThreads();
+      std::vector<Slice> slices(nslices);
       for (std::size_t r0 = 0; r0 < items.size(); r0 += ROUND)
       {
         const std::size_t r1 = std::min(r0 + ROUND, items.size());
-        round.assign(r1 - r0, Pep{});
-        perf::parallelSlices(r1 - r0, perf::workerThreads(), [&](std::size_t, std::size_t b, std::size_t e) {
+        perf::parallelSlices(r1 - r0, nslices, [&](std::size_t sl, std::size_t b, std::size_t e) {
+          auto& out = slices[sl];
+          out.clear();
           std::vector<AASequence> local_forms;
+          std::vector<Fragment> frag;
           for (std::size_t q = b; q < e; ++q)
           {
-            auto& out = round[q];
+            Pep pep{false, static_cast<std::uint32_t>(out.forms.size()), 0};
             AASequence base;
             try { base = AASequence::fromString(items[r0 + q]->first); }
-            catch (const std::exception&) { continue; }
-            out.ok = true;
+            catch (const std::exception&) { out.peps.push_back(pep); continue; }
+            pep.ok = true;
             ModifiedPeptideGenerator::applyFixedModifications(fixed_map, base);
             local_forms.clear();
             if (params.variable_modifications.empty()) { local_forms.push_back(base); }
@@ -468,63 +523,84 @@ namespace ODIA
               ModifiedPeptideGenerator::applyVariableModifications(
                 variable_map, base, params.max_variable_modifications, local_forms, true);
             }
-            out.forms.resize(local_forms.size());
-            for (std::size_t f = 0; f < local_forms.size(); ++f)
+            for (const auto& form : local_forms)
             {
-              const auto& form = local_forms[f];
-              out.forms[f].sequence = form.toString();
+              Form fo{form.toString(), static_cast<std::uint32_t>(out.precs.size()), 0};
               for (int z : params.charges)
               {
-                Prec pr{form.getMZ(z), z, 0, {}};
+                Prec pr{form.getMZ(z), z, 0, static_cast<std::uint32_t>(out.frags.size()), 0};
                 if (pr.mz < params.precursor_mz_min || pr.mz > params.precursor_mz_max) { pr.status = 1; }
                 else
                 {
-                  enumerateFragments(form, params, z, pr.fragments);
-                  if (pr.fragments.size() < params.min_fragments) { pr.status = 2; pr.fragments.clear(); }
+                  enumerateFragments(form, params, z, frag);
+                  if (frag.size() < params.min_fragments) { pr.status = 2; }
+                  else
+                  {
+                    out.frags.insert(out.frags.end(), frag.begin(), frag.end());
+                    pr.fc = static_cast<std::uint32_t>(frag.size());
+                  }
                 }
-                out.forms[f].precursors.push_back(std::move(pr));
+                out.precs.push_back(pr);
+                ++fo.pc;
               }
+              out.forms.push_back(std::move(fo));
+              ++pep.fc;
             }
+            out.peps.push_back(pep);
           }
         });
-        for (std::size_t q = 0; q < round.size(); ++q)
+        // Serial, in item order: the slices hold consecutive items.
+        std::size_t q = r0;
+        auto& p = library.precursors();
+        auto& t = library.transitions();
+        for (const auto& sl : slices)
         {
-          const auto& pep = round[q];
-          if (!pep.ok) { continue; }
-          const std::uint32_t protein_handle = library.strings().intern(items[r0 + q]->second);
-          for (const auto& form : pep.forms)
+          if (q >= r1) { break; }
+          for (const auto& pep : sl.peps)
           {
-            const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
-            for (const auto& pr : form.precursors)
+            const std::size_t item = q++;
+            if (!pep.ok) { continue; }
+            const std::uint32_t protein_handle = library.strings().intern(items[item]->second);
+            for (std::uint32_t f = pep.fb; f < pep.fb + pep.fc; ++f)
             {
-              if (pr.status == 1) { ++stats.dropped_precursor_mz; continue; }
-              if (pr.status == 2) { ++stats.dropped_too_few_fragments; continue; }
-              auto& p = library.precursors();
-              auto& t = library.transitions();
-              Library::checkTransitionCapacity(t.product_mz.size(), pr.fragments.size());
-              p.mz.push_back(toFixed(pr.mz));
-              p.irt.push_back(std::nanf(""));
-              p.im.push_back(std::nanf(""));
-              p.ccs.push_back(std::nanf(""));
-              p.charge.push_back(static_cast<std::uint8_t>(pr.z));
-              p.decoy.push_back(0);
-              p.modified_sequence.push_back(sequence_handle);
-              p.protein_group.push_back(protein_handle);
-              p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
-              p.transition_count.push_back(static_cast<std::uint32_t>(pr.fragments.size()));
-              for (const auto& f : pr.fragments)
+              const auto& form = sl.forms[f];
+              const std::uint32_t sequence_handle = library.strings().intern(form.sequence);
+              for (std::uint32_t c = form.pb; c < form.pb + form.pc; ++c)
               {
-                t.product_mz.push_back(toFixed(f.mz));
-                t.library_intensity.push_back(1.0f);
-                t.type.push_back(f.type);
-                t.ordinal.push_back(f.ordinal);
-                t.charge.push_back(f.charge);
-                t.loss.push_back(LossType::None);
+                const auto& pr = sl.precs[c];
+                if (pr.status == 1) { ++stats.dropped_precursor_mz; continue; }
+                if (pr.status == 2) { ++stats.dropped_too_few_fragments; continue; }
+                Library::checkTransitionCapacity(t.product_mz.size(), pr.fc);
+                p.mz.push_back(toFixed(pr.mz));
+                p.irt.push_back(std::nanf(""));
+                p.im.push_back(std::nanf(""));
+                p.ccs.push_back(std::nanf(""));
+                p.charge.push_back(static_cast<std::uint8_t>(pr.z));
+                p.decoy.push_back(0);
+                p.modified_sequence.push_back(sequence_handle);
+                p.protein_group.push_back(protein_handle);
+                p.transition_begin.push_back(static_cast<std::uint32_t>(t.product_mz.size()));
+                p.transition_count.push_back(pr.fc);
+                for (std::uint32_t k = pr.fb; k < pr.fb + pr.fc; ++k)
+                {
+                  const auto& fr = sl.frags[k];
+                  t.product_mz.push_back(toFixed(fr.mz));
+                  t.library_intensity.push_back(1.0f);
+                  t.type.push_back(fr.type);
+                  t.ordinal.push_back(fr.ordinal);
+                  t.charge.push_back(fr.charge);
+                  t.loss.push_back(LossType::None);
+                }
               }
             }
           }
         }
       }
+      // The shard maps are only read through `items`; freed here, inside the
+      // phase, on all threads.
+      perf::parallelSlices(shard_maps.size(), shard_maps.size(), [&](std::size_t sh, std::size_t, std::size_t) {
+        shard_maps[sh] = {};
+      });
     }
     for (const auto& [sequence, proteins] : peptide_to_proteins)
     {

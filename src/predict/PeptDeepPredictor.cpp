@@ -429,9 +429,24 @@ namespace ODIA
         impl_->shared_buffers.clear();
         impl_->shared_bytes = 0;
       }
-      for (int i = 1; i < sessions; ++i)
+      if (perf::parCreate() && sessions > 2)
       {
-        impl_->replicas.push_back(makeSession(static_cast<std::size_t>(i)));
+        // perf/generate-solutions: each session is built from the same
+        // read-only options and shared weights; ONNX Runtime's prepacked
+        // container takes its own lock. 96 MS2 sessions one after another
+        // took 2.3 s.
+        impl_->replicas.resize(static_cast<std::size_t>(sessions - 1));
+        perf::parallelSlices(impl_->replicas.size(), std::min<std::size_t>(impl_->replicas.size(), 32),
+                             [&](std::size_t, std::size_t b, std::size_t e) {
+          for (std::size_t i = b; i < e; ++i) { impl_->replicas[i] = makeSession(i + 1); }
+        });
+      }
+      else
+      {
+        for (int i = 1; i < sessions; ++i)
+        {
+          impl_->replicas.push_back(makeSession(static_cast<std::size_t>(i)));
+        }
       }
     }
     if (!optimized.empty())

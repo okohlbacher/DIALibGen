@@ -839,12 +839,24 @@ namespace ODIA
       for (std::size_t i = 0; i < n; ++i)
       {
         const auto seq = library.strings().get(p.modified_sequence[i]);
-        const auto pg = library.strings().get(p.protein_group[i]);
         const std::string seq_s(seq.data(), seq.size());
-        const std::string pg_s(pg.data(), pg.size());
         const int z = static_cast<int>(p.charge[i]);
         const std::string id = seq_s + std::to_string(z) + (p.decoy[i] ? "_decoy" : "");
-        ok(b_id.Append(id)); ok(b_seq.Append(seq_s)); ok(b_pg.Append(pg_s));
+        ok(b_id.Append(id));
+      }
+    };
+    const auto groupSeq = [&] {
+      for (std::size_t i = 0; i < n; ++i)
+      {
+        const auto seq = library.strings().get(p.modified_sequence[i]);
+        ok(b_seq.Append(std::string(seq.data(), seq.size())));
+      }
+    };
+    const auto groupPg = [&] {
+      for (std::size_t i = 0; i < n; ++i)
+      {
+        const auto pg = library.strings().get(p.protein_group[i]);
+        ok(b_pg.Append(std::string(pg.data(), pg.size())));
       }
     };
     const auto groupScalars = [&] {
@@ -877,7 +889,7 @@ namespace ODIA
     // The enum's own value, not its spelling: "noloss" and "y" cost bytes
     // and a parse on every read.
     std::vector<std::function<void()>> groups{
-      groupIds, groupScalars,
+      groupIds, groupSeq, groupPg, groupScalars,
       groupList(b_qmz, qmz_v, [&t](std::uint32_t j) { return fromFixed(t.product_mz[j]); }),
       groupList(b_int, int_v, [&t](std::uint32_t j) { return t.library_intensity[j]; }),
       groupList(b_ft, ft_v, [&t](std::uint32_t j) { return static_cast<std::uint8_t>(t.type[j]); }),

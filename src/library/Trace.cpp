@@ -772,7 +772,7 @@ namespace ODIA::trace
                             "ODIA_ORT_PROFILE", "OMP_NUM_THREADS", "MALLOC_ARENA_MAX", "GLIBC_TUNABLES",
                             "ODIA_SOLUTIONS", "ODIA_MAX_SESSIONS", "ODIA_MS2_ROWS", "ODIA_LSTM_ROWS",
                             "ODIA_MS2_BLOCK", "ODIA_LPT", "ODIA_INTERLEAVE", "ODIA_PAR_POST",
-                            "ODIA_PAR_ENUM", "ODIA_PAR_WRITE", "ODIA_TRIM", "ODIA_MS2_PRUNED",
+                            "ODIA_PAR_ENUM", "ODIA_PAR_WRITE", "ODIA_PAR_CREATE", "ODIA_TRIM", "ODIA_MS2_PRUNED",
                             "OPENBLAS_NUM_THREADS"})
     {
       if (const char* v = std::getenv(var)) { note(std::string("env.") + var, sanitize(v)); }

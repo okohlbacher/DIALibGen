@@ -1401,7 +1401,7 @@ native Bruker `.d` (opentims-based reader or an OpenMS upgrade), and
 - **M6** Desktop app, README figure (identification becomes a DIALibGen step),
   release smoke on all platforms.
 - **M7** Second pass, fragment intensities (`-write_intensity`), GBT opt-in.
-- **M8** Native Bruker `.d`, `.mzpeak`.
+- **M8** Native Bruker `.d`, `.mzpeak`. `.mzpeak` is read since 0.11.3 (vendored mzpeak-openms; `src/search/MzPeakRun.cpp`, `RunStages.cpp` loadMzPeakMaps); a native `.d` reader is open.
 
 ## Validation gates
 

@@ -266,7 +266,7 @@ result; these are not generic iRT models.
 
 ## Built-in identification (experimental)
 
-`-run run.mzML` replaces `-ids` in `refine` and `tune`: DIALibGen identifies
+`-run run.mzML` (or an mzPeak archive, `-run run.mzpeak`) replaces `-ids` in `refine` and `tune`: DIALibGen identifies
 precursors in the run itself (fragment-evidence candidates, OpenSWATH
 extraction, a semi-supervised discriminant, target-decoy FDR at 1 %), writes
 the identifications as a report (`-out_ids`, default `<out>.ids.parquet`) and
@@ -280,6 +280,19 @@ an established search engine remains the validated route. `-write_intensity`
 and `-min_fragments` are not available with `-run`; `-write_im` and the CCS
 head need a diaPASEF run with a per-peak 1/K0 array. Gates, design and
 measurements: [built-in identification](design/built-in-identification.md).
+
+mzPeak runs (experimental as well): `-run` takes a `.mzpeak` archive or its
+unpacked directory besides mzML (`.mzML`, `.mzML.gz`), chosen by the name. The
+archive is read with mzpeak-openms (vendored, `third_party/mzpeak-openms`)
+into the same OpenSWATH maps an mzML of the same data gives: every spectrum
+through the same SwathFile consumers, in memory or in per-window cache files
+(`search:readoptions`; `auto` decides by the decoded size, 3 GB). A diaPASEF
+frame that the archive keeps whole (mzpeak-convert's default for a `.d`) is
+split into one spectrum per isolation window by the windows' 1/K0 bands. RT
+comes from the archive's spectrum time (double precision); an mzML export of
+the same archive carries the float32 scan start time, so RTs differ from such
+an mzML by up to about 1e-7 relative. Builds configured with
+`-DDIALIBGEN_WITH_MZPEAK=OFF` refuse `.mzpeak` runs.
 
 ## GPU
 

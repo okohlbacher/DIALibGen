@@ -15,6 +15,10 @@ This project follows [Semantic Versioning](https://semver.org/).
   passed and the 16 GB / 60 min on 8 cores resources gate is not met; `-ids`
   remains the validated route
   ([design](docs/design/built-in-identification.md)).
+- `-run` reads mzPeak runs (`.mzpeak` archives or their unpacked directory)
+  besides mzML, through the vendored mzpeak-openms reader into the same
+  OpenSWATH maps; diaPASEF frames stored whole are split by their windows'
+  1/K0 bands. Experimental, as `-run`.
 
 ### Added
 

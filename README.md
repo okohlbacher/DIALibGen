@@ -24,7 +24,7 @@ flowchart LR
     fasta(["Protein FASTA"]) --> gen["<b>generate</b><br/>digest, then predict RT,<br/>fragments, CCS and 1/K0"]
     gen --> lib[("predicted<br/>library")]
     lib --> ident["<b>identify</b><br/>targeted trace extraction,<br/>scoring, target-decoy FDR"]
-    run(["DIA run<br/>(mzML)"]) -->|"-run"| ident
+    run(["DIA run<br/>(mzML or mzPeak)"]) -->|"-run"| ident
     ident --> ids[("identifications<br/>of one run")]
     rep(["external search<br/>report"]) -->|"-ids"| ids
     lib --> tune["<b>tune</b><br/>retrain RT/CCS,<br/>re-predict every precursor"]
@@ -235,9 +235,13 @@ DIALibGen -mode tune -tune_heads rt -in predicted.parquet -run run.mzML -out tun
 DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -run run.mzML -out adapted.tsv
 ```
 
-- The run must be a centroided DIA mzML. For timsTOF diaPASEF, convert the
-  `.d` with a converter that writes a per-peak 1/K0 array and valid mzML 1.1
-  (`mzpeak-convert --to mzml`, from the release that includes its mzML fixes).
+- The run is a centroided DIA run as mzML or as an mzPeak archive (`.mzpeak`,
+  or its unpacked directory; also experimental), chosen by the extension. For
+  timsTOF diaPASEF, convert the `.d` with `mzpeak-convert` to `.mzpeak` (its
+  default archive keeps each frame whole; DIALibGen splits it by the windows'
+  1/K0 bands) or to mzML with a per-peak 1/K0 array (`--to mzml`). An mzPeak
+  run is read with the vendored mzpeak-openms reader into the same OpenSWATH
+  maps an mzML gives.
 - The identifications are written to `<out>.ids.parquet` (`-out_ids`), in the
   columns an `-ids` report has, and can be reused with `-ids`.
 - A diaPASEF run is searched with its ion mobility: the library's 1/K0 is
@@ -302,7 +306,7 @@ measured. If fragment agreement matters, generate both and compare.
 | `-out *.parquet` | DIALibGen's compact Parquet, one row per precursor with fragment lists | From `generate` it embeds recipe, FASTA and model hashes; from `refine`/`tune` the same provenance as the sidecar. Input for `refine`/`tune`. Not read by DIA-NN 2; `-out_format diann2_parquet` writes DIA-NN 2.0's own Parquet layout. |
 | `-out *.pqp` | OpenSWATH's PQP, written by OpenMS | `-out_format openswath_tsv` writes OpenSWATH's assay TSV instead ([output layouts](docs/usage.md#files-and-provenance)). |
 | `-in` for `refine`/`tune` | DIALibGen Parquet, DIA-NN TSV, DIA-NN 2.0 Parquet library, or long-format Parquet (one row per transition, the TSV's columns) | |
-| `-run` (experimental) | One centroided DIA run, mzML | Instead of `-ids`; see [built-in identification](#built-in-identification-experimental). |
+| `-run` (experimental) | One centroided DIA run, mzML or mzPeak (`.mzpeak`) | Instead of `-ids`; see [built-in identification](#built-in-identification-experimental). |
 | `-ids` | DIA-NN `report.parquet` of **one** run (`report.tsv` is not read) | Needs precursor q-values and protein annotation. A multi-run report is refused; filter it to one `Run` first. `refine` also accepts a pre-filtered long-format Parquet library with `-empirical_library`. |
 | `-out_report` | TSV | Gate counts and residual summary (n, mean, sd, p95), measured before observed values are written. |
 | `*.refine.json` | JSON sidecar of `refine`/`tune` | Provenance; keep it with the library. |
@@ -377,7 +381,7 @@ separate.
   using one real DIA-NN 2.0 `--export-quant` report row; other versions and
   export settings remain unverified.
 - `-run` (built-in identification) is experimental: its entrapment and
-  resource validation gates are open, and it reads centroided mzML only.
+  resource validation gates are open. It reads centroided mzML and mzPeak.
 - Prediction supports one modification per residue. Refinement normalizes known
   modification names to UniMod accessions and reports unresolved names.
 - A library can contain at most 4,294,967,295 transitions. Larger inputs must

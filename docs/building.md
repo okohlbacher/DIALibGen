@@ -25,6 +25,15 @@ To omit training and its runtime dependency, configure with
 `-DDIALIBGEN_BUILD_FINETUNE=OFF`. The resulting executable still generates
 libraries and performs observed-value refinement.
 
+mzPeak input for `-run` (on by default) compiles the vendored mzpeak-openms
+reader (`third_party/mzpeak-openms`) and needs libzip and Boost headers with
+Boost.JSON and Boost.Compat (Boost 1.86 or later; its own CI uses 1.89+). The
+reader takes its Boost from `MZPEAK_BOOST_INCLUDE_DIR`, by default the Boost
+OpenMS uses; point it at a newer copy when OpenMS's is older (the Windows
+contrib has 1.87, which MSVC cannot compile the reader against). Nothing that
+includes OpenMS headers sees that copy. `-DDIALIBGEN_WITH_MZPEAK=OFF` builds
+without it; such a build refuses `.mzpeak` runs.
+
 The runtime is native C++; Python, NumPy, PyArrow and the Python ONNX Runtime
 package are test dependencies only. Model-dependent tests require all three
 ONNX models in `ODIA_MODEL_DIR`. A smaller passing suite without models is

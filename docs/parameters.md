@@ -14,7 +14,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |
 | `-ids` | input-file | (empty) |  | DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised. |
-| `-run` | input-file | (empty) |  | Experimental: a centroided DIA run (mzML) that the built-in identification step searches instead of reading -ids. Not yet validated (entrapment and resource gates open); -ids is the validated route. Give exactly one of -ids and -run. Settings: search:. |
+| `-run` | input-file | (empty) |  | Experimental: a centroided DIA run (mzML, or mzPeak: a .mzpeak archive or its unpacked directory) that the built-in identification step searches instead of reading -ids. Not yet validated (entrapment and resource gates open); -ids is the validated route. Give exactly one of -ids and -run. Settings: search:. |
 | `-out_ids` | output-file | (empty) |  | With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. Default: <out>.ids.parquet. Never overwritten. |
 | `-out_report` | output-file | (empty) |  | Per-axis residual report (TSV), measured BEFORE the overwrite. |
 | `-no_filter` | bool | `false` |  | Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent. |

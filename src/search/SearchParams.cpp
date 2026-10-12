@@ -149,7 +149,10 @@ namespace ODIA::search
     const int k = outerSwitch();
     if (k == 0 || k == -1) { return -1; }
     if (k >= 1) { return std::min(k, team); }
-    return team >= 4 ? team / 2 : -1;
+    // From a team of 8: at 4 the flat loop keeps all four threads busy and
+    // two windows at once were slower (extraction 840 -> 946 s on the timsTOF
+    // cell); at 8 the nested loop is level (512 -> 495 s), at 16 it wins.
+    return team >= 8 ? team / 2 : -1;
   }
 
   int SearchParams::calibrationThreads(int team)

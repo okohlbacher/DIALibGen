@@ -252,7 +252,8 @@ try:
 
         # Determinism: threads and chunking change nothing in the report.
         _, ids4, prov4, _ = search('t4', threads=4)
-        _, ids4c, _, _ = search('t4c', '-search:chunk', 600, threads=4)
+        # (with the nested window loop forced: at -threads 4 the default is the flat loop)
+        _, ids4c, prov4c, _ = search('t4c', '-search:chunk', 600, threads=4, env={'ODIA_OPENSWATH_OUTER': '2'})
         for other in (ids4, ids4c):
             if not same_report(ids, other):
                 explain(ids, other)
@@ -277,11 +278,12 @@ try:
         # performRTNormalization instead of the split seed picking, the whole
         # team decoding the mzML, hashes and cache removal on the main thread
         # in order -- the report and the input hashes are the same. At
-        # -threads 4 the defaults run the nested loop (2 windows x 2 threads,
-        # where OpenMS has it) and pick the seeds on 4 threads.
+        # -threads 4 the defaults pick the seeds on 4 threads and keep the flat
+        # window loop (the nested one starts at a team of 8); t4c above ran
+        # the nested loop (2 windows x 2 threads, where OpenMS has it).
         res = prov4['search']['resources']
-        if res.get('calibration_threads') != 4 or res.get('async_io') is not True or res.get('openswath_outer_loop') not in (2, -1) \
-                or res.get('load_threads') != 4:
+        if res.get('calibration_threads') != 4 or res.get('async_io') is not True or res.get('openswath_outer_loop') != -1 \
+                or res.get('load_threads') != 4 or prov4c['search']['resources'].get('openswath_outer_loop') not in (2, -1):
             fail('-threads 4 does not run the efficiency defaults: %s' % json.dumps(res))
         off = {'ODIA_OPENSWATH_OUTER': '0', 'ODIA_CALIB_PAR': '0', 'ODIA_LOAD_THREADS': '0', 'ODIA_ASYNC_IO': '0'}
         _, ids_off, prov_off, _ = search('t4-off', '-search:batch_size', 500, threads=4, env=off)
@@ -295,8 +297,9 @@ try:
         for key in ('library_fnv1a64', 'run_fnv1a64'):
             if not prov4['inputs'].get(key) or prov4['inputs'][key] != prov_off['inputs'][key]:
                 fail('%s differs with the hashes computed in order: %s vs %s' % (key, prov4['inputs'].get(key), prov_off['inputs'].get(key)))
-        print('ok   the -run efficiency defaults (nested loop %d, seed picking on %d threads, background hashes) change '
-              'neither the report nor the input hashes' % (res['openswath_outer_loop'], res['calibration_threads']))
+        print('ok   the -run efficiency defaults (nested loop %d at search:chunk 600, seed picking on %d threads, background '
+              'hashes) change neither the report nor the input hashes'
+              % (prov4c['search']['resources']['openswath_outer_loop'], res['calibration_threads']))
 
         # search:ms1_in_memory decides how extraction reads the MS1 map, never
         # what it reads: on and off write the same report, for a run read

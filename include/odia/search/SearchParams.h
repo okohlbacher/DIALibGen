@@ -250,7 +250,7 @@ namespace ODIA::search
     /// threads: team / 2, each window's batches split over the remaining two
     /// threads (stock OpenSwathWorkflow's threads_outer_loop; its inner team is
     /// team / outer, so outer x inner never exceeds the team). -1 = stock's
-    /// flat loop: below 4 threads, without the nested loop, or with
+    /// flat loop: below 8 threads, without the nested loop, or with
     /// ODIA_OPENSWATH_OUTER=0; ODIA_OPENSWATH_OUTER=k >= 1 sets k (at most the
     /// team). The result does not depend on it.
     static int openswathOuterLoop(int team);

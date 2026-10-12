@@ -28,7 +28,7 @@ Switches for measurements and tests; none changes the library's content:
 | `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
 | `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |
 | `ODIA_OPENSWATH_THREADS` | 16; 8 without the nested loop | `-run`: the most OpenMP threads an OpenSWATH call (calibration, extraction) gets; never more than `-threads` |
-| `ODIA_OPENSWATH_OUTER` | team / 2 from a team of 4 | `-run`: isolation windows an extraction call works on at once in stock OpenSWATH's nested loop, each window's batches over team / k threads; `0` = the flat loop (one thread per window) and a team of at most 8, as before 0.11.3. Needs an OpenMS built with `MT_ENABLE_NESTED_OPENMP` (conda's 3.5.0; MSVC builds always run the flat loop) |
+| `ODIA_OPENSWATH_OUTER` | team / 2 from a team of 8 | `-run`: isolation windows an extraction call works on at once in stock OpenSWATH's nested loop, each window's batches over team / k threads; `0` = the flat loop (one thread per window) and a team of at most 8, as before 0.11.3. Needs an OpenMS built with `MT_ENABLE_NESTED_OPENMP` (conda's 3.5.0; MSVC builds always run the flat loop) |
 | `ODIA_CALIB_PAR` | the team, at most 8 | `-run`: threads that pick and score the calibration's seed chromatograms (stock `performRTNormalization`'s serial step, split by seed); `0` or `1` = stock `performRTNormalization` |
 | `ODIA_LOAD_THREADS` | 4 | `-run`: OpenMP threads that decode an mzML run's arrays while it is read; `0` = all of `-threads` |
 | `ODIA_ASYNC_IO` | on | `0`: the run's and the library's content hashes and the removal of the run cache on the main thread, in order, instead of on threads of their own (waited for before the provenance is written) |

@@ -443,3 +443,5 @@ if(TARGET DIALibGen AND ODIA_PYTHON)
 endif()
 
 add_subdirectory(io)
+add_subdirectory(odia-core)
+add_subdirectory(search)

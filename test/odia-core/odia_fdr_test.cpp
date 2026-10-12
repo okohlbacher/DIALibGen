@@ -1,0 +1,242 @@
+// Copyright (c) 2026, Oliver Kohlbacher and the OpenDIAlyzer contributors.
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// odia_fdr_test.cpp -- self-check for the context / picked / entrapment FDR layer.
+// Ported from OpenDIAlyzer src/odia_fdr_test.cpp (see src/odia-core/MANIFEST.json).
+//
+// Each claim has a case that FAILS if the implementation is wrong:
+//   T1 rollUp takes the MAX member score and inherits the entity label.
+//   T2 entity q-values: a clean separation gives ~all targets at q <= 0.01 and no decoys.
+//   T3 rolling many null precursors up to an entity must not produce entity-level IDs.
+//   T4 picked competition collapses each pair to one entry, keeps the winner, ties -> DECOY;
+//      pairs are the entities that share a pair id, whatever their names say.
+//   T5 picked competition removes the protein-SIZE bias; a decoy carrying its target's key
+//      stays a separate entity and pairs with it.
+//   T6 the entrapment estimator reproduces (1+1/r)*n_ent/n and refuses degenerate inputs.
+//   T7 PEP is a local error rate: near 0 for clear hits, near 1 for the null, monotone.
+
+#include <odia-core/odia_fdr.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <random>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+static int failures = 0;
+static void check(bool ok, const char* what)
+{
+  if (!ok) { std::fprintf(stderr, "FAIL: %s\n", what); ++failures; }
+}
+
+int main()
+{
+  using odia::core::Entity;
+
+  // ---- T1: rollUp takes the max, keeps the label -------------------------------------
+  {
+    std::vector<std::string> key = {"P1", "P1", "P2", "", "P2"};
+    std::vector<double> sc = {1.0, 3.0, -2.0, 99.0, -5.0};
+    std::vector<int> lab = {1, 1, 0, 1, 0};
+    auto e = odia::core::rollUp(key, sc, lab);
+    check(e.size() == 2, "T1 rollUp collapses to one entity per key (unmapped rows dropped)");
+    check(e[0].id == "P1" && std::abs(e[0].score - 3.0) < 1e-12, "T1 max member score for P1");
+    check(e[1].id == "P2" && std::abs(e[1].score + 2.0) < 1e-12, "T1 max member score for P2");
+    check(e[0].label == 1 && e[1].label == 0, "T1 label inherited from members");
+  }
+
+  // ---- T2: clean separation -> targets pass, decoys do not ---------------------------
+  {
+    std::vector<Entity> e;
+    for (int i = 0; i < 500; ++i) { e.push_back({"T" + std::to_string(i), 1, 10.0 + i * 0.01}); }
+    for (int i = 0; i < 500; ++i) { e.push_back({"D" + std::to_string(i), 0, i * 0.01}); }
+    odia::core::assignQValues(e, false);
+    check(odia::core::countAtQ(e, 0.01) >= 495, "T2 separable targets are identified");
+    // A q-value belongs to the THRESHOLD: the best decoy sits just below the target block, where
+    // the cutoff really has a small FDR. Decoys are excluded from identifications by LABEL.
+    std::size_t bad = 0;
+    for (const auto& x : e) { if (x.label == 0 && x.qvalue <= 0.01) { ++bad; } }
+    check(bad <= 5, "T2 at most a boundary decoy or two sits at q<=0.01");
+    for (const auto& x : e)
+    {
+      if (x.label == 0) { check(x.score < 10.0, "T2 no decoy outscores the target block"); break; }
+    }
+  }
+
+  // ---- T3: rolling up INFLATES the error rate -----------------------------------------
+  {
+    std::mt19937 rng(7);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    const int n_entities = 2000, n_draws = 20;
+    std::vector<std::string> key;
+    std::vector<double> sc;
+    std::vector<int> lab;
+    for (int i = 0; i < n_entities; ++i)
+    {
+      for (int d = 0; d < n_draws; ++d)
+      { key.push_back("T" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(1); }
+      for (int d = 0; d < n_draws; ++d)
+      { key.push_back("D" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(0); }
+    }
+    auto e = odia::core::rollUp(key, sc, lab);
+    odia::core::assignQValues(e, false);
+    const std::size_t ids = odia::core::countAtQ(e, 0.01);
+    check(ids <= 20, "T3 pure null yields ~no entity-level identifications");
+
+    double best_entity = -1e30, mean_precursor = 0.0;
+    std::size_t np = 0;
+    for (const auto& x : e) { if (x.label == 1) { best_entity = std::max(best_entity, x.score); } }
+    for (std::size_t i = 0; i < sc.size(); ++i) { if (lab[i] == 1) { mean_precursor += sc[i]; ++np; } }
+    mean_precursor /= static_cast<double>(np);
+    check(best_entity > mean_precursor + 3.0,
+          "T3 entity score is a max-of-n extreme value, not a precursor score");
+  }
+
+  // ---- T4: picked competition, paired by pair id, never by name ----------------------
+  {
+    std::vector<Entity> e = {
+      {"A", 1, 5.0, 0}, {"DECOY_A", 0, 3.0, 0},     // target wins
+      {"B", 1, 1.0, 1}, {"B_rev", 0, 4.0, 1},       // decoy wins; its name follows no convention
+      {"C", 1, 2.0, 2}, {"C", 0, 2.0, 2},           // tie -> decoy
+      {"E", 1, 7.0, 3},                             // target whose decoy is absent
+      {"DECOY_F", 0, 6.0, 4},                       // decoy whose target is absent
+      {"G", 1, 8.0, -1}, {"DECOY_G", 0, 9.0, -1},   // names suggest a pair, ids say none
+    };
+    std::size_t paired = 0;
+    auto p = odia::core::pickedCompetition(e, &paired);
+    check(paired == 3, "T4 three pairs found");
+    check(p.size() == 7, "T4 pairs collapse to one entry each, singletons survive");
+    int n_target = 0, n_decoy = 0;
+    bool a_target = false, b_decoy = false, c_decoy = false, g_both = true;
+    for (const auto& x : p)
+    {
+      (x.label == 1 ? n_target : n_decoy)++;
+      if (x.id == "A" && x.label == 1) { a_target = true; }
+      if (x.id == "B_rev" && x.label == 0) { b_decoy = true; }
+      if (x.id == "C" && x.label == 0) { c_decoy = true; }
+    }
+    g_both = std::count_if(p.begin(), p.end(), [](const Entity& x) { return x.id == "G" || x.id == "DECOY_G"; }) == 2;
+    check(a_target, "T4 higher-scoring target wins its pair");
+    check(b_decoy, "T4 higher-scoring decoy wins its pair");
+    check(c_decoy, "T4 ties resolve to the decoy (conservative)");
+    check(g_both, "T4 a DECOY_ prefix does not make a pair");
+    check(n_target == 3 && n_decoy == 4, "T4 winner labels counted correctly");
+
+    bool threw = false;
+    try { odia::core::pickedCompetition({{"X", 1, 1.0, 9}, {"Y", 1, 2.0, 9}}); }
+    catch (const std::invalid_argument&) { threw = true; }
+    check(threw, "T4 two targets in one pair are refused");
+  }
+
+  // ---- T5: picked removes the protein-SIZE bias --------------------------------------
+  {
+    std::mt19937 rng(11);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<std::string> key;
+    std::vector<double> sc;
+    std::vector<int> lab;
+    const int n_prot = 1500;
+    for (int i = 0; i < n_prot; ++i)
+    {
+      const int size = 1 + (i % 50) * 4;           // 1..197 peptides
+      for (int k = 0; k < size; ++k)
+      { key.push_back("P" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(1); }
+      // The decoy protein carries its target's key; the label keeps them apart and the shared
+      // key pairs them.
+      for (int k = 0; k < size; ++k)
+      { key.push_back("P" + std::to_string(i)); sc.push_back(nd(rng)); lab.push_back(0); }
+    }
+    auto e = odia::core::rollUp(key, sc, lab);
+
+    auto by_score = e;
+    std::sort(by_score.begin(), by_score.end(),
+              [](const Entity& a, const Entity& b) { return a.score > b.score; });
+    double plain_mean_size = 0.0;
+    for (int i = 0; i < 100; ++i)
+    {
+      const std::string& id = by_score[static_cast<std::size_t>(i)].id;
+      const std::string num = id.substr(id.find('P') + 1);
+      plain_mean_size += 1 + (std::stoi(num) % 50) * 4;
+    }
+    plain_mean_size /= 100.0;
+    const double overall_mean_size = 1 + (49 / 2.0) * 4;   // ~99
+    check(plain_mean_size > overall_mean_size,
+          "T5 plain ranking is size-biased (large proteins crowd the top)");
+
+    std::size_t paired = 0;
+    auto p = odia::core::pickedCompetition(e, &paired);
+    check(e.size() == static_cast<std::size_t>(2 * n_prot), "T5 target and decoy of one key stay apart");
+    check(paired == static_cast<std::size_t>(n_prot), "T5 every protein paired");
+    check(p.size() == static_cast<std::size_t>(n_prot), "T5 picked halves the entity count");
+    std::size_t won_by_target = 0;
+    for (const auto& x : p) { if (x.label == 1) { ++won_by_target; } }
+    check(won_by_target > 600 && won_by_target < 900,
+          "T5 pair winners are ~50/50 under the null, independent of protein size");
+    odia::core::assignQValues(p, false);
+    check(odia::core::countAtQ(p, 0.01) <= 20, "T5 picked reports ~no IDs on null data");
+  }
+
+  // ---- T6: entrapment estimator ------------------------------------------------------
+  {
+    auto a = odia::core::entrapmentFdp(1000, 30, 5000, 5000);
+    check(a.valid && std::abs(a.fdp - 0.06) < 1e-12, "T6 combined estimator at r=1");
+    auto b = odia::core::entrapmentFdp(1000, 30, 5000, 10000);
+    check(b.valid && std::abs(b.fdp - 0.045) < 1e-12, "T6 combined estimator at r=2");
+    auto c = odia::core::entrapmentFdp(1000, 0, 5000, 5000);
+    check(c.valid && c.fdp == 0.0, "T6 zero entrapment hits -> zero FDP");
+    check(!odia::core::entrapmentFdp(1000, 30, 5000, 0).valid, "T6 no entrapment DB -> invalid");
+    check(!odia::core::entrapmentFdp(0, 0, 5000, 5000).valid, "T6 nothing reported -> invalid");
+    auto d = odia::core::entrapmentFdp(100, 90, 5000, 5000);
+    check(d.valid && d.fdp == 1.0, "T6 FDP clamped to 1");
+  }
+
+  // ---- T7: PEP is a LOCAL error rate, not a constant ---------------------------------
+  // 800 clear hits far above a null of 2000 targets and 2000 decoys. The hits must get a PEP
+  // near 0, the null a PEP near 1, PEP must not fall as the score falls, and ties share a value.
+  // ODIA's running max from the low-score end set every PEP to 1.
+  {
+    std::mt19937 rng(21);
+    std::normal_distribution<double> nd(0.0, 1.0);
+    std::vector<Entity> e;
+    for (int i = 0; i < 800; ++i) { e.push_back({"H" + std::to_string(i), 1, 8.0 + nd(rng)}); }
+    for (int i = 0; i < 2000; ++i) { e.push_back({"N" + std::to_string(i), 1, nd(rng)}); }
+    for (int i = 0; i < 2000; ++i) { e.push_back({"D" + std::to_string(i), 0, nd(rng)}); }
+    e.push_back({"TIE_T", 1, 0.5});
+    e.push_back({"TIE_D", 0, 0.5});
+    odia::core::assignQValues(e, false);
+    // The window is ~100 items wide, so the lowest-scoring hits share it with the top of the
+    // null and carry a larger PEP; the bulk of the hits must not.
+    std::size_t confident_hits = 0;
+    double null_pep = 1.0;
+    for (const auto& x : e)
+    {
+      if (x.id[0] == 'H' && x.pep < 0.05) { ++confident_hits; }
+      if (x.id[0] == 'N' && x.score < 0.0) { null_pep = std::min(null_pep, x.pep); }
+    }
+    check(confident_hits >= 720, "T7 clear hits have a PEP near 0");
+    check(null_pep > 0.9, "T7 null targets have a PEP near 1");
+    auto by_score = e;
+    std::sort(by_score.begin(), by_score.end(),
+              [](const Entity& a, const Entity& b) { return a.score > b.score; });
+    bool monotone = true;
+    for (std::size_t i = 1; i < by_score.size(); ++i)
+    {
+      if (by_score[i].score < by_score[i - 1].score && by_score[i].pep < by_score[i - 1].pep) { monotone = false; }
+    }
+    check(monotone, "T7 PEP does not fall as the score falls");
+    double tie_t = -1.0, tie_d = -2.0;
+    for (const auto& x : e) { if (x.id == "TIE_T") { tie_t = x.pep; } if (x.id == "TIE_D") { tie_d = x.pep; } }
+    check(tie_t == tie_d, "T7 equal scores share one PEP");
+    // Local FDR at a cut is not below the average FDR above it. Both saturate near 1 in the
+    // null, where they differ by smoothing noise, hence the tolerance.
+    std::size_t q_above_pep = 0;
+    for (const auto& x : e) { if (x.pep < x.qvalue - 0.02) { ++q_above_pep; } }
+    check(q_above_pep <= e.size() / 20, "T7 PEP (local) is rarely below q (average above the cut)");
+  }
+
+  if (failures) { std::fprintf(stderr, "odia_fdr_test FAILED (%d)\n", failures); return 1; }
+  std::fprintf(stderr, "odia_fdr_test OK\n");
+  return 0;
+}

@@ -27,6 +27,7 @@ Switches for measurements and tests; none changes the library's content:
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA) | precursors per MS2 call |
 | `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
 | `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |
+| `ODIA_OPENSWATH_THREADS` | `SearchParams::openswath_max_threads` | `-run`: the most OpenMP threads an OpenSWATH call (calibration, extraction) gets; never more than `-threads` |
 
 `ODIA_ORT_PROFILE` works without `ODIA_TRACE`. It keeps every operator call in
 memory until the predictor is destroyed, so use it on small inputs.
@@ -105,6 +106,19 @@ Regions recorded by `generate`:
 | 2 | `predict` inside each `block`; the host work of the neighbouring blocks runs on a helper thread meanwhile, with `idx` naming its block: `parse` (AASequence::fromString) of the next block, and for the previous block MS2 `post` (fragment selection), `emit` (appending the block in order) and `hand_over` (to the writer), CCS `post` (storing CCS and ion mobility). Block 0 is parsed before the first `block`, and the last block's MS2 `post` and `emit` run in `drain`. The gap between consecutive `predict` events is the time the sessions waited for the host. `ccs_settle` (CcsBatchGuard, on the writer's thread; `idx` = rows predicted again) |
 | 3 | `session_probe` (one CUDA device tried, `idx` = device; the session it builds is kept as that device's first, its `session_create` inside), `session_create` (`session` = index), `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch) |
 | 4 | `encode` (tokenisation and tensors), `ort_run` (ONNX Runtime `Run`), `unpack` (validation and copy-out) |
+
+Regions recorded by `refine` and `tune` with `-run` (the built-in identification):
+
+| level | names |
+|---|---|
+| 0 | `library_load`; the search: `run_load`, `prefilter`, `calibration`, `extraction`, `cache_remove` (the run's cache files; on an ion-mobility search after `report`), `scoring`, `report`, `report_write`; then `run_hash`, `apply` (refine: reading the report and writing observed values), `tune_check` (every library sequence encodable), `tune_rt` and `tune_ccs` (training), the re-predictions `rt` and `ccs` (as in `generate`), `provenance` (input hashes), `write` |
+| 1 | `run_load`: `cache_write` (reading the mzML into per-window cache files), `cache_size`, `im_check` (every spectrum's 1/K0 array); `prefilter`: `sessions` (the MS2 model), `pairs` (every eligible target's decoy, and with predicted intensities both members' predictions), `index`, `sweep`, `choose`, `build` (the searched set, its decoys), `predict_set` (the searched set's predicted assays), `seeds`, `sessions_release`; `calibration`: `openswath` (`rows` = seed assays, `session` = OpenMP threads); `extraction`: `ms1_hold`, `chunk` (`idx` = chunk, `rows` = precursors), `ms1_release`; `report`: `report_mobility` |
+| 2 | inside `pairs` and `predict_set`, per block of pairs: `decoys` (`idx` = block, `rows` = pairs), `parse` (sequences to AASequence), `infer` (the model call; the predictor's level-3 and 4 events nest in it), `rank` (fragment universes, ranking, the pair's count); inside each extraction `chunk`: `assays`, `openswath` (`rows` = precursors, `session` = OpenMP threads), `flatten` (feature rows, sorting, freeing the features) |
+
+OpenMP regions run on threads the tracer does not see as events: their CPU is
+the process CPU over the event's interval in `proc.tsv` (as `phase_table.tsv`
+computes it for phases), not the event's own `cpu_s`, which is the calling
+thread's alone.
 
 An event is filed under the level-0 phase that is open when it ends, on any
 thread. The streaming writer's `stream_write` and `ccs_settle` events therefore

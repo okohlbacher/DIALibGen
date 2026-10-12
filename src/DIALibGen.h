@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace ODIA::search { struct SearchParams; }
+
 class DIALibGen final : public OpenMS::TOPPBase
 {
 public:
@@ -21,6 +23,8 @@ protected:
   ExitCodes main_(int argc, const char** argv) override;
   ExitCodes generate_();
   ExitCodes refine_(bool tune_only);
+  /// The search: options, validated (throws std::invalid_argument).
+  ODIA::search::SearchParams searchParams_();
   ExitCodes convert_();
   /// GPU settings for prediction from -machine:*; warnings collects CPU fallbacks.
   ODIA::GpuOptions gpuOptions_(std::vector<std::string>* warnings);

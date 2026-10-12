@@ -3,11 +3,15 @@
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
+#include <odia/Hardware.h>
 #include <odia/LibraryExport.h>
 #include <memory>
 #include <odia/Library.h>
 #include <odia/LibraryGenerator.h>
 #include <odia/LibraryRefiner.h>
+#include <odia/Trace.h>
+#include <odia/search/Identifier.h>
+#include <odia/search/SearchParams.h>
 
 #ifdef DIALIBGEN_WITH_FINETUNE
 #include <odia/tune/Trainer.h>
@@ -25,6 +29,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <fstream>
 #include <iomanip>
 #include <map>
@@ -155,6 +162,14 @@ void DIALibGen::registerRefinementOptions_()
     registerInputFile_("ids", "<file>", "",
                        "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
     setValidFormats_("ids", {"parquet"}, false);
+    registerInputFile_("run", "<file>", "",
+                       "EXPERIMENTAL, in development: a centroided DIA run (mzML) that the built-in identification step "
+                       "searches instead of reading -ids. Give exactly one of -ids and -run. Settings: search:.", false);
+    setValidFormats_("run", {"mzML"}, false);
+    registerOutputFile_("out_ids", "<file>", "",
+                        "With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. "
+                        "Default: <out>.ids.parquet. Never overwritten.", false);
+    setValidFormats_("out_ids", {"parquet"}, false);
     registerOutputFile_("out_report", "<file>", "",
                         "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
     setValidFormats_("out_report", {"tsv"}, false);
@@ -217,7 +232,9 @@ void DIALibGen::registerRefinementOptions_()
                           "BEFORE refining, so precursors the reference never identified are corrected too. "
                           "Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a "
                           "training run plus whole-library inference.");
-    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs}_dynamic.onnx. "
+    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs,ms2}_dynamic.onnx: "
+                                                      "-tune starts from the RT and CCS models, and -run predicts both members "
+                                                      "of every searched target-decoy pair with the MS2 model. "
                                                       "Default: $DIALIBGEN_MODEL_DIR or the bundled models.", false);
     registerStringOption_("tune_heads", "<which>", "both", "Which models to tune.", false);
     setValidStrings_("tune_heads", {"rt", "ccs", "both"});
@@ -285,6 +302,96 @@ void DIALibGen::registerRefinementOptions_()
     registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
                                          "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
                                          "fallback is a WARNING in the log and in the output's provenance.");
+
+    registerTOPPSubsection_("search", "Built-in identification with -run (EXPERIMENTAL): candidates, decoys, extraction, "
+                                      "calibration and the run-level guards. See docs/design/built-in-identification.md");
+    registerStringOption_("search:candidates", "<rule>", "evidence", "Candidate selection: evidence = target-decoy pairs of which "
+                          "the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for "
+                          "both); random = a deterministic, label-blind random subset of pairs (search:subset)", false);
+    setValidStrings_("search:candidates", {"evidence", "random"});
+    registerIntOption_("search:subset", "<n>", 0, "search:candidates random: targets drawn from the library before the cap "
+                       "(0 = every eligible target)", false);
+    registerIntOption_("search:max_pairs", "<n>", 200000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no "
+                       "cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge "
+                       "and keeps the pairs with the most evidence", false);
+    registerIntOption_("search:prefilter_depth", "<n>", 5, "search:candidates evidence: keep a pair when its target or its decoy "
+                       "has this many of its 6 most intense predicted fragments among one MS2 spectrum's top peaks", false);
+    setMinInt_("search:prefilter_depth", 1); setMaxInt_("search:prefilter_depth", 6);
+    registerIntOption_("search:prefilter_top_peaks", "<n>", 1000, "search:candidates evidence: the most intense peaks of each MS2 "
+                       "spectrum the prefilter matches", false);
+    setMinInt_("search:prefilter_top_peaks", 1);
+    registerDoubleOption_("search:prefilter_ppm", "<ppm>", 10.0, "search:candidates evidence: fragment match tolerance, ppm either "
+                          "side", false);
+    setMinFloat_("search:prefilter_ppm", 0.1); setMaxFloat_("search:prefilter_ppm", 100.0);
+    registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
+                          "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
+    setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
+    registerStringOption_("search:intensities", "<source>", "predicted", "Fragments and intensities of both members of each "
+                          "target-decoy pair: predicted = both predicted by the PeptDeep MS2 model (tune_models, "
+                          "$DIALIBGEN_MODEL_DIR or the bundled models) from their own sequences, each taking its own most "
+                          "intense fragments; library = the library's target assay, the decoy in its target's fragment slots "
+                          "with its target's intensities (makes decoys weaker than null targets; for comparison only)", false);
+    setValidStrings_("search:intensities", {"predicted", "library"});
+    registerStringOption_("search:instrument", "<name>", "auto", "search:intensities predicted: the MS2 model's instrument "
+                          "(QE, Lumos, timsTOF, SciexTOF, ThermoTOF or an alias); auto = the instrument DIALibGen generate "
+                          "recorded in the library, else timsTOF for an ion-mobility run and QE otherwise", false);
+    registerDoubleOption_("search:nce", "<nce>", -1.0, "search:intensities predicted: the MS2 model's collision energy; -1 = "
+                          "the one recorded in the library with its instrument, else the instrument's default", false);
+    setMinFloat_("search:nce", -1.0); setMaxFloat_("search:nce", 100.0);
+    registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how", false);
+    registerIntOption_("search:passes", "<n>", 1, "Extraction passes (1 in this version)", false);
+    setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);
+    registerDoubleOption_("search:rt_window", "<s>", 0.0, "Full RT extraction window, seconds (0 = from the calibration)", false);
+    setMinFloat_("search:rt_window", 0.0);
+    registerDoubleOption_("search:mz_ppm", "<ppm>", 0.0, "Full fragment m/z extraction window, ppm (0 = automatic)", false);
+    setMinFloat_("search:mz_ppm", 0.0);
+    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility (diaPASEF) runs: "
+                          "0 = automatic, from the run's 1/K0 calibration; > 0 = this width; -1 = off (searched by m/z and RT "
+                          "only, no observed 1/K0: -write_im and the CCS head are refused)", false);
+    setMinFloat_("search:im_window", -1.0);
+    registerStringOption_("search:ms1", "<true/false>", "true", "Extract MS1 traces and use the MS1 sub-scores", false);
+    setValidStrings_("search:ms1", {"true", "false"});
+    registerStringOption_("search:rt_im_scores", "<true/false>", "true", "Let the RT and 1/K0 deviation sub-scores into the "
+                          "classifier; false is an ablation for tuning, which exists to correct those deviations", false);
+    setValidStrings_("search:rt_im_scores", {"true", "false"});
+    registerDoubleOption_("search:calibration_min_rsq", "<r2>", 0.70, "Least r^2 of the RT calibration on the seed assays", false);
+    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays found in the run that "
+                          "the RT outlier removal must keep", false);
+    for (const char* name : {"search:calibration_min_rsq", "search:calibration_min_coverage"})
+    { setMinFloat_(name, 0.0); setMaxFloat_(name, 1.0); }
+    registerFlag_("search:allow_bootstrap", "When the RT calibration fails, map the library RT range linearly onto the run "
+                                            "instead of aborting. A test hook, recorded in the provenance");
+    registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = per-window "
+                          "cache files, auto = cache for runs above 3 GB", false);
+    setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
+    registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the directory of -out_ids); "
+                          "they are removed after the search", false);
+    registerStringOption_("search:ms1_in_memory", "<mode>", "auto", "Hold the MS1 map in memory during extraction instead of "
+                          "reading it again for every batch: auto = when the free memory is at least twice its estimated size "
+                          "(the log says which, and why), on, off. Changes the speed and the memory, never the report", false);
+    setValidStrings_("search:ms1_in_memory", {"auto", "on", "off"});
+    registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
+    registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "
+                          "precursors passes q <= 0.01: no honest decoy set looks like that", false);
+    setMinFloat_("search:max_target_fraction", 0.01); setMaxFloat_("search:max_target_fraction", 1.0);
+    registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors, targets and decoys, up to this precursor q-value "
+                          "go into -out_ids", false);
+    setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
+    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Prefix of entrapment protein ids, at the start of an id or "
+                          "right after a '|' (sp|ENTRAP_P12345|...): log and record the combined entrapment FDP estimate and "
+                          "the entrapment winner test. A validation aid", false);
+    registerStringOption_("search:selftest", "<true/false>", "true", "Also score with swapped and with random pair labels, "
+                          "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
+                          "decoys that are built weaker than null targets", false);
+    setValidStrings_("search:selftest", {"true", "false"});
+    registerIntOption_("search:batch_size", "<n>", 500, "Advanced: precursors per extraction batch within one isolation window", false);
+    registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together. "
+                       "Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over "
+                       "isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's", false);
+    for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
+    setMinInt_("search:batch_size", 1);
+    setMinInt_("search:chunk", 2);
+
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
@@ -299,7 +406,50 @@ void DIALibGen::registerRefinementOptions_()
       const auto flag = flags.find(key);
       refinement_options_.insert(flag == flags.end() ? key : flag->second);
     }
-    refinement_options_.insert({"ids", "out_report"});
+    refinement_options_.insert({"ids", "out_report", "run", "out_ids"});
+  }
+
+ODIA::search::SearchParams DIALibGen::searchParams_()
+  {
+    auto count = [this](const char* name) { return static_cast<std::size_t>(std::max(0, getIntOption_(name))); };
+    ODIA::search::SearchParams s;
+    s.candidates = getStringOption_("search:candidates");
+    s.subset = count("search:subset");
+    s.max_pairs = count("search:max_pairs");
+    s.prefilter_depth = getIntOption_("search:prefilter_depth");
+    s.prefilter_top_peaks = count("search:prefilter_top_peaks");
+    s.prefilter_ppm = getDoubleOption_("search:prefilter_ppm");
+    s.decoys = ODIA::search::parseSearchDecoyMethod(getStringOption_("search:decoys"));
+    s.intensities = ODIA::search::parseIntensities(getStringOption_("search:intensities"));
+    if (getStringOption_("search:instrument") != "auto")
+    {
+      s.instrument = getStringOption_("search:instrument");
+      s.instrument_source = "search:instrument";
+    }
+    s.nce = getDoubleOption_("search:nce");
+    s.seed = static_cast<std::uint64_t>(count("search:seed"));
+    s.passes = getIntOption_("search:passes");
+    s.rt_window = getDoubleOption_("search:rt_window");
+    s.mz_ppm = getDoubleOption_("search:mz_ppm");
+    s.im_window = getDoubleOption_("search:im_window");
+    s.ms1 = getStringOption_("search:ms1") == "true";
+    s.rt_im_scores = getStringOption_("search:rt_im_scores") == "true";
+    s.batch_size = count("search:batch_size");
+    s.chunk = count("search:chunk");
+    s.calibration_min_rsq = getDoubleOption_("search:calibration_min_rsq");
+    s.calibration_min_coverage = getDoubleOption_("search:calibration_min_coverage");
+    s.allow_bootstrap = getFlag_("search:allow_bootstrap");
+    s.readoptions = ODIA::search::parseReadMode(getStringOption_("search:readoptions"));
+    s.cache_dir = getStringOption_("search:cache_dir");
+    s.ms1_in_memory = ODIA::search::parseMs1InMemory(getStringOption_("search:ms1_in_memory"));
+    s.min_ids = count("search:min_ids");
+    s.max_target_fraction = getDoubleOption_("search:max_target_fraction");
+    s.report_max_q = getDoubleOption_("search:report_max_q");
+    s.entrapment_tag = getStringOption_("search:entrapment_tag");
+    s.selftest = getStringOption_("search:selftest") == "true";
+    s.threads = ODIA::search::SearchParams::resolveThreads(getIntOption_("threads"));
+    s.validate();
+    return s;
   }
 
 
@@ -391,12 +541,35 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       return EXECUTION_OK;
     }
 
-    const std::string in = getStringOption_("in"), ids = getStringOption_("ids");
+    // A directory given as an input file -- a Bruker .d above all -- crashes
+    // TOPP's file-type probe in getStringOption_ (an uncaught
+    // std::ios_base::failure). Refuse it before any getter can run that probe.
+    for (const std::string name : {"run", "ids"})
+    {
+      const std::string raw = getParam_().getValue(name).toString();
+      std::error_code ec;
+      if (raw.empty() || !std::filesystem::is_directory(raw, ec)) { continue; }
+      std::string stem = raw;
+      while (stem.size() > 1 && (stem.back() == '/' || stem.back() == '\\')) { stem.pop_back(); }
+      const bool bruker = stem.size() > 2 && (stem.ends_with(".d") || stem.ends_with(".D"));
+      if (name == "run" && bruker)
+      {
+        writeLogError_("-run " + raw + " is a Bruker .d directory, which this version cannot read; convert it to a "
+                       "frame-merged mzML with a per-peak 1/K0 array (mzpeak-convert --to mzml) and pass that");
+      }
+      else { writeLogError_("-" + name + " " + raw + " is a directory; it takes a file" + (name == "run" ? " (mzML)" : " (report.parquet)")); }
+      return ILLEGAL_PARAMETERS;
+    }
+    const std::string in = getStringOption_("in");
+    std::string ids = getStringOption_("ids");
+    const std::string run = getStringOption_("run");
     // TOPP's writable-file probe follows and then removes dangling symlinks.
     // Inspect destinations before any output-file getter can run that probe.
     const std::string out = getParam_().getValue("out").toString();
-    if (in.empty() || ids.empty() || out.empty())
-    { writeLogError_("-in, -ids and -out are required"); return ILLEGAL_PARAMETERS; }
+    if (in.empty() || out.empty() || (ids.empty() && run.empty()))
+    { writeLogError_("-in, -ids and -out are required (-run can take the place of -ids)"); return ILLEGAL_PARAMETERS; }
+    if (!ids.empty() && !run.empty())
+    { writeLogError_("give exactly one of -ids and -run: -run writes its own identification report and uses it as -ids"); return ILLEGAL_PARAMETERS; }
 #ifndef DIALIBGEN_WITH_FINETUNE
     if (tune)
     { writeLogError_("this build has no fine-tuning stage; configure DIALIBGEN_BUILD_FINETUNE with libtorch"); return ILLEGAL_PARAMETERS; }
@@ -404,9 +577,129 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     ODIA::LibraryFormat format;
     try { format = ODIA::LibraryExport::resolve(out, getStringOption_("out_format")); }
     catch (const std::invalid_argument& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+
+    // The built-in identification step (-run): refusals, settings, report path.
+    std::string out_ids;
+    std::unique_ptr<ODIA::search::SearchParams> search;
+    if (!run.empty())
+    {
+      if (p.write_intensity)
+      { writeLogError_("-write_intensity is not available with -run yet: the built-in search does not measure fragment intensities"); return ILLEGAL_PARAMETERS; }
+      if (!p.require_gates)
+      { writeLogError_("-empirical_library does not apply to -run: the built-in report carries every gate column"); return ILLEGAL_PARAMETERS; }
+      if (p.min_fragments > 0)
+      { writeLogError_("-min_fragments is not available with -run yet: the built-in report carries no fragment identities"); return ILLEGAL_PARAMETERS; }
+      // Observed 1/K0 comes only from an ion-mobility (diaPASEF) run searched
+      // with its ion mobility: whether the run has it is known once it is
+      // loaded, which the search checks before searching anything
+      // (SearchParams::require_ion_mobility); search:im_window -1 is refused here.
+      std::vector<std::string> needs_im;
+      if (p.write_im) { needs_im.push_back("-write_im"); }
+      if (tune && getStringOption_("tune_heads") != "rt") { needs_im.push_back("-tune_heads " + getStringOption_("tune_heads")); }
+      std::string needs_im_text;
+      for (const auto& n : needs_im) { needs_im_text += (needs_im_text.empty() ? "" : " and ") + n; }
+      if (!needs_im.empty() && getDoubleOption_("search:im_window") == -1.0)
+      {
+        writeLogError_(needs_im_text + " needs observed 1/K0 values, and search:im_window -1 searches without ion mobility, so "
+                       "the built-in search measures none" + std::string(tune ? "; use -tune_heads rt" : ""));
+        return ILLEGAL_PARAMETERS;
+      }
+      // Everything that would fail AFTER the search (minutes on a full run)
+      // is checked before it.
+      if (tune)
+      {
+        const std::string heads = getStringOption_("tune_heads");
+        (void)heads;   // read by the model checks of a build with fine-tuning
+        const int epochs = getIntOption_("train:epochs"), warmup = getIntOption_("train:warmup");
+        if (epochs < 1 || warmup < 0 || warmup > epochs)
+        { writeLogError_("train:warmup must be in [0, train:epochs]"); return ILLEGAL_PARAMETERS; }
+        if (getIntOption_("cohort:train_size") > 0 && getDoubleOption_("cohort:train_frac") > 0)
+        { writeLogError_("give cohort:train_size or cohort:train_frac, not both"); return ILLEGAL_PARAMETERS; }
+#ifdef DIALIBGEN_WITH_FINETUNE
+        std::string models = getStringOption_("tune_models");
+        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
+        if (models.empty()) { models = bundledModelDir(); }
+        if (models.empty())
+        { writeLogError_("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); return ILLEGAL_PARAMETERS; }
+        for (const char* head : {"rt", "ccs"})
+        {
+          if (heads == (std::string(head) == "rt" ? "ccs" : "rt")) { continue; }
+          const std::string file = std::string("peptdeep_") + head + "_dynamic.onnx";
+          if (!std::filesystem::exists(std::filesystem::path(models) / file))
+          { writeLogError_("no " + file + " in " + models); return ILLEGAL_PARAMETERS; }
+        }
+#endif
+      }
+      try { search = std::make_unique<ODIA::search::SearchParams>(searchParams_()); }
+      catch (const std::exception& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
+      if (getIntOption_("threads") <= 0)
+      {
+        // -threads 0 is the effective CPU budget, as generate counts it: the
+        // search's prediction sessions, its OpenMP loops (TOPPBase passes 0 to
+        // omp_set_num_threads, which leaves OpenMP at every logical CPU) and
+        // the classifier. OpenSWATH's own team stays capped at
+        // SearchParams::openswath_max_threads.
+        writeLogInfo_("-threads 0: " + std::to_string(search->threads) + " threads (" + ODIA::physicalCoresReason() + ")");
+#ifdef _OPENMP
+        omp_set_num_threads(search->threads);
+#endif
+      }
+      search->require_ion_mobility = needs_im_text;
+      out_ids = getParam_().getValue("out_ids").toString();
+      if (out_ids.empty()) { out_ids = out + ".ids.parquet"; }
+      if (!out_ids.ends_with(".parquet"))
+      { writeLogError_("-out_ids must end in .parquet"); return ILLEGAL_PARAMETERS; }
+      if (search->intensities == ODIA::search::Intensities::Predicted)
+      {
+        // The MS2 model both members of every pair are predicted with: where
+        // -tune finds its stock models.
+        std::string models = getStringOption_("tune_models");
+        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
+        if (models.empty()) { models = bundledModelDir(); }
+        const std::filesystem::path ms2 = models.empty() ? std::filesystem::path() : std::filesystem::path(models) / "peptdeep_ms2_dynamic.onnx";
+        if (models.empty() || !std::filesystem::exists(ms2))
+        {
+          writeLogError_("-run predicts the fragments of every target and decoy it searches (search:intensities predicted) "
+                         "and needs peptdeep_ms2_dynamic.onnx: " +
+                         (models.empty() ? std::string("give -tune_models or $DIALIBGEN_MODEL_DIR") : "none in " + models));
+          return ILLEGAL_PARAMETERS;
+        }
+        search->ms2_model = ms2.string();
+        search->ms2_model_hash = ODIA::DIANNLibraryFile::hashFile(search->ms2_model);
+        if (!search->instrument.empty() && ODIA::PeptDeepEncoder::canonicalInstrument(search->instrument).empty())
+        {
+          writeLogError_("search:instrument: unknown instrument '" + search->instrument +
+                         "' (QE, Lumos, timsTOF, SciexTOF, ThermoTOF, or auto)");
+          return ILLEGAL_PARAMETERS;
+        }
+        // The instrument and NCE the library was generated with, when
+        // DIALibGen generate recorded them: the targets are then predicted
+        // exactly as the library predicted them.
+        if (search->instrument.empty())
+        {
+          try
+          {
+            const std::string config = ODIA::DIANNLibraryFile::readFingerprint(in, "odia.config_json");
+            if (!config.empty())
+            {
+              const json j = json::parse(config);
+              if (j.contains("instrument") && j["instrument"].is_string() && !j["instrument"].get<std::string>().empty())
+              {
+                search->instrument = j["instrument"].get<std::string>();
+                search->instrument_source = "library";
+                if (search->nce <= 0 && j.contains("nce") && j["nce"].is_number() && j["nce"].get<double>() > 0)
+                { search->nce = j["nce"].get<double>(); }
+              }
+            }
+          }
+          catch (const std::exception&) {}   // not a DIALibGen library: the run decides
+        }
+      }
+    }
+
     const std::string report = getParam_().getValue("out_report").toString();
     std::set<std::filesystem::path> destinations;
-    for (const auto& file : {out, out + ".refine.json", report})
+    for (const auto& file : {out, out + ".refine.json", report, out_ids})
     {
       if (file.empty()) { continue; }
       if (std::filesystem::exists(file) || std::filesystem::is_symlink(file))
@@ -416,17 +709,75 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     }
     (void)getStringOption_("out");
     (void)getStringOption_("out_report");
+    if (!run.empty()) { (void)getStringOption_("out_ids"); }
 
     ODIA::Library library;
     ODIA::RefineStats st;
     json tune_prov = json::object();
+    json search_prov;
+    std::string run_hash;
+    // Once the search has written its report, a later failure must say that the
+    // report is still there: -out_ids is never overwritten, so the same command
+    // would now be refused.
+    bool report_written = false;
+    auto keptReport = [&]() {
+      if (report_written)
+      {
+        writeLogError_("the identification report " + out_ids + " was kept; rerun with -ids " + out_ids +
+                       " instead of -run to reuse it, or remove it");
+      }
+    };
     try
     {
+      ODIA::trace::Scope load_phase("library_load", 0);
       ODIA::DIANNLibraryFile::load(in, library, static_cast<unsigned>(std::max(0, getIntOption_("threads"))));
+      load_phase.end();
       writeLogInfo_("library: " + std::to_string(library.precursorCount()) + " precursors, " +
                     std::to_string(library.transitionCount()) + " transitions");
+      if (search)
+      {
+        // Protein groups: tuning builds its held-out cohorts from them, and the
+        // report's PG.Q.Value (the -q_protein gate) is 1 without them. Checked
+        // before the search, not after it.
+        std::size_t targets = 0, grouped = 0;
+        for (std::size_t i = 0; i < library.precursorCount(); ++i)
+        {
+          if (library.precursors().decoy[i]) { continue; }
+          ++targets;
+          grouped += library.strings().get(library.precursors().protein_group[i]).empty() ? 0 : 1;
+        }
+        if (grouped == 0 && (tune || p.q_protein < 1.0))
+        {
+          throw std::runtime_error("none of the library's " + std::to_string(targets) + " target precursors has a Protein.Group; " +
+                                   (tune ? std::string("tuning needs protein groups for its held-out cohorts")
+                                         : std::string("every PG.Q.Value would be 1 and -q_protein would reject everything "
+                                                       "(pass -q_protein 1 to refine without the protein gate)")));
+        }
+        writeLogWarn_("-run is EXPERIMENTAL: the built-in identification has not passed its entrapment validation yet");
+        if (p.filter)
+        { writeLogWarn_("-mode refine with -run keeps only precursors identified among the at most search:max_pairs pairs "
+                        "searched; the built-in workflow is -mode refine -tune -no_filter"); }
+        ODIA::search::Identifier identifier(*search, [this](const std::string& m) { writeLogInfo_(m); },
+                                            [this](const std::string& m) { writeLogWarn_(m); });
+        const ODIA::search::IdentificationResult found = identifier.identify(library, run, out_ids, DIALIBGEN_VERSION);
+        report_written = true;
+        search_prov = json::parse(found.provenance_json);
+        {
+          ODIA::trace::Scope hash_phase("run_hash", 0);
+          run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+        }
+        // The hand-off: the report just written IS the reference from here on,
+        // read, gated and hashed by exactly the code that reads -ids.
+        ids = out_ids;
+        writeLogInfo_("identification report " + out_ids + " serves as -ids: " + std::to_string(found.identified) +
+                      " target precursors at q <= 0.01");
+      }
       ODIA::LibraryRefiner::ObsMap obs;
-      if (!tune_only) { obs = ODIA::LibraryRefiner::readObservations(ids, p, st); }
+      if (!tune_only)
+      {
+        ODIA::trace::Scope read_phase("apply", 0);
+        obs = ODIA::LibraryRefiner::readObservations(ids, p, st);
+      }
 
 #ifdef DIALIBGEN_WITH_FINETUNE
       if (tune)
@@ -444,6 +795,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         // A foreign library can carry mass-only modifications that the model
         // cannot encode. Reject these before training either head.
+        ODIA::trace::Scope check_phase("tune_check", 0);
         std::unordered_set<std::uint32_t> checked;
         for (const auto sequence_id : library.precursors().modified_sequence)
         {
@@ -454,6 +806,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           { throw std::runtime_error("tuning cannot encode library precursor '" + sequence + "': " + error.what()); }
         }
 
+        check_phase.end();
         const std::string keep = getStringOption_("tune_out_models");
         struct WorkDirectory
         {
@@ -565,7 +918,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
         if (want_rt)
         {
+          ODIA::trace::Scope train_phase("tune_rt", 0);
           const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::RT, "peptdeep_rt_dynamic.onnx");
+          train_phase.end();
           writeLogInfo_("tuned RT: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
                         " of " + std::to_string(r.epochs_run));
           // predictRetentionTimes returns what it could NOT predict, not what it
@@ -591,7 +946,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         }
         if (want_ccs)
         {
+          ODIA::trace::Scope train_phase("tune_ccs", 0);
           const ODIA::tune::TuneResult r = run_head(ODIA::tune::HeadKind::CCS, "peptdeep_ccs_dynamic.onnx");
+          train_phase.end();
           writeLogInfo_("tuned CCS: " + r.stop_reason + ", best epoch " + std::to_string(r.best_epoch) +
                         " of " + std::to_string(r.epochs_run));
           // derive_mobility rewrites the WHOLE 1/K0 column, so it runs only when
@@ -639,12 +996,15 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogInfo_(std::to_string(st.ids_ramp_censored) + " observed 1/K0 values within " + std::to_string(p.im_ramp_margin) +
                       " of the declared ramp top " + std::to_string(p.im_ramp_top) + " treated as censored"); }
 
-      ODIA::LibraryRefiner::refine(library, obs, p, st);
+      {
+        ODIA::trace::Scope apply_phase("apply", 0);
+        ODIA::LibraryRefiner::refine(library, obs, p, st);
+      }
       if (st.lib_unknown_mod_tokens)
       { writeLogWarn_(std::to_string(st.lib_unknown_mod_tokens) + " library modification tokens could not be resolved to UniMod; passed through verbatim and may fail the reference join"); }
       }
     }
-    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); return UNEXPECTED_RESULT; }
+    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); keptReport(); return UNEXPECTED_RESULT; }
 
     if (!tune_only)
     {
@@ -702,6 +1062,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
 
     // Provenance: the recipe, the inputs by content hash, the run, the units and every
     // count above -- embedded in the Parquet and always written as a sidecar (M13).
+    ODIA::trace::Scope provenance_phase("provenance", 0);
     json prov = {
       {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
       {"config", eff},
@@ -748,6 +1109,12 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                                                    (p.filter ? "" : "; UNMATCHED precursors keep MS2-model predictions") : std::string("unchanged (library prediction)")}}},
       {"warning", tune_only ? "Predictions adapted to one reference run; evaluate transfer on a different run." :
                              "Observed values describe the reference run and its gradient; evaluate transfer on a different run."}};
+    if (search)
+    {
+      prov["inputs"]["run"] = std::filesystem::absolute(run).string();
+      prov["inputs"]["run_fnv1a64"] = run_hash;
+      prov["search"] = search_prov;
+    }
     if (tune_only)
     {
       prov["reference"] = nullptr;
@@ -756,22 +1123,29 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       for (const char* key : {"matched_targets", "decoys_kept", "match_fraction"}) { prov["library"].erase(key); }
     }
 
+    provenance_phase.end();
     try
     {
+      ODIA::trace::Scope write_phase("write", 0);
       // The writers' output does not depend on the thread count.
       const unsigned write_threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
       ODIA::AtomicFile output(out), sidecar(out + ".refine.json");
+      // The library embeds what is a function of the inputs and settings;
+      // the search's timings and thread count stay in the sidecar, so the
+      // same -run command writes the same library bytes.
+      json embedded = prov;
+      if (embedded.contains("search") && embedded["search"].is_object()) { embedded["search"].erase("resources"); }
       if (format == ODIA::LibraryFormat::DIALibGenParquet)
       {
         ODIA::DIANNLibraryFile::storeParquetCompact(output.temporaryPath().string(), library, ODIA::DIANNLibraryFile::Fingerprint{},
-                                                    prov.dump(), {}, write_threads);
+                                                    embedded.dump(), {}, write_threads);
       }
       else if (format == ODIA::LibraryFormat::DIANNTSV)
       { ODIA::DIANNLibraryFile::storeTSV(output.temporaryPath().string(), library, write_threads); }
       else
       {
         std::vector<std::pair<std::string, std::string>> metadata;
-        if (ODIA::LibraryExport::carriesRecipe(format)) { metadata.emplace_back("odia.config_json", prov.dump()); }
+        if (ODIA::LibraryExport::carriesRecipe(format)) { metadata.emplace_back("odia.config_json", embedded.dump()); }
         ODIA::LibraryExport::store(output.temporaryPath().string(), library, format, metadata, write_threads);
       }
       std::ofstream side(sidecar.temporaryPath());
@@ -801,7 +1175,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       writeLogInfo_("wrote " + out + " and " + out + ".refine.json");
       if (staged_report) { writeLogInfo_("wrote report to " + report); }
     }
-    catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); return CANNOT_WRITE_OUTPUT_FILE; }
+    catch (const std::exception& e) { writeLogError_(std::string("write: ") + e.what()); keptReport(); return CANNOT_WRITE_OUTPUT_FILE; }
 
     return EXECUTION_OK;
   }

@@ -151,6 +151,14 @@ if(OpenMP_CXX_FOUND)
 endif()
 set_target_properties(odia_library PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# The classifier and FDR core vendored from OpenDIAlyzer: dependency-free C++17
+# headers, origin and changes in src/odia-core/MANIFEST.json. Nothing installs
+# them; an exported target links it as $<BUILD_INTERFACE:odia_core>.
+add_library(odia_core INTERFACE)
+target_include_directories(odia_core INTERFACE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>)
+target_compile_features(odia_core INTERFACE cxx_std_17)
+
 add_library(odia_refine STATIC src/refine/LibraryRefiner.cpp)
 target_link_libraries(odia_refine PUBLIC odia_library)
 
@@ -168,6 +176,26 @@ foreach(target odia_library odia_refine)
 endforeach()
 add_library(DIALibGen::odia_refine ALIAS odia_refine)
 set_target_properties(odia_refine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# The built-in identification step behind -run (docs/design/built-in-identification.md):
+# OpenSWATH extraction from the OpenMS odia_library already links, the vendored
+# odia-core classifier, and the report hand-off to the refine/tune readers.
+# Linked into the tool only; neither the library nor its headers are installed.
+add_library(odia_search STATIC
+  src/search/SearchParams.cpp
+  src/search/CandidateSelector.cpp
+  src/search/SearchDecoys.cpp
+  src/search/PredictedAssays.cpp
+  src/search/EvidencePrefilter.cpp
+  src/search/AssayBuilder.cpp
+  src/search/Scoring.cpp
+  src/search/ReportWriter.cpp
+  src/search/Identifier.cpp
+  src/search/IonMobility.cpp
+  src/search/MemoryCheck.cpp
+  src/search/RunStages.cpp)
+target_link_libraries(odia_search PUBLIC odia_refine odia_core PRIVATE nlohmann_json::nlohmann_json)
+set_target_properties(odia_search PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(DIALIBGEN_TARGETS odia_library odia_refine)
 if(DIALIBGEN_BUILD_FINETUNE)
   find_package(Torch REQUIRED CONFIG)
@@ -189,7 +217,7 @@ set(DIALIBGEN_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data")
 if(DIALIBGEN_BUILD_TOOL)
   add_executable(DIALibGen src/DIALibGen.cpp src/Generate.cpp src/Refine.cpp)
   target_link_libraries(DIALibGen PRIVATE
-    odia_refine nlohmann_json::nlohmann_json)
+    odia_search odia_refine nlohmann_json::nlohmann_json)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Retain ELF identity when AppImage packaging rewrites RPATHs.
     target_link_options(DIALibGen PRIVATE "-Wl,--build-id=sha1")
@@ -243,7 +271,8 @@ if(DIALIBGEN_INSTALL)
             DESTINATION ${CMAKE_INSTALL_BINDIR}
             RENAME dialibgen-fetch-models)
   endif()
-  install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  # include/odia/search belongs to the tool-only odia_search target.
+  install(DIRECTORY include/odia DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} PATTERN "search" EXCLUDE)
   install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/DIALibGen)
 
   install(DIRECTORY cmake/eigen3-range-shim DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/DIALibGen)

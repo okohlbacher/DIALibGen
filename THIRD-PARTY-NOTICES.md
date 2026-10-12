@@ -19,6 +19,14 @@ a derivative of that work; this notice is provided under Apache-2.0 §4(b) and
 - Zeng *et al.*, "AlphaPeptDeep: a modular deep learning framework to predict
   peptide properties for proteomics", *Nat. Commun.* **13**, 7238 (2022).
 
+### `src/odia-core/`, `test/odia-core/`
+
+The semi-supervised LDA classifier and the target-decoy FDR code are adapted
+from **OpenDIAlyzer** (BSD-3-Clause, Copyright (c) 2026, Oliver Kohlbacher and
+the OpenDIAlyzer contributors), https://github.com/okohlbacher/OpenDIAlyzer.
+`src/odia-core/MANIFEST.json` records the origin commit, the hashes of the
+original files and every change; `scripts/sync-odia-core.py --check` verifies it.
+
 ### `data/peptdeep_meta_inputs.txt`, `data/peptdeep_mod_elements.txt`
 
 Constants pinned from the same upstream, for the same reason and under the same

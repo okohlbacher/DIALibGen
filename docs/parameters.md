@@ -14,6 +14,8 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-write_config` | output-file | (empty) |  | Write the effective mode configuration and exit. |
 | `-irt_standards` | input-file | (empty) |  | iRT calibration standards; defaults to the bundled table. |
 | `-ids` | input-file | (empty) |  | DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised. |
+| `-run` | input-file | (empty) |  | EXPERIMENTAL, in development: a centroided DIA run (mzML) that the built-in identification step searches instead of reading -ids. Give exactly one of -ids and -run. Settings: search:. |
+| `-out_ids` | output-file | (empty) |  | With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. Default: <out>.ids.parquet. Never overwritten. |
 | `-out_report` | output-file | (empty) |  | Per-axis residual report (TSV), measured BEFORE the overwrite. |
 | `-no_filter` | bool | `false` |  | Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent. |
 | `-empirical_library` | bool | `false` |  | Declare -ids a pre-filtered empirical library rather than a report: gates whose columns are absent are BYPASSED and each bypass is recorded. Without this, a missing gate column is an error. |
@@ -40,7 +42,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-im_ramp_margin` | double | `0.02` |  | See -im_ramp_top. |
 | `-min_match_fraction` | double | `0.0` |  | Refuse when fewer than this fraction of passing reference precursors match the library. 0 = refuse only when nothing matches. |
 | `-tune` | bool | `false` |  | Fine-tune the RT and CCS models on -ids and re-predict the whole library through them BEFORE refining, so precursors the reference never identified are corrected too. Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a training run plus whole-library inference. |
-| `-tune_models` | string | (empty) |  | Directory holding the stock peptdeep_{rt,ccs}_dynamic.onnx. Default: $DIALIBGEN_MODEL_DIR or the bundled models. |
+| `-tune_models` | string | (empty) |  | Directory holding the stock peptdeep_{rt,ccs,ms2}_dynamic.onnx: -tune starts from the RT and CCS models, and -run predicts both members of every searched target-decoy pair with the MS2 model. Default: $DIALIBGEN_MODEL_DIR or the bundled models. |
 | `-tune_heads` | string | `both` | rt,ccs,both | Which models to tune. |
 | `-tune_out_models` | string | (empty) |  | Keep the tuned ONNX files and their .tune.json and .trajectory.tsv sidecars here. Default: a scratch directory, removed on exit -- the deliverable is the library. |
 | `-tune_predict_gpu` | bool | `false` |  | Use the GPU for the re-prediction pass (the ONNX one, not training). |
@@ -104,3 +106,33 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-machine:gpu_sessions` | int | `4` | 1:16 | ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: 2-4 give RT and CCS +30-45 %, 8 is slower. Does not change the output. |
 | `-machine:gpu_devices` | int list | (empty) | 0: | CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible device that works. Does not change the output. |
 | `-machine:require_gpu` | bool | `false` |  | Fail instead of running a model on the CPU when its CUDA session cannot be created (missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a fallback is a WARNING in the log and in the output's provenance. |
+| `-search:candidates` | string | `evidence` | evidence,random | Candidate selection: evidence = target-decoy pairs of which the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for both); random = a deterministic, label-blind random subset of pairs (search:subset) |
+| `-search:subset` | int | `0` | 0: | search:candidates random: targets drawn from the library before the cap (0 = every eligible target) |
+| `-search:max_pairs` | int | `200000` | 0: | Cap on the target-decoy pairs searched; time is linear in pairs (0 = no cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge and keeps the pairs with the most evidence |
+| `-search:prefilter_depth` | int | `5` | 1:6 | search:candidates evidence: keep a pair when its target or its decoy has this many of its 6 most intense predicted fragments among one MS2 spectrum's top peaks |
+| `-search:prefilter_top_peaks` | int | `1000` | 1: | search:candidates evidence: the most intense peaks of each MS2 spectrum the prefilter matches |
+| `-search:prefilter_ppm` | double | `10.0` | 0.1:100.0 | search:candidates evidence: fragment match tolerance, ppm either side |
+| `-search:decoys` | string | `shuffle` | shuffle,pseudo_reverse | How the search's in-memory decoys are built from the selected targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output |
+| `-search:intensities` | string | `predicted` | predicted,library | Fragments and intensities of both members of each target-decoy pair: predicted = both predicted by the PeptDeep MS2 model (tune_models, $DIALIBGEN_MODEL_DIR or the bundled models) from their own sequences, each taking its own most intense fragments; library = the library's target assay, the decoy in its target's fragment slots with its target's intensities (makes decoys weaker than null targets; for comparison only) |
+| `-search:instrument` | string | `auto` |  | search:intensities predicted: the MS2 model's instrument (QE, Lumos, timsTOF, SciexTOF, ThermoTOF or an alias); auto = the instrument DIALibGen generate recorded in the library, else timsTOF for an ion-mobility run and QE otherwise |
+| `-search:nce` | double | `-1.0` | -1.0:100.0 | search:intensities predicted: the MS2 model's collision energy; -1 = the one recorded in the library with its instrument, else the instrument's default |
+| `-search:seed` | int | `42` | 0: | Salt of the candidate draw: changes which pairs are searched, not how |
+| `-search:passes` | int | `1` | 1:1 | Extraction passes (1 in this version) |
+| `-search:rt_window` | double | `0.0` | 0.0: | Full RT extraction window, seconds (0 = from the calibration) |
+| `-search:mz_ppm` | double | `0.0` | 0.0: | Full fragment m/z extraction window, ppm (0 = automatic) |
+| `-search:im_window` | double | `0.0` | -1.0: | Full 1/K0 extraction window on ion-mobility (diaPASEF) runs: 0 = automatic, from the run's 1/K0 calibration; > 0 = this width; -1 = off (searched by m/z and RT only, no observed 1/K0: -write_im and the CCS head are refused) |
+| `-search:ms1` | string | `true` | true,false | Extract MS1 traces and use the MS1 sub-scores |
+| `-search:rt_im_scores` | string | `true` | true,false | Let the RT and 1/K0 deviation sub-scores into the classifier; false is an ablation for tuning, which exists to correct those deviations |
+| `-search:calibration_min_rsq` | double | `0.7` | 0.0:1.0 | Least r^2 of the RT calibration on the seed assays |
+| `-search:calibration_min_coverage` | double | `0.3` | 0.0:1.0 | Least fraction of the seed assays found in the run that the RT outlier removal must keep |
+| `-search:allow_bootstrap` | bool | `false` |  | When the RT calibration fails, map the library RT range linearly onto the run instead of aborting. A test hook, recorded in the provenance |
+| `-search:readoptions` | string | `auto` | auto,normal,cache | How the run is held: normal = in memory, cache = per-window cache files, auto = cache for runs above 3 GB |
+| `-search:cache_dir` | string | (empty) |  | Directory for cache files (default: the directory of -out_ids); they are removed after the search |
+| `-search:ms1_in_memory` | string | `auto` | auto,on,off | Hold the MS1 map in memory during extraction instead of reading it again for every batch: auto = when the free memory is at least twice its estimated size (the log says which, and why), on, off. Changes the speed and the memory, never the report |
+| `-search:min_ids` | int | `200` | 0: | Abort when fewer target precursors pass q <= 0.01 |
+| `-search:max_target_fraction` | double | `0.5` | 0.01:1.0 | Abort when more than this fraction of the scored target precursors passes q <= 0.01: no honest decoy set looks like that |
+| `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |
+| `-search:entrapment_tag` | string | (empty) |  | Prefix of entrapment protein ids, at the start of an id or right after a '\|' (sp\|ENTRAP_P12345\|...): log and record the combined entrapment FDP estimate and the entrapment winner test. A validation aid |
+| `-search:selftest` | string | `true` | true,false | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not decoys that are built weaker than null targets |
+| `-search:batch_size` | int | `500` | 1: | Advanced: precursors per extraction batch within one isolation window |
+| `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's |

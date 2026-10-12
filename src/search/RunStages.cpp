@@ -1,0 +1,2096 @@
+// Copyright (c) 2026, Oliver Kohlbacher and the DIALibGen authors.
+// SPDX-License-Identifier: BSD-3-Clause
+
+// The run-facing stages of Identifier: loading, calibration and extraction on
+// stock OpenMS 3.5.0 (SwathFile::loadMzML, OpenSwathCalibrationWorkflow::
+// performRTNormalization, OpenSwathWorkflow::performExtraction). Their
+// contracts are documented in include/odia/search/Identifier.h.
+//
+// Everything here is the stock API as the bioconda OpenMS 3.5.0 ships it. The
+// traps it works around were measured on that build (a throwaway probe on an
+// Astral slice, a full Astral run and a diaPASEF slice); each is named where
+// it is handled:
+//   * OpenSwathHelper::sampleExperiment de-duplicates by compound.sequence, so
+//     it is fed the stripped sequence while sampling and the seeds are rebuilt
+//     sequence-blind afterwards; its kit-priority path is not used -- every
+//     kit precursor in the library is a seed anyway;
+//   * performRTNormalization "succeeds" on a handful of points with a
+//     nonsense slope, and its outlier removal stops as soon as r^2 reaches
+//     min_rsq, so its points are refit robustly (RobustLine.h) and the result
+//     is validated here;
+//   * MRMRTNormalizer is not a DefaultParamHandler: every key it reads must be
+//     present (outlierMethod included);
+//   * the m/z window estimate exists only when an m/z correction function is
+//     set, and that correction wraps every map in a transforming accessor
+//     (+70 % extraction CPU measured) -- so the calibration runs on a COPY of
+//     the maps and extraction reads the originals;
+//   * Scores:use_elution_model_score defaults to true and Param::setValue on a
+//     misspelled key only warns, so every key is set explicitly and checked;
+//   * MS1 isotope traces above the monoisotopic one are placed at
+//     +k * 1.00336 Th whatever the charge, so only the monoisotopic trace is
+//     extracted (the MS1 isotope scores come from full scans regardless);
+//   * features are appended to the FeatureMap in thread-completion order, so
+//     each precursor's peak groups are ranked by apex RT to get an id that
+//     does not depend on scheduling or chunking.
+
+#include <odia/search/AssayBuilder.h>
+#include <odia/search/Identifier.h>
+#include <odia/search/IonMobility.h>
+#include <odia/search/MemoryCheck.h>
+#include <odia/search/RobustLine.h>
+
+#include <odia/Trace.h>
+
+#include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathOSWWriter.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathWorkflow.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/SwathMapMassCorrection.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/SpectrumAccessOpenMSInMemory.h>
+#include <OpenMS/CONCEPT/Exception.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/CONCEPT/ProgressLogger.h>
+#include <OpenMS/DATASTRUCTURES/Param.h>
+#include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
+#include <OpenMS/FORMAT/SwathFile.h>
+#include <OpenMS/KERNEL/FeatureMap.h>
+#include <OpenMS/METADATA/MetaInfoInterface.h>
+#include <OpenMS/METADATA/MetaInfoRegistry.h>
+#include <OpenMS/OPENSWATHALGO/DATAACCESS/ISpectrumAccess.h>
+#include <OpenMS/SYSTEM/File.h>
+
+#include <nlohmann/json.hpp>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <random>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ODIA::search
+{
+  namespace
+  {
+    namespace fs = std::filesystem;
+    using json = nlohmann::json;
+    using OpenMS::Param;
+
+    // ---- constants of the method (recorded in the provenance) -----------------
+
+    /// search:readoptions auto holds a run in memory up to this size and caches
+    /// it per window on disk above it (bytes of the mzML file).
+    constexpr std::uintmax_t cache_above_bytes = 3000000000ull;
+    /// The range the log quotes for the cache's size, as a multiple of the
+    /// mzML: 1.45x measured on an Orbitrap Astral run, 2.56x on diaPASEF.
+    constexpr double cache_ratio_low = 1.5;
+    constexpr double cache_ratio_high = 2.6;
+    /// Fragment and precursor m/z extraction width (full, ppm) when nothing
+    /// narrower is known; the calibration's estimate may only narrow it.
+    constexpr double default_mz_ppm = 20.0;
+    constexpr double mz_floor_ppm = 4.0;
+    constexpr double mz_cap_ppm = 50.0;
+    /// m/z width (full, ppm) the seed assays are searched with, over the whole run.
+    constexpr double calibration_mz_ppm = 20.0;
+    /// Seed sampling over the search's targets, after every kit precursor:
+    /// 100 RT bins from the most intense 40 %, as OpenSwathWorkflow's auto_irt
+    /// linear calibration, but 20 per bin instead of 5 -- a predicted library
+    /// has far fewer detectable precursors than the empirical libraries that
+    /// recipe was made for (an Astral slice: 0 accepted points from 496 seeds).
+    constexpr std::size_t seed_bins = 100;
+    constexpr std::size_t seeds_per_bin = 20;
+    constexpr double seed_top_fraction = 0.4;
+    constexpr unsigned seed_sampling_seed = 5489;
+    /// A calibration is accepted only with at least this many points ...
+    constexpr std::size_t calibration_min_points = 20;
+    /// ... covering at least this fraction of the seeds' library-RT span ...
+    constexpr double calibration_min_span = 0.5;
+    /// ... and a slope that maps the library RT range onto a run span within
+    /// this factor of the run's actual length.
+    constexpr double calibration_span_factor = 10.0;
+    /// The robust refit of the stock points (RobustLine.h): inliers within
+    /// this many robust SDs, the SD never taken below this (library units on
+    /// the [0, 100] assay scale).
+    constexpr double robust_cut = 3.0;
+    constexpr double robust_min_scale = 0.1;
+    /// RT window: quantile and padding of the seed residuals (TOPP's recipe),
+    /// never narrower than this (seconds).
+    constexpr double rt_window_quantile = 0.99;
+    constexpr double rt_window_padding = 1.3;
+    constexpr double rt_window_floor_s = 30.0;
+    /// Monoisotopic MS1 trace only: stock 3.5.0 places the isotope traces at
+    /// +k * 1.00336 Th regardless of charge (ChromatogramExtractor::prepare_coordinates).
+    constexpr int ms1_isotope_traces = 0;
+    /// The non-linear second fit of the RT calibration needs this many
+    /// points (with fewer, LOWESS's own span choice and outlier cut are
+    /// erratic: 100 evidence seeds gave a narrower but worse window than 200)
+    /// and must predict held-out points better than the line: its
+    /// cross-validated error (lowess_folds folds of one point set, residuals
+    /// capped at robust_cut line scales) must be below lowess_gain times the
+    /// line's.
+    constexpr std::size_t lowess_min_points = 200;
+    constexpr double lowess_gain = 0.97;
+    constexpr std::size_t lowess_folds = 5;
+    constexpr std::size_t lowess_max_fits = 10;
+    /// Below this many points the calibration is accepted with a warning:
+    /// its RT window rests on the extreme residuals of a few seeds.
+    constexpr std::size_t calibration_warn_points = 100;
+    /// The RT window's small-sample margin: half-width at least the padding
+    /// times this normal quantile (0.995) times the residuals' robust SD, so
+    /// a 0.99 quantile of 20 residuals (their maximum) cannot size it alone.
+    constexpr double rt_window_normal_quantile = 2.5758;
+    /// An evidence seed's calibration point "agrees" with the prefilter when
+    /// the two run times are this close (seconds); a diagnostic.
+    constexpr double prefilter_agreement_s = 30.0;
+    /// Ion-mobility calibration: the floor of the robust line's scale (1/K0),
+    /// so a near-perfect fit does not reject points for tiny residuals. (The
+    /// spectra it reads per window are IonMobility.h's mobility_probe_spectra.)
+    constexpr double im_robust_min_scale = 0.002;
+    /// The report's 1/K0: a measured peak group whose fragments co-locate
+    /// elsewhere (mobility_separation or more from the apex) with at least
+    /// this share of the apex's votes is counted in the record. Reported
+    /// anyway: on the timsTOF run such second places look like a second
+    /// conformer of the same ion (every fragment co-locates at both), and a
+    /// rule that dropped them would drop the precursors furthest from the
+    /// library's 1/K0 most often.
+    constexpr double second_colocation = 0.5;
+
+    /// A standard stream silenced while a stock call runs: OpenSWATH prints
+    /// one line per window and batch to std::cout ("Thread 3_0 will analyze
+    /// ..."), and extraction one "Detected N empty chromatograms" warning per
+    /// batch to std::cerr -- thousands of lines on an Astral run. Scoped and
+    /// restored on exceptions; exceptions themselves are not affected.
+    class Quiet
+    {
+    public:
+      explicit Quiet(std::ostream& stream) : stream_(stream), previous_(stream.rdbuf(&null_)) {}
+      ~Quiet() { stream_.rdbuf(previous_); }
+      Quiet(const Quiet&) = delete;
+      Quiet& operator=(const Quiet&) = delete;
+
+    private:
+      struct Null : std::streambuf
+      {
+        int overflow(int c) override { return traits_type::not_eof(c); }
+        std::streamsize xsputn(const char*, std::streamsize n) override { return n; }
+      } null_;
+      std::ostream& stream_;
+      std::streambuf* previous_;
+    };
+
+    /// Both standard streams: stock extraction and calibration print per-window
+    /// progress to std::cout. Only std::cout and std::cerr are silenced: lines
+    /// that stock OpenMS writes through its own log streams ("Detected N empty
+    /// chromatograms", "N spectra and 0 chromatograms stored", "Read
+    /// chromatogram while reading SWATH files") or with printf (the m/z
+    /// regression parameters) still reach the console, and the printf cannot
+    /// be silenced portably.
+    struct QuietStreams
+    {
+      Quiet out{std::cout};
+      Quiet err{std::cerr};
+    };
+
+    /// What stock OpenMS says about an error while a call runs: its fatal and
+    /// error log streams, copied into @p to. Needed because stock 3.5.0 logs
+    /// the REASON a file cannot be parsed ("Required attribute
+    /// 'defaultDataProcessingRef' not present!") and then MzMLFile rethrows a
+    /// ParseError that names only where it was thrown (XMLHandler.cpp@108).
+    class OpenMSErrors
+    {
+    public:
+      explicit OpenMSErrors(std::ostream& to) : to_(to)
+      {
+        // A log stream passes a line on only once while it is in the stream's
+        // cache of recent messages; empty that cache, or the same error on a
+        // second read in this process would not be seen.
+        OpenMS::OpenMS_Log_fatal.rdbuf()->clearCache();
+        OpenMS::OpenMS_Log_error.rdbuf()->clearCache();
+        OpenMS::OpenMS_Log_fatal.insert(to_);
+        OpenMS::OpenMS_Log_error.insert(to_);
+      }
+      ~OpenMSErrors()
+      {
+        OpenMS::OpenMS_Log_fatal.flush();
+        OpenMS::OpenMS_Log_error.flush();
+        OpenMS::OpenMS_Log_fatal.remove(to_);
+        OpenMS::OpenMS_Log_error.remove(to_);
+      }
+      OpenMSErrors(const OpenMSErrors&) = delete;
+      OpenMSErrors& operator=(const OpenMSErrors&) = delete;
+
+    private:
+      std::ostream& to_;
+    };
+
+    /// The lines OpenMS logged, without terminal colour codes and the
+    /// "<source file>(<line>): " prefix OPENMS_LOG_FATAL_ERROR puts in front,
+    /// de-duplicated, at most a few.
+    std::string openmsReason(const std::string& logged)
+    {
+      std::string plain;
+      for (std::size_t k = 0; k < logged.size(); ++k)
+      {
+        if (logged[k] == '\x1b' && k + 1 < logged.size() && logged[k + 1] == '[')
+        {
+          std::size_t e = k + 2;
+          while (e < logged.size() && !std::isalpha(static_cast<unsigned char>(logged[e]))) { ++e; }
+          k = e;   // skip "ESC [ ... <letter>"
+          continue;
+        }
+        plain.push_back(logged[k]);
+      }
+      std::vector<std::string> lines;
+      std::istringstream in(plain);
+      std::string line;
+      while (std::getline(in, line))
+      {
+        if (!line.empty() && line.back() == '\r') { line.pop_back(); }
+        const std::size_t cut = line.find("): ");
+        if (cut != std::string::npos && line.find_first_of("/\\") < cut) { line = line.substr(cut + 3); }
+        if (line.empty() || std::find(lines.begin(), lines.end(), line) != lines.end()) { continue; }
+        lines.push_back(line);
+      }
+      std::string out;
+      for (std::size_t k = 0; k < lines.size() && k < 4; ++k) { out += (k ? "; " : "") + lines[k]; }
+      return out;
+    }
+
+    /// Bytes of the regular files below @p dir.
+    std::uintmax_t directoryBytes(const fs::path& dir)
+    {
+      std::uintmax_t bytes = 0;
+      std::error_code ec;
+      for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+      {
+        std::error_code size_ec;
+        if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
+      }
+      return bytes;
+    }
+
+    /// The estimated size of the run's MS1 maps held in memory as OpenSWATH
+    /// spectra (search:ms1_in_memory), before they are: the peaks' doubles
+    /// (m/z, intensity and, on diaPASEF, 1/K0) plus a per-spectrum overhead.
+    /// A cached run is measured by its MS1 cache file, which SwathFile's cache
+    /// consumer names <basename>_ms1.mzML.cached and which holds the same
+    /// arrays (24.4 GB of cache gave +20.8 GB of RSS on a diaPASEF run); a run
+    /// read into memory by counting its MS1 peaks. @p from says which.
+    std::uint64_t ms1MemoryEstimate(const RunData& run, std::string& from)
+    {
+      constexpr std::uint64_t per_spectrum = 512;   // the Spectrum, its array pointers and descriptions
+      std::uint64_t spectra = 0;
+      for (const auto& m : run.maps)
+      {
+        if (m.ms1 && m.sptr) { spectra += m.sptr->getNrSpectra(); }
+      }
+      if (spectra == 0) { from = "no MS1 spectra"; return 0; }
+      if (!run.scratch.empty())
+      {
+        const std::string suffix = "_ms1.mzML.cached";
+        std::uint64_t bytes = 0;
+        std::error_code ec;
+        for (auto it = fs::directory_iterator(run.scratch, ec); !ec && it != fs::directory_iterator(); it.increment(ec))
+        {
+          const std::string name = it->path().filename().string();
+          std::error_code size_ec;
+          if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+              it->is_regular_file(size_ec))
+          { bytes += it->file_size(size_ec); }
+        }
+        if (bytes > 0) { from = "the MS1 cache file"; return bytes + spectra * per_spectrum; }
+      }
+      std::uint64_t bytes = 0;
+      for (const auto& m : run.maps)
+      {
+        if (!m.ms1 || !m.sptr) { continue; }
+        for (std::size_t k = 0; k < m.sptr->getNrSpectra(); ++k)
+        {
+          const OpenSwath::SpectrumPtr sp = m.sptr->getSpectrumById(static_cast<int>(k));
+          if (!sp) { continue; }
+          for (const auto& a : sp->getDataArrays())
+          {
+            if (a) { bytes += a->data.size() * sizeof(double); }
+          }
+        }
+      }
+      from = "the MS1 peak count";
+      return bytes + spectra * per_spectrum;
+    }
+
+    /// The OpenMP team for one stock OpenSWATH call, restored afterwards. Stock
+    /// 3.5.0 scores every feature through MetaInfo::setValue/getValue, which
+    /// take a process-wide critical section (MetaInfoRegistry); above about
+    /// eight threads the team mostly spins on it. Measured on an Astral slice
+    /// (40,000 pairs): extraction 108 s at 4 threads, 62-64 s at 8, 57 s at 16
+    /// and 94-106 s at 32, with 3x the CPU of 16. Measured again on 0.11.2's
+    /// base (dax, traced, ODIA_OPENSWATH_THREADS; docs/design/built-in-
+    /// identification.md, "The OpenSWATH team"): 16 beat 8 nowhere -- Astral
+    /// 40,000 pairs 153 s at 8, 169 s at 16 with twice the CPU, 297 s at 32;
+    /// timsTOF 30,000 pairs 496 / 536 / 589 s, where one straggling window
+    /// ends every call -- and OMP_WAIT_POLICY=passive with GOMP_SPINCOUNT=10000
+    /// changed none of it (it removed only the calibration's idle spinning).
+    /// The result does not depend on the team.
+    class ThreadCap
+    {
+    public:
+      explicit ThreadCap(int cap)
+      {
+#ifdef _OPENMP
+        previous_ = omp_get_max_threads();
+        used_ = std::max(1, std::min(previous_, cap));
+        omp_set_num_threads(used_);
+#else
+        (void)cap;
+#endif
+      }
+      ~ThreadCap()
+      {
+#ifdef _OPENMP
+        omp_set_num_threads(previous_);
+#endif
+      }
+      ThreadCap(const ThreadCap&) = delete;
+      ThreadCap& operator=(const ThreadCap&) = delete;
+      int used() const { return used_; }
+      int requested() const { return previous_; }
+
+    private:
+      int previous_ = 1;
+      int used_ = 1;
+    };
+
+    std::string fixed(double v, int digits)
+    {
+      std::ostringstream s;
+      s.setf(std::ios::fixed);
+      s.precision(digits);
+      s << v;
+      return s.str();
+    }
+
+    json num(double v) { return std::isfinite(v) ? json(v) : json(nullptr); }
+
+    /// Set @p key, which must already exist: Param::setValue on a misspelled
+    /// key adds it with a warning and changes nothing the algorithm reads.
+    void set(Param& p, const std::string& key, const OpenMS::ParamValue& value)
+    {
+      if (!p.exists(key))
+      { throw std::logic_error("search: OpenMS parameter '" + key + "' does not exist in this OpenMS build (stock 3.5.0 is required)"); }
+      p.setValue(key, value);
+    }
+
+    /// OpenSWATH's peak picking and scoring: the TOPP tool's "Scoring" block,
+    /// every key set explicitly. Elution-model and ion-series scores are off
+    /// (the former defaults to ON; the latter needs sequences, which the
+    /// assays do not carry). @p im_scores: the ion-mobility sub-scores (and
+    /// im_drift, the peak group's 1/K0); @p ms1_im: MS1 scores and im_ms1_drift
+    /// read the MS1 spectra within the precursor's 1/K0 range (stock default
+    /// ON, which needs a per-peak 1/K0 array in MS1).
+    Param featureFinderParam(bool ms1, bool im_scores, bool ms1_im)
+    {
+      Param ff = OpenMS::MRMFeatureFinderScoring().getDefaults();
+      set(ff, "stop_report_after_feature", 5);
+      set(ff, "rt_normalization_factor", 100.0);   // assay RT lives on [0, 100]
+      set(ff, "Scores:use_ms1_correlation", ms1 ? "true" : "false");
+      set(ff, "Scores:use_ms1_fullscan", ms1 ? "true" : "false");
+      set(ff, "Scores:use_ms1_mi", ms1 ? "true" : "false");
+      set(ff, "Scores:use_mi_score", "true");
+      set(ff, "Scores:use_elution_model_score", "false");
+      set(ff, "Scores:use_ionseries_scores", "false");
+      set(ff, "Scores:use_ion_mobility_scores", im_scores ? "true" : "false");
+      set(ff, "use_ms1_ion_mobility", ms1_im ? "true" : "false");
+      set(ff, "TransitionGroupPicker:min_peak_width", -1.0);
+      set(ff, "TransitionGroupPicker:recalculate_peaks", "true");
+      set(ff, "TransitionGroupPicker:compute_peak_quality", "false");
+      set(ff, "TransitionGroupPicker:minimal_quality", -1.5);
+      set(ff, "TransitionGroupPicker:background_subtraction", "none");
+      set(ff, "TransitionGroupPicker:compute_peak_shape_metrics", "false");
+      set(ff, "TransitionGroupPicker:recalculate_peaks_max_z", 0.75);
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:use_gauss", "false");
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:sgolay_polynomial_order", 3);
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:sgolay_frame_length", 11);
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:peak_width", -1.0);
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:remove_overlapping_peaks", "true");
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:write_sn_log_messages", "false");
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:method", "corrected");
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:signal_to_noise", 0.1);
+      set(ff, "TransitionGroupPicker:PeakPickerChromatogram:gauss_width", 30.0);
+      set(ff, "uis_threshold_sn", -1);
+      set(ff, "uis_threshold_peak_area", 0);
+      set(ff, "EMGScoring:max_iteration", 10);
+      return ff;
+    }
+
+    /// MRMRTNormalizer's settings ("Calibration:RTNormalization"). Not a
+    /// DefaultParamHandler: every key it reads must be present. Linear model,
+    /// iterative residual outlier removal, and estimateBestPeptides ON -- the
+    /// TOPP default (off) stops outlier removal at r^2 ~ min_rsq by
+    /// construction; on, the probe measured r^2 0.977 and residuals near an
+    /// oracle linear fit.
+    Param irtDetectionParam()
+    {
+      Param p;
+      p.setValue("alignmentMethod", "linear");
+      p.setValue("lowess:auto_span", "true");
+      p.setValue("lowess:span", 0.05);
+      p.setValue("lowess:auto_span_min", 0.15);
+      p.setValue("lowess:auto_span_max", 0.80);
+      p.setValue("lowess:auto_span_grid", "0.005,0.01,0.05,0.15,0.25,0.30,0.50,0.70,0.90");
+      p.setValue("b_spline:num_nodes", 5);
+      p.setValue("outlierMethod", "iter_residual");
+      p.setValue("useIterativeChauvenet", "false");
+      p.setValue("RANSACMaxIterations", 1000);
+      p.setValue("RANSACMaxPercentRTThreshold", 3);
+      p.setValue("RANSACSamplingSize", 10);
+      p.setValue("estimateBestPeptides", "true");
+      p.setValue("InitialQualityCutoff", 0.5);
+      p.setValue("OverallQualityCutoff", 5.5);
+      p.setValue("NrRTBins", 10);
+      p.setValue("MinPeptidesPerBin", 1);
+      p.setValue("MinBinsFilled", 8);
+      return p;
+    }
+
+    /// The non-linear RT model: stock LOWESS with its span chosen by
+    /// cross-validation, linear interpolation between the smoothed points (a
+    /// cubic spline can overshoot and stop increasing), and outside the points
+    /// the line through the first and last one.
+    Param lowessParam()
+    {
+      Param p;
+      p.setValue("span", 0.3);
+      p.setValue("auto_span", "true");
+      p.setValue("auto_span_grid", "0.1,0.15,0.2,0.3,0.4,0.5,0.7");
+      p.setValue("interpolation_type", "linear");
+      p.setValue("extrapolation_type", "two-point-linear");
+      return p;
+    }
+
+    /// SwathMapMassCorrection for the calibration. The correction function is
+    /// set only so the m/z windows get ESTIMATED (with "none" the estimator
+    /// returns before measuring anything); the corrected maps it produces are
+    /// a copy and are discarded.
+    Param massCorrectionParam()
+    {
+      Param p = OpenMS::SwathMapMassCorrection().getDefaults();
+      set(p, "mz_extraction_window", calibration_mz_ppm);
+      set(p, "mz_extraction_window_ppm", "true");
+      set(p, "im_extraction_window", -1.0);
+      set(p, "mz_correction_function", "regression_delta_ppm");
+      set(p, "im_correction_function", "none");
+      return p;
+    }
+
+    /// ChromExtractParams is a POD without a constructor: every field is set.
+    OpenMS::ChromExtractParams chromParams(double mz_ppm, double im_window, double rt_window)
+    {
+      OpenMS::ChromExtractParams cp;
+      cp.min_upper_edge_dist = 0.0;
+      cp.mz_extraction_window = mz_ppm;
+      cp.ppm = true;
+      cp.im_extraction_window = im_window;
+      cp.extraction_function = "tophat";
+      cp.rt_extraction_window = rt_window;
+      cp.extra_rt_extract = 0.0;
+      return cp;
+    }
+
+    /// The sub-scores handed to the classifier, in column order. A fixed list:
+    /// columns a run cannot fill stay NaN and are dropped label-blind by the
+    /// classifier. Deliberately a non-collinear subset of OpenSWATH's var_*
+    /// scores (the library_* and xcorr_* families each carry near-duplicates),
+    /// plus the MS1 scores with search:ms1. The RT deviation score is
+    /// var_norm_rt_score, the one search:rt_im_scores false removes.
+    ///
+    /// Ion mobility (M2), appended so a run without it keeps its columns:
+    /// with @p im the 1/K0 co-elution of the fragments and the MS2 1/K0
+    /// deviation, with @p ms1_im also the MS1 1/K0 deviation. The deviations
+    /// are what search:rt_im_scores false removes (rtImScoreNames).
+    ///
+    /// MS1-MS2 co-elution: stock 3.5.0 computes var_ms1_xcorr_coelution,
+    /// var_ms1_xcorr_shape and var_ms1_mi_score only from TWO or more precursor
+    /// isotope traces (OpenSwathScoring, `precursor_ids.size() > 1`), and this
+    /// search extracts the monoisotopic trace only (ms1_isotope_traces), so
+    /// those three were NaN on every run. The *_contrast variants correlate
+    /// that one MS1 trace with the fragment traces and are always computed.
+    std::vector<std::string> scoreColumns(bool ms1, bool im = false, bool ms1_im = false)
+    {
+      std::vector<std::string> c = {
+        "var_xcorr_coelution_weighted", "var_xcorr_shape_weighted", "var_xcorr_coelution", "var_xcorr_shape",
+        "var_library_corr", "var_library_rmsd", "var_library_sangle", "var_library_manhattan",
+        "var_intensity_score", "var_log_sn_score", "var_massdev_score_weighted",
+        "var_isotope_correlation_score", "var_isotope_overlap_score", "var_mi_weighted_score", "var_norm_rt_score"};
+      if (ms1)
+      {
+        for (const char* s : {"var_ms1_ppm_diff", "var_ms1_isotope_correlation", "var_ms1_isotope_overlap",
+                              "var_ms1_xcorr_coelution_contrast", "var_ms1_xcorr_shape_contrast", "var_ms1_mi_contrast_score"})
+        { c.emplace_back(s); }
+      }
+      if (im)
+      {
+        for (const char* s : {"var_im_xcorr_shape", "var_im_xcorr_coelution", "var_im_delta_score"}) { c.emplace_back(s); }
+        if (ms1_im) { c.emplace_back("var_im_ms1_delta_score"); }
+      }
+      return c;
+    }
+
+    /// Uppercase residues outside (...) and [...]: "AC(UniMod:4)K" -> "ACK".
+    std::string strippedSequence(std::string_view modified)
+    {
+      std::string out;
+      int depth = 0;
+      for (const char c : modified)
+      {
+        if (c == '(' || c == '[') { ++depth; continue; }
+        if (c == ')' || c == ']') { depth = std::max(0, depth - 1); continue; }
+        if (depth == 0 && c >= 'A' && c <= 'Z') { out.push_back(c); }
+      }
+      return out;
+    }
+
+    /// The iRT and CiRT kit sequences OpenMS ships (share/OpenMS/CHEMISTRY),
+    /// read from their PeptideSequence column. Missing files are reported, not fatal.
+    std::unordered_set<std::string> kitSequences(std::vector<std::string>& found, std::vector<std::string>& missing)
+    {
+      std::unordered_set<std::string> out;
+      for (const char* name : {"CHEMISTRY/cirtkit.tsv", "CHEMISTRY/irtkit.tsv"})
+      {
+        std::string path;
+        try { path = OpenMS::File::find(name); }
+        catch (const std::exception&) { missing.emplace_back(name); continue; }
+        std::ifstream in(path);
+        std::string line;
+        if (!in || !std::getline(in, line)) { missing.emplace_back(name); continue; }
+        auto split = [](const std::string& s) {
+          std::vector<std::string> f;
+          std::size_t start = 0;
+          for (;;)
+          {
+            const std::size_t tab = s.find('\t', start);
+            f.push_back(s.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
+            if (tab == std::string::npos) { break; }
+            start = tab + 1;
+          }
+          return f;
+        };
+        const auto header = split(line);
+        const auto col = std::find(header.begin(), header.end(), "PeptideSequence");
+        if (col == header.end()) { missing.emplace_back(std::string(name) + " (no PeptideSequence column)"); continue; }
+        const auto k = static_cast<std::size_t>(col - header.begin());
+        while (std::getline(in, line))
+        {
+          if (!line.empty() && line.back() == '\r') { line.pop_back(); }
+          const auto f = split(line);
+          if (k < f.size() && !f[k].empty()) { out.insert(strippedSequence(f[k])); }
+        }
+        found.emplace_back(name);
+      }
+      return out;
+    }
+
+    /// First and last MS2 spectrum time over all isolation windows, seconds.
+    std::pair<double, double> runSpan(const std::vector<OpenSwath::SwathMap>& maps)
+    {
+      double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+      for (const auto& m : maps)
+      {
+        if (m.ms1 || !m.sptr) { continue; }
+        const std::size_t n = m.sptr->getNrSpectra();
+        if (n == 0) { continue; }
+        lo = std::min(lo, m.sptr->getSpectrumMetaById(0).RT);
+        hi = std::max(hi, m.sptr->getSpectrumMetaById(static_cast<int>(n - 1)).RT);
+      }
+      return {lo, hi};
+    }
+
+    double quantile(std::vector<double> v, double q)
+    {
+      if (v.empty()) { return std::numeric_limits<double>::quiet_NaN(); }
+      std::sort(v.begin(), v.end());
+      const double pos = q * static_cast<double>(v.size() - 1);
+      const auto a = static_cast<std::size_t>(std::floor(pos));
+      const std::size_t b = std::min(v.size() - 1, a + 1);
+      return v[a] + (pos - static_cast<double>(a)) * (v[b] - v[a]);
+    }
+
+    /// Everything the parameter setters above would refuse, checked before
+    /// the run is read (which can take minutes): a missing key is a build
+    /// problem, not a run problem.
+    void checkParameters()
+    {
+      (void)featureFinderParam(true, true, true);
+      (void)featureFinderParam(false, false, false);
+      (void)massCorrectionParam();
+    }
+
+    /// A strict total order on score rows (NaN after every number), so equal
+    /// apex times still rank the same way on every run.
+    bool rowLess(double apex_a, const float* a, double apex_b, const float* b, std::size_t width)
+    {
+      if (apex_a != apex_b) { return apex_a < apex_b; }
+      for (std::size_t c = 0; c < width; ++c)
+      {
+        const bool na = std::isnan(a[c]), nb = std::isnan(b[c]);
+        if (na != nb) { return nb; }
+        if (!na && a[c] != b[c]) { return a[c] < b[c]; }
+      }
+      return false;
+    }
+
+    /// What one read of every spectrum says about a diaPASEF run's 1/K0
+    /// arrays: non-empty spectra without one (stock extraction throws on such
+    /// a spectrum inside an OpenMP region once a 1/K0 window is set, and the
+    /// process aborts without a message), and, in MS2 maps with 1/K0 limits,
+    /// the peaks whose 1/K0 lies outside their own window's limits.
+    struct MobilityArrays
+    {
+      std::size_t ms2_spectra = 0, ms2_without = 0, ms1_spectra = 0, ms1_without = 0;
+      std::size_t ms2_peaks = 0, ms2_peaks_outside = 0;
+    };
+
+    /// Reads every spectrum of the MS2 maps (and of the MS1 maps with
+    /// @p with_ms1) once, in blocks spread over the threads, each block
+    /// through its own handle (a cached map reads through one file stream).
+    MobilityArrays sweepMobilityArrays(const std::vector<OpenSwath::SwathMap>& maps, bool with_ms1)
+    {
+      constexpr std::size_t block = 256;
+      struct Item { std::size_t map, begin, end; };
+      std::vector<Item> items;
+      for (std::size_t m = 0; m < maps.size(); ++m)
+      {
+        if (!maps[m].sptr || (maps[m].ms1 && !with_ms1)) { continue; }
+        const std::size_t n = maps[m].sptr->getNrSpectra();
+        for (std::size_t b = 0; b < n; b += block) { items.push_back({m, b, std::min(n, b + block)}); }
+      }
+      std::vector<MobilityArrays> part(items.size());
+      std::string failure;
+      const auto N = static_cast<std::ptrdiff_t>(items.size());
+#pragma omp parallel for schedule(dynamic, 1)
+      for (std::ptrdiff_t q = 0; q < N; ++q)
+      {
+        try
+        {
+          const Item& it = items[static_cast<std::size_t>(q)];
+          const OpenSwath::SwathMap& m = maps[it.map];
+          OpenSwath::SpectrumAccessPtr access = m.sptr->lightClone();
+          if (!access) { access = m.sptr; }
+          MobilityArrays& r = part[static_cast<std::size_t>(q)];
+          const bool limits = !m.ms1 && m.imLower >= 0 && m.imUpper > m.imLower;
+          const double lo = m.imLower - SearchParams::im_limits_tolerance, hi = m.imUpper + SearchParams::im_limits_tolerance;
+          for (std::size_t k = it.begin; k < it.end; ++k)
+          {
+            const OpenSwath::SpectrumPtr sp = access->getSpectrumById(static_cast<int>(k));
+            if (!sp || !sp->getMZArray() || sp->getMZArray()->data.empty()) { continue; }   // stock skips empty spectra
+            (m.ms1 ? r.ms1_spectra : r.ms2_spectra)++;
+            const OpenSwath::BinaryDataArrayPtr im = sp->getDriftTimeArray();
+            if (!im) { (m.ms1 ? r.ms1_without : r.ms2_without)++; continue; }
+            if (!limits) { continue; }
+            r.ms2_peaks += im->data.size();
+            for (const double v : im->data) { r.ms2_peaks_outside += (v < lo || v > hi) ? 1 : 0; }
+          }
+        }
+        catch (const std::exception& e)
+        {
+#pragma omp critical(odia_im_sweep_failure)
+          { if (failure.empty()) { failure = e.what(); } }
+        }
+      }
+      if (!failure.empty()) { throw std::runtime_error("search run: reading every spectrum for its 1/K0 array failed: " + failure); }
+      MobilityArrays total;
+      for (const auto& r : part)
+      {
+        total.ms2_spectra += r.ms2_spectra;
+        total.ms2_without += r.ms2_without;
+        total.ms1_spectra += r.ms1_spectra;
+        total.ms1_without += r.ms1_without;
+        total.ms2_peaks += r.ms2_peaks;
+        total.ms2_peaks_outside += r.ms2_peaks_outside;
+      }
+      return total;
+    }
+  }
+
+  // ---- loading ----------------------------------------------------------------
+
+  RunData Identifier::loadRun(const std::string& path)
+  {
+    checkParameters();
+    RunData run;
+    run.path = path;
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec))
+    { throw std::runtime_error("search: the run " + path + " is not a readable file"); }
+    const std::uintmax_t bytes = fs::file_size(path);
+    const bool cache = params().readoptions == ReadMode::Cache ||
+                       (params().readoptions == ReadMode::Auto && bytes > cache_above_bytes);
+    run.read_mode = cache ? "cache" : "normal";
+
+    // Cache files go to a private directory, which identify() removes once
+    // nothing reads the run any more: after extraction, or on an ion-mobility
+    // search after the report's 1/K0 is re-measured in it (after scoring,
+    // just before the report is written). OpenMS never deletes its cache
+    // files itself.
+    std::string tmp;
+    if (cache)
+    {
+      const fs::path parent = params().cache_dir.empty() ? scratchParent() : fs::path(params().cache_dir);
+      fs::create_directories(parent);
+      std::random_device random;
+      for (int attempt = 0; attempt < 16 && run.scratch.empty(); ++attempt)
+      {
+        const fs::path candidate = parent / (".dialibgen-run-cache-" + std::to_string(random()) + "-" + std::to_string(random()));
+        if (fs::create_directory(candidate)) { run.scratch = candidate; }
+      }
+      if (run.scratch.empty()) { throw std::runtime_error("search: cannot create a cache directory in " + parent.string()); }
+      // SwathFile treats tmp as a directory only when it ends in '/', on every platform.
+      tmp = run.scratch.generic_string() + "/";
+    }
+    // Said before the read, which can take minutes: where the cache goes and
+    // how large it gets, so a killed process leaves a directory the user can
+    // find, on a disk that had room for it. The cache holds every peak
+    // uncompressed: measured 1.45x the mzML on an Orbitrap Astral run and
+    // 2.56x on a diaPASEF run (whose 1/K0 array is cached too).
+    auto gb = [](double b) { return fixed(b / 1e9, 1); };
+    info("search run: reading " + path + " (" + std::to_string(bytes / 1000000) + " MB) " +
+         (cache ? "into per-window cache files in " + run.scratch.string() + " (typically " + fixed(cache_ratio_low, 1) +
+                  " to " + fixed(cache_ratio_high, 1) + " times the run, here " + gb(cache_ratio_low * static_cast<double>(bytes)) +
+                  " to " + gb(cache_ratio_high * static_cast<double>(bytes)) +
+                  " GB; removed once the run is no longer read: after extraction, or with ion mobility after the "
+                  "report's 1/K0 is measured)"
+                : std::string("into memory")));
+    std::ostringstream said;
+    try
+    {
+      OpenMS::SwathFile file;
+      file.setLogType(OpenMS::ProgressLogger::NONE);
+      QuietStreams quiet;
+      OpenMSErrors capture(said);
+      trace::Scope reading("cache_write", 1);
+      run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode);
+    }
+    catch (const std::exception& e)
+    {
+      if (!run.scratch.empty()) { fs::remove_all(run.scratch, ec); }
+      // Stock MzMLFile rethrows parse errors without their reason, which went
+      // to the log stream captured above: say both.
+      const std::string reason = openmsReason(said.str());
+      std::string message = "search: OpenMS cannot read the run " + path + ": " + (reason.empty() ? std::string(e.what()) : reason);
+      if (!reason.empty()) { message += " [" + std::string(e.what()) + "]"; }
+      if (reason.find("defaultDataProcessingRef") != std::string::npos)
+      {
+        message += " -- the file is not valid mzML 1.1: <spectrumList> and <chromatogramList> must name a "
+                   "defaultDataProcessingRef that a <dataProcessing> in <dataProcessingList> defines (some converters, "
+                   "mzpeak-convert 0.12.5 among them, leave them out); add them, or convert with a tool that writes them";
+      }
+      throw std::runtime_error(message);
+    }
+    catch (...)
+    {
+      if (!run.scratch.empty()) { fs::remove_all(run.scratch, ec); }
+      throw;
+    }
+    if (!run.scratch.empty())
+    {
+      trace::Scope sizing("cache_size", 1);
+      run.cache_bytes = directoryBytes(run.scratch);
+      info("search run: the cache takes " + gb(static_cast<double>(run.cache_bytes)) + " GB, " +
+           fixed(static_cast<double>(run.cache_bytes) / static_cast<double>(std::max<std::uintmax_t>(1, bytes)), 2) + " times the run");
+    }
+
+    try
+    {
+      std::size_t ms1 = 0, ms2 = 0, spectra_ms2 = 0, swapped = 0, with_limits = 0;
+      for (auto& m : run.maps)
+      {
+        if (m.ms1) { ++ms1; continue; }
+        ++ms2;
+        spectra_ms2 += m.sptr ? m.sptr->getNrSpectra() : 0;
+        // Reversed 1/K0 limits (lower > upper), as some converters write them.
+        if (m.imLower >= 0 && m.imUpper >= 0)
+        {
+          ++with_limits;
+          if (m.imLower > m.imUpper) { std::swap(m.imLower, m.imUpper); ++swapped; }
+        }
+      }
+      if (ms2 == 0 || spectra_ms2 == 0)
+      {
+        throw SearchAbort("search: the run " + path + " has no DIA isolation windows with spectra (" + std::to_string(ms2) +
+                          " MS2 windows, " + std::to_string(ms1) + " MS1 maps); DIA mzML is required");
+      }
+      // Ion mobility needs both: window limits AND a per-peak 1/K0 array. A
+      // file with limits but no array is usable for RT only.
+      bool array = false;
+      for (const auto& m : run.maps)
+      {
+        if (m.ms1 || !m.sptr || m.sptr->getNrSpectra() == 0) { continue; }
+        if (m.sptr->getSpectrumById(0)->getDriftTimeArray()) { array = true; break; }
+      }
+      run.ion_mobility = with_limits > 0 && array;
+      // Ion mobility is used unless search:im_window -1 turns it off.
+      const bool im_on = run.ion_mobility && params().im_window != -1.0;
+      const auto [first, last] = runSpan(run.maps);
+      if (swapped > 0)
+      { info("search run: " + std::to_string(swapped) + " of " + std::to_string(ms2) + " isolation windows had reversed 1/K0 limits (swapped)"); }
+      json im_json = json::object();
+      if (run.ion_mobility)
+      {
+        // OpenSWATH's extraction throws on a spectrum without a 1/K0 array
+        // once an ion-mobility window is set (MS1 too). Without ion mobility
+        // (search:im_window -1) nothing reads the arrays: sample every MS2
+        // window at its start, middle and end for the record. With it, every
+        // spectrum is read below.
+        std::size_t sampled = 0, without = 0;
+        double im_lo = std::numeric_limits<double>::infinity(), im_hi = -im_lo;
+        for (const auto& m : run.maps)
+        {
+          if (m.ms1 || !m.sptr) { continue; }
+          im_lo = std::min(im_lo, m.imLower);
+          im_hi = std::max(im_hi, m.imUpper);
+          if (im_on) { continue; }
+          const std::size_t n = m.sptr->getNrSpectra();
+          std::vector<std::size_t> at = {0, n / 2, n - 1};
+          at.erase(std::unique(at.begin(), at.end()), at.end());
+          for (const std::size_t k : at)
+          {
+            if (k >= n) { continue; }
+            const OpenSwath::SpectrumPtr sp = m.sptr->getSpectrumById(static_cast<int>(k));
+            if (!sp || sp->getMZArray()->data.empty()) { continue; }
+            ++sampled;
+            without += sp->getDriftTimeArray() ? 0 : 1;
+          }
+        }
+        for (const auto& m : run.maps)
+        {
+          if (!m.ms1 || !m.sptr) { continue; }
+          for (std::size_t k = 0; k < m.sptr->getNrSpectra() && k < 16; ++k)
+          {
+            const OpenSwath::SpectrumPtr sp = m.sptr->getSpectrumById(static_cast<int>(k));
+            if (!sp || sp->getMZArray()->data.empty()) { continue; }
+            run.ms1_ion_mobility = sp->getDriftTimeArray() != nullptr;
+            break;
+          }
+        }
+        if (!im_on)
+        {
+          im_json = {{"im_range", {num(im_lo), num(im_hi)}}, {"im_spectra_sampled", sampled},
+                     {"im_spectra_without_array", without}, {"ms1_im_per_peak_array", run.ms1_ion_mobility}};
+        }
+        else
+        {
+          // Every spectrum, once, before anything is searched: a spectrum
+          // without an array would abort the process hours later, inside
+          // OpenSWATH. MS1 too when its traces are read with 1/K0.
+          const bool ms1_arrays = run.ms1_ion_mobility && params().ms1;
+          const auto swept = std::chrono::steady_clock::now();
+          trace::Scope sweeping("im_check", 1);
+          const MobilityArrays a = sweepMobilityArrays(run.maps, ms1_arrays);
+          sweeping.end();
+          const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - swept).count();
+          const double outside = a.ms2_peaks > 0 ? static_cast<double>(a.ms2_peaks_outside) / static_cast<double>(a.ms2_peaks) : 0.0;
+          im_json = {{"im_range", {num(im_lo), num(im_hi)}}, {"im_spectra_checked", a.ms2_spectra},
+                     {"im_spectra_without_array", a.ms2_without}, {"ms1_im_per_peak_array", run.ms1_ion_mobility},
+                     {"ms1_spectra_checked", a.ms1_spectra}, {"ms1_spectra_without_array", a.ms1_without},
+                     {"im_peaks_outside_window_limits", {{"peaks", a.ms2_peaks}, {"outside", a.ms2_peaks_outside},
+                                                         {"share", outside}, {"tolerance", SearchParams::im_limits_tolerance}}}};
+          if (a.ms2_without > 0 || a.ms1_without > 0)
+          {
+            throw SearchAbort("search: the run " + path + " has ion mobility, but " + std::to_string(a.ms2_without) + " of " +
+                              std::to_string(a.ms2_spectra) + " MS2 spectra" +
+                              (ms1_arrays ? " and " + std::to_string(a.ms1_without) + " of " + std::to_string(a.ms1_spectra) + " MS1 spectra"
+                                          : std::string()) +
+                              " carry no per-peak 1/K0 array, which an ion-mobility extraction needs in every spectrum; "
+                              "search:im_window -1 searches the run by m/z and RT only");
+          }
+          info("search run: every spectrum carries a 1/K0 array (" + std::to_string(a.ms2_spectra) + " MS2" +
+               (ms1_arrays ? ", " + std::to_string(a.ms1_spectra) + " MS1" : std::string()) + " read in " + fixed(seconds, 1) +
+               " s); " + fixed(100.0 * outside, 3) + " % of the MS2 peaks lie outside their window's 1/K0 limits");
+          if (outside > SearchParams::im_limits_outside_warn)
+          {
+            warn("search: " + fixed(100.0 * outside, 2) + " % of the MS2 peaks (" + std::to_string(a.ms2_peaks_outside) + " of " +
+                 std::to_string(a.ms2_peaks) + ") lie more than " + fixed(SearchParams::im_limits_tolerance, 3) + " outside their "
+                 "isolation window's 1/K0 limits: the limits are not on the calibration of the per-peak 1/K0 values (as in "
+                 "files of converters that write a linear approximation), and precursors are assigned to windows by them, so "
+                 "some are extracted from a window that did not acquire them; convert the run again with limits on the "
+                 "vendor calibration (mzpeak-convert 0.13 or later), or search:im_window -1");
+          }
+        }
+        if (im_on)
+        {
+          info("search run: diaPASEF, " + std::to_string(ms2) + " isolation windows over 1/K0 " + fixed(im_lo, 3) + " .. " +
+               fixed(im_hi, 3) + "; searched with an ion-mobility window" +
+               (run.ms1_ion_mobility ? std::string(" in MS2 and MS1") : std::string(" in MS2 (the MS1 spectra carry no 1/K0 array)")));
+        }
+        else
+        {
+          warn("search: search:im_window -1: the run has ion mobility (diaPASEF) but is searched WITHOUT it, by m/z and RT "
+               "only, every precursor over the whole 1/K0 range of its window; IM in the report is empty (NaN)");
+        }
+      }
+      else if (with_limits > 0)
+      { warn("search: the isolation windows carry 1/K0 limits but the spectra no per-peak 1/K0 array; the run is searched by m/z and RT only"); }
+      json loader = {
+        {"bytes", bytes}, {"read_mode", run.read_mode}, {"auto_cache_above_bytes", cache_above_bytes},
+        {"cache_bytes", run.cache_bytes},
+        {"ms2_windows", ms2}, {"ms1_maps", ms1}, {"ms2_spectra", spectra_ms2},
+        {"rt_range_s", {num(first), num(last)}},
+        {"im_limits", with_limits}, {"im_limits_swapped", swapped}, {"im_per_peak_array", array},
+        {"im_extraction", im_on}};
+      // Only on ion-mobility runs: every other run records exactly what it did before M2.
+      for (auto it = im_json.begin(); it != im_json.end(); ++it) { loader[it.key()] = it.value(); }
+      run.provenance_json = loader.dump();
+    }
+    catch (...)
+    {
+      run.maps.clear();
+      if (!run.scratch.empty()) { fs::remove_all(run.scratch, ec); }
+      throw;
+    }
+    return run;
+  }
+
+  // ---- calibration ------------------------------------------------------------
+
+  // ---- the RT model: line or LOWESS -----------------------------------------------
+
+  Identifier::RtModelChoice Identifier::chooseRtModel(const std::vector<std::pair<double, double>>& stock,
+                                                      const std::vector<std::pair<double, double>>& points,
+                                                      const OpenMS::TransformationDescription& line, double run_first,
+                                                      double run_span)
+  {
+    // A predicted library's RT is not a linear function of the run's
+    // everywhere (an Astral run: the line ran a median 89 s late in the top
+    // library-RT decile), and the RT window is sized by the residuals.
+    // LOWESS (stock TransformationModelLowess, span by cross-validation) on
+    // the stock points, with its own iterative outlier cut. The choice is made
+    // on held-out accuracy, not on window widths (those come from different
+    // inlier sets and cannot see a bias confined to one part of the
+    // gradient): both models are fitted and scored by lowess_folds-fold
+    // cross-validation on ONE point set, the union of both inlier sets,
+    // residuals capped at robust_cut line scales so an outlier costs both
+    // models the same. LOWESS is used when enough points remain, both
+    // directions are increasing, and its held-out error is below lowess_gain
+    // times the line's.
+    RtModelChoice out;
+    json nonlinear = {{"model", "lowess"}, {"min_points", lowess_min_points}, {"gain_required", lowess_gain},
+                      {"rule", "cross-validated error on one point set"}, {"used", false}};
+    if (points.size() < lowess_min_points)
+    {
+      nonlinear["reason"] = "too few points";
+      out.record_json = nonlinear.dump();
+      return out;
+    }
+    try
+    {
+      QuietStreams quiet;   // the CV span search logs to std::cout
+      OpenMS::TransformationDescription linear = line;
+      const double linear_window = linear.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+      std::vector<std::pair<double, double>> current = points;
+      OpenMS::TransformationDescription fit;
+      std::size_t fits = 0;
+      bool converged = false;
+      double scale = 0.0;
+      for (;;)
+      {
+        fit = OpenMS::TransformationDescription();
+        fit.setDataPoints(current);
+        fit.fitModel("lowess", lowessParam());
+        ++fits;
+        std::vector<double> residual;
+        for (const auto& p : current) { residual.push_back(std::fabs(p.second - fit.apply(p.first))); }
+        scale = std::max(robust_min_scale, 1.4826 * quantile(residual, 0.5));
+        std::vector<std::pair<double, double>> next;
+        for (const auto& p : stock) { if (std::fabs(p.second - fit.apply(p.first)) <= robust_cut * scale) { next.push_back(p); } }
+        if (next == current) { converged = true; break; }
+        // Stop with `fit` fitted on `current`, never one set behind it.
+        if (next.size() < lowess_min_points || fits >= lowess_max_fits) { break; }
+        current.swap(next);
+      }
+      // Increasing both ways, over the run and over the assay range: the
+      // extraction maps assay RT through the inverse fit.
+      OpenMS::TransformationDescription inverse = fit;
+      inverse.invert();
+      bool increasing = true;
+      double previous = -std::numeric_limits<double>::infinity(), previous_inverse = previous;
+      for (int g = 0; g <= 200 && increasing; ++g)
+      {
+        const double x = run_first + run_span * g / 200.0, a = 100.0 * g / 200.0;
+        const double y = fit.apply(x), r = inverse.apply(a);
+        increasing = y > previous && r > previous_inverse;
+        previous = y;
+        previous_inverse = r;
+      }
+      // Held-out error of both models on the union of both inlier sets.
+      std::vector<std::pair<double, double>> common = points;
+      common.insert(common.end(), current.begin(), current.end());
+      std::sort(common.begin(), common.end());
+      common.erase(std::unique(common.begin(), common.end()), common.end());
+      double line_scale = 0.0;
+      {
+        std::vector<double> r;
+        for (const auto& p : points) { r.push_back(std::fabs(p.second - linear.apply(p.first))); }
+        line_scale = std::max(robust_min_scale, 1.4826 * quantile(r, 0.5));
+      }
+      const double cap = robust_cut * line_scale;
+      double error_line = 0.0, error_lowess = 0.0;
+      std::size_t held = 0;
+      for (std::size_t f = 0; f < lowess_folds; ++f)
+      {
+        std::vector<std::pair<double, double>> train, test;
+        for (std::size_t k = 0; k < common.size(); ++k) { (k % lowess_folds == f ? test : train).push_back(common[k]); }
+        if (train.size() < 2 || test.empty()) { continue; }
+        OpenMS::TransformationDescription line_f, lowess_f;
+        line_f.setDataPoints(train);
+        line_f.fitModel("linear", Param());
+        lowess_f.setDataPoints(train);
+        lowess_f.fitModel("lowess", lowessParam());
+        for (const auto& p : test)
+        {
+          error_line += std::min(cap, std::fabs(p.second - line_f.apply(p.first)));
+          error_lowess += std::min(cap, std::fabs(p.second - lowess_f.apply(p.first)));
+          ++held;
+        }
+      }
+      if (held > 0) { error_line /= static_cast<double>(held); error_lowess /= static_cast<double>(held); }
+      const double window = fit.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+      nonlinear["points"] = current.size();
+      nonlinear["fits"] = fits;
+      nonlinear["converged"] = converged;
+      nonlinear["span"] = static_cast<double>(fit.getModelParameters().getValue("span"));
+      nonlinear["scale_library"] = scale;
+      nonlinear["increasing"] = increasing;
+      nonlinear["window_linear_s"] = num(linear_window);
+      nonlinear["window_lowess_s"] = num(window);
+      nonlinear["cv"] = {{"folds", lowess_folds}, {"points", common.size()}, {"cap_library", cap},
+                         {"error_linear", num(error_line)}, {"error_lowess", num(error_lowess)}};
+      if (!increasing) { nonlinear["reason"] = "not increasing over the run"; }
+      else if (current.size() < lowess_min_points) { nonlinear["reason"] = "too few points after the outlier cut"; }
+      else if (held == 0 || !(error_lowess < lowess_gain * error_line))
+      { nonlinear["reason"] = "does not predict held-out points better than the line"; }
+      else
+      {
+        nonlinear["used"] = true;
+        out.lowess = true;
+        out.fit = fit;
+        out.points = current;
+      }
+    }
+    catch (const std::exception& e) { nonlinear["reason"] = std::string("fit failed: ") + e.what(); }
+    // The span search logs one info line per fit; the log stream prints a
+    // "<line> occurred N times" note when its repeat cache empties. Empty it
+    // now, while std::cout is still silenced.
+    {
+      QuietStreams quiet;
+      OpenMS::OpenMS_Log_info.rdbuf()->clearCache();
+    }
+    out.record_json = nonlinear.dump();
+    return out;
+  }
+
+  // ---- calibration ----------------------------------------------------------------
+
+  Calibration Identifier::calibrate(const Library& library, const SearchSet& set, RunData& run)
+  {
+    Calibration cal;
+    json detail = json::object();
+    const auto [run_first, run_last] = runSpan(run.maps);
+    const double run_span = run_last - run_first;
+    if (!(run_span > 0))
+    { throw SearchAbort("search: the run's MS2 spectra span no time (" + fixed(run_first, 1) + " .. " + fixed(run_last, 1) + " s); cannot calibrate RT"); }
+
+    // 1. Seeds: EVERY kit precursor the library holds (the iRT and CiRT kits
+    //    exist to be found in any run), and a stock-sampled share of the
+    //    search's other targets. Input-library indices, targets only, one per
+    //    precursor id.
+    std::vector<std::string> kit_files, kit_missing;
+    const std::unordered_set<std::string> kit = kitSequences(kit_files, kit_missing);
+    const auto& pre = library.precursors();
+    auto eligible = [&](std::size_t i) {
+      return !pre.decoy[i] && pre.mz[i] != MZ_INVALID && pre.charge[i] != 0 && std::isfinite(pre.irt[i]) &&
+             pre.transition_count[i] >= SearchParams::min_assay_fragments;
+    };
+    auto idOf = [&](std::size_t i) {
+      std::string id(library.strings().get(pre.modified_sequence[i]));
+      id += std::to_string(pre.charge[i]);
+      return id;
+    };
+    std::vector<std::size_t> picked;
+    std::unordered_set<std::string> picked_ids;
+    std::size_t kit_in_library = 0, kit_outside_windows = 0, kit_outside_rt = 0;
+    // Seeds only from the central library-RT range: one kit row with an absurd
+    // RT would stretch the seeds' RT span, and the stock binned-coverage check
+    // over that span would then fail the whole search.
+    const bool has_central = set.rt_robust.max > set.rt_robust.min;   // a set built by hand may not carry one
+    auto centralRt = [&](std::size_t i) {
+      return !has_central || (pre.irt[i] >= set.rt_robust.min && pre.irt[i] <= set.rt_robust.max);
+    };
+    const std::vector<IsolationWindow> windows = isolationWindows(run);
+    if (!kit.empty())
+    {
+      for (std::size_t i = 0; i < library.precursorCount(); ++i)
+      {
+        if (!eligible(i) || !kit.count(strippedSequence(library.strings().get(pre.modified_sequence[i])))) { continue; }
+        ++kit_in_library;
+        // A seed outside every isolation window cannot be found.
+        if (!windows.empty() && !CandidateSelector::inWindow(fromFixed(pre.mz[i]), windows)) { ++kit_outside_windows; continue; }
+        if (!centralRt(i)) { ++kit_outside_rt; continue; }
+        if (picked_ids.insert(idOf(i)).second) { picked.push_back(i); }   // a duplicated (sequence, charge): first index
+      }
+    }
+    const std::size_t picked_kit = picked.size();
+
+    // 2a. Evidence seeds (search:candidates evidence): targets with fragment
+    //     evidence of their own, spread over the library RT range by the
+    //     prefilter, which also says where each was seen.
+    std::unordered_map<std::size_t, double> seen_at;   // input library index -> prefilter best-spectrum RT
+    if (!set.seeds.empty())
+    {
+      std::size_t added = 0;
+      for (const SeedHint& s : set.seeds)
+      {
+        if (!eligible(s.index) || !picked_ids.insert(idOf(s.index)).second) { continue; }
+        picked.push_back(s.index);
+        seen_at.emplace(s.index, s.rt_s);
+        ++added;
+      }
+      detail["seed_rule"] = "evidence";
+      detail["seeds_evidence"] = added;
+      detail["seed_candidates"] = set.seeds.size();
+    }
+    // 2b. Otherwise the stock sampler over the other targets: RT bins, the
+    //    most intense share first. It de-duplicates by compound.sequence, so
+    //    it sees the STRIPPED sequence (one seed per peptide, whatever its
+    //    charge states); one transition per compound carries the summed
+    //    library intensity it ranks by. The seed assays are rebuilt
+    //    sequence-blind below.
+    else
+    {
+      detail["seed_rule"] = "sampled";
+      std::vector<std::size_t> candidates;
+      candidates.reserve(set.pairs());
+      for (std::size_t k = 0; k < set.pairs(); ++k) { candidates.push_back(set.source[k]); }
+      std::sort(candidates.begin(), candidates.end());
+      candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+      OpenSwath::LightTargetedExperiment pool;
+      pool.compounds.reserve(candidates.size());
+      pool.transitions.reserve(candidates.size());
+      std::unordered_map<std::string, std::size_t> index_of;
+      for (const std::size_t i : candidates)
+      {
+        const std::string id = idOf(i);
+        if (!centralRt(i) || picked_ids.count(id) || !index_of.emplace(id, i).second) { continue; }
+        OpenSwath::LightCompound c;
+        c.id = id;
+        c.sequence = strippedSequence(library.strings().get(pre.modified_sequence[i]));
+        c.charge = pre.charge[i];
+        c.rt = set.rt_scale.toAssay(pre.irt[i]);
+        c.drift_time = -1.0;
+        OpenSwath::LightTransition t;
+        t.transition_name = id + "_sum";
+        t.peptide_ref = id;
+        t.library_intensity = 0.0;
+        for (std::uint32_t k = 0; k < pre.transition_count[i]; ++k)
+        { t.library_intensity += library.transitions().library_intensity[pre.transition_begin[i] + k]; }
+        t.precursor_mz = fromFixed(pre.mz[i]);
+        t.decoy = false;
+        pool.compounds.push_back(std::move(c));
+        pool.transitions.push_back(std::move(t));
+      }
+      // The sampler keeps the top share first and only then needs three
+      // candidates (it throws below that): pools under ceil(3 / top share)
+      // contribute no sampled seeds, and the calibration guard below says so.
+      if (static_cast<double>(pool.compounds.size()) * seed_top_fraction >= 3.0)
+      {
+        try
+        {
+          QuietStreams quiet;
+          const OpenSwath::LightTargetedExperiment sampled = OpenMS::OpenSwathHelper::sampleExperiment(
+            pool, seed_bins, seeds_per_bin, seed_sampling_seed, true, seed_top_fraction);
+          for (const auto& c : sampled.compounds) { picked.push_back(index_of.at(c.id)); }
+        }
+        catch (const std::exception& e) { detail["seed_sampling_failure"] = e.what(); }
+      }
+      detail["seed_candidates"] = pool.compounds.size();
+    }
+    // An ion-mobility run (searched with it) calibrates RT the way it is then
+    // searched: each seed extracted from the ONE diaPASEF window its library
+    // 1/K0 falls in (OpenSWATH's pasef assignment). Without it every seed was
+    // extracted from every window holding its m/z, and the stock peak picker,
+    // which keys chromatograms by transition id, kept whichever window's
+    // extraction finished last. Seeds without a library 1/K0 cannot be
+    // assigned (stock refuses them).
+    const bool im_run = run.ion_mobility && params().im_window != -1.0;
+    if (im_run)
+    {
+      const std::size_t before = picked.size();
+      picked.erase(std::remove_if(picked.begin(), picked.end(), [&](std::size_t i) { return !std::isfinite(libraryMobility(library, i)); }),
+                   picked.end());
+      detail["seeds_without_library_im"] = before - picked.size();
+      detail["seed_window_assignment"] = "pasef: one diaPASEF window per seed, by library 1/K0";
+    }
+    const OpenSwath::LightTargetedExperiment seed = AssayBuilder::buildTargets(library, picked, set.rt_scale, im_run);
+    cal.seeds = seed.compounds.size();
+    detail["kit_files"] = kit_files;
+    detail["kit_files_missing"] = kit_missing;
+    detail["kit_sequences"] = kit.size();
+    detail["kit_precursors_in_library"] = kit_in_library;
+    detail["kit_precursors_outside_windows"] = kit_outside_windows;
+    detail["kit_precursors_outside_library_rt_range"] = kit_outside_rt;
+    detail["seed_library_rt_range"] = {set.rt_robust.min, set.rt_robust.max};
+    detail["seeds_kit"] = picked_kit;
+    if (set.seeds.empty())
+    {
+      detail["sampling"] = {{"bins", seed_bins}, {"per_bin", seeds_per_bin}, {"top_fraction", seed_top_fraction},
+                            {"seed", seed_sampling_seed}};
+    }
+    detail["seed_mz_ppm"] = calibration_mz_ppm;
+    detail["model"] = "linear";
+    detail["outliers"] = "iter_residual, estimateBestPeptides";
+
+    // 3. performRTNormalization on a COPY of the maps (the m/z estimate wraps
+    //    the maps it is given; extraction must read the originals).
+    std::string failure;
+    double mz_estimate = -1.0, ms1_mz_estimate = -1.0;
+    if (cal.seeds < 3)
+    { failure = std::to_string(cal.seeds) + " seed assays (" + std::to_string(detail["seed_candidates"].get<std::size_t>()) + " candidates)"; }
+    else
+    {
+      try
+      {
+        std::vector<OpenSwath::SwathMap> maps = run.maps;
+        OpenMS::OpenSwathCalibrationWorkflow workflow;
+        workflow.setLogType(OpenMS::ProgressLogger::NONE);
+        OpenMS::TransformationDescription im_trafo;
+        const Param ff = featureFinderParam(false, false, false);
+        const OpenMS::ChromExtractParams cp_irt = chromParams(calibration_mz_ppm, -1.0, -1.0);
+        const ThreadCap team(SearchParams::openswathThreads());
+        QuietStreams quiet;
+        trace::Scope normalizing("openswath", 1);
+        normalizing.fields().rows = static_cast<std::int64_t>(seed.compounds.size());
+        normalizing.fields().session = team.used();
+        // pasef on an ion-mobility run searched with it (see the seeds above).
+        cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
+                                                 params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
+                                                 massCorrectionParam(), "", 0, im_run, false);
+        cal.im = im_trafo;
+        mz_estimate = workflow.getEstimatedMzWindow();
+        ms1_mz_estimate = workflow.getEstimatedMs1MzWindow();
+      }
+      catch (const std::exception& e)
+      {
+        failure = std::string("performRTNormalization failed: ") + e.what();
+        // The stock binned-coverage check (8 of 10 library-RT bins) fails when
+        // too few seeds are found across the library's RT range: a run that
+        // covers part of the gradient only (a slice), or a library that does
+        // not match the run. Nothing here can tell the two apart.
+        if (failure.find("not enough bins") != std::string::npos)
+        {
+          failure += " -- the seeds found in the run do not cover most of the library RT range: either the run covers "
+                     "only part of the gradient (a slice), or the library does not match the run (organism, "
+                     "modifications, a different gradient)";
+          double lo = std::numeric_limits<double>::infinity(), hi = -lo;
+          for (const auto& c : seed.compounds) { lo = std::min(lo, c.rt); hi = std::max(hi, c.rt); }
+          failure += "; the seed assays span library RT " + fixed(set.rt_scale.toLibrary(lo), 3) + " .. " +
+                     fixed(set.rt_scale.toLibrary(hi), 3) + " (seeds come from the central library-RT range " + fixed(set.rt_robust.min, 3) +
+                     " .. " + fixed(set.rt_robust.max, 3) + "; all library targets span " + fixed(set.rt_scale.min, 3) + " .. " +
+                     fixed(set.rt_scale.max, 3) + ")";
+        }
+      }
+    }
+
+    // 4. Refit robustly, then validate: stock stops removing outliers as soon as
+    //    r^2 reaches min_rsq, and accepts a handful of points and any slope.
+    std::vector<std::pair<double, double>> points;
+    std::vector<std::pair<double, double>> stock;
+    if (failure.empty())
+    {
+      for (const auto& dp : cal.rt.getDataPoints()) { stock.emplace_back(dp.first, dp.second); }
+      detail["points_stock"] = stock.size();
+      const RobustLine line = robustLine(stock, robust_cut, robust_min_scale);
+      if (!line.valid())
+      { failure = "no line through the " + std::to_string(stock.size()) + " calibration points"; }
+      else
+      {
+        for (std::size_t k = 0; k < stock.size(); ++k) { if (line.inlier[k]) { points.push_back(stock[k]); } }
+        detail["robust"] = {{"cut_sd", robust_cut}, {"inliers", line.inliers}, {"iterations", line.iterations},
+                            {"scale_library", num(line.scale)},
+                            {"scale_s", num(line.slope > 0 ? line.scale / line.slope : std::numeric_limits<double>::quiet_NaN())}};
+        if (points.size() >= 2)
+        {
+          cal.rt = OpenMS::TransformationDescription();
+          cal.rt.setDataPoints(points);
+          cal.rt.fitModel("linear", Param());
+        }
+      }
+    }
+    cal.points = failure.empty() ? points.size() : 0;
+    double slope = std::numeric_limits<double>::quiet_NaN(), intercept = slope;
+    if (failure.empty())
+    {
+      const double n = static_cast<double>(points.size());
+      double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, ylo = std::numeric_limits<double>::infinity(), yhi = -ylo;
+      for (const auto& dp : points)
+      {
+        sx += dp.first; sy += dp.second; sxx += dp.first * dp.first; syy += dp.second * dp.second; sxy += dp.first * dp.second;
+        ylo = std::min(ylo, dp.second); yhi = std::max(yhi, dp.second);
+      }
+      const double vx = n * sxx - sx * sx, vy = n * syy - sy * sy, cxy = n * sxy - sx * sy;
+      cal.rsq = (vx > 0 && vy > 0) ? (cxy * cxy) / (vx * vy) : std::numeric_limits<double>::quiet_NaN();
+      slope = vx > 0 ? cxy / vx : std::numeric_limits<double>::quiet_NaN();   // assay units per second
+      intercept = n > 0 ? (sy - slope * sx) / n : slope;
+      double seed_lo = std::numeric_limits<double>::infinity(), seed_hi = -seed_lo;
+      for (const auto& c : seed.compounds) { seed_lo = std::min(seed_lo, c.rt); seed_hi = std::max(seed_hi, c.rt); }
+      const double span = (seed_hi > seed_lo && points.size() > 1) ? (yhi - ylo) / (seed_hi - seed_lo) : 0.0;
+      cal.coverage = cal.seeds > 0 ? static_cast<double>(points.size()) / static_cast<double>(cal.seeds) : 0.0;
+      const double implied_s = (slope > 0) ? 100.0 / slope : std::numeric_limits<double>::infinity();
+      detail["seed_rt_span_covered"] = num(span);
+      detail["library_range_implied_s"] = num(implied_s);
+      detail["run_span_s"] = run_span;
+      if (points.size() < calibration_min_points)
+      { failure = std::to_string(points.size()) + " calibration points, fewer than " + std::to_string(calibration_min_points); }
+      else if (!(cal.rsq >= params().calibration_min_rsq))
+      { failure = "r^2 " + fixed(cal.rsq, 3) + " below search:calibration_min_rsq " + fixed(params().calibration_min_rsq, 2); }
+      else if (!(slope > 0))
+      { failure = "the RT map does not increase (slope " + fixed(slope, 6) + " library units per second)"; }
+      else if (implied_s > calibration_span_factor * run_span || implied_s < run_span / calibration_span_factor)
+      {
+        failure = "the RT map spreads the library RT range over " + fixed(implied_s, 0) + " s of a " + fixed(run_span, 0) +
+                  " s run (slope " + fixed(slope, 6) + "); more than " + fixed(calibration_span_factor, 0) + "x off";
+      }
+      else if (span < calibration_min_span)
+      { failure = "the points cover " + fixed(100.0 * span, 1) + " % of the seeds' library RT span, less than " + fixed(100.0 * calibration_min_span, 0) + " %"; }
+    }
+    detail["slope_library_per_s"] = num(slope);
+    detail["intercept_library"] = num(intercept);
+
+    if (!failure.empty())
+    {
+      detail["failure"] = failure;
+      if (!params().allow_bootstrap)
+      {
+        std::string im_note;
+        if (detail.contains("seeds_without_library_im"))
+        {
+          im_note = "; on this ion-mobility run " + std::to_string(detail["seeds_without_library_im"].get<std::size_t>()) +
+                    " seeds were dropped for want of a library 1/K0 (IM or CCS), and search:im_window -1 searches by m/z "
+                    "and RT only";
+        }
+        throw SearchAbort("search: RT calibration failed: " + failure + " (" + std::to_string(cal.seeds) + " seed assays, " +
+                          std::to_string(picked_kit) + " of them iRT/CiRT kit precursors, " + std::to_string(cal.points) +
+                          " points kept); nothing is searched on a guessed RT scale unless search:allow_bootstrap is set" + im_note);
+      }
+      // The test hook: the library RT range laid linearly over the run, and a
+      // window as wide as the run unless search:rt_window says otherwise.
+      if (run.ion_mobility && params().im_window != -1.0)
+      {
+        // The ion-mobility calibration measures the RT calibration's seeds at
+        // their apex; a guessed RT map has none.
+        throw SearchAbort("search: RT calibration failed: " + failure + "; search:allow_bootstrap cannot stand in for it on an "
+                          "ion-mobility run, whose 1/K0 calibration measures the RT calibration's seeds (search:im_window -1 "
+                          "searches without ion mobility)");
+      }
+      cal.bootstrap = true;
+      cal.rt = OpenMS::TransformationDescription();
+      cal.rt.setDataPoints(std::vector<std::pair<double, double>>{{run_first, 0.0}, {run_last, 100.0}});
+      cal.rt.fitModel("linear", Param());
+      cal.im = OpenMS::TransformationDescription();
+      cal.rt_window = params().rt_window > 0 ? params().rt_window : 2.0 * run_span;
+      cal.mz_ppm = params().mz_ppm > 0 ? params().mz_ppm : default_mz_ppm;
+      cal.ms1_mz_ppm = params().mz_ppm > 0 ? params().mz_ppm : default_mz_ppm;
+      cal.im_window = -1.0;
+      detail["rt_window_rule"] = params().rt_window > 0 ? "search:rt_window" : "bootstrap: twice the run span";
+      cal.provenance_json = detail.dump();
+      return cal;
+    }
+
+    // 4a. Where the prefilter saw the evidence seeds, against the peak groups
+    //     the stock calibration picked for them: two independent looks at
+    //     the same seed. Recorded, not used. A point is matched to its seed
+    //     by the seed's assay RT, the only key performRTNormalization keeps.
+    if (!seen_at.empty())
+    {
+      std::unordered_map<double, std::vector<double>> by_assay_rt;
+      for (const auto& [index, rt] : seen_at) { by_assay_rt[set.rt_scale.toAssay(pre.irt[index])].push_back(rt); }
+      std::vector<double> gap;
+      for (const auto& p : stock)
+      {
+        const auto it = by_assay_rt.find(p.second);
+        if (it == by_assay_rt.end()) { continue; }
+        double best = std::numeric_limits<double>::infinity();
+        for (const double rt : it->second) { best = std::min(best, std::fabs(rt - p.first)); }
+        if (std::isfinite(best)) { gap.push_back(best); }
+      }
+      std::size_t within = 0;
+      for (const double g : gap) { within += g <= prefilter_agreement_s ? 1 : 0; }
+      detail["prefilter_agreement"] = {{"points", gap.size()}, {"median_s", num(quantile(gap, 0.5))},
+                                       {"p90_s", num(quantile(gap, 0.9))}, {"within_s", prefilter_agreement_s},
+                                       {"within", within}};
+    }
+
+    // 4b. A non-linear second fit (Identifier::chooseRtModel): LOWESS
+    //     replaces the line when it predicts held-out points better.
+    {
+      json nonlinear;
+      if (params().rt_window <= 0)
+      {
+        const RtModelChoice choice = chooseRtModel(stock, points, cal.rt, run_first, run_span);
+        nonlinear = json::parse(choice.record_json);
+        if (choice.lowess)
+        {
+          cal.rt = choice.fit;
+          points = choice.points;
+          detail["model"] = "lowess";
+        }
+      }
+      else { nonlinear = {{"model", "lowess"}, {"used", false}, {"reason", "search:rt_window is set"}}; }
+      detail["nonlinear"] = nonlinear;
+    }
+
+    // 4c. Where the chosen model is biased, by library-RT decile of the
+    //     points (median signed residual, run seconds): a diagnostic.
+    {
+      std::vector<std::pair<double, double>> by_assay;   // (assay RT, run - model run RT)
+      OpenMS::TransformationDescription inverse = cal.rt;
+      inverse.invert();
+      for (const auto& p : points) { by_assay.emplace_back(p.second, p.first - inverse.apply(p.second)); }
+      std::sort(by_assay.begin(), by_assay.end());
+      json deciles = json::array();
+      for (std::size_t d = 0; d < 10 && !by_assay.empty(); ++d)
+      {
+        const std::size_t lo = d * by_assay.size() / 10, hi = (d + 1) * by_assay.size() / 10;
+        std::vector<double> r;
+        for (std::size_t k = lo; k < hi; ++k) { r.push_back(by_assay[k].second); }
+        deciles.push_back(num(r.empty() ? std::numeric_limits<double>::quiet_NaN() : quantile(r, 0.5)));
+      }
+      detail["median_residual_s_by_library_rt_decile"] = deciles;
+    }
+
+    cal.points = points.size();
+
+    // 5. Windows. RT: the seed residuals (TOPP's quantile and padding), with a
+    //    floor; m/z: the calibration's estimate may only NARROW the default.
+    double robust_sd_s = std::numeric_limits<double>::quiet_NaN();
+    {
+      OpenMS::TransformationDescription inverse = cal.rt;
+      inverse.invert();
+      std::vector<double> residual;
+      residual.reserve(points.size());
+      for (const auto& dp : points) { residual.push_back(std::fabs(inverse.apply(dp.second) - dp.first)); }
+      robust_sd_s = 1.4826 * quantile(residual, 0.5);
+      detail["residual_s"] = {{"median", num(quantile(residual, 0.5))}, {"p95", num(quantile(residual, 0.95))},
+                              {"p99", num(quantile(residual, 0.99))}, {"max", num(quantile(residual, 1.0))},
+                              {"robust_sd", num(robust_sd_s)}};
+    }
+    if (points.size() < calibration_warn_points)
+    {
+      warn("search: the RT calibration rests on " + std::to_string(points.size()) + " points, fewer than " +
+           std::to_string(calibration_warn_points) + ": its RT window is sized with a small-sample margin and may still "
+           "miss true precursors");
+      detail["few_points_warning"] = true;
+    }
+    if (params().rt_window > 0)
+    {
+      cal.rt_window = params().rt_window;
+      detail["rt_window_rule"] = "search:rt_window";
+    }
+    else
+    {
+      const double estimate = cal.rt.estimateWindow(rt_window_quantile, true, true, rt_window_padding);
+      const double margin = std::isfinite(robust_sd_s) ? 2.0 * rt_window_padding * rt_window_normal_quantile * robust_sd_s : 0.0;
+      cal.rt_window = std::min(2.0 * run_span, std::max({rt_window_floor_s, estimate, margin}));
+      detail["rt_window_estimate_s"] = num(estimate);
+      detail["rt_window_margin_s"] = num(margin);
+      detail["rt_window_rule"] = "2 x " + fixed(rt_window_quantile, 2) + " quantile of the seed residuals x " +
+                                 fixed(rt_window_padding, 1) + ", at least 2 x " + fixed(rt_window_padding, 1) + " x " +
+                                 fixed(rt_window_normal_quantile, 3) + " robust SDs of them and " + fixed(rt_window_floor_s, 0) + " s";
+    }
+    auto mzWindow = [&](double estimate) {
+      if (params().mz_ppm > 0) { return params().mz_ppm; }
+      if (!(estimate > 0)) { return default_mz_ppm; }
+      return std::min(default_mz_ppm, std::min(mz_cap_ppm, std::max(mz_floor_ppm, estimate)));
+    };
+    cal.mz_ppm = mzWindow(mz_estimate);
+    cal.ms1_mz_ppm = mzWindow(ms1_mz_estimate);
+    detail["mz_estimate_ppm"] = num(mz_estimate > 0 ? mz_estimate : std::numeric_limits<double>::quiet_NaN());
+    detail["ms1_mz_estimate_ppm"] = num(ms1_mz_estimate > 0 ? ms1_mz_estimate : std::numeric_limits<double>::quiet_NaN());
+    detail["mz_rule"] = params().mz_ppm > 0 ? std::string("search:mz_ppm")
+                                            : "estimate clamped to [" + fixed(mz_floor_ppm, 0) + ", " + fixed(mz_cap_ppm, 0) +
+                                                "] ppm, never wider than the default " + fixed(default_mz_ppm, 0) + " ppm";
+    cal.im_window = -1.0;
+    if (run.ion_mobility && params().im_window != -1.0)
+    { detail["ion_mobility"] = json::parse(calibrateMobility(library, set, run, seed, picked, points, cal)); }
+    cal.provenance_json = detail.dump();
+    return cal;
+  }
+
+  // ---- ion-mobility calibration -------------------------------------------------
+
+  std::string Identifier::calibrateMobility(const Library& library, const SearchSet& set, const RunData& run,
+                                            const OpenSwath::LightTargetedExperiment& seed, const std::vector<std::size_t>& picked,
+                                            const std::vector<std::pair<double, double>>& points, Calibration& cal)
+  {
+    // Every point of the chosen RT model is a seed found at its apex. Measure
+    // where its fragments co-locate in 1/K0 there, over the WHOLE 1/K0 range
+    // of the windows holding its m/z -- an estimate that never looks at the
+    // library's value -- and fit library -> run 1/K0 through those points.
+    // Seeds are targets; the map is applied to every target and its decoy alike.
+    const auto& pre = library.precursors();
+    const auto& tr = library.transitions();
+    std::unordered_map<double, std::vector<std::size_t>> seed_at;   // assay RT -> seed compounds
+    for (std::size_t k = 0; k < seed.compounds.size(); ++k) { seed_at[seed.compounds[k].rt].push_back(k); }
+    const double ppm_half = cal.mz_ppm / 2.0;
+    std::size_t unmatched = 0, ambiguous = 0, no_library = 0, no_window = 0, weak = 0;
+    std::vector<std::pair<double, double>> measured;   // (library 1/K0, run 1/K0)
+    std::vector<std::size_t> measured_index;           // input library index per measured point
+    for (const auto& p : points)
+    {
+      const auto it = seed_at.find(p.second);
+      if (it == seed_at.end()) { ++unmatched; continue; }
+      if (it->second.size() != 1) { ++ambiguous; continue; }   // two seeds share an assay RT: which one is this?
+      const std::size_t i = picked[it->second.front()];
+      const double k0 = libraryMobility(library, i);
+      if (!std::isfinite(k0)) { ++no_library; continue; }
+      const double mz = fromFixed(pre.mz[i]);
+      std::vector<double> fragments;
+      for (std::uint32_t f = 0; f < pre.transition_count[i]; ++f) { fragments.push_back(fromFixed(tr.product_mz[pre.transition_begin[i] + f])); }
+      const MobilityApex apex = mobilityAt(run.maps, mz, p.first, fragments, ppm_half);
+      if (apex.windows == 0) { ++no_window; continue; }
+      if (!std::isfinite(apex.im) || apex.fragments < SearchParams::im_seed_min_fragments) { ++weak; continue; }
+      measured.emplace_back(k0, apex.im);
+      measured_index.push_back(i);
+    }
+    json im = {{"rule", "each RT calibration point's seed measured at its apex (" + std::to_string(mobility_probe_spectra) +
+                        " spectra per window holding its m/z), over the windows' whole 1/K0 range: the 1/K0 where most of "
+                        "its fragments co-locate (each fragment one vote); robust line library -> run 1/K0"},
+               {"rt_points", points.size()}, {"measured", measured.size()},
+               {"skipped", {{"no_seed_at_rt", unmatched}, {"ambiguous_rt", ambiguous}, {"no_library_im", no_library},
+                            {"no_window", no_window}, {"fewer_fragments", weak}}},
+               {"min_fragments", SearchParams::im_seed_min_fragments}, {"ppm_half", ppm_half}};
+    const RobustLine line = robustLine(measured, robust_cut, im_robust_min_scale);
+    std::vector<std::pair<double, double>> inliers;
+    for (std::size_t k = 0; k < measured.size() && line.valid(); ++k) { if (line.inlier[k]) { inliers.push_back(measured[k]); } }
+    double rsq = std::numeric_limits<double>::quiet_NaN();
+    {
+      const double n = static_cast<double>(inliers.size());
+      double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+      for (const auto& q : inliers) { sx += q.first; sy += q.second; sxx += q.first * q.first; syy += q.second * q.second; sxy += q.first * q.second; }
+      const double vx = n * sxx - sx * sx, vy = n * syy - sy * sy, cxy = n * sxy - sx * sy;
+      if (vx > 0 && vy > 0) { rsq = cxy * cxy / (vx * vy); }
+    }
+    im["slope"] = num(line.slope);
+    im["intercept"] = num(line.intercept);
+    im["inliers"] = inliers.size();
+    im["rsq"] = num(rsq);
+    im["robust"] = {{"cut_sd", robust_cut}, {"min_scale", im_robust_min_scale}, {"scale", num(line.scale)}, {"iterations", line.iterations}};
+    std::string failure;
+    if (inliers.size() < SearchParams::im_calibration_min_points)
+    {
+      failure = std::to_string(inliers.size()) + " seeds measured in 1/K0 and kept, fewer than " +
+                std::to_string(SearchParams::im_calibration_min_points);
+    }
+    else if (!(line.slope >= SearchParams::im_slope_low && line.slope <= SearchParams::im_slope_high))
+    {
+      failure = "the library -> run 1/K0 line has slope " + fixed(line.slope, 3) + ", outside [" + fixed(SearchParams::im_slope_low, 2) +
+                ", " + fixed(SearchParams::im_slope_high, 2) + "]";
+    }
+    else if (!(rsq >= params().calibration_min_rsq))
+    { failure = "r^2 " + fixed(rsq, 3) + " of the 1/K0 line below search:calibration_min_rsq " + fixed(params().calibration_min_rsq, 2); }
+    if (!failure.empty())
+    {
+      throw SearchAbort("search: ion-mobility calibration failed: " + failure + " (" + std::to_string(points.size()) +
+                        " RT calibration points, " + std::to_string(measured.size()) + " measured in 1/K0: " +
+                        std::to_string(no_library) + " seeds without a library 1/K0, " + std::to_string(weak) +
+                        " with fewer than " + std::to_string(SearchParams::im_seed_min_fragments) + " fragments at one 1/K0, " +
+                        std::to_string(ambiguous) + " ambiguous); search:im_window -1 searches the run by m/z and RT only");
+    }
+    cal.im = OpenMS::TransformationDescription();
+    cal.im.setDataPoints(inliers);
+    cal.im.fitModel("linear", Param());
+
+    // Residuals of the fitted map, and the window.
+    std::vector<double> abs_residual;
+    abs_residual.reserve(inliers.size());
+    for (const auto& q : inliers) { abs_residual.push_back(std::fabs(q.second - cal.im.apply(q.first))); }
+    double q99 = 0.0, robust_sd = 0.0;
+    const double automatic = automaticImWindow(abs_residual, q99, robust_sd);
+    cal.im_window = params().im_window > 0 ? params().im_window : automatic;
+    im["residual"] = {{"median", num(quantile(abs_residual, 0.5))}, {"p95", num(quantile(abs_residual, 0.95))},
+                      {"p99", num(q99)}, {"robust_sd", num(robust_sd)}};
+    im["window"] = cal.im_window;
+    im["window_automatic"] = automatic;
+    im["window_rule"] = params().im_window > 0
+                          ? std::string("search:im_window")
+                          : "2 x " + fixed(SearchParams::im_window_padding, 1) + " x max(0.99 quantile, " +
+                              fixed(SearchParams::im_window_normal_quantile, 3) + " robust SDs) of the residuals, clamped to [" +
+                              fixed(SearchParams::im_window_min, 2) + ", " + fixed(SearchParams::im_window_max, 2) + "]";
+
+    // Which diaPASEF window would extract each measured seed: by its measured
+    // 1/K0 (where it is), by its library 1/K0 as it stands, and by the
+    // calibrated one (what extraction uses).
+    std::size_t right_library = 0, right_calibrated = 0, placed = 0;
+    for (std::size_t k = 0; k < measured.size(); ++k)
+    {
+      const double mz = fromFixed(pre.mz[measured_index[k]]);
+      const int truth = windowOf(run.maps, mz, measured[k].second);
+      if (truth < 0) { continue; }
+      ++placed;
+      right_library += windowOf(run.maps, mz, measured[k].first) == truth ? 1 : 0;
+      right_calibrated += windowOf(run.maps, mz, cal.im.apply(measured[k].first)) == truth ? 1 : 0;
+    }
+    im["window_assignment"] = {{"seeds", placed}, {"library_im", right_library}, {"calibrated_im", right_calibrated}};
+
+    // The searched pairs whose calibrated 1/K0 lies in no window at their m/z.
+    // Extraction assigns them to the nearest window their 1/K0 range reaches
+    // into (assignWindow); the rest are never extracted, neither member (a
+    // pair shares m/z and 1/K0).
+    std::size_t outside = 0, nearest = 0, missing = 0;
+    for (std::size_t k = 0; k < set.pairs(); ++k)
+    {
+      const double k0 = libraryMobility(set.library, k);
+      if (!std::isfinite(k0)) { ++missing; continue; }
+      const double mz = fromFixed(set.library.precursors().mz[k]), calibrated = cal.im.apply(k0);
+      if (windowOf(run.maps, mz, calibrated) >= 0) { continue; }
+      double assigned = calibrated;
+      (assignWindow(run.maps, mz, calibrated, cal.im_window / 2, assigned) >= 0 ? nearest : outside)++;
+    }
+    im["pairs"] = {{"searched", set.pairs()}, {"no_library_im", missing}, {"outside_windows", outside + nearest},
+                   {"assigned_to_nearest_window", nearest}, {"never_extracted", outside + missing}};
+    info("search calibration: 1/K0 from " + std::to_string(inliers.size()) + " of " + std::to_string(measured.size()) +
+         " seeds measured at their apex: run = " + fixed(cal.im.apply(0.0), 4) + " + " + fixed(line.slope, 4) +
+         " x library, residual robust SD " + fixed(robust_sd, 4) + ", p99 " + fixed(q99, 4) + ", r^2 " + fixed(rsq, 3) +
+         "; 1/K0 window " + fixed(cal.im_window, 3) + (params().im_window > 0 ? " (search:im_window; automatic " + fixed(automatic, 3) + ")" : std::string(" (automatic)")) +
+         "; window of " + std::to_string(right_calibrated) + " of " + std::to_string(placed) + " seeds right with calibrated 1/K0, " +
+         std::to_string(right_library) + " with the library's; " + std::to_string(outside + nearest) + " of " + std::to_string(set.pairs()) +
+         " pairs outside every window, " + std::to_string(nearest) + " of them extracted from the nearest one" +
+         (missing ? ", " + std::to_string(missing) + " without a library 1/K0" : std::string()));
+    if (outside > 0)
+    {
+      warn("search: " + std::to_string(outside) + " of " + std::to_string(set.pairs()) + " searched pairs are lost: their "
+           "calibrated 1/K0 lies farther than half the 1/K0 window (" + fixed(cal.im_window / 2, 3) + ") from every window at "
+           "their m/z, so neither member is extracted");
+    }
+    // Searched pairs without a library 1/K0 (never extracted either) are
+    // warned about, and recorded, by identify() once they are chosen.
+    return im.dump();
+  }
+
+  // ---- extraction -------------------------------------------------------------
+
+  void Identifier::extract(const SearchSet& set, RunData& run, const Calibration& calibration, PeakGroups& out)
+  {
+    bool has_ms1 = false;
+    for (const auto& m : run.maps) { has_ms1 = has_ms1 || (m.ms1 && m.sptr && m.sptr->getNrSpectra() > 0); }
+    const bool ms1 = params().ms1 && has_ms1;
+    if (params().ms1 && !has_ms1) { warn("search: search:ms1 is on but the run has no MS1 spectra; MS1 traces and sub-scores are off"); }
+
+    // Ion mobility: a diaPASEF run whose calibration set a 1/K0 window (not
+    // search:im_window -1). Each precursor is then extracted from the ONE
+    // window OpenSWATH assigns it by m/z and calibrated 1/K0 (pasef), over
+    // its 1/K0 range only; a target and its decoy share both, and so the
+    // window and the range.
+    const bool im = run.ion_mobility && calibration.im_window > 0;
+    const bool ms1_im = im && ms1 && run.ms1_ion_mobility;
+    const std::vector<std::string> columns = scoreColumns(ms1, im, ms1_im);
+    out.setColumns(columns);
+    const std::size_t width = columns.size();
+    // Meta value names -> registry indices. registerName, not getIndex: a name
+    // OpenSWATH has not used yet in this process has no index, and getIndex
+    // would answer "unknown" -- the first search would read that sub-score as
+    // missing everywhere and the next one would not.
+    auto& registry = OpenMS::MetaInfoInterface::metaRegistry();
+    std::vector<OpenMS::UInt> column_index;
+    column_index.reserve(width);
+    for (const auto& name : columns) { column_index.push_back(registry.registerName(name)); }
+    const OpenMS::UInt peptide_ref = registry.registerName("PeptideRef");
+    const OpenMS::UInt left_width = registry.registerName("leftWidth");
+    const OpenMS::UInt right_width = registry.registerName("rightWidth");
+    // The peak group's 1/K0 (MS2 and MS1), and the sub-scores whose stock
+    // "no signal" value would read as a measurement: an MS2 1/K0 deviation of
+    // -1, an MS1 deviation measured from an MS1 1/K0 of -1, a perfect 1/K0
+    // co-elution (0) from fewer than two fragment mobilograms. They become
+    // missing (NaN) instead, which the classifier imputes. Values only, for
+    // both classes alike.
+    OpenMS::UInt im_drift = 0, im_ms1_drift = 0;
+    std::ptrdiff_t col_im_delta = -1, col_im_ms1_delta = -1, col_im_shape = -1, col_im_coelution = -1;
+    if (im)
+    {
+      im_drift = registry.registerName("im_drift");
+      im_ms1_drift = registry.registerName("im_ms1_drift");
+      auto col = [&](const char* name) {
+        const auto it = std::find(columns.begin(), columns.end(), name);
+        return it == columns.end() ? std::ptrdiff_t(-1) : it - columns.begin();
+      };
+      col_im_delta = col("var_im_delta_score");
+      col_im_ms1_delta = col("var_im_ms1_delta_score");
+      col_im_shape = col("var_im_xcorr_shape");
+      col_im_coelution = col("var_im_xcorr_coelution");
+    }
+
+    const Param ff = featureFinderParam(ms1, im, ms1_im);
+    const OpenMS::ChromExtractParams cp = chromParams(calibration.mz_ppm, im ? calibration.im_window : -1.0, calibration.rt_window);
+    const OpenMS::ChromExtractParams cp_ms1 =
+      chromParams(calibration.ms1_mz_ppm, ms1_im ? calibration.im_window : -1.0, calibration.rt_window);
+    OpenMS::OpenSwathWorkflow workflow(ms1, ms1_im, false, im, -1);
+    AssayOptions assay_options;
+    if (im)
+    {
+      // The calibrated library 1/K0: what the window assignment and the 1/K0
+      // extraction range of both pair members read.
+      assay_options.ion_mobility = true;
+      assay_options.im_map = [&calibration](double k0) { return calibration.im.apply(k0); };
+    }
+    workflow.setLogType(OpenMS::ProgressLogger::NONE);
+    OpenMS::OpenSwathOSWWriter osw("", 0);   // an empty name: inactive
+    OpenMS::NoopMSDataWritingConsumer chromatograms("");
+
+    // The maps extraction reads. With search:ms1_in_memory the MS1 map is
+    // read once into shared in-memory spectra here: stock extraction reads
+    // every MS1 spectrum of the RT window again for every batch, and through
+    // the loader's accessor each read copies the whole spectrum (a diaPASEF
+    // MS1 frame is several MB, from the page cache of the cache file). The
+    // in-memory accessor hands out the stored spectrum instead; OpenSWATH
+    // reads the same values either way. run.maps is not changed, and the
+    // copy is freed when extraction returns.
+    std::vector<OpenSwath::SwathMap> maps = run.maps;
+    {
+      const auto t0 = std::chrono::steady_clock::now();
+      json record = {{"mode", toString(params().ms1_in_memory)}, {"held", false}};
+      if (ms1)
+      {
+        std::string from;
+        const std::uint64_t estimate = ms1MemoryEstimate(run, from);
+        const std::uint64_t available = availableMemoryBytes();
+        const Ms1MemoryDecision decision = decideMs1InMemory(params().ms1_in_memory, estimate, available);
+        record["estimate_bytes"] = estimate;
+        record["estimate_from"] = from;
+        record["available_bytes"] = available;
+        record["headroom"] = ms1_in_memory_headroom;
+        record["reason"] = decision.reason;
+        if (decision.hold)
+        {
+          trace::Scope holding("ms1_hold", 1);
+          for (auto& m : maps)
+          {
+            if (m.ms1 && m.sptr) { m.sptr = std::make_shared<OpenMS::SpectrumAccessOpenMSInMemory>(*m.sptr); }
+          }
+          const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+          record["held"] = true;
+          record["seconds"] = seconds;
+          info("search extraction: the MS1 map is held in memory, read once in " + fixed(seconds, 1) + " s (" + decision.reason +
+               "; estimated from " + from + ")");
+        }
+        else
+        {
+          info("search extraction: the MS1 map is read per batch, not held in memory (" + decision.reason + "; estimated from " +
+               from + ")");
+        }
+      }
+      else { record["reason"] = "MS1 is not extracted"; }
+      run.ms1_memory_json = record.dump();
+    }
+
+    const auto chunks = AssayBuilder::chunks(set, params().chunk, params().batch_size);
+    const std::vector<IsolationWindow> windows = isolationWindows(run);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::size_t done = 0, nearest_window = 0;
+    for (std::size_t c = 0; c < chunks.size(); ++c)
+    {
+      const auto started = std::chrono::steady_clock::now();
+      trace::Scope chunk_step("chunk", 1);
+      chunk_step.fields().idx = static_cast<std::int64_t>(c);
+      chunk_step.fields().rows = static_cast<std::int64_t>(chunks[c].size());
+      trace::Scope assays_step("assays", 2);
+      AssayChunk assays = AssayBuilder::build(set, chunks[c], assay_options);
+      if (im)
+      {
+        // A calibrated 1/K0 just outside every window at its m/z: the
+        // transitions carry a 1/K0 inside the nearest window the extraction
+        // range reaches into, so OpenSWATH's pasef assignment extracts the
+        // precursor there; the compound keeps the calibrated value, which
+        // centres the 1/K0 range. Read from m/z and 1/K0 only, which a target
+        // and its decoy share.
+        std::unordered_map<std::string, double> moved;
+        for (std::size_t k = 0; k < assays.experiment.compounds.size(); ++k)
+        {
+          const auto& compound = assays.experiment.compounds[k];
+          if (!(compound.drift_time > 0)) { continue; }
+          const double mz = fromFixed(set.library.precursors().mz[assays.precursor[k]]);
+          if (windowOf(run.maps, mz, compound.drift_time) >= 0) { continue; }
+          double assigned = compound.drift_time;
+          if (assignWindow(run.maps, mz, compound.drift_time, calibration.im_window / 2, assigned) >= 0)
+          { moved.emplace(compound.id, assigned); }
+        }
+        for (auto& t : assays.experiment.transitions)
+        {
+          const auto it = moved.find(t.peptide_ref);
+          if (it != moved.end()) { t.precursor_im = it->second; }
+        }
+        nearest_window += moved.size();
+      }
+      std::size_t spread = 0;   // isolation windows this chunk has precursors in
+      {
+        std::vector<char> used(windows.size(), 0);
+        for (const std::size_t i : chunks[c])
+        {
+          const double mz = fromFixed(set.library.precursors().mz[i]);
+          for (std::size_t w = 0; w < windows.size(); ++w)
+          {
+            if (windows[w].lower < mz && mz < windows[w].upper) { used[w] = 1; }
+          }
+        }
+        spread = static_cast<std::size_t>(std::count(used.begin(), used.end(), 1));
+      }
+      assays_step.end();
+      std::unordered_map<std::string, std::size_t> precursor_of;
+      precursor_of.reserve(assays.precursor.size());
+      for (std::size_t k = 0; k < assays.precursor.size(); ++k)
+      { precursor_of.emplace(assays.experiment.compounds[k].id, assays.precursor[k]); }
+
+      // Extract, flatten, free the features. Rows are ordered by (precursor,
+      // apex RT, sub-scores) before they get their ids: the FeatureMap's own
+      // order depends on which thread finished first.
+      struct Row { std::size_t precursor; double apex, left, right; float im; std::size_t offset; };
+      std::vector<Row> rows;
+      std::vector<float> values;
+      std::size_t n_features = 0;
+      trace::Scope flatten_step;   // started after OpenSWATH; also times freeing the features
+      {
+        OpenMS::FeatureMap features;
+        {
+          const ThreadCap team(SearchParams::openswathThreads());
+          if (c == 0 && team.used() < team.requested())
+          {
+            info("search extraction: OpenSWATH runs on " + std::to_string(team.used()) + " of the " +
+                 std::to_string(team.requested()) + " threads; stock OpenSWATH does not scale beyond " +
+                 std::to_string(SearchParams::openswathThreads()));
+          }
+          QuietStreams quiet;
+          trace::Scope extracting("openswath", 2);
+          extracting.fields().rows = static_cast<std::int64_t>(assays.precursor.size());
+          extracting.fields().session = team.used();
+          workflow.performExtraction(maps, calibration.rt, cp, cp_ms1, ff, assays.experiment, features, true, osw,
+                                     &chromatograms, static_cast<int>(params().batch_size), ms1_isotope_traces, false);
+        }
+        flatten_step.start("flatten", 2);
+        n_features = features.size();
+        rows.reserve(features.size());
+        values.reserve(features.size() * width);
+        for (const OpenMS::Feature& f : features)
+        {
+          const std::string id = f.getMetaValue(peptide_ref).toString();
+          const auto it = precursor_of.find(id);
+          if (it == precursor_of.end())
+          { throw std::logic_error("search: OpenSWATH returned a feature for '" + id + "', which is not in the chunk it was given"); }
+          Row r;
+          r.precursor = it->second;
+          r.apex = f.getRT();
+          const OpenMS::DataValue& l = f.getMetaValue(left_width);
+          const OpenMS::DataValue& h = f.getMetaValue(right_width);
+          r.left = l.isEmpty() ? std::numeric_limits<double>::quiet_NaN() : static_cast<double>(l);
+          r.right = h.isEmpty() ? std::numeric_limits<double>::quiet_NaN() : static_cast<double>(h);
+          r.offset = values.size();
+          for (const OpenMS::UInt k : column_index)
+          {
+            const OpenMS::DataValue& v = f.getMetaValue(k);
+            const bool numeric = v.valueType() == OpenMS::DataValue::DOUBLE_VALUE || v.valueType() == OpenMS::DataValue::INT_VALUE;
+            values.push_back(numeric ? static_cast<float>(static_cast<double>(v)) : nan);
+          }
+          r.im = nan;
+          if (im)
+          {
+            auto value = [&](OpenMS::UInt k) {
+              const OpenMS::DataValue& v = f.getMetaValue(k);
+              const bool numeric = v.valueType() == OpenMS::DataValue::DOUBLE_VALUE || v.valueType() == OpenMS::DataValue::INT_VALUE;
+              return numeric ? static_cast<double>(v) : std::numeric_limits<double>::quiet_NaN();
+            };
+            const double ms2_k0 = value(im_drift), ms1_k0 = value(im_ms1_drift);
+            r.im = static_cast<float>(reportedMobility(ms2_k0, ms1_k0));
+            float* row = values.data() + r.offset;
+            if (col_im_delta >= 0 && !(row[col_im_delta] >= 0.0f)) { row[col_im_delta] = nan; }
+            if (col_im_ms1_delta >= 0 && !(std::isfinite(ms1_k0) && ms1_k0 > 0.0)) { row[col_im_ms1_delta] = nan; }
+            if (col_im_coelution >= 0 && col_im_shape >= 0 && std::isnan(row[col_im_shape]) && row[col_im_coelution] == 0.0f)
+            { row[col_im_coelution] = nan; }
+          }
+          rows.push_back(r);
+        }
+      }
+
+      std::sort(rows.begin(), rows.end(), [&](const Row& a, const Row& b) {
+        if (a.precursor != b.precursor) { return a.precursor < b.precursor; }
+        if (rowLess(a.apex, values.data() + a.offset, b.apex, values.data() + b.offset, width)) { return true; }
+        if (rowLess(b.apex, values.data() + b.offset, a.apex, values.data() + a.offset, width)) { return false; }
+        // Equal in apex and every sub-score: the 1/K0 decides (NaN last; all
+        // NaN without ion mobility, where this never decides anything).
+        const bool na = std::isnan(a.im), nb = std::isnan(b.im);
+        if (na != nb) { return nb; }
+        return !na && a.im < b.im;
+      });
+      std::size_t targets = 0, decoys = 0;
+      std::int64_t rank = 0;
+      for (std::size_t r = 0; r < rows.size(); ++r)
+      {
+        const bool first = r == 0 || rows[r].precursor != rows[r - 1].precursor;
+        rank = first ? 0 : rank + 1;
+        if (first) { (set.isDecoy(rows[r].precursor) ? decoys : targets)++; }
+        out.add(set, rows[r].precursor, rank, values.data() + rows[r].offset, static_cast<float>(rows[r].apex),
+                static_cast<float>(rows[r].left), static_cast<float>(rows[r].right), rows[r].im);
+      }
+      done += assays.precursor.size();
+      flatten_step.end();
+      chunk_step.end();
+      const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+      info("search extraction: chunk " + std::to_string(c + 1) + "/" + std::to_string(chunks.size()) + ", " +
+           std::to_string(assays.precursor.size()) + " precursors in " + std::to_string(spread) + " of " +
+           std::to_string(windows.size()) + " isolation windows: " + std::to_string(n_features) + " peak groups for " +
+           std::to_string(targets) + " targets and " + std::to_string(decoys) + " decoys (" + std::to_string(done) + "/" +
+           std::to_string(set.size()) + " done, " + fixed(seconds, 1) + " s)");
+    }
+    if (nearest_window > 0)
+    {
+      info("search extraction: " + std::to_string(nearest_window) + " precursors whose calibrated 1/K0 lies just outside every "
+           "window at their m/z were extracted from the nearest window");
+    }
+  }
+
+  // ---- the report's 1/K0 ----------------------------------------------------------
+
+  std::string Identifier::measureReportedMobility(const SearchSet& set, const RunData& run, const Calibration& calibration,
+                                                  const std::vector<std::size_t>& precursors, const std::vector<double>& apex_s,
+                                                  std::vector<ReportRow>& rows)
+  {
+    if (precursors.size() != rows.size() || apex_s.size() != rows.size())
+    { throw std::logic_error("search: measureReportedMobility needs one precursor and one apex per report row"); }
+    const auto started = std::chrono::steady_clock::now();
+    const auto& pre = set.library.precursors();
+    const auto& tr = set.library.transitions();
+    const std::size_t n = rows.size();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double ppm_half = calibration.mz_ppm / 2.0;
+
+    // Rows by the MS2 maps holding their m/z: each group is measured by one
+    // thread through its own handles on those maps (a cached map reads
+    // through one file stream). Every row is measured on its own, so the
+    // grouping decides only who reads what, never a value.
+    std::map<std::vector<std::size_t>, std::vector<std::size_t>> by_maps;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+      const double mz = fromFixed(pre.mz[precursors[k]]);
+      std::vector<std::size_t> key;
+      for (std::size_t m = 0; m < run.maps.size(); ++m)
+      {
+        const auto& map = run.maps[m];
+        if (!map.ms1 && map.sptr && map.lower < mz && mz < map.upper) { key.push_back(m); }
+      }
+      by_maps[key].push_back(k);
+    }
+    std::vector<const std::pair<const std::vector<std::size_t>, std::vector<std::size_t>>*> tasks;
+    for (const auto& g : by_maps) { tasks.push_back(&g); }
+    std::vector<double> measured(n, nan);
+    std::vector<std::size_t> fragments_at(n, 0), windows(n, 0);
+    std::vector<char> second(n, 0);   // the fragments co-locate strongly at a second 1/K0 too
+    std::string failure;
+    const auto T = static_cast<std::ptrdiff_t>(tasks.size());
+#pragma omp parallel for schedule(dynamic, 1)
+    for (std::ptrdiff_t q = 0; q < T; ++q)
+    {
+      try
+      {
+        const auto& [key, members] = *tasks[static_cast<std::size_t>(q)];
+        std::vector<OpenSwath::SwathMap> local;
+        for (const std::size_t m : key)
+        {
+          OpenSwath::SwathMap map = run.maps[m];
+          if (OpenSwath::SpectrumAccessPtr clone = map.sptr->lightClone()) { map.sptr = clone; }
+          local.push_back(std::move(map));
+        }
+        std::vector<double> fragments;
+        for (const std::size_t k : members)
+        {
+          const std::size_t i = precursors[k];
+          fragments.clear();
+          for (std::uint32_t f = 0; f < pre.transition_count[i]; ++f) { fragments.push_back(fromFixed(tr.product_mz[pre.transition_begin[i] + f])); }
+          const MobilityApex apex = mobilityAt(local, fromFixed(pre.mz[i]), apex_s[k], fragments, ppm_half);
+          windows[k] = apex.windows;
+          fragments_at[k] = apex.fragments;
+          if (std::isfinite(apex.im) && apex.fragments >= SearchParams::im_seed_min_fragments) { measured[k] = apex.im; }
+          second[k] = apex.votes > 0 && apex.second_votes >= second_colocation * apex.votes ? 1 : 0;
+        }
+      }
+      catch (const std::exception& e)
+      {
+#pragma omp critical(odia_report_mobility_failure)
+        { if (failure.empty()) { failure = e.what(); } }
+      }
+    }
+    if (!failure.empty()) { throw std::runtime_error("search: re-measuring the reported 1/K0 failed: " + failure); }
+
+    // The record: how many were measured, how the measurement compares with
+    // OpenSWATH's own value and with the calibrated library 1/K0 the
+    // extraction window was centred on.
+    std::size_t with = 0, no_window = 0, weak = 0, outside = 0, both = 0, second_places = 0;
+    std::vector<double> vs_openswath, from_calibrated;
+    for (std::size_t k = 0; k < n; ++k)
+    {
+      const double openswath = rows[k].im;
+      rows[k].im = measured[k];
+      if (windows[k] == 0) { ++no_window; continue; }
+      if (!std::isfinite(measured[k])) { ++weak; continue; }
+      ++with;
+      second_places += second[k] ? 1 : 0;
+      const double k0 = libraryMobility(set.library, precursors[k]);
+      if (std::isfinite(k0) && !calibration.im.getDataPoints().empty())
+      {
+        const double deviation = measured[k] - calibration.im.apply(k0);
+        from_calibrated.push_back(std::fabs(deviation));
+        outside += std::fabs(deviation) > calibration.im_window / 2 ? 1 : 0;
+      }
+      if (std::isfinite(openswath))
+      {
+        ++both;
+        vs_openswath.push_back(std::fabs(measured[k] - openswath));
+      }
+    }
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    json record = {
+      {"rule", "each reported peak group, target or decoy, re-measured at its apex: the " + std::to_string(mobility_probe_spectra) +
+               " spectra closest to it in every window holding its m/z, over those windows' whole 1/K0 range, with its assay's "
+               "fragments (mobilityAt, the 1/K0 calibration's estimator); NaN with fewer than " +
+               std::to_string(SearchParams::im_seed_min_fragments) + " fragments at the apex. OpenSWATH's im_drift, read inside "
+               "the extraction window, is compared, not reported"},
+      {"rows", n}, {"measured", with}, {"fewer_fragments", weak}, {"no_window", no_window},
+      {"min_fragments", SearchParams::im_seed_min_fragments},
+      {"abs_deviation_from_calibrated", {{"median", num(quantile(from_calibrated, 0.5))}, {"p90", num(quantile(from_calibrated, 0.9))},
+                                         {"p99", num(quantile(from_calibrated, 0.99))}}},
+      {"outside_extraction_window", outside},
+      {"second_colocation", {{"rule", "the fragments also co-locate at least " + fixed(mobility_separation, 2) + " from the apex "
+                                      "with at least " + fixed(second_colocation, 1) + " of its votes (another conformer or an "
+                                      "isobaric co-eluting species); the apex is reported, not NaN"},
+                             {"rows", second_places}}},
+      {"vs_openswath_im_drift", {{"both", both}, {"median_abs_difference", num(quantile(vs_openswath, 0.5))},
+                                 {"p90_abs_difference", num(quantile(vs_openswath, 0.9))}}}};
+    info("search report: 1/K0 of " + std::to_string(n) + " reported peak groups re-measured over their windows' whole 1/K0 range: " +
+         std::to_string(with) + " measured, " + std::to_string(weak) + " with fewer than " +
+         std::to_string(SearchParams::im_seed_min_fragments) + " fragments at one 1/K0 (NaN); " + std::to_string(outside) +
+         " lie outside the 1/K0 extraction window, " + std::to_string(second_places) + " have a second strong co-location; "
+         "median |re-measured - OpenSWATH's im_drift| " +
+         fixed(quantile(vs_openswath, 0.5), 4) + " over " + std::to_string(both) + " (" + fixed(seconds, 1) + " s)");
+    return record.dump();
+  }
+}

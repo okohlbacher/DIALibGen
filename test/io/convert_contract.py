@@ -4,6 +4,9 @@ import subprocess
 import sys
 
 library_io, dialibgen, work = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+# -mode convert refuses to overwrite: start from an empty directory, so a rerun passes too.
+for stale in ('converted.tsv', 'converted.parquet'):
+    (work / stale).unlink(missing_ok=True)
 work.mkdir(parents=True, exist_ok=True)
 
 def run(*args, ok=True):

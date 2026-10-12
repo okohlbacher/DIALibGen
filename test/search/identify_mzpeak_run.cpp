@@ -150,6 +150,24 @@ int main(int argc, char** argv)
         const OpenSwath::SpectrumPtr sy = y.sptr->getSpectrumById(static_cast<int>(k));
         const std::string at = where + " spectrum " + std::to_string(k);
         compareArrays("m/z", sx->getMZArray(), sy->getMZArray(), at);
+        static int shown = 0;
+        if (shown < 3 && sx->getDriftTimeArray() && sy->getDriftTimeArray() &&
+            sx->getDriftTimeArray()->data.size() == sy->getDriftTimeArray()->data.size() &&
+            sx->getDriftTimeArray()->data != sy->getDriftTimeArray()->data)
+        {
+          // The first points where the 1/K0 order differs: (m/z, intensity, 1/K0) on both sides.
+          ++shown;
+          const auto& xi = sx->getDriftTimeArray()->data;
+          std::size_t first = 0;
+          while (first < xi.size() && xi[first] == sy->getDriftTimeArray()->data[first]) { ++first; }
+          std::cout << "  " << at << ": first 1/K0 difference at point " << first << "\n";
+          for (std::size_t q = first >= 2 ? first - 2 : 0; q < std::min(xi.size(), first + 4); ++q)
+          {
+            std::cout << std::setprecision(10) << "    " << sx->getMZArray()->data[q] << " " << sx->getIntensityArray()->data[q] << " "
+                      << xi[q] << "  |  " << sy->getMZArray()->data[q] << " " << sy->getIntensityArray()->data[q] << " "
+                      << sy->getDriftTimeArray()->data[q] << "\n";
+          }
+        }
         compareArrays("intensity", sx->getIntensityArray(), sy->getIntensityArray(), at);
         compareArrays("1/K0", sx->getDriftTimeArray(), sy->getDriftTimeArray(), at);
         if (sx->getDataArrays().size() != sy->getDataArrays().size()) { structure(at + ": number of arrays"); }

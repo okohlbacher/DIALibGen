@@ -802,7 +802,7 @@ namespace ODIA::search
 
     /// The peaks of @p unit into @p s: all of them, or, for one window of a
     /// whole diaPASEF frame, those whose 1/K0 lies in the window's band
-    /// (lower, upper], sorted by m/z as a per-window spectrum is.
+    /// (lower, upper].
     void mzpeakFill(OpenMS::MSSpectrum& s, const mzpeak::Peaks& peaks, const mzpeak::SpectrumInfo& info, int window,
                     std::uint64_t& dropped_outside)
     {
@@ -821,7 +821,6 @@ namespace ODIA::search
         {
           if (peaks.mobility[k] > w.im_lower && peaks.mobility[k] <= w.im_upper) { keep.push_back(k); }
         }
-        std::stable_sort(keep.begin(), keep.end(), [&](std::size_t a, std::size_t b) { return peaks.mz[a] < peaks.mz[b]; });
         if (window == 0)
         {
           // Count once per frame: the points in no window's band.
@@ -832,6 +831,17 @@ namespace ODIA::search
             dropped_outside += any ? 0 : 1;
           }
         }
+      }
+      // A spectrum with 1/K0 in the order a per-window reading of the .d gives
+      // it (mzdata's BinaryArrayMap3D::unstack): by m/z, then by 1/K0. An
+      // ims-compact frame stores its points in another order; a per-window
+      // archive already in this one (then nothing moves).
+      if (im)
+      {
+        const auto before = [&](std::size_t a, std::size_t b) {
+          return peaks.mz[a] < peaks.mz[b] || (peaks.mz[a] == peaks.mz[b] && peaks.mobility[a] < peaks.mobility[b]);
+        };
+        if (!std::is_sorted(keep.begin(), keep.end(), before)) { std::stable_sort(keep.begin(), keep.end(), before); }
       }
       s.reserve(keep.size());
       for (const std::size_t k : keep) { s.emplace_back(peaks.mz[k], peaks.intensity[k]); }

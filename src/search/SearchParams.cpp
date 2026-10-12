@@ -5,6 +5,8 @@
 
 #include <odia/Hardware.h>
 
+#include <OpenMS/config.h>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -101,18 +103,75 @@ namespace ODIA::search
     return requested > 0 ? requested : static_cast<int>(std::max(1u, physicalCores()));
   }
 
+  namespace
+  {
+    /// An integer environment switch in [lo, hi], or @p fallback when it is
+    /// unset, empty, malformed or out of range.
+    int envInt(const char* name, int fallback, long lo, long hi)
+    {
+      const char* e = std::getenv(name);
+      if (!e || !*e) { return fallback; }
+      char* end = nullptr;
+      const long v = std::strtol(e, &end, 10);
+      return (end && *end == '\0' && v >= lo && v <= hi) ? static_cast<int>(v) : fallback;
+    }
+
+    /// ODIA_OPENSWATH_OUTER, read once: -2 unset, else its value (<= 0: off).
+    int outerSwitch()
+    {
+      static const int v = envInt("ODIA_OPENSWATH_OUTER", -2, -1, 4096);
+      return v;
+    }
+  }
+
+  bool SearchParams::openswathNestedLoop()
+  {
+#if defined(_OPENMP) && defined(MT_ENABLE_NESTED_OPENMP)
+    return true;
+#else
+    return false;
+#endif
+  }
+
   int SearchParams::openswathThreads()
   {
     static const int cap = [] {
-      if (const char* e = std::getenv("ODIA_OPENSWATH_THREADS"); e && *e)
-      {
-        char* end = nullptr;
-        const long v = std::strtol(e, &end, 10);
-        if (end && *end == '\0' && v >= 1 && v <= 4096) { return static_cast<int>(v); }
-      }
-      return openswath_max_threads;
+      const int nested = openswathNestedLoop() && outerSwitch() != 0 && outerSwitch() != -1 ? openswath_max_threads
+                                                                                             : openswath_max_threads_flat;
+      return envInt("ODIA_OPENSWATH_THREADS", nested, 1, 4096);
     }();
     return cap;
+  }
+
+  int SearchParams::openswathOuterLoop(int team)
+  {
+    if (!openswathNestedLoop() || team < 1) { return -1; }
+    const int k = outerSwitch();
+    if (k == 0 || k == -1) { return -1; }
+    if (k >= 1) { return std::min(k, team); }
+    return team >= 4 ? team / 2 : -1;
+  }
+
+  int SearchParams::calibrationThreads(int team)
+  {
+    static const int k = envInt("ODIA_CALIB_PAR", -1, 0, 4096);
+    const int wanted = k >= 0 ? k : calibration_max_threads;
+    return std::max(1, std::min(wanted, team));
+  }
+
+  int SearchParams::loadThreads()
+  {
+    static const int k = envInt("ODIA_LOAD_THREADS", load_max_threads, 0, 4096);
+    return k;
+  }
+
+  bool SearchParams::asyncIo()
+  {
+    static const bool on = [] {
+      const char* e = std::getenv("ODIA_ASYNC_IO");
+      return !(e && std::string(e) == "0");
+    }();
+    return on;
   }
 
   int SearchParams::predictionSessions(int threads)

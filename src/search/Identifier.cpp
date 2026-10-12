@@ -18,6 +18,7 @@
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 namespace ODIA::search
@@ -197,6 +198,56 @@ namespace ODIA::search
     return rows;
   }
 
+  std::string CacheRemoval::removeNow(const std::filesystem::path& path)
+  {
+    std::error_code ec;
+    std::uintmax_t bytes = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
+    {
+      std::error_code size_ec;
+      if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
+    }
+    ec.clear();
+    std::filesystem::remove_all(path, ec);
+    std::error_code exists_ec;
+    if (ec || std::filesystem::exists(path, exists_ec))
+    {
+      return "search: could not remove the run's cache directory " + path.string() + " (" + std::to_string(bytes / 1000000) +
+             " MB" + (ec ? ": " + ec.message() : std::string()) + "); remove it by hand";
+    }
+    return std::string();
+  }
+
+  CacheRemoval::CacheRemoval(std::filesystem::path path)
+      : thread_([this, path = std::move(path)] {
+          try
+          {
+            {
+              trace::Scope removing("cache_remove_bg", 1);
+              message_ = removeNow(path);
+            }
+            trace::flushThread();
+          }
+          catch (const std::exception& e) { message_ = "search: could not remove the run's cache directory " + path.string() + ": " + e.what(); }
+          catch (...) { message_ = "search: could not remove the run's cache directory " + path.string(); }
+        })
+  {
+  }
+
+  std::string CacheRemoval::wait()
+  {
+    if (thread_.joinable()) { thread_.join(); }
+    collected_ = true;
+    return message_;
+  }
+
+  CacheRemoval::~CacheRemoval()
+  {
+    if (thread_.joinable()) { thread_.join(); }
+    if (!collected_ && !message_.empty()) { std::cerr << message_ << std::endl; }
+  }
+
   std::vector<IsolationWindow> Identifier::isolationWindows(const RunData& run)
   {
     std::vector<IsolationWindow> out;
@@ -230,32 +281,40 @@ namespace ODIA::search
     {
       const Identifier* owner = nullptr;
       std::filesystem::path path;
-      void remove()
+      /// Set by a removal handed to a thread (SearchParams::asyncIo): the
+      /// result keeps it, so the caller can overlap it with its own work.
+      std::shared_ptr<CacheRemoval> background;
+      void remove(bool in_background = false)
       {
         if (path.empty()) { return; }
+        if (in_background && SearchParams::asyncIo())
+        {
+          try
+          {
+            background = std::make_shared<CacheRemoval>(path);
+            path.clear();
+            return;
+          }
+          catch (const std::system_error&) {}   // no thread to spare: remove it here
+        }
         trace::Scope removing("cache_remove", 0);
-        std::error_code ec;
-        std::uintmax_t bytes = 0;
-        for (auto it = std::filesystem::recursive_directory_iterator(path, ec);
-             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec))
-        {
-          std::error_code size_ec;
-          if (it->is_regular_file(size_ec)) { bytes += it->file_size(size_ec); }
-        }
-        ec.clear();
-        std::filesystem::remove_all(path, ec);
-        std::error_code exists_ec;
-        if (ec || std::filesystem::exists(path, exists_ec))
-        {
-          owner->warn("search: could not remove the run's cache directory " + path.string() + " (" +
-                      std::to_string(bytes / 1000000) + " MB" + (ec ? ": " + ec.message() : std::string()) +
-                      "); remove it by hand");
-        }
+        const std::string message = CacheRemoval::removeNow(path);
+        if (!message.empty()) { owner->warn(message); }
         path.clear();
       }
       ~Scratch()
       {
-        try { remove(); } catch (...) {}
+        try
+        {
+          remove();
+          // A search that fails after its removal started waits for it here.
+          if (background)
+          {
+            const std::string message = background->wait();
+            if (!message.empty()) { owner->warn(message); }
+          }
+        }
+        catch (...) {}
       }
     } scratch;
     scratch.owner = this;
@@ -499,7 +558,7 @@ namespace ODIA::search
     if (!im_search)
     {
       run.maps.clear();
-      scratch.remove();
+      scratch.remove(true);
     }
 
     groups.validate(set);
@@ -577,7 +636,7 @@ namespace ODIA::search
       timing["report_mobility"] = since(measured);
       run.maps.clear();
       report_phase.end();
-      scratch.remove();
+      scratch.remove(true);
     }
     IdentificationResult result;
     result.report = out_ids;
@@ -642,13 +701,19 @@ namespace ODIA::search
     search["report"] = {{"path", std::filesystem::absolute(out_ids).string()}, {"rows", rows.size()},
                         {"targets", result.report_targets}, {"decoys", result.report_decoys}, {"max_q", params_.report_max_q}};
     search["warnings"] = warnings;
+    const int openswath_team = std::min(params_.threads, SearchParams::openswathThreads());
     search["resources"] = {{"threads", params_.threads},
-                           {"openswath_threads", std::min(params_.threads, SearchParams::openswathThreads())},
+                           {"openswath_threads", openswath_team},
+                           {"openswath_outer_loop", SearchParams::openswathOuterLoop(openswath_team)},
+                           {"calibration_threads", SearchParams::calibrationThreads(openswath_team)},
+                           {"load_threads", SearchParams::loadThreads()},
+                           {"async_io", SearchParams::asyncIo()},
                            {"prediction_sessions", prediction_sessions},
                            {"seconds", timing}};
     // Decided by the free memory of the moment: the sidecar's, never the report's.
     if (!run.ms1_memory_json.empty()) { search["resources"]["ms1_in_memory"] = json::parse(run.ms1_memory_json); }
     result.provenance_json = search.dump();
+    result.cache_removal = std::move(scratch.background);
     return result;
   }
 }

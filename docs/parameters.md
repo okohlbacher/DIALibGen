@@ -134,5 +134,5 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-search:report_max_q` | double | `0.1` | 0.01:1.0 | Precursors, targets and decoys, up to this precursor q-value go into -out_ids |
 | `-search:entrapment_tag` | string | (empty) |  | Prefix of entrapment protein ids, at the start of an id or right after a '\|' (sp\|ENTRAP_P12345\|...): log and record the combined entrapment FDP estimate and the entrapment winner test. A validation aid |
 | `-search:selftest` | string | `true` | true,false | Also score with swapped and with random pair labels, and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not decoys that are built weaker than null targets |
-| `-search:batch_size` | int | `500` | 1: | Advanced: precursors per extraction batch within one isolation window |
+| `-search:batch_size` | int | `100` | 1: | Advanced: precursors per extraction batch within one isolation window (500 before 0.11.3; the report does not depend on it) |
 | `-search:chunk` | int | `20000` | 2: | Advanced: precursors per extraction call; target-decoy pairs stay together. Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's |

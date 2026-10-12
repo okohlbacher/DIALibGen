@@ -143,8 +143,10 @@ namespace ODIA::search
     /// fit (an ablation switch for tuning, whose purpose is to correct them).
     bool rt_im_scores = true;
     /// Precursors per extraction batch within one isolation window, inside one
-    /// OpenSWATH call (OpenSwathWorkflow's batchSize counts compounds).
-    std::size_t batch_size = 500;
+    /// OpenSWATH call (OpenSwathWorkflow's batchSize counts compounds). 100
+    /// lets the nested window loop split a crowded window over its inner
+    /// threads (500 until 0.11.3; the report does not depend on it).
+    std::size_t batch_size = 100;
     /// Precursors per OpenSWATH extraction call; target-decoy pairs stay together.
     std::size_t chunk = 20000;
 
@@ -226,14 +228,53 @@ namespace ODIA::search
     static constexpr std::size_t min_assay_fragments = 3;
     /// The most OpenMP threads a stock OpenSWATH call (calibration, extraction)
     /// gets, whatever -threads says: stock 3.5.0 serialises feature scoring on
-    /// a process-wide lock, and more threads only spin (see RunStages.cpp;
-    /// re-measured on 0.11.2's base at 8, 16 and 32 threads with and without
-    /// a passive OpenMP wait policy: 8 stays the fastest).
-    static constexpr int openswath_max_threads = 8;
-    /// The cap OpenSWATH calls use: openswath_max_threads, or the value of
+    /// a process-wide lock (MetaInfoRegistry), and above 16 threads the team
+    /// mostly waits on it (team 32: 62 % of thread stacks inside it). 16 needs
+    /// stock OpenSWATH's nested window loop (openswathOuterLoop): with the flat
+    /// loop one crowded isolation window ends every call on one thread, and 16
+    /// beat 8 nowhere (docs/design/built-in-identification.md, "The OpenSWATH
+    /// team" and "-run efficiency defaults").
+    static constexpr int openswath_max_threads = 16;
+    /// The cap without the nested loop: an OpenMS built without
+    /// MT_ENABLE_NESTED_OPENMP (MSVC builds), or ODIA_OPENSWATH_OUTER=0.
+    static constexpr int openswath_max_threads_flat = 8;
+    /// The cap OpenSWATH calls use: openswath_max_threads with the nested loop,
+    /// openswath_max_threads_flat without it, or the value of
     /// ODIA_OPENSWATH_THREADS (a measurement switch, read once; docs/tracing.md).
     /// The result does not depend on it.
     static int openswathThreads();
+    /// Whether the OpenMS linked against runs OpenSwathWorkflow's nested window
+    /// loop (built with MT_ENABLE_NESTED_OPENMP).
+    static bool openswathNestedLoop();
+    /// Windows an extraction call works on at once for a team of @p team
+    /// threads: team / 2, each window's batches split over the remaining two
+    /// threads (stock OpenSwathWorkflow's threads_outer_loop; its inner team is
+    /// team / outer, so outer x inner never exceeds the team). -1 = stock's
+    /// flat loop: below 4 threads, without the nested loop, or with
+    /// ODIA_OPENSWATH_OUTER=0; ODIA_OPENSWATH_OUTER=k >= 1 sets k (at most the
+    /// team). The result does not depend on it.
+    static int openswathOuterLoop(int team);
+    /// Threads that pick and score the calibration's seed chromatograms (stock
+    /// performRTNormalization's one serial step, split by seed) for a team of
+    /// @p team: at most 8 (measured: 275 -> 50 s on the timsTOF run). 1 =
+    /// stock performRTNormalization, also with ODIA_CALIB_PAR=0 or 1;
+    /// ODIA_CALIB_PAR=k >= 2 sets k (at most the team). The calibration does
+    /// not depend on it.
+    static int calibrationThreads(int team);
+    /// The most OpenMP threads that decode an mzML run's binary arrays while
+    /// it is read (stock SwathFile::loadMzML): 4, measured to keep the load's
+    /// wall time (one thread parses) at a third of the CPU of a team of 16.
+    /// ODIA_LOAD_THREADS=k >= 1 sets k; 0 lifts the cap (-threads).
+    static int loadThreads();
+    static constexpr int load_max_threads = 4;
+    /// Whether the run's and the library's content hashes run on threads of
+    /// their own from the start, and a search's run cache is removed on a
+    /// background thread (the process waits for both before it writes its
+    /// provenance). ODIA_ASYNC_IO=0 does all of it on the main thread, in
+    /// order. The values are the same.
+    static bool asyncIo();
+    /// The most threads that pick the calibration's seeds.
+    static constexpr int calibration_max_threads = 8;
     /// Evidence prefilter: the fragments indexed per pair member, its own most
     /// intense (search:intensities predicted: each member by its own
     /// prediction; library: by the target's library intensity, in the same

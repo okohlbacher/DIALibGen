@@ -36,10 +36,12 @@
 #include <omp.h>
 #endif
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <map>
 #include <random>
 #include <sstream>
+#include <system_error>
 
 using json = nlohmann::json;
 
@@ -415,7 +417,7 @@ void DIALibGen::registerRefinementOptions_()
                           "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
                           "decoys that are built weaker than null targets", false);
     setValidStrings_("search:selftest", {"true", "false"});
-    registerIntOption_("search:batch_size", "<n>", 500, "Advanced: precursors per extraction batch within one isolation window", false);
+    registerIntOption_("search:batch_size", "<n>", 100, "Advanced: precursors per extraction batch within one isolation window (500 before 0.11.3; the report does not depend on it)", false);
     registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together. "
                        "Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over "
                        "isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's", false);
@@ -690,7 +692,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         // search's prediction sessions, its OpenMP loops (TOPPBase passes 0 to
         // omp_set_num_threads, which leaves OpenMP at every logical CPU) and
         // the classifier. OpenSWATH's own team stays capped at
-        // SearchParams::openswath_max_threads.
+        // SearchParams::openswathThreads() (16 with the nested window loop).
         writeLogInfo_("-threads 0: " + std::to_string(search->threads) + " threads (" + ODIA::physicalCoresReason() + ")");
 #ifdef _OPENMP
         omp_set_num_threads(search->threads);
@@ -768,6 +770,33 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     json tune_prov = json::object();
     json search_prov;
     std::string run_hash;
+    // The run's and the library's content hashes (FNV-1a, one byte at a time,
+    // ~0.9 GB/s: 36 s for a 30 GB diaPASEF mzML) run on threads of their own
+    // from the start, beside the library load and the search, instead of on
+    // the main thread afterwards (SearchParams::asyncIo). get() waits for each
+    // where its value is needed and rethrows what went wrong there.
+    std::future<std::string> run_hash_ahead, library_hash_ahead;
+    if (ODIA::search::SearchParams::asyncIo())
+    {
+      auto hashing = [](const char* name, std::string path, bool run_hash) {
+        std::string value;
+        {
+          ODIA::trace::Scope hash_step(name, 1);
+          value = run_hash ? runHash(path) : ODIA::DIANNLibraryFile::hashFile(path);
+        }
+        ODIA::trace::flushThread();
+        return value;
+      };
+      try
+      {
+        if (!run.empty()) { run_hash_ahead = std::async(std::launch::async, hashing, "run_hash_bg", run, true); }
+        library_hash_ahead = std::async(std::launch::async, hashing, "library_hash_bg", in, false);
+      }
+      catch (const std::system_error&) {}   // no thread to spare: hashed in order below
+    }
+    // The search's run cache, removed on a thread while refine and tuning go
+    // on; waited for before the provenance is written.
+    std::shared_ptr<ODIA::search::CacheRemoval> cache_removal;
     // Once the search has written its report, a later failure must say that the
     // report is still there: -out_ids is never overwritten, so the same command
     // would now be refused.
@@ -814,9 +843,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         const ODIA::search::IdentificationResult found = identifier.identify(library, run, out_ids, DIALIBGEN_VERSION);
         report_written = true;
         search_prov = json::parse(found.provenance_json);
+        cache_removal = found.cache_removal;
         {
           ODIA::trace::Scope hash_phase("run_hash", 0);
-          run_hash = runHash(run);
+          run_hash = run_hash_ahead.valid() ? run_hash_ahead.get() : runHash(run);
         }
         // The hand-off: the report just written IS the reference from here on,
         // read, gated and hashed by exactly the code that reads -ids.
@@ -1115,10 +1145,18 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     // Provenance: the recipe, the inputs by content hash, the run, the units and every
     // count above -- embedded in the Parquet and always written as a sidecar (M13).
     ODIA::trace::Scope provenance_phase("provenance", 0);
+    // Everything that ran beside the main thread is done before the provenance.
+    if (cache_removal)
+    {
+      const std::string message = cache_removal->wait();
+      if (!message.empty()) { writeLogWarn_(message); }
+      cache_removal.reset();
+    }
+    const std::string library_hash = library_hash_ahead.valid() ? library_hash_ahead.get() : ODIA::DIANNLibraryFile::hashFile(in);
     json prov = {
       {"tool", "DIALibGen"}, {"tool_version", DIALIBGEN_VERSION}, {"mode", tune_only ? "tune" : "refine"},
       {"config", eff},
-      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_fnv1a64", ODIA::DIANNLibraryFile::hashFile(in)},
+      {"inputs", {{"library", std::filesystem::absolute(in).string()}, {"library_fnv1a64", library_hash},
                   {"reference", std::filesystem::absolute(ids).string()}, {"reference_fnv1a64", ODIA::DIANNLibraryFile::hashFile(ids)},
                   {"reference_run", st.run}}},
       {"gates_bypassed", st.gates_bypassed},

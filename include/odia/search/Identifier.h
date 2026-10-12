@@ -40,6 +40,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ODIA::search
@@ -101,6 +102,29 @@ namespace ODIA::search
     std::string provenance_json;
   };
 
+  /// The run's cache directory, removed on a thread of its own (removing a
+  /// diaPASEF run's cache takes ~14 s). wait() joins it and returns what went
+  /// wrong ("" if nothing); the destructor joins too and prints a warning
+  /// nobody collected to std::cerr, so a failure is never silent.
+  class CacheRemoval
+  {
+  public:
+    explicit CacheRemoval(std::filesystem::path path);
+    ~CacheRemoval();
+    CacheRemoval(const CacheRemoval&) = delete;
+    CacheRemoval& operator=(const CacheRemoval&) = delete;
+    /// Remove @p path now, on the calling thread: "" or the warning.
+    static std::string removeNow(const std::filesystem::path& path);
+    /// Wait until the directory is gone (or could not be removed).
+    std::string wait();
+
+  private:
+    // Declared before the thread, which writes message_ as soon as it starts.
+    std::string message_;
+    bool collected_ = false;
+    std::thread thread_;
+  };
+
   struct IdentificationResult
   {
     std::string report;                 ///< the -out_ids path written
@@ -111,6 +135,9 @@ namespace ODIA::search
     std::string run_name;               ///< the report's Run value
     /// The provenance sidecar's "search" block, as a JSON object.
     std::string provenance_json;
+    /// The run cache's removal, still running when identify() returns
+    /// (SearchParams::asyncIo); null when there was none or it is done.
+    std::shared_ptr<CacheRemoval> cache_removal;
   };
 
   class Identifier

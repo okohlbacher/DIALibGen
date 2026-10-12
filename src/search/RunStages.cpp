@@ -31,7 +31,13 @@
 //     extracted (the MS1 isotope scores come from full scans regardless);
 //   * features are appended to the FeatureMap in thread-completion order, so
 //     each precursor's peak groups are ranked by apex RT to get an id that
-//     does not depend on scheduling or chunking.
+//     does not depend on scheduling or chunking;
+//   * performRTNormalization picks and scores every seed's whole-run
+//     chromatograms in one serial loop (MRMFeatureFinderScoring::
+//     pickExperiment), so SplitCalibration runs that step split by seed and
+//     the rest of stock 3.5.0's doDataNormalization_ step for step;
+//   * the nested window loop of performExtraction leaves OpenMP nesting on
+//     and dynamic teams off, so both are put back after every call.
 
 #include <odia/search/AssayBuilder.h>
 #include <odia/search/Identifier.h>
@@ -45,10 +51,12 @@
 #include "../library/ThreadPool.h"
 
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/MRMRTNormalizer.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathOSWWriter.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathWorkflow.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/SwathMapMassCorrection.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/SpectrumAccessOpenMS.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/SpectrumAccessOpenMSInMemory.h>
 #include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/CONCEPT/LogStream.h>
@@ -58,6 +66,7 @@
 #include <OpenMS/FORMAT/SwathFile.h>
 #include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/METADATA/MetaInfoInterface.h>
 #include <OpenMS/METADATA/MetaInfoRegistry.h>
 #include <OpenMS/OPENSWATHALGO/DATAACCESS/ISpectrumAccess.h>
@@ -80,6 +89,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <streambuf>
@@ -352,6 +362,11 @@ namespace ODIA::search
     /// timsTOF 30,000 pairs 496 / 536 / 589 s, where one straggling window
     /// ends every call -- and OMP_WAIT_POLICY=passive with GOMP_SPINCOUNT=10000
     /// changed none of it (it removed only the calibration's idle spinning).
+    /// With the flat window loop, that is; stock's nested loop with batches of
+    /// 100 (SearchParams::openswathOuterLoop) splits the straggling window and
+    /// makes 16 pay: timsTOF 514 -> 297 s, Astral 150 -> 138 s; at 32 the
+    /// registry lock wins again (387 s), so the cap is 16
+    /// (docs/design/built-in-identification.md, "-run efficiency defaults").
     /// The result does not depend on the team.
     class ThreadCap
     {
@@ -380,6 +395,228 @@ namespace ODIA::search
     private:
       int previous_ = 1;
       int used_ = 1;
+    };
+
+    /// OpenMP's nesting and dynamic-team settings, put back when the scope
+    /// ends: stock OpenSwathWorkflow's nested window loop switches nesting on
+    /// and dynamic teams off and leaves them so.
+    class OpenMPNesting
+    {
+    public:
+      OpenMPNesting()
+      {
+#ifdef _OPENMP
+#if _OPENMP >= 200805
+        levels_ = omp_get_max_active_levels();
+#else
+        nested_ = omp_get_nested();
+#endif
+        dynamic_ = omp_get_dynamic();
+#endif
+      }
+      ~OpenMPNesting()
+      {
+#ifdef _OPENMP
+#if _OPENMP >= 200805
+        omp_set_max_active_levels(levels_);
+#else
+        omp_set_nested(nested_);
+#endif
+        omp_set_dynamic(dynamic_);
+#endif
+      }
+      OpenMPNesting(const OpenMPNesting&) = delete;
+      OpenMPNesting& operator=(const OpenMPNesting&) = delete;
+
+    private:
+      int levels_ = 1;
+      int nested_ = 0;
+      int dynamic_ = 0;
+    };
+
+    /// Stock performRTNormalization with its one serial step split by seed.
+    /// Stock 3.5.0's doDataNormalization_ (OpenSwathWorkflow.cpp) runs
+    /// MRMFeatureFinderScoring::pickExperiment once over every seed's whole-run
+    /// chromatograms, a serial loop over the transition groups on the calling
+    /// thread (270 of the 275 s of calibration on the full timsTOF run, the
+    /// team idle). Here the seeds are cut into pieces, each picked and scored
+    /// by its own feature finder on @p threads threads; everything else is
+    /// stock doDataNormalization_, step for step. Stock picks and scores each
+    /// transition group on its own as well, and the groups land in one map
+    /// keyed by id, so the result does not depend on the pieces or on the
+    /// order the threads finish in (measured: the same calibration and report
+    /// on the timsTOF and Astral runs; identify_e2e compares the split with
+    /// stock on every build). Inside the parallel region stock
+    /// scorePeakgroups' own `parallel for if (in_parallel == 0)` runs serial.
+    /// The copied steps follow OpenMS 3.5.0 and must be checked against any
+    /// other version.
+    class SplitCalibration : public OpenMS::OpenSwathCalibrationWorkflow
+    {
+    public:
+      OpenMS::TransformationDescription run(const OpenSwath::LightTargetedExperiment& targeted_exp,
+                                            std::vector<OpenSwath::SwathMap>& swath_maps, OpenMS::TransformationDescription& im_trafo,
+                                            double min_rsq, double min_coverage, const Param& default_ffparam,
+                                            const OpenMS::ChromExtractParams& cp_irt, const Param& irt_detection_param,
+                                            const Param& calibration_param, bool pasef, int threads)
+      {
+        using namespace OpenMS;
+        // 1-2. Stock: the seeds' chromatograms over the whole run.
+        std::vector<MSChromatogram> chromatograms;
+        TransformationDescription no_trafo;
+        simpleExtractChromatograms_(swath_maps, targeted_exp, chromatograms, no_trafo, cp_irt, pasef, false);
+
+        const bool estimateBestPeptides = irt_detection_param.getValue("estimateBestPeptides").toBool();
+        const std::pair<double, double> RTRange = OpenSwathHelper::estimateRTRange(targeted_exp);
+        std::map<OpenMS::String, double> PeptideRTMap;
+        for (Size i = 0; i < targeted_exp.getCompounds().size(); i++)
+        { PeptideRTMap[targeted_exp.getCompounds()[i].id] = targeted_exp.getCompounds()[i].rt; }
+
+        Param feature_finder_param(default_ffparam);
+        feature_finder_param.setValue("Scores:use_rt_score", "false");
+        feature_finder_param.setValue("Scores:use_elution_model_score", "false");
+        feature_finder_param.setValue("rt_extraction_window", -1.0);
+        feature_finder_param.setValue("stop_report_after_feature", 1);
+        feature_finder_param.setValue("TransitionGroupPicker:PeakPickerChromatogram:signal_to_noise", 1.0);
+        feature_finder_param.setValue("TransitionGroupPicker:compute_peak_quality", "false");
+        if (estimateBestPeptides)
+        {
+          feature_finder_param.setValue("TransitionGroupPicker:compute_peak_quality", "true");
+          feature_finder_param.setValue("TransitionGroupPicker:minimal_quality", irt_detection_param.getValue("InitialQualityCutoff"));
+        }
+
+        // 3. pickExperiment, split: the seeds in 4 pieces per thread (dynamic
+        //    schedule), each with its own experiment, chromatograms and
+        //    feature finder. A chromatogram that belongs to no seed transition
+        //    goes to every piece, as stock would see it.
+        const std::size_t n = targeted_exp.compounds.size();
+        const std::size_t pieces = std::max<std::size_t>(1, std::min<std::size_t>(n, static_cast<std::size_t>(std::max(1, threads)) * 4));
+        std::unordered_map<std::string, std::size_t> piece_of_compound;
+        for (std::size_t i = 0; i < n; ++i) { piece_of_compound[targeted_exp.compounds[i].id] = i * pieces / std::max<std::size_t>(1, n); }
+        std::vector<OpenSwath::LightTargetedExperiment> sub(pieces);
+        for (auto& e : sub) { e.proteins = targeted_exp.proteins; }
+        for (const auto& c : targeted_exp.compounds) { sub[piece_of_compound.at(c.id)].compounds.push_back(c); }
+        std::unordered_map<std::string, std::size_t> piece_of_transition;
+        for (const auto& t : targeted_exp.transitions)
+        {
+          const auto it = piece_of_compound.find(t.peptide_ref);
+          if (it == piece_of_compound.end()) { continue; }
+          sub[it->second].transitions.push_back(t);
+          piece_of_transition[t.transition_name] = it->second;
+        }
+        std::vector<std::shared_ptr<PeakMap>> xic(pieces);
+        {
+          std::vector<std::vector<MSChromatogram>> parts(pieces);
+          for (const auto& ch : chromatograms)
+          {
+            const auto it = piece_of_transition.find(ch.getNativeID());
+            if (it != piece_of_transition.end()) { parts[it->second].push_back(ch); }
+            else { for (auto& part : parts) { part.push_back(ch); } }
+          }
+          chromatograms.clear();
+          chromatograms.shrink_to_fit();
+          for (std::size_t p = 0; p < pieces; ++p)
+          {
+            xic[p] = std::make_shared<PeakMap>();
+            xic[p]->setChromatograms(parts[p]);
+          }
+        }
+        std::vector<MRMFeatureFinderScoring::TransitionGroupMapType> maps(pieces);
+        std::vector<std::string> errors(pieces);
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(std::max(1, threads)) schedule(dynamic, 1)
+#endif
+        for (std::ptrdiff_t p = 0; p < static_cast<std::ptrdiff_t>(pieces); ++p)
+        {
+          try
+          {
+            MRMFeatureFinderScoring featureFinder;
+            featureFinder.setParameters(feature_finder_param);
+            FeatureMap featureFile;
+            std::vector<OpenSwath::SwathMap> empty_swath_maps;
+            TransformationDescription empty_trafo;
+            OpenSwath::SpectrumAccessPtr chromatogram_ptr = OpenSwath::SpectrumAccessPtr(new OpenMS::SpectrumAccessOpenMS(xic[p]));
+            featureFinder.setStrictFlag(false);
+            featureFinder.pickExperiment(chromatogram_ptr, featureFile, sub[p], empty_trafo, empty_swath_maps, maps[p]);
+          }
+          catch (const std::exception& e) { errors[p] = e.what(); }
+          catch (...) { errors[p] = "unknown exception"; }
+        }
+        for (const auto& e : errors) { if (!e.empty()) { throw std::runtime_error(e); } }
+        MRMFeatureFinderScoring::TransitionGroupMapType transition_group_map;
+        for (auto& m : maps)
+        {
+          for (auto& kv : m) { transition_group_map.emplace(kv.first, std::move(kv.second)); }
+        }
+
+        // 4-9. Stock doDataNormalization_ from here on.
+        std::vector<std::pair<double, double>> pairs;
+        const std::map<std::string, double> best_features = OpenSwathHelper::simpleFindBestFeature(transition_group_map,
+          estimateBestPeptides, irt_detection_param.getValue("OverallQualityCutoff"));
+        std::map<OpenMS::String, MRMFeatureFinderScoring::MRMTransitionGroupType*> trgrmap_allpeaks;
+        for (auto it = best_features.begin(); it != best_features.end(); ++it)
+        {
+          pairs.emplace_back(it->second, PeptideRTMap[it->first]);
+          if (transition_group_map.find(it->first) != transition_group_map.end())
+          { trgrmap_allpeaks[it->first] = &transition_group_map[it->first]; }
+        }
+        std::vector<std::pair<double, double>> pairs_corrected;
+        const std::string outlier_method = irt_detection_param.getValue("outlierMethod").toString();
+        if (outlier_method == "iter_residual" || outlier_method == "iter_jackknife")
+        {
+          pairs_corrected = MRMRTNormalizer::removeOutliersIterative(pairs, min_rsq, min_coverage,
+            irt_detection_param.getValue("useIterativeChauvenet").toBool(), outlier_method);
+        }
+        else if (outlier_method == "ransac")
+        {
+          const double pcnt_rt_threshold = irt_detection_param.getValue("RANSACMaxPercentRTThreshold");
+          const double max_rt_threshold = (RTRange.second - RTRange.first) * pcnt_rt_threshold / 100.0;
+          pairs_corrected = MRMRTNormalizer::removeOutliersRANSAC(pairs, min_rsq, min_coverage,
+            irt_detection_param.getValue("RANSACMaxIterations"), max_rt_threshold, irt_detection_param.getValue("RANSACSamplingSize"));
+        }
+        else if (outlier_method == "none") { pairs_corrected = pairs; }
+        else { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "Illegal outlierMethod " + outlier_method); }
+        if (estimateBestPeptides)
+        {
+          const bool enoughPeptides = MRMRTNormalizer::computeBinnedCoverage(RTRange, pairs_corrected,
+            irt_detection_param.getValue("NrRTBins"), irt_detection_param.getValue("MinPeptidesPerBin"),
+            irt_detection_param.getValue("MinBinsFilled"));
+          if (!enoughPeptides)
+          { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "There were not enough bins with the minimal number of peptides"); }
+        }
+        if (pairs_corrected.size() < 2)
+        { throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "There are less than 2 iRT normalization peptides, not enough for an RT correction."); }
+        std::map<OpenMS::String, MRMFeatureFinderScoring::MRMTransitionGroupType*> trgrmap_final;
+        for (const auto& it : trgrmap_allpeaks)
+        {
+          if (it.second->getFeatures().empty()) { continue; }
+          const MRMFeature& feat = it.second->getBestFeature();
+          for (Size pit = 0; pit < pairs_corrected.size(); pit++)
+          {
+            if (std::fabs(feat.getRT() - pairs_corrected[pit].first) < 1e-2) { trgrmap_final[it.first] = it.second; break; }
+          }
+        }
+        SwathMapMassCorrection mc;
+        mc.setParameters(calibration_param);
+        mc.correctMZ(trgrmap_final, targeted_exp, swath_maps, pasef);
+        mc.correctIM(trgrmap_final, targeted_exp, swath_maps, pasef, im_trafo);
+        setEstimatedMzWindow(mc.getFragmentMzWindow());
+        setEstimatedImWindow(mc.getFragmentImWindow());
+        setEstimatedMs1MzWindow(mc.getPrecursorMzWindow());
+        setEstimatedMs1ImWindow(mc.getPrecursorImWindow());
+        TransformationDescription trafo_out;
+        trafo_out.setDataPoints(pairs_corrected);
+        Param model_params;
+        model_params.setValue("symmetric_regression", "false");
+        model_params.setValue("span", irt_detection_param.getValue("lowess:span"));
+        model_params.setValue("auto_span", irt_detection_param.getValue("lowess:auto_span"));
+        model_params.setValue("auto_span_min", irt_detection_param.getValue("lowess:auto_span_min"));
+        model_params.setValue("auto_span_max", irt_detection_param.getValue("lowess:auto_span_max"));
+        model_params.setValue("auto_span_grid", irt_detection_param.getValue("lowess:auto_span_grid"));
+        model_params.setValue("num_nodes", irt_detection_param.getValue("b_spline:num_nodes"));
+        const OpenMS::String model_type = irt_detection_param.getValue("alignmentMethod").toString();
+        trafo_out.fitModel(model_type, model_params);
+        return trafo_out;
+      }
     };
 
     std::string fixed(double v, int digits)
@@ -1072,7 +1309,15 @@ namespace ODIA::search
       file.setLogType(OpenMS::ProgressLogger::NONE);
       QuietStreams quiet;
       OpenMSErrors capture(said);
+      // Stock MzMLHandler wakes its whole OpenMP team for every pool of
+      // spectra the one parsing thread has read, and the team mostly spins:
+      // ~80 CPU-s per thread on the full timsTOF run whatever its size. A
+      // team of SearchParams::loadThreads() keeps the wall time (measured:
+      // 1,403 -> 503 CPU-s at -threads 16, 14,369 -> 809 at -threads 0).
+      std::unique_ptr<ThreadCap> decode_team;
+      if (!mzpeak_run && SearchParams::loadThreads() >= 1) { decode_team = std::make_unique<ThreadCap>(SearchParams::loadThreads()); }
       trace::Scope reading("cache_write", 1);
+      if (decode_team) { reading.fields().session = decode_team->used(); }
       if (mzpeak_run)
       {
         // The same consumers and maps as an mzML run, from the archive.
@@ -1582,17 +1827,32 @@ namespace ODIA::search
         const Param ff = featureFinderParam(false, false, false);
         const OpenMS::ChromExtractParams cp_irt = chromParams(calibration_mz_ppm, -1.0, -1.0);
         const ThreadCap team(SearchParams::openswathThreads());
+        // The seeds' peak picking and scoring split over this many threads
+        // (SplitCalibration); 1 = stock performRTNormalization.
+        const int pickers = SearchParams::calibrationThreads(team.used());
         QuietStreams quiet;
         trace::Scope normalizing("openswath", 1);
         normalizing.fields().rows = static_cast<std::int64_t>(seed.compounds.size());
-        normalizing.fields().session = team.used();
+        normalizing.fields().session = pickers > 1 ? pickers : team.used();
         // pasef on an ion-mobility run searched with it (see the seeds above).
-        cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
-                                                 params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
-                                                 massCorrectionParam(), "", 0, im_run, false);
+        if (pickers > 1)
+        {
+          SplitCalibration split;
+          split.setLogType(OpenMS::ProgressLogger::NONE);
+          cal.rt = split.run(seed, maps, im_trafo, params().calibration_min_rsq, params().calibration_min_coverage, ff, cp_irt,
+                             irtDetectionParam(), massCorrectionParam(), im_run, pickers);
+          mz_estimate = split.getEstimatedMzWindow();
+          ms1_mz_estimate = split.getEstimatedMs1MzWindow();
+        }
+        else
+        {
+          cal.rt = workflow.performRTNormalization(seed, maps, im_trafo, params().calibration_min_rsq,
+                                                   params().calibration_min_coverage, ff, cp_irt, irtDetectionParam(),
+                                                   massCorrectionParam(), "", 0, im_run, false);
+          mz_estimate = workflow.getEstimatedMzWindow();
+          ms1_mz_estimate = workflow.getEstimatedMs1MzWindow();
+        }
         cal.im = im_trafo;
-        mz_estimate = workflow.getEstimatedMzWindow();
-        ms1_mz_estimate = workflow.getEstimatedMs1MzWindow();
       }
       catch (const std::exception& e)
       {
@@ -2048,7 +2308,17 @@ namespace ODIA::search
     const OpenMS::ChromExtractParams cp = chromParams(calibration.mz_ppm, im ? calibration.im_window : -1.0, calibration.rt_window);
     const OpenMS::ChromExtractParams cp_ms1 =
       chromParams(calibration.ms1_mz_ppm, ms1_im ? calibration.im_window : -1.0, calibration.rt_window);
-    OpenMS::OpenSwathWorkflow workflow(ms1, ms1_im, false, im, -1);
+    // Stock OpenSWATH's nested window loop: `outer_loop` windows at once,
+    // each window's batches over team / outer_loop threads (2), so a window
+    // holding many precursors (on diaPASEF one window takes 16 % of every
+    // call's) no longer ends the call on one thread. -1 = the flat loop.
+#ifdef _OPENMP
+    const int extraction_team = std::max(1, std::min(omp_get_max_threads(), SearchParams::openswathThreads()));
+#else
+    const int extraction_team = 1;
+#endif
+    const int outer_loop = SearchParams::openswathOuterLoop(extraction_team);
+    OpenMS::OpenSwathWorkflow workflow(ms1, ms1_im, false, im, outer_loop);
     AssayOptions assay_options;
     if (im)
     {
@@ -2176,12 +2446,17 @@ namespace ODIA::search
         OpenMS::FeatureMap features;
         {
           const ThreadCap team(SearchParams::openswathThreads());
-          if (c == 0 && team.used() < team.requested())
+          if (c == 0)
           {
-            info("search extraction: OpenSWATH runs on " + std::to_string(team.used()) + " of the " +
-                 std::to_string(team.requested()) + " threads; stock OpenSWATH does not scale beyond " +
-                 std::to_string(SearchParams::openswathThreads()));
+            const std::string layout = outer_loop >= 1 ? std::to_string(std::min(outer_loop, team.used())) + " windows at once, " +
+                                                           std::to_string(std::max(1, team.used() / outer_loop)) + " threads each"
+                                                       : std::string("one thread per window");
+            info("search extraction: OpenSWATH on " + std::to_string(team.used()) + " of the " + std::to_string(team.requested()) +
+                 " threads (" + layout + ", batches of " + std::to_string(params().batch_size) + " precursors)" +
+                 (team.used() < team.requested() ? "; stock OpenSWATH does not scale beyond " + std::to_string(SearchParams::openswathThreads())
+                                                 : std::string()));
           }
+          const OpenMPNesting nesting;   // the nested loop leaves nesting on and dynamic teams off
           QuietStreams quiet;
           trace::Scope extracting("openswath", 2);
           extracting.fields().rows = static_cast<std::int64_t>(assays.precursor.size());

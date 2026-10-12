@@ -463,7 +463,6 @@ jobs:
               "peptdeep_reference_encoding", "peptdeep_element_table", "peptdeep_meta_inputs",
               "peptdeep_encoder_matches_reference", "topp_parameters", "parameter_docs_current",
               "generate_threads_identical", "generate_stream_matches_one_pass",
-              "generate_ms2_pruned_matches_full",
           }
           # No runner has a GPU: gpu_matches_cpu skips (77) here by design and
           # runs where one is visible. generate_under_thread_limit is Linux-only.
@@ -509,8 +508,8 @@ jobs:
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
 
-          # Require all bundled prediction models, the pruned MS2 graph included.
-          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx peptdeep_ms2_pruned.onnx; do
+          # Require all three bundled prediction models.
+          for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
             test -s "$PWD/stage/share/DIALibGen/models/$m" \
               || { echo "::error::$m is not in the install tree"; exit 1; }
           done

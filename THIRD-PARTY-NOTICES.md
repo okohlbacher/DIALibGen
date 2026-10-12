@@ -42,15 +42,6 @@ exported to ONNX by the OpenMS project and mirrored at
 install them unmodified. User-requested tuning produces separate adapted models
 with embedded training provenance and sidecars.
 
-Since 0.11.2 releases also carry `peptdeep_ms2_pruned.onnx`, a **modified**
-copy of `peptdeep_ms2_dynamic.onnx` (Apache License 2.0, section 4(b)): the
-graph's modification-neutral-loss ("modloss") branch is removed and its four
-output channels are filled with zeros; every other weight and operator is
-unchanged, and the remaining channels are bit-identical to the original's. It
-is made by `scripts/prune-ms2-modloss.py` from the pinned original and kept in
-this repository as `data/models/peptdeep_ms2_pruned.onnx` (SHA256
-`82d6e933bdf25c4d4b7c2ebdcbc9b549956adc35362b11378f5a53055a94c3dd`).
-
 - AlphaPeptDeep: https://github.com/MannLabs/alphapeptdeep, Apache License 2.0.
 - Zeng *et al.*, "AlphaPeptDeep: a modular deep learning framework to predict
   peptide properties for proteomics", *Nat. Commun.* **13**, 7238 (2022).

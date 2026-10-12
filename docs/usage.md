@@ -102,18 +102,6 @@ an unknown modification. DIA-NN itself has no C-terminal modifications
 (`--var-mod` with `c` or `*c` makes none). The OpenSWATH outputs use OpenMS's
 notation, `.(UniMod:1)PEPTIDE` and `PEPTIDE.(UniMod:2)`.
 
-### MS2 model
-
-The MS2 model run by default is `peptdeep_ms2_pruned.onnx`, which every
-release carries beside the three stock models: AlphaPeptDeep's MS2 model with
-its modification-neutral-loss branch removed. Generation reads only the b and
-y channels, which the pruned graph computes bit for bit as the full one does,
-so the library content is the same, with about 15 % less CPU for MS2. The
-recorded recipe names and hashes the model that ran. To run the full model,
-set `"ms2_model": "peptdeep_ms2_dynamic.onnx"` (a bare file name that is not
-beside the config names a model in the model directories) or its path. A
-`DIALIBGEN_MODEL_DIR` holding only the three stock models runs the full model.
-
 Predicted RT is normalized model output by default. Set
 `-generation:irt_rescale true` for iRT calibration with the bundled standards,
 or supply `-irt_standards standards.tsv`. CCS and derived 1/K0 are distinct

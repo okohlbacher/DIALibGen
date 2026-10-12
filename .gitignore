@@ -14,4 +14,4 @@ compile_commands.json
 # (distributed in release bundles under the terms in THIRD-PARTY-NOTICES.md).
 stage/
 dist-bundles/
-/models/
+models/

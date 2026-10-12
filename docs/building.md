@@ -20,13 +20,6 @@ cmake --install build
 ./install/bin/DIALibGen --helphelp
 ```
 
-`fetch-models.sh` downloads the three stock AlphaPeptDeep models against pinned
-SHA256 digests and copies DIALibGen's pruned MS2 graph,
-`data/models/peptdeep_ms2_pruned.onnx`, beside them. The install carries the
-pruned graph in `share/DIALibGen/models` in any case. It is derived from the
-pinned MS2 model by `scripts/prune-ms2-modloss.py` (onnx and onnxruntime for
-Python), which checks the graph against the original before writing it.
-
 Use `-DTorch_DIR=/path/to/libtorch/share/cmake/Torch` if LibTorch is not found.
 To omit training and its runtime dependency, configure with
 `-DDIALIBGEN_BUILD_FINETUNE=OFF`. The resulting executable still generates

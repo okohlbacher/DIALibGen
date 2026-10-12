@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Download the three AlphaPeptDeep ONNX models and put them where the tool looks,
-# together with DIALibGen's pruned MS2 graph (peptdeep_ms2_pruned.onnx, derived
-# from the MS2 model by scripts/prune-ms2-modloss.py; the default for MS2).
+# Download the three AlphaPeptDeep ONNX models and put them where the tool looks.
 #
 # Installed as `dialibgen-fetch-models`; in a checkout it is scripts/fetch-models.sh.
 #
@@ -27,14 +25,7 @@ MODELS="
 peptdeep_rt_dynamic.onnx  3f3b847ea37a9333ac163409f3d4b343d021471548091c61aed6cfa398ce62fd
 peptdeep_ms2_dynamic.onnx 4141ea233d663b6f5b98ad80b8923ee685dae5cfdbe12243e2e30cd9c44ecf00
 peptdeep_ccs_dynamic.onnx 41816f325cdd838897b7e7dcaf291da5d4d3903a1532fc5dc9db7e0725015801
-peptdeep_ms2_pruned.onnx  82d6e933bdf25c4d4b7c2ebdcbc9b549956adc35362b11378f5a53055a94c3dd
 "
-
-# The pruned graph ships in DIALibGen's own tree (data/models in a checkout,
-# share/DIALibGen/models in an install) rather than on OpenMS's archive. It is
-# copied from there when present, else fetched from the repository.
-PRUNED_URL=https://raw.githubusercontent.com/okohlbacher/DIALibGen/main/data/models/peptdeep_ms2_pruned.onnx
-SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 
 DIR=""
 PREFIX=""
@@ -134,38 +125,20 @@ while read -r name want; do
     [ "$CHECK" = 1 ] && { missing=$((missing + 1)); continue; }
     rm -f "$target"
   elif [ "$CHECK" = 1 ]; then
-    # Optional: without it the tool runs the full MS2 model, same library.
-    if [ "$name" = peptdeep_ms2_pruned.onnx ]; then
-      printf '  %-26s missing (optional: the full MS2 model is used)\n' "$name"
-      continue
-    fi
     printf '  %-26s missing\n' "$name"
     missing=$((missing + 1))
     continue
   fi
 
+  printf '  %-26s downloading...' "$name"
   # To a temporary name first: an interrupted download must not leave something
   # that looks installed. --retry because this is one server and one chance.
   tmp="$target.part"
-  url="$BASE/$name"
-  local_copy=""
-  if [ "$name" = peptdeep_ms2_pruned.onnx ]; then
-    url=$PRUNED_URL
-    for c in "$SELF_DIR/../data/models/$name" "$SELF_DIR/../share/DIALibGen/models/$name"; do
-      [ -f "$c" ] && [ "$c" != "$target" ] && { local_copy=$c; break; }
-    done
-  fi
-  if [ -n "$local_copy" ]; then
-    printf '  %-26s copying...' "$name"
-    cp "$local_copy" "$tmp"
-  else
-    printf '  %-26s downloading...' "$name"
-    if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
-      echo " FAILED"
-      rm -f "$tmp"
-      echo "could not download $url" >&2
-      exit 1
-    fi
+  if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$BASE/$name"; then
+    echo " FAILED"
+    rm -f "$tmp"
+    echo "could not download $BASE/$name" >&2
+    exit 1
   fi
   have=$(digest "$tmp")
   if [ "$have" != "$want" ]; then
@@ -184,12 +157,12 @@ EOF
 
 if [ "$CHECK" = 1 ]; then
   [ "$missing" -eq 0 ] || { echo; echo "$missing model(s) missing or corrupt"; exit 1; }
-  echo; echo "all present models verified"
+  echo; echo "all three present and verified"
   exit 0
 fi
 
 echo
-[ "$got" -gt 0 ] && echo "fetched $got, $(( 4 - got )) already present" || echo "nothing to do"
+[ "$got" -gt 0 ] && echo "downloaded $got, $(( 3 - got )) already present" || echo "nothing to do"
 
 # Whether the tool will actually FIND them, which is the only claim worth making.
 # It is not the same question as whether the files are on disk: the directory has

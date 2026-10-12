@@ -8,8 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `-out_format` (all modes) selects the layout of `-out`; `auto`, the default,
-  keeps choosing by extension, and the default `.parquet` and `.tsv` outputs
-  are byte for byte those of 0.11.2. The opt-in layouts carry their version
+  keeps choosing by extension, and the default `.parquet` and `.tsv` layouts
+  are unchanged. The opt-in layouts carry their version
   in their name:
   - `diann2_parquet` (`.parquet`): DIA-NN 2.0's own Parquet library layout,
     the 27 columns, order and types of a library DIA-NN 2.0 writes, including
@@ -41,9 +41,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The pruned MS2 model (`peptdeep_ms2_pruned.onnx`) is removed; the full
+  model, `peptdeep_ms2_dynamic.onnx`, is the default again. Libraries name the
+  full model in their provenance; their content is unchanged. MS2 takes about
+  15 % more CPU than in 0.11.2.
 - **Generation on the CPU is faster again** (whole human-sized proteome,
-  2 x 96-core EPYC: 158 -> 124 s at 96 threads, 595 -> 575 s at 16), with
-  the same library content and bytes as 0.11.2:
+  2 x 96-core EPYC: to be measured), with the same library content as 0.11.2:
   - parallel work runs on a persistent worker pool instead of threads started
     for every step; worker k is bound to NUMA node k mod n (Linux;
     `ODIA_POOL_PIN=0` turns it off). Memory is no longer interleaved over the

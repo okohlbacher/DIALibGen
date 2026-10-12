@@ -119,9 +119,7 @@ per physical core; generation runs one inference session per thread. Training
 has its own `-machine:threads` setting (default 16). Explicit generation CLI/INI settings
 override the optional JSON config; CLI settings override INI settings.
 
-Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx` and
-`peptdeep_ms2_pruned.onnx`, the MS2 model without its unused neutral-loss
-branch, which generation runs by default (same library, faster). Override them with
+Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx`. Override them with
 `DIALIBGEN_MODEL_DIR`, the generation model-path options, or `-tune_models`.
 For a source installation, `scripts/fetch-models.sh --dir models` downloads and
 verifies the pinned models. See [building](docs/building.md) and

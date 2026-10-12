@@ -1270,6 +1270,9 @@ process (+30 % per epoch at 16 threads, measured on dax by the training
 work). What would help is better balance across windows inside a call
 (the timsTOF straggler) and the calibration's OpenSWATH call, which runs on
 1.8 cores for 270 s on the timsTOF run.
+Both are addressed in 0.11.3 ("-run efficiency defaults" below): stock
+OpenSWATH's nested window loop splits the straggling window, which makes
+a team of 16 pay, and the calibration's seed picking is split by seed.
 
 ### The prediction port and the decoys (perf/run-speed)
 
@@ -1345,6 +1348,72 @@ calibration (6 %, on 1.8 cores) and the serial reading and hashing (run
 cache 239 s on 5.9 cores, library 39 s, run hash 36 s, input hashes 12 s,
 cache removal 14 s).
 
+
+### -run efficiency defaults (0.11.3)
+
+The run-efficiency analysis (why the full timsTOF `-run` keeps 8.7 of 16
+cores busy; prototypes and analysis tools on branch
+[perf/run-efficiency](https://github.com/okohlbacher/DIALibGen/tree/perf/run-efficiency),
+`scripts/perf/run-efficiency/`; its report, runs and traces on dax in
+`/scratch/kohlbach/run-eff/`) measured four countermeasures behind
+switches. In 0.11.3 they are the defaults; each switch restores the old
+way, and the report does not depend on any of them (`docs/tracing.md`):
+
+| what | default | off |
+|---|---|---|
+| extraction: stock OpenSWATH's nested window loop, team / 2 windows at once with 2 threads over each window's batches, batches of 100, team up to 16 (from a team of 8; only where OpenMS has `MT_ENABLE_NESTED_OPENMP`, not MSVC builds) | on | `ODIA_OPENSWATH_OUTER=0`, `-search:batch_size 500` |
+| calibration: the seeds' peak picking and scoring (`pickExperiment`, one serial loop in stock `performRTNormalization`) split by seed over up to 8 threads; the rest is stock 3.5.0 step for step | on | `ODIA_CALIB_PAR=0` |
+| the run's and the library's hashes on threads of their own, the run cache removed in the background; waited for before the provenance | on | `ODIA_ASYNC_IO=0` |
+| a decode team of 4 while the mzML is read (it only spun) | 4 | `ODIA_LOAD_THREADS=0` |
+
+At a team of 4 the nested loop made extraction slower (840 -> 946 s on
+the timsTOF cell: two windows at once leave the crowded one on two
+threads), so below 8 threads the flat loop stays. Above 16 the
+`MetaInfoRegistry` lock wins again (team 32: 387 s against 297 s at 16),
+so the team stops at 16 whatever `-threads` says.
+
+Measured on dax (2 x EPYC 9654), the code of 14e74ba against 14e74ba plus
+these defaults, one traced run per configuration under the timing lock;
+"others" is the mean of other users' busy cores during the run (`/proc/stat`
+minus the run's own CPU; a run counts as contaminated above 16). Runs in
+`dax:/scratch/kohlbach/run-defaults/runs/`.
+
+| workload | threads | before: wall (CPU) | defaults: wall (CPU) | extraction | calibration | others |
+|---|---:|---:|---:|---|---|---:|
+| timsTOF cell, library intensities | 4 | 1,545 s (4,558) | 1,277 s (4,513) | 840 -> 841 s | 277 -> 82 s | – / 2.2 |
+| | 8 | 1,131 s (4,868) | 855 s (4,548) | 512 -> 495 s | 275 -> 49 s | – / 2.3 |
+| | 16 | 1,182 s (5,725) | 629 s (4,879) | 524 -> 284 s | 275 -> 49 s | – / 2.6 |
+| | 0 (192) | 1,201 s (21,921) | 660 s (10,955) | 520 -> 290 s | 277 -> 49 s | – / 1.9 |
+| timsTOF cell, predicted intensities | 16 | 2,005 s (21,055) | 1,572 s (20,068) | 373 -> 233 s | 277 -> 47 s | – / 9.0 |
+| Astral cell, library intensities | 16 | 568 s (2,315) | 253 s (2,143) | – | – | 15.0 / 1.5 |
+| full timsTOF `-mode tune -run` | 16 | 4,574 s (39,742) | **3,317 s (44,096)** | 2,297 -> 1,541 s | 275 -> 51 s | – / 3.7 |
+| full Astral `-mode tune -tune_heads rt -run` | 16 | 1,710 s (16,541) | 1,346 s (17,598) | 431 -> 341 s | 36 -> 7 s | 1.6 / 2.0 |
+
+The baselines at 4, 16 and 0 threads and of the two full runs are the
+analysis' runs of perf/run-speed (whose extraction, calibration and load
+code 14e74ba keeps); at 8 threads, the predicted and the Astral cell they
+are 14e74ba's binary. The Astral cell's baseline ran under load (load
+average 82; other users 15.0 cores, just inside the rule); the analysis'
+clean run of the same cell took 384 s. In the full timsTOF run the hashes
+(36 + 12 s), the cache removal (14 s) and the run load's extra CPU (1,403
+-> 541 CPU-s) are gone as measured; it took 3,317 s against 4,574 s
+(-27 %) and the analysis' projection of about 3,490 s. Its tuning ran
+0.11.3's 16 training threads: 541 s (tune_rt 389, tune_ccs 152) against
+472 s with 4 threads in the baseline; 14e74ba's own `-mode tune -ids` at
+16 training threads took 518 s on the same report, so the -205 s the
+analysis measured for 16 training threads (on a measurement build) did
+not appear on 0.11.3.
+
+Equivalence: every report was `pyarrow` `Table.equals` to its baseline
+with no metadata difference but `tool_version` (timsTOF cell 06a0b223
+lineage at 4, 8, 16 and 0 threads; predicted cell 6ebddf84; Astral cell
+md5-identical to 14e74ba's; full run 1cbf491a). The full run's tuned
+library is md5-identical to the one 14e74ba tunes from the same report
+at 16 training threads (4160a0c6...; 14e74ba's default, so not the
+4-thread ece0d219... of the baseline). Without `-run`, generate (sub10,
+TSV and Parquet), `-mode refine -ids` and `-mode tune -ids` write the same
+libraries as 14e74ba (tables equal; only paths in the embedded provenance
+differ).
 ## Formats
 
 First release: centroided DIA **mzML**. timsTOF diaPASEF needs a frame-merged

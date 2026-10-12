@@ -15,6 +15,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   passed and the 16 GB / 60 min on 8 cores resources gate is not met; `-ids`
   remains the validated route
   ([design](docs/design/built-in-identification.md)).
+  Faster extraction, calibration and run loading by default (nested
+  OpenSWATH window loop with a team of up to 16, calibration split by seed,
+  hashes and cache removal in the background, a capped decode team): the
+  full timsTOF `-run` at 16 threads takes 3,317 s instead of 4,574 s with
+  the same report
+  ([measured](docs/design/built-in-identification.md#-run-efficiency-defaults-0113)).
 - `-run` reads mzPeak runs (`.mzpeak` archives or their unpacked directory)
   besides mzML, through the vendored mzpeak-openms reader into the same
   OpenSWATH maps; diaPASEF frames stored whole are split by their windows'

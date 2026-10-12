@@ -37,9 +37,12 @@
 #include <odia/search/Identifier.h>
 #include <odia/search/IonMobility.h>
 #include <odia/search/MemoryCheck.h>
+#include <odia/search/MzPeakRun.h>
 #include <odia/search/RobustLine.h>
 
 #include <odia/Trace.h>
+
+#include "../library/ThreadPool.h"
 
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMFeatureFinderScoring.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
@@ -53,6 +56,7 @@
 #include <OpenMS/DATASTRUCTURES/Param.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/FORMAT/SwathFile.h>
+#include <OpenMS/FORMAT/DATAACCESS/SwathFileConsumer.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/METADATA/MetaInfoInterface.h>
 #include <OpenMS/METADATA/MetaInfoRegistry.h>
@@ -66,6 +70,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -726,6 +731,254 @@ namespace ODIA::search
       }
       return total;
     }
+
+    // ---- mzPeak runs ------------------------------------------------------------
+
+    /// SwathFile with the window census of its loadMzML at hand.
+    class MzPeakSwathFile : public OpenMS::SwathFile
+    {
+    public:
+      using OpenMS::SwathFile::countScansInSwath_;
+    };
+
+    /// One spectrum the SwathFile consumers see: an archive spectrum, or one
+    /// isolation window of a diaPASEF frame the archive keeps whole (window
+    /// = its index in the frame's precursors, -1 for the whole spectrum).
+    struct MzPeakUnit
+    {
+      std::size_t spectrum;
+      int window;
+    };
+
+    /// The OpenMS spectrum an mzML of the archive gives for @p info: the MS
+    /// level, RT in seconds, native id, the precursor as MzMLHandler builds it
+    /// (m/z of the selected ion, the isolation window's offsets, 1/K0) and the
+    /// window's 1/K0 band as the spectrum's "ion mobility lower/upper limit"
+    /// meta values (what SwathFile groups windows by). No peaks.
+    OpenMS::MSSpectrum mzpeakShell(const mzpeak::SpectrumInfo& info, int window)
+    {
+      OpenMS::MSSpectrum s;
+      s.setMSLevel(static_cast<OpenMS::UInt>(std::max(0, info.ms_level)));
+      s.setRT(info.rt_s);
+      s.setNativeID(info.id);
+      s.setType(OpenMS::SpectrumSettings::SpectrumType::CENTROID);
+      if (info.ms_level >= 2 && !info.windows.empty())
+      {
+        const std::vector<std::size_t> which = window >= 0 ? std::vector<std::size_t>{static_cast<std::size_t>(window)}
+                                                           : std::vector<std::size_t>{0};
+        std::vector<OpenMS::Precursor> precursors;
+        for (const std::size_t k : which)
+        {
+          const mzpeak::Window& w = info.windows[k];
+          OpenMS::Precursor p;
+          p.setMZ(w.mz);
+          if (w.mz != w.target && w.target > 0) { p.setMetaValue("isolation window target m/z", w.target); }
+          if (w.has_offsets)
+          {
+            p.setIsolationWindowLowerOffset(w.lower_offset);
+            p.setIsolationWindowUpperOffset(w.upper_offset);
+          }
+          if (w.has_im)
+          {
+            p.setDriftTime(w.im);
+            p.setDriftTimeUnit(OpenMS::DriftTimeUnit::VSSC);
+            s.setDriftTime(w.im);
+            s.setDriftTimeUnit(OpenMS::DriftTimeUnit::VSSC);
+          }
+          precursors.push_back(p);
+          if (w.has_im_limits)
+          {
+            s.setMetaValue("ion mobility lower limit", w.im_lower);
+            s.setMetaValue("ion mobility upper limit", w.im_upper);
+          }
+        }
+        s.setPrecursors(precursors);
+      }
+      return s;
+    }
+
+    /// The name MzMLHandler gives a 1/K0 array (its CV term, MS:1003006).
+    constexpr const char* mzpeak_im_array = "mean inverse reduced ion mobility array";
+
+    /// The peaks of @p unit into @p s: all of them, or, for one window of a
+    /// whole diaPASEF frame, those whose 1/K0 lies in the window's band
+    /// (lower, upper], sorted by m/z as a per-window spectrum is.
+    void mzpeakFill(OpenMS::MSSpectrum& s, const mzpeak::Peaks& peaks, const mzpeak::SpectrumInfo& info, int window,
+                    std::uint64_t& dropped_outside)
+    {
+      const std::size_t n = std::min(peaks.mz.size(), peaks.intensity.size());
+      const bool im = peaks.mobility.size() == n && n > 0;
+      std::vector<std::size_t> keep;
+      if (window < 0)
+      {
+        keep.resize(n);
+        for (std::size_t k = 0; k < n; ++k) { keep[k] = k; }
+      }
+      else
+      {
+        const mzpeak::Window& w = info.windows[static_cast<std::size_t>(window)];
+        for (std::size_t k = 0; k < n; ++k)
+        {
+          if (peaks.mobility[k] > w.im_lower && peaks.mobility[k] <= w.im_upper) { keep.push_back(k); }
+        }
+        std::stable_sort(keep.begin(), keep.end(), [&](std::size_t a, std::size_t b) { return peaks.mz[a] < peaks.mz[b]; });
+        if (window == 0)
+        {
+          // Count once per frame: the points in no window's band.
+          for (std::size_t k = 0; k < n; ++k)
+          {
+            bool any = false;
+            for (const auto& o : info.windows) { any = any || (peaks.mobility[k] > o.im_lower && peaks.mobility[k] <= o.im_upper); }
+            dropped_outside += any ? 0 : 1;
+          }
+        }
+      }
+      s.reserve(keep.size());
+      for (const std::size_t k : keep) { s.emplace_back(peaks.mz[k], peaks.intensity[k]); }
+      if (im)
+      {
+        OpenMS::MSSpectrum::FloatDataArray a;
+        a.setName(mzpeak_im_array);
+        a.reserve(keep.size());
+        for (const std::size_t k : keep) { a.push_back(static_cast<float>(peaks.mobility[k])); }
+        s.getFloatDataArrays().push_back(std::move(a));
+      }
+    }
+
+    /// Spectra per block of the parallel read, and the most points a block
+    /// holds at once (about 20 bytes each while decoded).
+    constexpr std::size_t mzpeak_block_spectra_per_thread = 16;
+    constexpr std::uint64_t mzpeak_block_points = 32u << 20;
+
+    /// What SwathFile::loadMzML does for an mzML, for an mzPeak archive: the
+    /// window census over every spectrum's metadata, then every spectrum,
+    /// in archive order, through the same consumer (in memory, or cached per
+    /// window with read mode "cache"). The peaks are decoded in blocks, in
+    /// parallel, each worker through its own cursor; the consumer takes them
+    /// one by one in order. @p record receives what was read.
+    std::vector<OpenSwath::SwathMap> loadMzPeakMaps(const mzpeak::Reader& reader, const std::string& path, const std::string& tmp,
+                                                    const std::string& read_mode, int threads, json& record)
+    {
+      const std::vector<mzpeak::SpectrumInfo>& info = reader.spectra();
+
+      // The spectra the consumers see: an MS2 spectrum with several windows
+      // (a diaPASEF frame an ims-compact archive keeps whole) becomes one per
+      // window, as the per-window reading of the .d makes them.
+      std::vector<MzPeakUnit> units;
+      units.reserve(info.size());
+      std::size_t frames_split = 0;
+      for (std::size_t i = 0; i < info.size(); ++i)
+      {
+        const auto& sp = info[i];
+        if (sp.ms_level >= 2 && sp.windows.size() > 1)
+        {
+          for (const auto& w : sp.windows)
+          {
+            if (!w.has_im_limits)
+            {
+              throw std::runtime_error("search: the mzPeak run " + path + ": spectrum " + sp.id + " holds " +
+                                       std::to_string(sp.windows.size()) + " isolation windows, but window m/z " +
+                                       std::to_string(w.mz) + " has no 1/K0 band to tell its peaks apart");
+            }
+          }
+          ++frames_split;
+          for (std::size_t k = 0; k < sp.windows.size(); ++k) { units.push_back({i, static_cast<int>(k)}); }
+        }
+        else { units.push_back({i, -1}); }
+      }
+
+      trace::Scope census("mzpeak_census", 1);
+      std::vector<OpenMS::MSSpectrum> shells;
+      shells.reserve(units.size());
+      for (const auto& u : units) { shells.push_back(mzpeakShell(info[u.spectrum], u.window)); }
+      std::vector<int> swath_counter;
+      int nr_ms1_spectra = 0;
+      std::vector<OpenSwath::SwathMap> boundaries;
+      MzPeakSwathFile census_file;
+      census_file.countScansInSwath_(shells, swath_counter, nr_ms1_spectra, boundaries);
+      std::vector<OpenMS::MSSpectrum>().swap(shells);
+      census.end();
+
+      const OpenMS::String tmp_fname = (!tmp.empty() && tmp.back() == '/') ? OpenMS::File::getUniqueName() : OpenMS::String();
+      std::shared_ptr<OpenMS::FullSwathFileConsumer> consumer;
+      if (read_mode == "normal") { consumer = std::make_shared<OpenMS::RegularSwathFileConsumer>(boundaries); }
+      else if (read_mode == "cache")
+      { consumer = std::make_shared<OpenMS::CachedSwathFileConsumer>(boundaries, tmp, tmp_fname, nr_ms1_spectra, swath_counter); }
+      else { throw std::runtime_error("search: read mode " + read_mode + " is not available for an mzPeak run"); }
+      consumer->setExperimentalSettings(OpenMS::ExperimentalSettings());
+
+      const unsigned team = static_cast<unsigned>(std::max(1, threads));
+      std::vector<std::unique_ptr<mzpeak::Reader::Cursor>> cursors(team);
+      std::uint64_t points = 0, dropped_outside = 0;
+      std::size_t block_count = 0;
+      trace::Scope reading("mzpeak_read", 1);
+      for (std::size_t first = 0; first < info.size();)
+      {
+        // The block: consecutive spectra, at most a number per thread and a
+        // number of points (the metadata knows each spectrum's count only
+        // after decoding on some archives, so the cap applies to the read).
+        const std::size_t last = std::min(info.size(), first + mzpeak_block_spectra_per_thread * team);
+        std::vector<mzpeak::Peaks> peaks(last - first);
+        std::atomic<std::size_t> next{first};
+        std::atomic<std::uint64_t> held{0};
+        std::atomic<std::size_t> stop{last};
+        trace::Scope decoding("mzpeak_decode", 2);
+        decoding.fields().idx = static_cast<std::int64_t>(block_count);
+        ODIA::parallel::team(team, [&](std::size_t w) {
+          if (!cursors[w]) { cursors[w] = reader.cursor(); }
+          for (std::size_t i = next.fetch_add(1); i < stop.load(); i = next.fetch_add(1))
+          {
+            cursors[w]->read(i, peaks[i - first]);
+            const std::uint64_t n = peaks[i - first].mz.size();
+            if (held.fetch_add(n) + n > mzpeak_block_points)
+            {
+              // Enough for this block: the spectra after i wait for the next.
+              std::size_t current = stop.load();
+              while (i + 1 < current && !stop.compare_exchange_weak(current, i + 1)) {}
+            }
+          }
+        });
+        const std::size_t end = std::min(stop.load(), last);
+        decoding.fields().rows = static_cast<std::int64_t>(end - first);
+        decoding.end();
+        trace::Scope consuming("mzpeak_consume", 2);
+        consuming.fields().idx = static_cast<std::int64_t>(block_count);
+        for (std::size_t i = first; i < end; ++i)
+        {
+          const auto& sp = info[i];
+          points += peaks[i - first].mz.size();
+          if (sp.ms_level >= 2 && sp.windows.size() > 1)
+          {
+            for (std::size_t k = 0; k < sp.windows.size(); ++k)
+            {
+              OpenMS::MSSpectrum s = mzpeakShell(sp, static_cast<int>(k));
+              mzpeakFill(s, peaks[i - first], sp, static_cast<int>(k), dropped_outside);
+              consumer->consumeSpectrum(s);
+            }
+          }
+          else
+          {
+            OpenMS::MSSpectrum s = mzpeakShell(sp, -1);
+            mzpeakFill(s, peaks[i - first], sp, -1, dropped_outside);
+            consumer->consumeSpectrum(s);
+          }
+          peaks[i - first] = mzpeak::Peaks();   // freed as soon as consumed
+        }
+        consuming.end();
+        ++block_count;
+        first = end;
+      }
+      reading.fields().rows = static_cast<std::int64_t>(points);
+      reading.end();
+
+      std::vector<OpenSwath::SwathMap> maps;
+      consumer->retrieveSwathMaps(maps);
+      record = {{"format", "mzpeak"}, {"mzpeak_version", reader.version()}, {"spectra", info.size()},
+                {"spectra_to_consumer", units.size()}, {"frames_split_by_window", frames_split},
+                {"points", points}, {"blocks", block_count}, {"threads", team}};
+      if (frames_split > 0) { record["frame_points_outside_every_window"] = dropped_outside; }
+      return maps;
+    }
   }
 
   // ---- loading ----------------------------------------------------------------
@@ -736,11 +989,36 @@ namespace ODIA::search
     RunData run;
     run.path = path;
     std::error_code ec;
-    if (!fs::is_regular_file(path, ec))
+    const bool mzpeak_run = mzpeak::isMzPeak(path);
+    if (!fs::is_regular_file(path, ec) && !(mzpeak_run && fs::is_directory(path, ec)))
     { throw std::runtime_error("search: the run " + path + " is not a readable file"); }
-    const std::uintmax_t bytes = fs::file_size(path);
+    if (mzpeak_run && !mzpeak::available())
+    {
+      throw std::runtime_error("search: the run " + path + " is an mzPeak archive, and this build of DIALibGen reads mzML only "
+                               "(built without DIALIBGEN_WITH_MZPEAK); convert it with mzpeak-convert --to mzml");
+    }
+    const std::uintmax_t bytes = fs::is_directory(path, ec) ? directoryBytes(path) : fs::file_size(path);
+    // An mzPeak archive is several times smaller than the mzML of the same
+    // run: search:readoptions auto decides by the peaks it holds, decoded
+    // (m/z 8, intensity 4 and 1/K0 8 bytes each), against the same 3 GB.
+    std::unique_ptr<mzpeak::Reader> mzpeak_reader;
+    std::uintmax_t decoded = bytes;
+    if (mzpeak_run)
+    {
+      trace::Scope opening("mzpeak_open", 1);
+      mzpeak_reader = std::make_unique<mzpeak::Reader>(path);
+      std::uint64_t points = 0;
+      bool im = false;
+      for (const auto& sp : mzpeak_reader->spectra())
+      {
+        points += sp.points;
+        for (const auto& w : sp.windows) { im = im || w.has_im_limits; }
+      }
+      decoded = points * (im ? 20u : 12u);
+      opening.fields().rows = static_cast<std::int64_t>(mzpeak_reader->spectra().size());
+    }
     const bool cache = params().readoptions == ReadMode::Cache ||
-                       (params().readoptions == ReadMode::Auto && bytes > cache_above_bytes);
+                       (params().readoptions == ReadMode::Auto && decoded > cache_above_bytes);
     run.read_mode = cache ? "cache" : "normal";
 
     // Cache files go to a private directory, which identify() removes once
@@ -777,6 +1055,7 @@ namespace ODIA::search
                   "report's 1/K0 is measured)"
                 : std::string("into memory")));
     std::ostringstream said;
+    std::string mzpeak_record;
     try
     {
       OpenMS::SwathFile file;
@@ -784,7 +1063,16 @@ namespace ODIA::search
       QuietStreams quiet;
       OpenMSErrors capture(said);
       trace::Scope reading("cache_write", 1);
-      run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode);
+      if (mzpeak_run)
+      {
+        // The same consumers and maps as an mzML run, from the archive.
+        json record;
+        run.maps = loadMzPeakMaps(*mzpeak_reader, path, tmp, run.read_mode, params().threads, record);
+        record["decoded_bytes_estimate"] = decoded;
+        run.meta = std::make_shared<OpenMS::ExperimentalSettings>();
+        mzpeak_record = record.dump();
+      }
+      else { run.maps = file.loadMzML(path, tmp, run.meta, run.read_mode); }
     }
     catch (const std::exception& e)
     {
@@ -792,6 +1080,7 @@ namespace ODIA::search
       // Stock MzMLFile rethrows parse errors without their reason, which went
       // to the log stream captured above: say both.
       const std::string reason = openmsReason(said.str());
+      if (mzpeak_run) { throw std::runtime_error(std::string(e.what())); }
       std::string message = "search: OpenMS cannot read the run " + path + ": " + (reason.empty() ? std::string(e.what()) : reason);
       if (!reason.empty()) { message += " [" + std::string(e.what()) + "]"; }
       if (reason.find("defaultDataProcessingRef") != std::string::npos)
@@ -833,7 +1122,7 @@ namespace ODIA::search
       if (ms2 == 0 || spectra_ms2 == 0)
       {
         throw SearchAbort("search: the run " + path + " has no DIA isolation windows with spectra (" + std::to_string(ms2) +
-                          " MS2 windows, " + std::to_string(ms1) + " MS1 maps); DIA mzML is required");
+                          " MS2 windows, " + std::to_string(ms1) + " MS1 maps); a DIA run is required");
       }
       // Ion mobility needs both: window limits AND a per-peak 1/K0 array. A
       // file with limits but no array is usable for RT only.
@@ -955,6 +1244,8 @@ namespace ODIA::search
         {"im_extraction", im_on}};
       // Only on ion-mobility runs: every other run records exactly what it did before M2.
       for (auto it = im_json.begin(); it != im_json.end(); ++it) { loader[it.key()] = it.value(); }
+      // Only on mzPeak runs: an mzML run records exactly what it did before.
+      if (!mzpeak_record.empty()) { loader["mzpeak"] = json::parse(mzpeak_record); }
       run.provenance_json = loader.dump();
     }
     catch (...)

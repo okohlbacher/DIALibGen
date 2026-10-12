@@ -11,6 +11,7 @@
 #include <odia/LibraryRefiner.h>
 #include <odia/Trace.h>
 #include <odia/search/Identifier.h>
+#include <odia/search/MzPeakRun.h>
 #include <odia/search/SearchParams.h>
 
 #ifdef DIALIBGEN_WITH_FINETUNE
@@ -26,6 +27,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -42,6 +45,31 @@ using json = nlohmann::json;
 
 namespace
 {
+  /// The run's fingerprint for the provenance: the file's FNV-1a64, or for an
+  /// unpacked mzPeak archive (a directory) the FNV-1a64 of its members'
+  /// "relative path<TAB>FNV-1a64" lines in path order.
+  std::string runHash(const std::string& run)
+  {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(run, ec)) { return ODIA::DIANNLibraryFile::hashFile(run); }
+    std::vector<std::filesystem::path> members;
+    for (auto it = std::filesystem::recursive_directory_iterator(run, ec); !ec && it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec))
+    {
+      if (it->is_regular_file(ec)) { members.push_back(it->path()); }
+    }
+    std::sort(members.begin(), members.end());
+    std::uint64_t h = 1469598103934665603ull;
+    for (const auto& m : members)
+    {
+      const std::string line = std::filesystem::relative(m, run).generic_string() + "\t" + ODIA::DIANNLibraryFile::hashFile(m.string()) + "\n";
+      for (const unsigned char c : line) { h ^= c; h *= 1099511628211ull; }
+    }
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << h;
+    return out.str();
+  }
+
   const char* rtUnitName(ODIA::RefineParams::RtUnit u)
   { return u == ODIA::RefineParams::RtUnit::MinMax ? "minmax" : "observed"; }
   const char* intensityNormName(ODIA::RefineParams::IntensityNorm n)
@@ -163,10 +191,12 @@ void DIALibGen::registerRefinementOptions_()
                        "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
     setValidFormats_("ids", {"parquet"}, false);
     registerInputFile_("run", "<file>", "",
-                       "Experimental: a centroided DIA run (mzML) that the built-in identification step searches instead "
+                       "Experimental: a centroided DIA run (mzML, or mzPeak: a .mzpeak archive or its unpacked directory) that "
+                       "the built-in identification step searches instead "
                        "of reading -ids. Not yet validated (entrapment and resource gates open); -ids is the validated route. "
                        "Give exactly one of -ids and -run. Settings: search:.", false);
-    setValidFormats_("run", {"mzML"}, false);
+    // Not checked by TOPP (OpenMS 3.5 has no mzPeak type): refine_ checks the extension.
+    setValidFormats_("run", {"mzML", "mzpeak"}, false);
     registerOutputFile_("out_ids", "<file>", "",
                         "With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. "
                         "Default: <out>.ids.parquet. Never overwritten.", false);
@@ -553,17 +583,38 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       std::string stem = raw;
       while (stem.size() > 1 && (stem.back() == '/' || stem.back() == '\\')) { stem.pop_back(); }
       const bool bruker = stem.size() > 2 && (stem.ends_with(".d") || stem.ends_with(".D"));
+      // An unpacked mzPeak archive is a directory holding mzpeak_index.json.
+      if (name == "run" && ODIA::search::mzpeak::isMzPeak(raw)) { continue; }
       if (name == "run" && bruker)
       {
         writeLogError_("-run " + raw + " is a Bruker .d directory, which this version cannot read; convert it to a "
-                       "frame-merged mzML with a per-peak 1/K0 array (mzpeak-convert --to mzml) and pass that");
+                       "per-window mzML with a per-peak 1/K0 array (mzpeak-convert --to mzml) or an mzPeak archive (mzpeak-convert) and pass that");
       }
       else { writeLogError_("-" + name + " " + raw + " is a directory; it takes a file" + (name == "run" ? " (mzML)" : " (report.parquet)")); }
       return ILLEGAL_PARAMETERS;
     }
     const std::string in = getStringOption_("in");
     std::string ids = getStringOption_("ids");
-    const std::string run = getStringOption_("run");
+    // Read as given: TOPP's input-file getter probes the type, which OpenMS 3.5
+    // does not know for mzPeak and which fails on a directory.
+    const std::string run = getParam_().getValue("run").toString();
+    if (!run.empty())
+    {
+      std::error_code ec;
+      std::string name = std::filesystem::path(run).filename().string();
+      std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      const bool mzpeak = ODIA::search::mzpeak::isMzPeak(run);
+      if (!mzpeak && !name.ends_with(".mzml") && !name.ends_with(".mzml.gz"))
+      { writeLogError_("-run " + run + ": give an mzML (.mzML) or an mzPeak archive (.mzpeak)"); return ILLEGAL_PARAMETERS; }
+      if (!std::filesystem::exists(run, ec))
+      { writeLogError_("-run " + run + " does not exist"); return INPUT_FILE_NOT_FOUND; }
+      if (mzpeak && !ODIA::search::mzpeak::available())
+      {
+        writeLogError_("-run " + run + " is an mzPeak archive, and this build reads mzML only (DIALIBGEN_WITH_MZPEAK off); "
+                       "convert it with mzpeak-convert --to mzml");
+        return ILLEGAL_PARAMETERS;
+      }
+    }
     // TOPP's writable-file probe follows and then removes dangling symlinks.
     // Inspect destinations before any output-file getter can run that probe.
     const std::string out = getParam_().getValue("out").toString();
@@ -765,7 +816,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         search_prov = json::parse(found.provenance_json);
         {
           ODIA::trace::Scope hash_phase("run_hash", 0);
-          run_hash = ODIA::DIANNLibraryFile::hashFile(run);
+          run_hash = runHash(run);
         }
         // The hand-off: the report just written IS the reference from here on,
         // read, gated and hashed by exactly the code that reads -ids.

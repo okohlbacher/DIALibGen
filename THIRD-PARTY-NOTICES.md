@@ -27,6 +27,20 @@ the OpenDIAlyzer contributors), https://github.com/okohlbacher/OpenDIAlyzer.
 `src/odia-core/MANIFEST.json` records the origin commit, the hashes of the
 original files and every change; `scripts/sync-odia-core.py --check` verifies it.
 
+### `third_party/mzpeak-openms/`
+
+The mzPeak reader behind `-run` with an `.mzpeak` run is **mzpeak-openms**
+(BSD-3-Clause, Copyright (c) 2026, OpenMS Inc., EKU Tuebingen; license in
+`third_party/mzpeak-openms/LICENSE` and `licenses/mzpeak-openms-LICENSE.txt`),
+https://github.com/okohlbacher/mzpeak-openms, vendored at tag
+`partitioned-read-2026-10-11` (commit daa8d1d) and compiled into the
+executable. Its sources are unchanged and keep their license headers;
+`third_party/mzpeak-openms/MANIFEST.json` records the origin, every file's
+SHA-256 and how DIALibGen builds them. It bundles **MSNumpress** (Copyright 2013
+Johan Teleman, Apache-2.0, see the file headers and
+`third_party/mzpeak-openms/THIRD_PARTY.md`). It reads archives through
+**libzip** (BSD-3-Clause), linked from the build environment.
+
 ### `data/peptdeep_meta_inputs.txt`, `data/peptdeep_mod_elements.txt`
 
 Constants pinned from the same upstream, for the same reason and under the same
@@ -82,6 +96,8 @@ corresponding-source release asset.
 | Coin-OR solver libraries | EPL; the exact version and terms are in the inventory |
 | Eigen | MPL-2.0 |
 | nlohmann/json | MIT |
+| mzpeak-openms (compiled in) | BSD-3-Clause; its MSNumpress Apache-2.0 |
+| libzip | BSD-3-Clause |
 | Boost | BSL-1.0 |
 | LLVM OpenMP, where bundled | Apache-2.0 with LLVM exception |
 | Intel OpenMP (Windows) | Intel Developer Tools EULA, August 2024, plus its third-party terms |

@@ -18,6 +18,7 @@ runtime package or SDK and records their versions in `runtime-dependencies.json`
 | `nlohmann-json-LICENSE.txt` | nlohmann/json 3.12 package LICENSE.MIT, https://github.com/nlohmann/json |
 | `LGPL-3.0-only.txt` | Qt LGPL-3.0 license text, https://code.qt.io/cgit/qt/qtbase.git/tree/LICENSES/LGPL-3.0-only.txt |
 | `GPL-3.0-or-later.txt` | GNU GPL version 3 text, https://www.gnu.org/licenses/gpl-3.0.txt; each component's grant determines “only” versus “or later” |
+| `mzpeak-openms-LICENSE.txt` | mzpeak-openms `LICENSE` at tag partitioned-read-2026-10-11 (daa8d1d), https://github.com/okohlbacher/mzpeak-openms; compiled into DIALibGen (`third_party/mzpeak-openms`) |
 | `GCC-Runtime-Exception-3.1.txt` | GCC source distribution `COPYING.RUNTIME`, https://gcc.gnu.org/git/?p=gcc.git;a=blob_plain;f=COPYING.RUNTIME;hb=HEAD |
 
 The GCC runtime exception does not change DIALibGen's BSD license or the licenses

@@ -153,6 +153,24 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
                 '-run', bruker, '-out', fresh())
     refused('is a directory', '-mode', 'refine', '-in', library, '-ids', bruker, '-out', fresh())
 
+    # mzPeak runs: a .mzpeak archive, or its unpacked directory (holding
+    # mzpeak_index.json), is taken as the run; anything but .mzML/.mzpeak is not.
+    refused('give an mzML (.mzML) or an mzPeak archive (.mzpeak)', '-mode', 'refine', '-in', library,
+            '-run', root / 'run.txt', '-out', fresh())
+    refused('does not exist', '-mode', 'refine', '-in', library, '-run', root / 'absent.mzpeak', '-out', fresh())
+    archive = root / 'run.mzpeak'
+    archive.write_bytes(b'not a zip archive\n')
+    unpacked = root / 'unpacked.mzpeak'
+    unpacked.mkdir()
+    (unpacked / 'mzpeak_index.json').write_text('{}\n')
+    for target in (archive, unpacked):
+        out = fresh()
+        log = run('-mode', 'refine', '-in', library, '-run', target, '-out', out, '-search:intensities', 'library', ok=False)
+        assert ('cannot read the mzPeak archive' in log or 'reads mzML only' in log
+                or 'has no DIA isolation windows' in log), log
+        assert 'is a directory' not in log and 'Bruker' not in log, log
+        assert not out.exists()
+
     # -out_ids is never overwritten: explicit or default, and distinct from -out.
     sentinel = b'existing report\n'
     for explicit in (True, False):

@@ -120,3 +120,20 @@ if(TARGET DIALibGen AND ODIA_PYTHON)
     set_tests_properties(identify_e2e_tune PROPERTIES TIMEOUT 2400 SKIP_RETURN_CODE 77)
   endif()
 endif()
+
+# mzPeak input (-run): an mzPeak archive and an mzML of the same data load into
+# the same OpenSWATH maps (identify_mzpeak_run), and give the same report.
+add_executable(identify_mzpeak_run identify_mzpeak_run.cpp)
+target_link_libraries(identify_mzpeak_run PRIVATE odia_search)
+# The fixture: the first 123 spectra (3 cycles: MS1 and 40 diaPASEF windows,
+# 1/K0 bands and per-peak 1/K0) of identify_synth_run's "im" run (120 peptides,
+# 0.3, seed 20261012), converted by mzpeak-convert 0.18.0 (MZPC_MAX_SPECTRA=123;
+# chunked delta layout), and that archive's own mzML export (gzipped). No
+# instrument data.
+add_test(NAME identify_mzpeak_run
+         COMMAND identify_mzpeak_run "${PROJECT_SOURCE_DIR}/test/data/mzpeak/synthetic-dia-pasef.mzpeak"
+                                     "${PROJECT_SOURCE_DIR}/test/data/mzpeak/synthetic-dia-pasef.mzML.gz" 2 normal)
+add_test(NAME identify_mzpeak_run_cache
+         COMMAND identify_mzpeak_run "${PROJECT_SOURCE_DIR}/test/data/mzpeak/synthetic-dia-pasef.mzpeak"
+                                     "${PROJECT_SOURCE_DIR}/test/data/mzpeak/synthetic-dia-pasef.mzML.gz" 2 cache)
+set_tests_properties(identify_mzpeak_run identify_mzpeak_run_cache PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)

@@ -116,8 +116,27 @@ namespace ODIA::search::mzpeak
       info.has_rt = md.retention_time.has_value();
       info.rt_s = md.retention_time.value_or(0.0);
       info.points = std::max(md.number_of_peaks.value_or(0), md.number_of_data_points.value_or(0));
-      for (const auto& p : md.precursors)
+      // The selected ion of each precursor. An archive whose precursor rows
+      // carry no precursor_index (mzpeak-convert 0.18's ims-compact frames)
+      // gets all of a frame's selected ions joined to its first precursor by
+      // the library; there, the k-th ion belongs to the k-th window.
+      std::vector<const MzPeak::SelectedIonInfo*> ions(md.precursors.size(), nullptr);
+      std::size_t holders = 0;
+      for (const auto& p : md.precursors) { holders += p.selected_ions.empty() ? 0 : 1; }
+      if (md.precursors.size() > 1 && holders == 1 && md.precursors.front().selected_ions.size() == md.precursors.size())
       {
+        for (std::size_t k = 0; k < ions.size(); ++k) { ions[k] = &md.precursors.front().selected_ions[k]; }
+      }
+      else
+      {
+        for (std::size_t k = 0; k < ions.size(); ++k)
+        {
+          if (!md.precursors[k].selected_ions.empty()) { ions[k] = &md.precursors[k].selected_ions.front(); }
+        }
+      }
+      for (std::size_t k = 0; k < md.precursors.size(); ++k)
+      {
+        const auto& p = md.precursors[k];
         Window w;
         const auto& iw = p.isolation_window;
         if (iw.target_mz) { w.target = decimalOf(*iw.target_mz); }
@@ -128,9 +147,9 @@ namespace ODIA::search::mzpeak
           w.lower_offset = decimalOf(*iw.lower_offset);
           w.upper_offset = decimalOf(*iw.upper_offset);
         }
-        if (!p.selected_ions.empty())
+        if (ions[k] != nullptr)
         {
-          const auto& ion = p.selected_ions.front();
+          const auto& ion = *ions[k];
           // OpenMS takes the selected ion's m/z as the precursor's when it has
           // one (PeakFileOptions::getPrecursorMZSelectedIon, the default).
           if (ion.selected_ion_mz) { w.mz = *ion.selected_ion_mz; }

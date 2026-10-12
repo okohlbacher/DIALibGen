@@ -59,6 +59,18 @@ Why it is here rather than done:
   `tune` followed by `refine -no_filter` is not the reference; refine refuses
   observed RT with the filter off unless the RT head is tuned in the same call.
 
+## `-run` on Windows: Evidence depends on -threads in the ninth digit
+
+On the Windows CI runner (MSVC, Intel OpenMP) the identification report's
+`Evidence` (the discriminant score) differs between `-threads 1` and `4` by
+about 1e-9 relative on every row; every other column, the q-values and the
+refined library's rows are the same. Linux and macOS write the same bytes at
+any thread count. Not yet located: the classifier's folds run serially inside
+each fold, so the suspects are the extraction's feature values (OpenSWATH on
+MSVC) or per-thread floating-point state (denormal flags) of the OpenMP
+workers. `identify_e2e` checks Evidence on Windows within 1e-6 relative until
+this is found.
+
 ## Done
 
 - Outputs that DIA-NN reads completely: the TSV carries DIA-NN's protein

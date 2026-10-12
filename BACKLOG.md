@@ -59,60 +59,19 @@ Why it is here rather than done:
   `tune` followed by `refine -no_filter` is not the reference; refine refuses
   observed RT with the filter off unless the RT head is tuned in the same call.
 
-## Outputs that DIA-NN reads completely
+## Done
 
-Checked with DIA-NN 2.0 and a post-hardening 0.11.0 build:
-
-- DIA-NN loads the TSV's precursors but reports "0 protein groups": it does
-  not use the `Protein.Group` column of a library TSV. Users must add
-  `--fasta ... --reannotate --met-excision`, and a first-pass report made
-  without it is useless to `refine`/`tune`. In our benchmark pipeline, writing
-  the column as `Protein.Ids` holding bare accessions made DIA-NN load protein
-  groups; other header names have not been tested.
-- DIA-NN refuses the Parquet output: it requires its own layout, including the
-  `Flags` and `Protein.Ids` columns. A DIA-NN-2-layout Parquet export would let
-  one file serve as both record and search library.
-- The `-out` help text, and with it `docs/parameters.md`, the GUI help and the
-  class documentation, still calls both formats a "DIA-NN spectral library".
-  The source string should say that `.tsv` is DIA-NN's dialect and `.parquet`
-  is DIALibGen's own layout; the generated reference then follows.
-
-Not done because the first two change an output contract that existing
-pipelines read; they need a versioned option and round-trip tests against
-DIA-NN.
-
-## Variable terminal modifications are silently ignored
-
-`-generation:variable_modifications 'Acetyl (N-term)'` exits 0 and writes the
-same library as a run without the option; nothing is logged. With
-`-generation:max_variable_modifications 2` the same option yields `.(Acetyl)`
-forms. `Amidated (C-term)` behaves the same way. `Acetyl (Protein N-term)` is
-never applied, at any setting. Fixed terminal modifications work.
-
-Cause: OpenMS `ModifiedPeptideGenerator::applyVariableModifications` matches
-by residue in its one-modification path, and generation keeps no protein
-position, so protein-terminal specificity cannot be honoured. To do: apply
-residue-less terminal modifications at the default limit, track
-protein-terminal peptides (including the Met-excised N-terminus), and until
-then warn or refuse when a requested variable modification matched no peptide.
-Add a regression test that counts modified forms, and check how DIA-NN and
-OpenSWATH read the `.(Acetyl)PEPTIDE` notation.
-
-## The SciexTOF warning is wrong
-
-Generation warns that `SciexTOF` predictions "will be close to Lumos". At equal
-NCE they are not: the median spectral cosine against `Lumos` is 0.85, the same
-distance as the trained `timsTOF` label, while `ThermoTOF` is at 0.99. Split the
-warning in `src/Generate.cpp`, and measure `SciexTOF` against `Lumos` on SCIEX
-data before recommending either.
-
-## OpenSWATH export
-
-`TargetedFileConverter` does not read DIALibGen's TSV, which uses DIA-NN's
-column names. [Usage](docs/usage.md#openswath) documents a column mapping. A
-native `-out library.pqp` or an OpenSWATH-dialect TSV would remove that step;
-it is not done because decoy semantics differ (see the note in usage) and
-the export needs its own round-trip test against OpenMS.
+- Outputs that DIA-NN reads completely: the TSV carries DIA-NN's protein
+  columns since 0.11.2; `-out_format diann2_parquet` writes DIA-NN 2.0's
+  Parquet layout (0.11.3).
+- Terminal modifications: peptide-terminal ones apply at any
+  `max_variable_modifications` (0.11.2), protein-terminal ones apply to
+  protein-terminal peptides (0.11.3); a requested modification that modifies
+  nothing is refused.
+- The SciexTOF warning (0.11.2).
+- OpenSWATH export: `-out library.pqp` and `-out_format openswath_tsv`,
+  written by OpenMS (0.11.3).
+- Persistent worker pool (0.11.3; item 1 below).
 
 ## `generate` is several times slower than DIA-NN's predictor
 
@@ -169,7 +128,7 @@ by up to ~1.9 A^2.
 the pruned MS2 model, streamed writing during MS2, and the small items
 (OpenBLAS threads, error flag, Arrow pool). Still open, in order:
 
-1. **Persistent worker pool** instead of a `std::thread` per call: node-level
+1. **Persistent worker pool** (done in 0.11.3) instead of a `std::thread` per call: node-level
    affinity, half the workers per socket, each worker first-touching its own
    arena. This removes about 5,600 thread creations and 97 glibc arenas (4.3-5.5 GB
    retained) per whole-proteome run, and the NUMA-interleave workaround.
@@ -188,10 +147,8 @@ the pruned MS2 model, streamed writing during MS2, and the small items
    and the decoys"). The OpenSWATH cap stays at 8 (B1 re-measured: 16 is
    slower on both runs, a passive wait policy changes nothing). Next for
    `-run`: the extraction straggler window (one window ends each timsTOF call
-   alone), the calibration's OpenSWATH call (270 s on 1.8 cores), the pruned
-   MS2 model in the search (bit-identical b/y channels, about -15 % CPU, but
-   the report's ms2_model_hash changes), and the serial hashing and loading
-   (about 100 s).
+   alone), the calibration's OpenSWATH call (270 s on 1.8 cores), and the serial
+   hashing and loading (about 100 s).
 3. **CPU cost per prediction**, the remaining ~1.3x gap to DIA-NN at 8-16 threads
    (9,100 vs 6,386 CPU-s at 8 threads). First profile ONNX Runtime per operation
    (MS2 transformer layers, RT/CCS LSTMs). Anything that changes outputs

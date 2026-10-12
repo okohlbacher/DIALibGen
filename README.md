@@ -45,8 +45,8 @@ Cylinders are what the steps produce. `identify` is not a mode of its own: it
 runs inside `refine` and `tune` when they are given the raw run
 (`-run run.mzML`), and its report is kept (`-out_ids`). Given an external
 search's report instead (`-ids report.parquet`), they skip it. `-run` is
-experimental, and until ion-mobility support lands it adapts retention time
-only (`-tune_heads rt`, no `-write_im`). `tune` and `refine` can be used on
+**experimental** ([below](#built-in-identification-experimental)); `-ids` with
+an external search's report is the validated route. `tune` and `refine` can be used on
 their own or combined: `-mode refine -tune` retrains and re-predicts the
 library first and then writes the observed values, in one invocation; add
 `-no_filter` to keep the precursors that were not identified. Models saved
@@ -155,9 +155,9 @@ retain the config separately. `-mode convert` turns an existing `.parquet` into 
 `irt_rescale=false`, predicted RT is the model's normalized output, not iRT.
 
 A complete cycle with DIA-NN 2: predict, search once, adapt to the run, search
-again. `tune` and `refine` need a report of **one** run that carries protein
-annotation, hence `--fasta ... --reannotate --met-excision` in the searches
-(see [DIA-NN](#dia-nn)).
+again. `tune` and `refine` need a report of **one** run with protein groups;
+DIA-NN takes them from the TSV, and `--fasta ... --reannotate` adds gene-level
+grouping (see [DIA-NN](#dia-nn)).
 
 ```bash
 # 1. predict; DIA-NN reads the TSV form
@@ -215,6 +215,14 @@ This library's RT is the tuned model's normalized output, not minutes; only
 
 ### Built-in identification (experimental)
 
+**`-run` is experimental.** Two of its validation gates are still open: the
+entrapment (honesty) gate has not passed on the test runs and a screened
+entrapment design, and the resources gate (16 GB and at most 60 minutes on 8
+cores) is not met: a whole timsTOF run takes about an hour on 96 cores. Use
+`-ids` with an established search engine's report for libraries you rely on;
+the [design document](docs/design/built-in-identification.md) has the gates
+and the measurements.
+
 With `-run`, `refine` and `tune` need no external search. DIALibGen finds
 candidate precursors whose predicted fragments co-occur in the run's spectra,
 extracts their traces with OpenSWATH (stock OpenMS), scores them with a
@@ -245,9 +253,8 @@ DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -ru
   predicted well.
 - Measured on an Orbitrap Astral and a timsTOF run: most identifications are
   also found by DIA-NN (95-97 %), and entrapment estimates the error at
-  0.7-0.9 % at nominal 1 %. The option stays experimental until a screened
-  entrapment test confirms this; see the
-  [design document](docs/design/built-in-identification.md).
+  0.7-0.9 % at nominal 1 %. That is not yet the honesty gate, which needs the
+  held-out test runs and screened entrapment.
 
 ### Instruments
 
@@ -291,74 +298,44 @@ measured. If fragment agreement matters, generate both and compare.
 | File | Format | Notes |
 |---|---|---|
 | `-in` for `generate` | Protein FASTA | Peptides with ambiguous residues are skipped and counted. |
-| `-out *.tsv` | DIA-NN-dialect TSV, one row per transition | Read by DIA-NN. Carries no recipe; keep the config next to it. |
-| `-out *.parquet` | DIALibGen's compact Parquet, one row per precursor with fragment lists | From `generate` it embeds recipe, FASTA and model hashes; from `refine`/`tune` the same provenance as the sidecar. Input for `refine`/`tune`. **Not read by DIA-NN 2.** |
-| `-in` for `refine`/`tune` | Either of the two library formats above, or long-format Parquet (one row per transition, the TSV's columns) | |
+| `-out *.tsv` | DIA-NN's TSV library, one row per transition | Read completely by DIA-NN 1.7 and 2.x, protein groups included. Carries no recipe; keep the config next to it. |
+| `-out *.parquet` | DIALibGen's compact Parquet, one row per precursor with fragment lists | From `generate` it embeds recipe, FASTA and model hashes; from `refine`/`tune` the same provenance as the sidecar. Input for `refine`/`tune`. Not read by DIA-NN 2; `-out_format diann2_parquet` writes DIA-NN 2.0's own Parquet layout. |
+| `-out *.pqp` | OpenSWATH's PQP, written by OpenMS | `-out_format openswath_tsv` writes OpenSWATH's assay TSV instead ([output layouts](docs/usage.md#files-and-provenance)). |
+| `-in` for `refine`/`tune` | DIALibGen Parquet, DIA-NN TSV, DIA-NN 2.0 Parquet library, or long-format Parquet (one row per transition, the TSV's columns) | |
+| `-run` (experimental) | One centroided DIA run, mzML | Instead of `-ids`; see [built-in identification](#built-in-identification-experimental). |
 | `-ids` | DIA-NN `report.parquet` of **one** run (`report.tsv` is not read) | Needs precursor q-values and protein annotation. A multi-run report is refused; filter it to one `Run` first. `refine` also accepts a pre-filtered long-format Parquet library with `-empirical_library`. |
 | `-out_report` | TSV | Gate counts and residual summary (n, mean, sd, p95), measured before observed values are written. |
 | `*.refine.json` | JSON sidecar of `refine`/`tune` | Provenance; keep it with the library. |
 
-The TSV columns are `Precursor.Id`, `Modified.Sequence`, `Precursor.Charge`,
-`Decoy`, `RT`, `IM`, `Precursor.Mz`, `Product.Mz`, `Relative.Intensity`,
-`Fragment.Type`, `Fragment.Charge`, `Fragment.Series.Number`,
-`Fragment.Loss.Type`, `Protein.Group` and `CCS`. `RT` is the model's normalized
-output unless `-generation:irt_rescale true` is set (iRT) or the library was
-tuned or refined (minutes of the reference run; `-rt_unit minmax` rescales to
-0–100, `-no_write_rt` keeps the input RT). `IM` is 1/K0 in Vs/cm².
+The TSV's columns are listed in the [usage guide](docs/usage.md#the-tsv-library).
+`RT` is the model's normalized output unless `-generation:irt_rescale true` is
+set (iRT) or the library was tuned or refined (minutes of the reference run;
+`-rt_unit minmax` rescales to 0–100, `-no_write_rt` keeps the input RT). Ion
+mobility is 1/K0 in Vs/cm².
 
 #### DIA-NN
 
-Use the **TSV** output. Checked with DIA-NN 2.0:
-
-- DIA-NN 2.0 refuses the Parquet output; it expects its own Parquet layout.
-- DIA-NN does not take protein annotation from the TSV: it loads the
-  precursors but reports "0 protein groups". Add `--fasta proteins.fasta
-  --reannotate --met-excision`, as in the example above. Without `--reannotate`
-  DIA-NN leaves `Protein.Group` empty and sets every protein q-value to 1, and
-  neither mode can use that report. `tune` holds its validation and test
-  cohorts out by protein, drops rows without one, and stops with "no usable
-  observations after filtering". `refine` stops with "no reference observation
-  passed the gates", because no row passes `-q_protein`.
-- `--met-excision` matches DIALibGen's default removal of the initiator
-  methionine. Without it DIA-NN cannot assign those N-terminal peptides to a
-  protein (2.4 % of the precursors of a 600-protein test library), and `tune`
-  and `refine` lose them. A non-tryptic `-generation:enzyme` needs the matching
-  `--cut` as well.
-- With `--reannotate` in a raw-data search DIA-NN prints a warning that
-  reannotation should be a separate step. The combined form is the one checked
-  end to end here. The separate step, `diann --lib predicted.tsv --fasta
-  proteins.fasta --reannotate --met-excision --gen-spec-lib --out-lib
-  predicted.diann.parquet`, takes seconds and its output is DIA-NN's own
-  Parquet, but DIA-NN filters fragments when it writes it, and a search with
-  that file was not checked. Keep `predicted.tsv` as the `-in` of
-  `tune`/`refine` either way.
-- For timsTOF data DIA-NN advises fixed mass accuracies
-  (`--mass-acc 15 --mass-acc-ms1 15`).
-- The default library has no decoys. Let DIA-NN generate them.
+Use the **TSV** output, or `-out_format diann2_parquet`. DIA-NN reads the
+TSV's protein annotation; `--met-excision` matches DIALibGen's default removal
+of the initiator methionine, and a non-tryptic `-generation:enzyme` needs the
+matching `--cut`. `tune` and `refine` need the report of **one** run with
+protein groups. For timsTOF data DIA-NN advises fixed mass accuracies
+(`--mass-acc 15 --mass-acc-ms1 15`). The default library has no decoys; let
+DIA-NN generate them. Details: [DIA-NN](docs/usage.md#dia-nn).
 
 #### OpenSWATH
 
-`TargetedFileConverter` does not read the TSV directly, because OpenSWATH uses
-different column names. Map the columns, then convert. Checked with OpenMS 3.5:
-the conversion to PQP and TraML keeps every precursor and transition with RT
-and ion mobility, and `OpenSwathDecoyGenerator` accepts the result. An
-`OpenSwathWorkflow` search with such a library has not been tested; it also
-needs iRT assays (`-tr_irt`) for your sample.
+`-out library.pqp` writes OpenSWATH's PQP through OpenMS's own writer; no
+column mapping is needed:
 
 ```bash
-DIALibGen -in proteins.fasta -out predicted.tsv -generation:irt_rescale true
-python3 to_openswath.py predicted.tsv openswath.tsv
-TargetedFileConverter -in openswath.tsv -out library.pqp
+DIALibGen -in proteins.fasta -out library.pqp -generation:irt_rescale true
 OpenSwathDecoyGenerator -in library.pqp -out library_decoys.pqp
 ```
 
-[`to_openswath.py`](scripts/to_openswath.py) is a small helper in this
-repository, not part of the release archives; download it and run it with
-Python 3 and pandas. The [usage guide](docs/usage.md#openswath) lists the column
-mapping. Generate without decoys (the default) and let OpenSWATH create its
-own: DIALibGen's optional decoys follow DIA-NN's convention, which OpenSWATH
-tools misread. `tune` reads DIA-NN reports only; neither mode reads OpenSWATH
-result files.
+Generate without decoys (the default) and let OpenSWATH create its own.
+`tune` reads DIA-NN reports only; neither mode reads OpenSWATH result files.
+See [OpenSWATH](docs/usage.md#openswath) for what was checked.
 
 ## TOPP workflows and models
 
@@ -399,14 +376,8 @@ separate.
   refused. DIA-NN 2.x fragment parsing has synthetic tests and a regression
   using one real DIA-NN 2.0 `--export-quant` report row; other versions and
   export settings remain unverified.
-- Variable terminal modifications need `-generation:max_variable_modifications
-  2` or higher. At the default of 1, `Acetyl (N-term)` or `Amidated (C-term)` is
-  accepted without a warning and not applied. `Acetyl (Protein N-term)` is never
-  applied, because generation does not track a peptide's position in its
-  protein. Fixed terminal and residue-specific variable modifications work.
-- DIA-NN 2 does not read the Parquet output and ignores the TSV's protein
-  column; see [DIA-NN](#dia-nn). OpenSWATH needs a column mapping; see
-  [OpenSWATH](#openswath).
+- `-run` (built-in identification) is experimental: its entrapment and
+  resource validation gates are open, and it reads centroided mzML only.
 - Prediction supports one modification per residue. Refinement normalizes known
   modification names to UniMod accessions and reports unresolved names.
 - A library can contain at most 4,294,967,295 transitions. Larger inputs must

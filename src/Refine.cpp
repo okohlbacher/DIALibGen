@@ -163,8 +163,9 @@ void DIALibGen::registerRefinementOptions_()
                        "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
     setValidFormats_("ids", {"parquet"}, false);
     registerInputFile_("run", "<file>", "",
-                       "EXPERIMENTAL, in development: a centroided DIA run (mzML) that the built-in identification step "
-                       "searches instead of reading -ids. Give exactly one of -ids and -run. Settings: search:.", false);
+                       "Experimental: a centroided DIA run (mzML) that the built-in identification step searches instead "
+                       "of reading -ids. Not yet validated (entrapment and resource gates open); -ids is the validated route. "
+                       "Give exactly one of -ids and -run. Settings: search:.", false);
     setValidFormats_("run", {"mzML"}, false);
     registerOutputFile_("out_ids", "<file>", "",
                         "With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. "
@@ -303,7 +304,7 @@ void DIALibGen::registerRefinementOptions_()
                                          "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
                                          "fallback is a WARNING in the log and in the output's provenance.");
 
-    registerTOPPSubsection_("search", "Built-in identification with -run (EXPERIMENTAL): candidates, decoys, extraction, "
+    registerTOPPSubsection_("search", "Built-in identification with -run (experimental): candidates, decoys, extraction, "
                                       "calibration and the run-level guards. See docs/design/built-in-identification.md");
     registerStringOption_("search:candidates", "<rule>", "evidence", "Candidate selection: evidence = target-decoy pairs of which "
                           "the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for "

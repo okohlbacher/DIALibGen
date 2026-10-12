@@ -5,6 +5,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [0.11.3] — unreleased
 
+### Added (experimental)
+
+- `-run run.mzML` in `refine` and `tune`: built-in identification of the run
+  (fragment-evidence candidates, OpenSWATH extraction with stock OpenMS, a
+  semi-supervised discriminant, target-decoy FDR), with ion mobility on
+  diaPASEF runs; its report (`-out_ids`) then serves as `-ids`. Settings are
+  the `-search:` options. Not validated yet: the entrapment gate has not
+  passed and the 16 GB / 60 min on 8 cores resources gate is not met; `-ids`
+  remains the validated route
+  ([design](docs/design/built-in-identification.md)).
+
 ### Added
 
 - `-out_format` (all modes) selects the layout of `-out`; `auto`, the default,
@@ -41,6 +52,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- README restructured: an overview figure, the modes, examples, an instrument
+  table and the input/output formats; a [backlog](BACKLOG.md).
 - The pruned MS2 model (`peptdeep_ms2_pruned.onnx`) is removed; the full
   model, `peptdeep_ms2_dynamic.onnx`, is the default again. Libraries name the
   full model in their provenance; their content is unchanged. MS2 takes about
@@ -230,13 +243,6 @@ This project follows [Semantic Versioning](https://semver.org/).
   the RT head and re-predicting a 3.5 M-precursor library takes about a
   minute instead of 12.5 min on 64 CPU threads, with the same held-out
   accuracy.
-- README restructured: overview with a figure of the phases, a usage section
-  with modes, examples, an instrument table and input/output formats.
-- Documented how to use libraries with DIA-NN 2 (TSV, `--fasta --reannotate
-  --met-excision`, one `--f` per run) and with OpenSWATH (column mapping through
-  `scripts/to_openswath.py`), and what was and was not checked.
-- Corrected: DIA-NN 2 does not read DIALibGen's Parquet output.
-- New backlog, including the planned one-step mode.
 
 ## [0.11.1] — 2026-10-10
 

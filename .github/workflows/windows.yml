@@ -145,6 +145,14 @@ jobs:
           conda install -y -c conda-forge libarrow libparquet libzip nlohmann_json
           PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
           echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
+          # The mzPeak reader needs a newer Boost than the contrib's 1.87, which
+          # OpenMS was built with. Its headers go to a prefix of their own, used
+          # only by odia_mzpeak, so no OpenMS translation unit sees them.
+          BOOST_PREFIX=$(cygpath -m "$RUNNER_TEMP/mzpeak-boost")
+          conda create -y -p "$BOOST_PREFIX" -c conda-forge 'libboost-headers>=1.89'
+          test -f "$BOOST_PREFIX/Library/include/boost/json/src.hpp" \
+            || { echo "::error::no Boost.JSON headers in $BOOST_PREFIX"; exit 1; }
+          echo "MZPEAK_BOOST_INCLUDE_DIR=$BOOST_PREFIX/Library/include" >> "$GITHUB_ENV"
 
       # Install curl alongside contrib and use Windows Schannel for TLS.
       - name: Build libcurl from source
@@ -277,6 +285,14 @@ jobs:
             onnxruntime-cpp numpy pyarrow onnxruntime pyyaml
           PREFIX=$(python -c "import sys,os;print(os.environ['CONDA_PREFIX'].replace(os.sep,'/'))")
           echo "CONDA_LIB_PREFIX=$PREFIX/Library" >> "$GITHUB_ENV"
+          # The mzPeak reader needs a newer Boost than the contrib's 1.87, which
+          # OpenMS was built with. Its headers go to a prefix of their own, used
+          # only by odia_mzpeak, so no OpenMS translation unit sees them.
+          BOOST_PREFIX=$(cygpath -m "$RUNNER_TEMP/mzpeak-boost")
+          conda create -y -p "$BOOST_PREFIX" -c conda-forge 'libboost-headers>=1.89'
+          test -f "$BOOST_PREFIX/Library/include/boost/json/src.hpp" \
+            || { echo "::error::no Boost.JSON headers in $BOOST_PREFIX"; exit 1; }
+          echo "MZPEAK_BOOST_INCLUDE_DIR=$BOOST_PREFIX/Library/include" >> "$GITHUB_ENV"
           # Select and validate the Python environment containing the reference-test dependencies.
           # An empty interpreter path would silently unregister those tests.
           CP=$(python -c 'import sys; print(sys.executable)')
@@ -384,6 +400,7 @@ jobs:
             -DDIALIBGEN_REFINEMENT_PYTHON="$CONDA_PYTHON" \
             -DODIA_MODEL_DIR="$PWD/models" \
             -DDIALIBGEN_BUILD_FINETUNE=ON \
+            -DMZPEAK_BOOST_INCLUDE_DIR="$MZPEAK_BOOST_INCLUDE_DIR" \
             -DTorch_DIR="$PWD/libtorch-sdk/share/cmake/Torch" \
             -DCMAKE_INSTALL_PREFIX="$PWD/stage"
 

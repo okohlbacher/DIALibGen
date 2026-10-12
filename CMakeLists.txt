@@ -193,7 +193,6 @@ add_library(odia_search STATIC
   src/search/Identifier.cpp
   src/search/IonMobility.cpp
   src/search/MemoryCheck.cpp
-  src/search/MzPeakRun.cpp
   src/search/RunStages.cpp)
 target_link_libraries(odia_search PUBLIC odia_refine odia_core PRIVATE nlohmann_json::nlohmann_json)
 set_target_properties(odia_search PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -204,9 +203,12 @@ set_target_properties(odia_search PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # includes its headers, never together with OpenMS's.
 option(DIALIBGEN_WITH_MZPEAK "Read mzPeak runs with -run (needs libzip and Boost >= 1.86 headers)" ON)
 if(DIALIBGEN_WITH_MZPEAK)
+  # odia_mzpeak holds src/search/MzPeakRun.cpp with the reader.
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/mzpeak.cmake)
   target_link_libraries(odia_search PRIVATE odia_mzpeak)
-  set_source_files_properties(src/search/MzPeakRun.cpp PROPERTIES COMPILE_DEFINITIONS "DIALIBGEN_WITH_MZPEAK;BOOST_JSON_NO_LIB;BOOST_CONTAINER_NO_LIB;BOOST_ALL_NO_LIB")
+else()
+  # Without the reader MzPeakRun.cpp says so when an .mzpeak run is given.
+  target_sources(odia_search PRIVATE src/search/MzPeakRun.cpp)
 endif()
 set(DIALIBGEN_TARGETS odia_library odia_refine)
 if(DIALIBGEN_BUILD_FINETUNE)

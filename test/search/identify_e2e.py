@@ -107,7 +107,8 @@ try:
     if mode == 'refine':
         out, ids, prov, log = search('t1')
         s = prov['search']
-        if prov['inputs']['reference'] != str(ids.resolve()) or prov['inputs']['run'] != str(mzml.resolve()):
+        # Compared resolved: macOS's temporary directory is a symlink (/var -> /private/var).
+        if Path(prov['inputs']['reference']).resolve() != ids.resolve() or Path(prov['inputs']['run']).resolve() != mzml.resolve():
             fail('the sidecar does not name the report as the reference and the run as input')
         if not prov['inputs'].get('run_fnv1a64'):
             fail('no run hash in the sidecar')

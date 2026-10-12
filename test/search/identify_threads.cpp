@@ -13,6 +13,7 @@
 #include <odia/search/PredictedAssays.h>
 #include <odia/search/SearchParams.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -39,7 +40,7 @@ int main(int argc, char** argv)
   check(SearchParams::resolveThreads(4) == 4 && SearchParams::resolveThreads(1) == 1, "a positive -threads is taken as given");
   check(SearchParams::resolveThreads(0) == cores && SearchParams::resolveThreads(-1) == cores,
         "-threads 0 is the physical cores: " + std::to_string(SearchParams::resolveThreads(0)));
-  check(SearchParams::predictionSessions(1) == 1 && SearchParams::predictionSessions(8) == 8 &&
+  check(SearchParams::predictionSessions(1) == 1 && SearchParams::predictionSessions(8) == std::min(8, cores) &&
           SearchParams::predictionSessions(0) == 1 &&
           SearchParams::predictionSessions(100000) == cores,
         "one prediction session per thread, at least 1, at most the " + std::to_string(cores) + " physical cores");

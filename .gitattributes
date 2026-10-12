@@ -1,0 +1,7 @@
+# Vendored and hashed sources keep their bytes on every platform (their
+# manifests record SHA-256 digests; a CRLF checkout on Windows would change them).
+src/odia-core/** text eol=lf
+test/odia-core/** text eol=lf
+third_party/** -text
+# Binary test fixtures.
+test/data/mzpeak/** binary

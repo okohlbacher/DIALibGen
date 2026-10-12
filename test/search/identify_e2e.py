@@ -37,6 +37,38 @@ import sys
 import tempfile
 from pathlib import Path
 
+
+def explain(a, b):
+    """Says on stderr how two Parquet files differ: rows, columns, embedded JSON (needs pyarrow)."""
+    try:
+        import pyarrow.parquet as pq_diag
+    except ImportError:
+        print('pyarrow unavailable: no detail on the difference', file=sys.stderr)
+        return
+    def json_diff(x, y, path=''):
+        if isinstance(x, dict) and isinstance(y, dict):
+            for k in sorted(set(x) | set(y)):
+                yield from json_diff(x.get(k), y.get(k), path + '/' + k)
+        elif x != y:
+            yield '%s: %s | %s' % (path, str(x)[:200], str(y)[:200])
+    ta, tb = pq_diag.read_table(a), pq_diag.read_table(b)
+    print('%s vs %s: rows %d / %d, table equal %s' % (a, b, ta.num_rows, tb.num_rows, ta.equals(tb)), file=sys.stderr)
+    if ta.num_rows == tb.num_rows and not ta.equals(tb):
+        for column in ta.column_names:
+            if column in tb.column_names and not ta.column(column).equals(tb.column(column)):
+                x, y = ta.column(column).to_pylist(), tb.column(column).to_pylist()
+                rows = [i for i in range(len(x)) if x[i] != y[i]]
+                print('  column %s: %d rows differ, e.g. row %d: %s | %s' % (column, len(rows), rows[0], x[rows[0]], y[rows[0]]),
+                      file=sys.stderr)
+    ma, mb = ta.schema.metadata or {}, tb.schema.metadata or {}
+    for key in sorted(set(ma) | set(mb)):
+        if ma.get(key) != mb.get(key):
+            try:
+                for line in list(json_diff(json.loads(ma.get(key, b'{}')), json.loads(mb.get(key, b'{}'))))[:20]:
+                    print('  %s %s' % (key.decode(), line), file=sys.stderr)
+            except ValueError:
+                print('  %s differs (not JSON)' % key.decode(), file=sys.stderr)
+
 mode, tool, synth = sys.argv[1], sys.argv[2], sys.argv[3]
 models = Path(sys.argv[4]) if len(sys.argv) > 4 else None
 
@@ -161,32 +193,8 @@ try:
             parquets.append(kept_as)
             (d / 'out.parquet.refine.json').unlink()
         if not filecmp.cmp(parquets[0], parquets[1], shallow=False):
-            # Say what differs: the report, the library's rows, or its embedded provenance.
-            try:
-                import pyarrow.parquet as pq_diag
-                def json_diff(x, y, path=''):
-                    if isinstance(x, dict) and isinstance(y, dict):
-                        for k in sorted(set(x) | set(y)):
-                            yield from json_diff(x.get(k), y.get(k), path + '/' + k)
-                    elif x != y:
-                        yield '%s: %s | %s' % (path, str(x)[:200], str(y)[:200])
-                for name in ('ids', 'out'):
-                    a, b = (pq_diag.read_table(d / ('%s-%d.parquet' % (name, t))) for t in (1, 4))
-                    print('%s: rows %d / %d, table equal %s' % (name, a.num_rows, b.num_rows, a.equals(b)), file=sys.stderr)
-                    if a.num_rows == b.num_rows and not a.equals(b):
-                        for column in a.column_names:
-                            if not a.column(column).equals(b.column(column)):
-                                print('  column %s differs' % column, file=sys.stderr)
-                    ma, mb = a.schema.metadata or {}, b.schema.metadata or {}
-                    for key in sorted(set(ma) | set(mb)):
-                        if ma.get(key) != mb.get(key):
-                            try:
-                                for line in list(json_diff(json.loads(ma.get(key, b'{}')), json.loads(mb.get(key, b'{}'))))[:20]:
-                                    print('  %s %s' % (key.decode(), line), file=sys.stderr)
-                            except ValueError:
-                                print('  %s differs (not JSON)' % key.decode(), file=sys.stderr)
-            except ImportError:
-                print('pyarrow unavailable: no detail on the difference', file=sys.stderr)
+            for name in ('ids', 'out'):
+                explain(d / ('%s-1.parquet' % name), d / ('%s-4.parquet' % name))
             fail('the refined Parquet library differs between -threads 1 and 4')
         print('ok   refined Parquet library byte-identical at -threads 1 and 4')
 
@@ -195,6 +203,7 @@ try:
         _, ids4c, _, _ = search('t4c', '-search:chunk', 600, threads=4)
         for other in (ids4, ids4c):
             if not filecmp.cmp(ids, other, shallow=False):
+                explain(ids, other)
                 fail('%s differs from %s' % (other, ids))
         # -threads 0: the effective CPU budget (the physical cores), said in the log and recorded; the same report.
         _, ids0, prov0, log0 = search('t0', threads=0)
@@ -205,6 +214,7 @@ try:
         if (os.cpu_count() or 1) >= 4 and int(said.group(1)) < 2:
             fail('-threads 0 means %s thread(s) on a machine with %d hardware threads' % (said.group(1), os.cpu_count()))
         if not filecmp.cmp(ids, ids0, shallow=False):
+            explain(ids, ids0)
             fail('the report at -threads 0 differs from that at -threads 1')
         print('ok   -threads 0 means %s threads here, and the report is the same' % said.group(1))
         print('ok   report byte-identical at -threads 1 and 4 and at search:chunk 20000 and 600')
@@ -238,6 +248,7 @@ try:
             if reference is None:
                 cached_reference = other
             elif not filecmp.cmp(reference, other, shallow=False):
+                explain(reference, other)
                 fail('%s: the report differs from that of %s' % (name, reference.parent.name))
         print('ok   report byte-identical with search:ms1_in_memory on and off, in memory and cached (default: %s, %s)'
               % ('held' if held_by_default['held'] else 'streamed', held_by_default['reason']))

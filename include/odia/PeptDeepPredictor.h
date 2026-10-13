@@ -31,6 +31,14 @@ namespace ODIA
     /// "ALL" (Core ML's choice, may use the Neural Engine), "CPUAndNeuralEngine"
     /// or "CPUOnly".
     std::string coreml_units = "CPUAndGPU";
+    /// CoreML: residue counts whose batch shapes are compiled (or loaded
+    /// from the cache) in the background as soon as the predictor exists,
+    /// several at a time, so the builds overlap the phases before the first
+    /// prediction instead of running one after the other inside it (a cold
+    /// cache cost a whole-proteome MS2 phase 66 s of serialised compiles).
+    /// generate passes the peptide-length window; 0: nothing ahead of use.
+    int prebuild_min_residues = 0;
+    int prebuild_max_residues = 0;
     /// Throw instead of running on the CPU when CUDA was requested but no
     /// CUDA session could be created (missing cuDNN, no visible GPU, a
     /// CPU-only ONNX Runtime).
@@ -121,6 +129,13 @@ namespace ODIA
     /// On CoreML: how many batches run concurrently; the sessions there are
     /// one per batch shape, shared by the workers (coremlSession_).
     std::size_t sessionCount() const;
+
+    /// CoreML: waits for the background shape builds (GpuOptions::
+    /// prebuild_*) and returns how many shapes this predictor compiled or
+    /// loaded and the seconds they took (summed over the builders). 0 on
+    /// the other providers. Prediction calls never need this: a worker that
+    /// needs a shape still being built waits for that one alone.
+    std::pair<std::size_t, double> waitForShapes();
 
     PeptDeepPredictor(const PeptDeepPredictor&) = delete;
     PeptDeepPredictor& operator=(const PeptDeepPredictor&) = delete;

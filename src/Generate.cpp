@@ -664,7 +664,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
     writeLogInfo_("MS2 model: " + ms2_model);
     std::vector<std::string> device_warnings;
-    const ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
+    ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
+    // CoreML compiles one MS2 shape per residue count: the window's shapes
+    // are built in the background from the predictor's construction on.
+    gpu.prebuild_min_residues = static_cast<int>(p.min_length);
+    gpu.prebuild_max_residues = static_cast<int>(p.max_length);
     ODIA::Library library;
     std::string standards;
     setup_phase.fields().rows = threads;

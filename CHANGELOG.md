@@ -42,6 +42,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- CoreML: the shapes of the peptide-length window are compiled, or loaded
+  from the cache, in the background from the predictor's construction on
+  (`ODIA_COREML_BUILDERS`, 8), in the order the chunks ask for them, so they
+  overlap the RT and CCS phases instead of being built one after the other
+  by the first worker to need each while the others waited inside the MS2
+  phase (66 s of a cold-cache whole-proteome run, 16 s warm). Measured:
+  Core ML compiles one model at a time whatever the builder count (42
+  shapes cold: 105 s with 4, 8 or 16 builders), cached loads 23 s with 8
+  builders against 34 s one by one. A worker that needs a shape still being
+  built waits for that one alone. Every CoreML MS2 phase ends with one line
+  of shapes built, rows run and padding rows.
 - `-machine:device` defaults to `auto`: on Apple silicon fine-tuning runs on
   the GPU (MPS) when LibTorch has the back end, elsewhere on the CPU as
   before (CUDA is still asked for by name). The Astral RT tune on an M4 Max

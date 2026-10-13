@@ -408,8 +408,19 @@ What runs where, and why:
 - **MS2 on the GPU.** CoreML compiles a model per batch shape (rows x
   residues), so the predictor fixes both: every batch is padded to 2048 rows
   (`PeptDeepPredictor::MAX_BATCH_ROWS`) and one session is compiled per
-  residue count, on first use, with the whole graph on CoreML except the
-  `OneHot` of the instrument index. (With dynamic shapes Core ML's compiler
+  residue count, with the whole graph on CoreML except the `OneHot` of the
+  instrument index. The shapes of the peptide-length window are compiled,
+  or loaded from the cache, in the background from the moment the predictor
+  exists, in the order the chunks will ask for them, so the builds overlap
+  the RT and CCS phases; a worker that needs a shape still being built
+  waits for that one alone. Core ML compiles one model at a time whatever
+  the number of builders (24 shapes for 7-30 residues: about 2.5 s each
+  cold with 4, 8 or 16 builders), and cached loads gain a little from
+  parallelism. (Before 0.11.4 each shape was built by the first worker to
+  need it while the others waited, one after the other, inside the MS2
+  phase: 66 s of a cold-cache whole-proteome run, 16 s warm.) Each run ends
+  its MS2 phase with a line such as `[MS2] CoreML: 24 shapes built in
+  35.1 s (summed), 5808438 rows run, 755402 padding rows (11.5 %)`. (With dynamic shapes Core ML's compiler
   rejects the model's reshapes and the provider is slower than one CPU
   thread; the predictor also rewrites the models' scalar `PRelu` into
   `LeakyRelu`, which the provider's MLProgram builder gets wrong.) Core ML

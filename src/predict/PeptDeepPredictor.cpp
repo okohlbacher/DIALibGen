@@ -21,6 +21,9 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <condition_variable>
 #include <map>
 #include <cmath>
@@ -400,6 +403,13 @@ namespace ODIA
     std::size_t coreml_workers = 1;
     double coreml_build_seconds = 0;      ///< for the trace: compile and load time
     std::size_t coreml_builds = 0;
+    /// The shapes GpuOptions::prebuild_* asked for, built in the background
+    /// by these threads (joined by waitForShapes and the destructor).
+    std::vector<std::pair<std::int64_t, std::int64_t>> prebuild;
+    std::vector<std::thread> builders;
+    /// Rows run and rows padded (the difference is wasted GPU time), for
+    /// the summary line.
+    std::atomic<std::uint64_t> coreml_rows{0}, coreml_padded_rows{0};
 
     /// A CoreML session for one shape. Builds take 0.8 s (cached) to 4 s
     /// (compiled); a worker that needs a shape another worker is building
@@ -428,6 +438,31 @@ namespace ODIA
       coreml_build_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       ++coreml_builds;
       return session;
+    }
+
+    /// Builds the claimed shapes of `prebuild` in order on this thread,
+    /// shared with the other builders through the index. A shape that fails
+    /// is released (sessionFor_ then builds it itself and reports the error)
+    /// and the builder goes on with the next.
+    void buildAhead(std::atomic<std::size_t>& next)
+    {
+      for (std::size_t i = next++; i < prebuild.size(); i = next++)
+      {
+        const auto key = prebuild[i];
+        std::unique_ptr<Ort::Session> built;
+        try
+        {
+          trace::Scope building("session_create", 3);
+          building.fields().rows = key.first;
+          building.fields().len = key.second;
+          built = buildCoreML(key.first, key.second, "odia-coreml", false);
+        }
+        catch (...) {}
+        const std::lock_guard<std::mutex> lock(coreml_mutex);
+        if (built) { coreml_sessions[key] = std::move(built); }
+        else { coreml_sessions.erase(key); }
+        coreml_built.notify_all();
+      }
     }
     /// The names as Run takes them, built once: every batch passes the same.
     std::vector<const char*> input_ptrs;
@@ -778,6 +813,54 @@ namespace ODIA
       // encoding of one overlaps the GPU work of the other); four gain
       // nothing more, and cost nothing but the option's default.
       impl_->coreml_workers = static_cast<std::size_t>(std::max(1, gpu.sessions_per_device));
+      // The shapes of the peptide-length window, built in the background
+      // from now on, several at a time (ODIA_COREML_BUILDERS, 8 by default),
+      // in the order the chunks will ask for them: by length, the full
+      // chunks' shape before the remainders'. Core ML compiles one model at
+      // a time whatever the builder count (42 shapes cold: 105 s with 4, 8
+      // or 16 builders, about 2.5 s each); cached loads gain a little (23 s
+      // with 8 builders against 34 s one by one). The gain is the start:
+      // the builds overlap the RT and CCS phases. Without this every shape
+      // was built by the first worker to need it while the others waited,
+      // one after the other, because the chunks of a block come in length
+      // order: 66 s of a cold-cache whole-proteome run, 16 s warm.
+      if (gpu.prebuild_min_residues > 0 && gpu.prebuild_max_residues >= gpu.prebuild_min_residues)
+      {
+        for (int residues = gpu.prebuild_min_residues; residues <= gpu.prebuild_max_residues; ++residues)
+        {
+          const auto tokens = static_cast<std::int64_t>(residues) + 2;
+          auto buckets = impl_->buckets;
+          for (auto it = buckets.rbegin(); it != buckets.rend(); ++it)
+          {
+            const std::pair<std::int64_t, std::int64_t> key{*it, tokens};
+            if (impl_->coreml_sessions.count(key) != 0) { continue; }
+            impl_->coreml_sessions[key] = nullptr;   // claimed: being built
+            impl_->prebuild.push_back(key);
+          }
+        }
+        std::size_t builders = 8;
+        if (const char* v = std::getenv("ODIA_COREML_BUILDERS"); v != nullptr && *v != '\0')
+        {
+          char* end = nullptr;
+          const long long x = std::strtoll(v, &end, 10);
+          if (end != v && x > 0) { builders = static_cast<std::size_t>(x); }
+        }
+        builders = std::min(builders, impl_->prebuild.size());
+        // Shared by the builders; outlives them (joined in waitForShapes).
+        impl_->builders.reserve(builders);
+        auto next = std::make_shared<std::atomic<std::size_t>>(0);
+        for (std::size_t b = 0; b < builders; ++b)
+        {
+          try { impl_->builders.emplace_back([impl = impl_.get(), next] { impl->buildAhead(*next); }); }
+          catch (const std::system_error&) { break; }   // no thread: the workers build what is left
+        }
+        if (impl_->builders.empty())
+        {
+          const std::lock_guard<std::mutex> lock(impl_->coreml_mutex);
+          for (const auto& key : impl_->prebuild) { impl_->coreml_sessions.erase(key); }
+          impl_->prebuild.clear();
+        }
+      }
     }
     else if (impl_->provider == Provider::CUDA)
     {
@@ -952,6 +1035,15 @@ namespace ODIA
     return impl_->replicas.size() + 1;
   }
 
+  std::pair<std::size_t, double> PeptDeepPredictor::waitForShapes()
+  {
+    if (impl_->provider != Provider::CoreML) { return {0, 0.0}; }
+    for (auto& t : impl_->builders) { if (t.joinable()) { t.join(); } }
+    impl_->builders.clear();
+    const std::lock_guard<std::mutex> lock(impl_->coreml_mutex);
+    return {impl_->coreml_builds, impl_->coreml_build_seconds};
+  }
+
   Ort::Session& PeptDeepPredictor::sessionFor_(std::size_t worker, std::int64_t rows, std::int64_t length)
   {
     if (impl_->provider != Provider::CoreML) { return impl_->at(worker); }
@@ -996,6 +1088,8 @@ namespace ODIA
     if (impl_->provider != Provider::CoreML) { return batch; }
     std::int64_t bucket = impl_->buckets.back();
     for (const auto b : impl_->buckets) { if (b >= static_cast<std::int64_t>(batch.rows)) { bucket = b; break; } }
+    impl_->coreml_rows += batch.rows;
+    impl_->coreml_padded_rows += static_cast<std::uint64_t>(bucket) - batch.rows;
     if (bucket == static_cast<std::int64_t>(batch.rows)) { return batch; }
     // Padded with copies of the last row: valid input, whose predictions are
     // dropped. The real rows are not affected by it (the models apply no
@@ -1191,10 +1285,18 @@ namespace ODIA
 
   PeptDeepPredictor::~PeptDeepPredictor()
   {
-    if (impl_ && impl_->provider == Provider::CoreML && trace::enabled())
+    if (impl_ && impl_->provider == Provider::CoreML)
     {
-      trace::note(std::string("predictor.") + impl_->kind + ".coreml_sessions",
-                  std::to_string(impl_->coreml_builds) + " shapes, " + std::to_string(impl_->coreml_build_seconds) + " s building");
+      // The builders refer to impl_: joined before anything of it goes.
+      waitForShapes();
+      const std::uint64_t rows = impl_->coreml_rows.load(), padded = impl_->coreml_padded_rows.load();
+      std::ostringstream summary;
+      summary.imbue(std::locale::classic());
+      summary << std::fixed << std::setprecision(1) << impl_->coreml_builds << " shapes built in "
+              << impl_->coreml_build_seconds << " s (summed), " << rows << " rows run, " << padded << " padding rows ("
+              << (rows + padded > 0 ? 100.0 * static_cast<double>(padded) / static_cast<double>(rows + padded) : 0.0) << " %)";
+      if (rows > 0) { std::cerr << "[" << impl_->kind << "] CoreML: " << summary.str() << "\n"; }
+      if (trace::enabled()) { trace::note(std::string("predictor.") + impl_->kind + ".coreml_sessions", summary.str()); }
     }
     if (!impl_ || !impl_->ort_profiling) { return; }
     // End explicitly rather than at session destruction, so the file names

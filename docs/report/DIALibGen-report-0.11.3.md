@@ -539,6 +539,80 @@ precursor counts: protein-group gains and quantitative accuracy were not assesse
 
 ![Whole-run precursor identifications passing DIA-NN's estimated 1 % FDR, per run, without match-between-runs or entrapment validation; all tuned libraries were trained on run 01, runs 02 and 03 are technical replicates. Left: DIA-NN 1.7.12 with no library and with library set B (DIALibGen 0.11.3, tuned on library-free identifications). Right: DIA-NN 2.0 with the four predicted libraries of set A (both predictors tuned on the shared training pool).](fig/ids.png){width=100%}
 
+## Entrapment check of the 1 % FDR
+
+**Design.** Five of the seven search configurations of this section (DIA-NN 2.0's own tuned library and
+DIA-NN 1.7.12 with the untuned library were left out) were repeated on ProteoBench's entrapment database for
+these runs: a pre-digested FASTA of 1,420,868 human target peptides (contaminants included) and, for each, one
+entrapment twin with the same amino-acid composition in shuffled order (ratio r = 1, paired 1:1; the twins
+cannot be in the sample). No in-silico digestion was applied anywhere; otherwise the settings of the searches
+above were kept, except that the reports were written down to q ≤ 0.05 so that the matched-FDP cut-off can lie
+above q = 0.01 (the counts at q ≤ 0.01 equal DIA-NN's own log counts in every search). Libraries: DIA-NN 2.0's
+predicted library of the entrapment FASTA (7,008,740 precursors); DIALibGen 0.11.1 untuned and tuned (set-A
+recipe: tuned on run 01's identifications from a DIA-NN 1.7.12 search of the untuned library; 7,007,990
+precursors); DIA-NN 1.7.12 library-free; and DIALibGen 0.11.3 tuned on the library-free identifications of
+run 01 (set-B recipe). Each precursor at the cut-off is a target or an entrapment hit by its stripped
+sequence. With T targets and E entrapment hits, the combined estimate is FDP = E (1 + 1/r) / (T + E) = 2E / N,
+with a Wilson 95 % interval on E/N scaled by 2 (an approximate interval for the estimate, not for the true
+FDP). The paired estimate (Wen et al. 2025) additionally counts an entrapment precursor whose twin precursor
+(same pair, charge and number of oxidised methionines) is absent, or ranks better than its twin, as evidence of
+a false target; both estimates are upper bounds under the entrapment assumptions, the lower bound is E / N.
+"Targets at matched 1 % FDP" ranks all reported precursors by q-value (ties by PEP or CScore) and takes the
+largest prefix whose combined FDP is at most 1 %: a retrospective calibration on the entrapment labels, used
+here to compare the libraries descriptively at the same estimated FDP, not a prospective FDR control. Pooled
+rows count precursor–run observations. Arms with an FDP above 1.5 % are marked **!**.
+
+Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
+
+| arm | run | targets, q ≤ 0.01 | entrap. hits | combined FDP (95 % CI) | paired FDP | FDP / 1 % | targets, matched 1 % FDP |
+|:------------------------------|:---------|--------:|------:|:----------------------|--------:|------:|---------:|
+| **DIA-NN 2.0, its own predicted library** | 01 | 81,052 | 353 | 0.87 % (0.78–0.96) | 0.83 % | 0.87 | 82,953 |
+|  | 02 | 79,172 | 311 | 0.78 % (0.70–0.87) | 0.74 % | 0.78 | 81,707 |
+|  | 03 | 79,909 | 313 | 0.78 % (0.70–0.87) | 0.73 % | 0.78 | 82,421 |
+|  | 01–03 pooled | 240,133 | 977 | 0.81 % (0.76–0.86) | 0.77 % | 0.81 | 246,842 |
+| **DIA-NN 2.0, DIALibGen untuned** | 01 | 81,967 | 351 | 0.85 % (0.77–0.95) | 0.80 % | 0.85 | 83,536 |
+|  | 02 | 83,406 | 296 | 0.71 % (0.63–0.79) | 0.68 % | 0.71 | 86,382 |
+|  | 03 | 81,429 | 338 | 0.83 % (0.74–0.92) | 0.77 % | 0.83 | 83,401 |
+|  | 01–03 pooled | 246,802 | 985 | 0.80 % (0.75–0.85) | 0.75 % | 0.80 | 253,227 |
+| **DIA-NN 2.0, DIALibGen fine-tuned on run 01** | 01 | 86,243 | 388 | 0.90 % (0.81–0.99) | 0.85 % | 0.90 | 87,315 |
+|  | 02 | 86,845 | 325 | 0.75 % (0.67–0.83) | 0.71 % | 0.75 | 89,041 |
+|  | 03 | 85,825 | 345 | 0.80 % (0.72–0.89) | 0.76 % | 0.80 | 87,938 |
+|  | 01–03 pooled | 258,913 | 1,058 | 0.81 % (0.77–0.86) | 0.77 % | 0.81 | 264,335 |
+| **DIA-NN 1.7.12, library-free** | 01 | 33,312 | 177 | 1.06 % (0.91–1.22) | 0.98 % | 1.06 | 32,773 |
+|  | 02 | 37,922 | 209 | 1.10 % (0.96–1.25) | 1.06 % | 1.10 | 37,436 |
+|  | 03 | 34,359 | 175 | 1.01 % (0.87–1.17) | 0.97 % | 1.01 | 34,280 |
+|  | 01–03 pooled | 105,593 | 561 | 1.06 % (0.97–1.15) | 1.01 % | 1.06 | 104,480 |
+| **DIA-NN 1.7.12, DIALibGen fine-tuned on run 01** | 01 | 78,504 | 2,202 | 5.46 % (5.24–5.69) **!** | 5.30 % | 5.46 | 68,809 |
+|  | 02 | 78,837 | 1,978 | 4.90 % (4.69–5.11) **!** | 4.73 % | 4.90 | 70,722 |
+|  | 03 | 76,799 | 2,543 | 6.41 % (6.17–6.66) **!** | 6.30 % | 6.41 | 67,155 |
+|  | 01–03 pooled | 234,140 | 6,723 | 5.58 % (5.45–5.72) **!** | 5.44 % | 5.58 | 206,003 |
+
+![Entrapment results per arm and run. Top: combined FDP at nominal q ≤ 0.01 with its scaled Wilson 95 % interval (symbols: runs 01, 02, 03); dashed line nominal 1 %, dotted 1.5 %. Bottom: target precursors at a matched combined FDP of at most 1 % (bars left to right: runs 01, 02, 03).](fig/entrapment.png){width=100%}
+
+- **DIA-NN 2.0 stays within its 1 % with all three libraries tested.** Combined FDP 0.71–0.90 % for its own
+  predicted library and for DIALibGen's untuned and tuned libraries alike: in DIA-NN 2.0, DIALibGen's
+  libraries are consistent with 1 % control to the same degree as DIA-NN's own (similar estimates, not a proof
+  of equivalence).
+- **At a matched 1 % FDP the ranking of section 5 holds:** pooled over the runs, DIALibGen tuned identifies
+  264,335 targets, DIALibGen untuned 253,227 and DIA-NN's library 246,842 (+7.1 % and +2.6 % over DIA-NN's
+  library; precursor–run observations, the matched cut chosen on the pooled data). This is the fairer headline
+  than the counts at nominal q.
+- **DIA-NN 1.7.12 understates its error rate with a predicted library.** Library-free it is approximately
+  consistent with nominal control (combined 1.01–1.10 %, intervals including 1 %), but with DIALibGen's tuned
+  library its nominal 1 % corresponds to an estimated 4.9–6.4 % (even the lower bound is 2.4–3.2 %). This
+  reproduces the 5.2 % seen earlier for the untuned 0.11.1 library in this setup (2,047 entrapment hits among
+  78,405 at q ≤ 0.01 on run 01). The FDP of the set-B searches of the human proteome (the table above) was not
+  measured; this result is a strong indication that their nominal counts are too high. At a matched 1 % FDP
+  the tuned library still yields 206,003 targets against 104,480 library-free (2.0 ×), reached at q ≈ 0.003.
+- Peptide-level estimates (distinct modified sequences) give the same picture (pooled combined FDP 0.86–0.88 %
+  for the DIA-NN 2.0 arms, 1.09 % library-free, 6.0 % for 1.7.12 with the tuned library). Protein-group
+  estimates are not meaningful here: every FASTA entry is a single peptide.
+- Caveats: one dataset and one entrapment design (shuffled twins); the entrapment FASTA has no protein
+  context, so the searches differ from section 5 in search space (two sequences per target peptide) and the
+  identification counts are not comparable with those tables; the tuned libraries were trained on run 01, so
+  run 01 is in-sample for them (each run is searched and RT-aligned on its own); the matched cut uses the
+  entrapment labels of the same data.
+
 # 6. Limitations
 
 - **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 is slower than 0.11.2 and than DIA-NN 2.0

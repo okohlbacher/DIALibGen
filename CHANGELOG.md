@@ -8,8 +8,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `docs/report/DIALibGen-report-0.11.3.md` and `.pdf`: the report on the tool, its usage and
-  its performance against DIA-NN (runtime, RT and fragment-intensity accuracy, identifications),
-  also attached to the 0.11.3 release.
+  its performance against DIA-NN (runtime on servers, GPUs and a laptop, RT accuracy through
+  the stages of refinement and tuning, fragment-intensity accuracy, identifications, and an
+  entrapment check of the 1 % FDR), also attached to the 0.11.3 release.
 
 ## [0.11.3] — 2026-10-13
 

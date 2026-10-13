@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.11.4] — unreleased
 
 ### Added
 
@@ -101,6 +101,10 @@ This project follows [Semantic Versioning](https://semver.org/).
 - ONNX Runtime's log goes through one process-wide logger; its two per-session
   CoreML notices (how many nodes the provider took, "some nodes were not
   assigned") are replaced by the predictor's own provider line and warning.
+- The third-party notices name what of Boost the mzPeak reader compiles in
+  (Boost.JSON and Boost.Compat, header-only) and which Boost headers the
+  release builds use (1.90 on Linux and macOS, 1.92 on Windows);
+  `licenses/README.md` no longer cites a Boost version the builds do not use.
 
 ## [0.11.3] — 2026-10-13
 

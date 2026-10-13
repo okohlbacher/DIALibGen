@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   with `-tune_predict_gpu` re-predicting through CoreML. Not bit-identical to
   CPU training; the provenance says so.
 - `-machine:device` and `-machine:coreml_units` are accepted in `generate`.
+- `scripts/coreml_unroll_lstm.py`: the LSTM-free RT and CCS graphs for
+  CoreML, as an experiment that is not shipped. The unrolled graphs match
+  the CPU's LSTM kernel (RT 6e-7, CCS 4.3e-4 A^2 on CoreML) but run at the
+  speed of one CPU thread (16.2 k against 18.9 k rows/s at 16 tokens, 9.5 k
+  against 10.2 k at 32), and the CPU path has one session per core, so RT
+  and CCS stay on the CPU, overlapped with the GPU's MS2 phase instead.
 - `-mode prepare` (macOS): compiles the bundled MS2 model's CoreML shapes
   for `-generation:peptide_length` into the cache once, for an installation
   or before a first run. The cache is capped (`ODIA_COREML_CACHE_MAX`, 4G by

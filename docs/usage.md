@@ -448,7 +448,14 @@ What runs where, and why:
   of GPU time; now they hide behind it). The CPU calls are the same calls,
   so the library is the same; `ODIA_OVERLAP=0` runs the phases in order.
   The same holds on CUDA, where all three models run on the GPU and the
-  host-side work of RT and CCS overlaps MS2's kernels. The predictor
+  host-side work of RT and CCS overlaps MS2's kernels. Running the LSTMs
+  on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`
+  unrolls them per sequence length into MatMul/Sigmoid/Tanh steps): the
+  unrolled graphs agree with the CPU's LSTM kernel to 6e-7 (RT) and
+  4.3e-4 A^2 (CCS) on CoreML, within the tolerances the MS2 path is held
+  to, but the GPU runs them at the speed of one CPU thread (16 tokens:
+  16.2 k rows/s against 18.9 k per thread; 32 tokens: 9.5 k against
+  10.2 k) and the CPU path has one session per core. The predictor
   probes each model's node placement and, when an arithmetic operator stays
   on the CPU, uses the CPU path and says so: a `WARNING` naming the model
   and the operator, recorded in the output's provenance as `odia.warnings`

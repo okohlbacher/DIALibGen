@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   with `-tune_predict_gpu` re-predicting through CoreML. Not bit-identical to
   CPU training; the provenance says so.
 - `-machine:device` and `-machine:coreml_units` are accepted in `generate`.
+- `-machine:cores performance` (macOS, every mode): `-threads 0` counts the
+  performance cores only (`hw.perflevel0.physicalcpu`, 12 of the M4 Max's
+  16). Opt-in, not the default: on a whole human library 12 threads needed
+  18 % less CPU time than 16 for the same output, but the wall time went
+  either way with the background load (-3 % at full scale, +16 % on a small
+  input), so it saves energy and fan noise, not time.
 - CTest `coreml_matches_cpu` (skips without the CoreML provider).
 - [Building on macOS](docs/building.md#macos-apple-silicon): the conda-forge
   packages carry both back ends; environment and compiler notes.

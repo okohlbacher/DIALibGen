@@ -4,6 +4,7 @@
 #include <odia/Hardware.h>
 
 #include <algorithm>
+#include <atomic>
 #include <thread>
 
 #include <string>
@@ -37,6 +38,9 @@ namespace ODIA
       unsigned cores = 0;       ///< 0: could not be determined
       std::string reason;
     };
+
+    /// preferPerformanceCores(): read once, when the count is first computed.
+    std::atomic<bool> g_performance_only{false};
 
 #if defined(__linux__)
     /// CPUs the process may run on, as a dynamically sized set: a fixed
@@ -165,14 +169,26 @@ namespace ODIA
       if (sysctlbyname("hw.physicalcpu", &cores, &size, nullptr, 0) != 0 || cores < 1) { return c; }
       c.cores = static_cast<unsigned>(cores);
       c.reason = "hw.physicalcpu";
-      // Performance and efficiency cores alike: chunks are handed out one at
-      // a time, so a slower core simply takes fewer of them.
+      // Performance and efficiency cores alike by default: chunks are handed
+      // out one at a time, so a slower core simply takes fewer of them.
+      // -machine:cores performance counts the performance cores only.
       int performance = 0;
       size = sizeof performance;
       if (sysctlbyname("hw.perflevel0.physicalcpu", &performance, &size, nullptr, 0) == 0 && performance > 0 &&
           performance < cores)
-      { c.reason += " (" + std::to_string(performance) + " performance and " + std::to_string(cores - performance) +
-                    " efficiency cores)"; }
+      {
+        if (g_performance_only.load())
+        {
+          c.cores = static_cast<unsigned>(performance);
+          c.reason = "hw.perflevel0.physicalcpu (the " + std::to_string(performance) + " performance cores; " +
+                     std::to_string(cores - performance) + " efficiency cores left idle, -machine:cores performance)";
+        }
+        else
+        {
+          c.reason += " (" + std::to_string(performance) + " performance and " + std::to_string(cores - performance) +
+                      " efficiency cores)";
+        }
+      }
 #elif defined(_WIN32)
       // ...Ex and RelationProcessorCore: every processor group, not only the
       // calling thread's (at most 64 logical processors).
@@ -212,6 +228,8 @@ namespace ODIA
   } // namespace
 
   unsigned physicalCores() { return counted().cores; }
+
+  void preferPerformanceCores(bool only) { g_performance_only.store(only); }
 
   const std::string& physicalCoresReason() { return counted().reason; }
 

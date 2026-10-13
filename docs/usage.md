@@ -675,8 +675,11 @@ explicit commands.
   adaptation. Tune mode does not first filter or overwrite observations; use a
   separate refine invocation when observed-value reconstruction is intended.
 - `-threads` now defaults to 1, consistently with TOPP. Use `-threads 0` for
-  one thread per physical core or an explicit count. `-machine:threads`
-  controls training separately.
+  one thread per physical core or an explicit count (on macOS,
+  `-machine:cores performance` makes `-threads 0` count the performance
+  cores only: on an M4 Max 12 threads instead of 16 needed 18 % less CPU time
+  for the same library at -3 % to +16 % wall, so it saves energy, not time).
+  `-machine:threads` controls training separately.
 - Met excision now includes every allowed missed-cleavage peptide. Generated
   peptide space can increase; cache fingerprint v5 prevents reuse of libraries
   made with the old omission. Frozen 0.10.1 benchmark libraries are historical

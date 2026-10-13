@@ -7,6 +7,7 @@
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
 #include <odia/DIANNLibraryFile.h>
+#include <odia/Hardware.h>
 #include <odia/LibraryExport.h>
 #include <odia/Trace.h>
 #include <algorithm>
@@ -73,6 +74,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   }
   const std::string mode = getStringOption_("mode");
   const auto& parameters = getParam_();
+  // Before anything counts the cores: -threads 0 on macOS may mean the
+  // performance cores only (every mode; it changes no output).
+  ODIA::preferPerformanceCores(getStringOption_("machine:cores") == "performance");
   // Arrow's pools follow -threads, not the hardware-thread count.
   try { ODIA::DIANNLibraryFile::useThreads(static_cast<unsigned>(std::max(0, getIntOption_("threads")))); }
   catch (const std::exception& e) { writeLogWarn_(std::string("cannot size Arrow's thread pools: ") + e.what()); }
@@ -83,6 +87,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   const bool with_run = !parameters.getValue("run").toString().empty();
   for (const auto& option : supplied_)
   {
+    // Which cores -threads 0 counts: every mode.
+    if (option == "machine:cores") { continue; }
     // The GPU options steer prediction in generate as well as in tune.
     const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32" ||
                                    option == "machine:gpu_sessions" || option == "machine:gpu_devices" ||

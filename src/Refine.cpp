@@ -328,6 +328,11 @@ void DIALibGen::registerRefinementOptions_()
                        "CPU threads used for training. The tuned weights depend on the count, which the provenance records. "
                        "0: the platform default, 16 on Linux and Windows and 8 on macOS (where 16 was measured 1.5x slower per "
                        "epoch; -machine:threads 16 reproduces a Linux or Windows model)", false);
+    registerStringOption_("machine:cores", "<which>", "all",
+                          "macOS: the cores -threads 0 counts. all: every physical core (hw.physicalcpu); performance: the "
+                          "performance cores only (hw.perflevel0.physicalcpu), which saves CPU energy, not time (measured: "
+                          "-3 to +16 % wall, 18 % less CPU time). No effect elsewhere. Does not change the output", false);
+    setValidStrings_("machine:cores", {"all", "performance"});
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     registerStringOption_("machine:tf32", "<true/false>", "false",

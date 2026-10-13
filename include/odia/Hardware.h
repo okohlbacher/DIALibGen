@@ -31,6 +31,15 @@ namespace ODIA
   /// How physicalCores() was arrived at, for the log.
   const std::string& physicalCoresReason();
 
+  /// macOS: count only the performance cores (`hw.perflevel0.physicalcpu`)
+  /// in physicalCores(), what `-machine:cores performance` asks for. Saves
+  /// CPU energy, not time (measured on an M4 Max, 12 + 4 cores: 12 threads
+  /// against 16 were -3 % to +16 % wall and 18 % less CPU time). Must be
+  /// called before the first physicalCores(); no effect on other platforms
+  /// or when the performance-core count cannot be read. Does not change the
+  /// output.
+  void preferPerformanceCores(bool only);
+
   /// NUMA nodes with memory that this machine has online (Linux sysfs); 1
   /// elsewhere or when it cannot be read.
   unsigned numaNodes();

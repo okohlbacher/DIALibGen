@@ -3,6 +3,14 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `docs/report/DIALibGen-report-0.11.3.md` and `.pdf`: the report on the tool, its usage and
+  its performance against DIA-NN (runtime, RT and fragment-intensity accuracy, identifications),
+  also attached to the 0.11.3 release.
+
 ## [0.11.3] — 2026-10-13
 
 ### Added (experimental)

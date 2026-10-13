@@ -39,7 +39,12 @@ executable. Its sources are unchanged and keep their license headers;
 SHA-256 and how DIALibGen builds them. It bundles **MSNumpress** (Copyright 2013
 Johan Teleman, Apache-2.0, see the file headers and
 `third_party/mzpeak-openms/THIRD_PARTY.md`). It reads archives through
-**libzip** (BSD-3-Clause), linked from the build environment.
+**libzip** (BSD-3-Clause), linked from the build environment, and parses
+their metadata with **Boost.JSON** (BSL-1.0, header-only; its one
+translation unit, `boost/json/src.hpp`, is compiled into DIALibGen from
+`src/search/MzPeakBoostJson.cpp`, so no Boost library is linked or
+shipped) and **Boost.Compat**, from the Boost headers of the build
+environment (1.90 in the Linux and macOS release builds, 1.92 on Windows).
 
 ### `data/peptdeep_meta_inputs.txt`, `data/peptdeep_mod_elements.txt`
 
@@ -98,7 +103,7 @@ corresponding-source release asset.
 | nlohmann/json | MIT |
 | mzpeak-openms (compiled in) | BSD-3-Clause; its MSNumpress Apache-2.0 |
 | libzip | BSD-3-Clause |
-| Boost | BSL-1.0 |
+| Boost.JSON and Boost.Compat (header-only, compiled in for the mzPeak reader) | BSL-1.0 |
 | LLVM OpenMP, where bundled | Apache-2.0 with LLVM exception |
 | Intel OpenMP (Windows) | Intel Developer Tools EULA, August 2024, plus its third-party terms |
 | Arm Compute Library (Linux ARM64) | MIT, with bundled third-party notices |

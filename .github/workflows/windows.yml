@@ -483,7 +483,9 @@ jobs:
           }
           # No runner has a GPU: gpu_matches_cpu skips (77) here by design and
           # runs where one is visible. generate_under_thread_limit is Linux-only.
-          allowed_skips = {"gpu_matches_cpu", "generate_under_thread_limit"}
+          # coreml_matches_cpu runs where ONNX Runtime has the CoreML provider
+          # and the MS2 model compiles on it (macOS arm64) and skips elsewhere.
+          allowed_skips = {"gpu_matches_cpu", "generate_under_thread_limit", "coreml_matches_cpu"}
           assert required <= tests.keys(), f"required tests missing: {required - tests.keys()}"
           for name, case in tests.items():
               assert name in allowed_skips or case.find("skipped") is None, f"{name} must pass, not skip"

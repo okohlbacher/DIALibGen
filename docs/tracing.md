@@ -23,6 +23,7 @@ Switches for measurements and tests; none changes the library's content:
 |---|---|---|
 | `ODIA_STREAM` | on | `0`: 0.11.1's order (MS2, then CCS) and the one-pass writer, instead of RT, CCS, MS2 with the writer streaming behind MS2 |
 | `ODIA_OVERLAP` | on | `0`: when MS2 runs on a GPU (CUDA, CoreML), predict RT and CCS on the CPU before MS2 instead of on a thread of their own while the GPU predicts MS2 (the writer then waits for both); the library is the same either way |
+| `ODIA_OVERLAP_RESERVE` | half of `-threads` on CoreML, 0 on CUDA | cores the overlapped RT and CCS phases leave free for the GPU's host side (their sessions are `-threads` minus this); the library does not depend on it |
 | `ODIA_NUMA_INTERLEAVE` | off | `1`: interleave the run's memory over the NUMA nodes (the default above 32 threads until 0.11.2; the worker pool places its workers on the nodes instead) |
 | `ODIA_POOL_PIN` | on | `0`: do not bind pool worker k to NUMA node k mod n |
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA), 200000 (CoreML) | precursors per MS2 call |

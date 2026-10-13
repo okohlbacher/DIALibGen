@@ -835,11 +835,14 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       for (const auto& [name, count] : st.variable_modification_precursors)
       { writeLogInfo_("variable modification '" + name + "': " + std::to_string(count) + " precursors"); }
 
+      // Sessions of the CPU phases: all of -threads, or fewer while they
+      // overlap the GPU's MS2 phase (below).
+      unsigned cpu_threads = threads;
       // The RT phase and the iRT calibration; @p info takes the log lines
       // (written at once on the main thread, collected on the CPU thread).
       const auto rtPhase = [&](const std::function<void(const std::string&)>& info) {
         if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
-              library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
+              library, rt_model, true, cpu_threads, p.free_cysteine_rt_correction, gpu); miss)
         {
           throw PhaseFailure(UNEXPECTED_RESULT, std::to_string(miss) + " precursors have no predicted RT. "
                              "Refusing rather than shipping a library with NaN retention "
@@ -881,6 +884,26 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
       if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
       const bool overlap = overlap_wanted && ms2 && ms2->provider() != ODIA::PeptDeepPredictor::Provider::CPU;
+      // While the GPU predicts MS2, its host side (Core ML's own threads,
+      // the encoding workers) needs cores: with all 16 CPU sessions busy on
+      // CCS, the Astral MS2 phase on an M4 Max took 229 s instead of 153 s
+      // and the overlap gained 6 s of 238 (with 12 sessions 208 s, with 8
+      // 189 s under a noisier load). The CPU phases therefore leave half
+      // the cores free on CoreML (ODIA_OVERLAP_RESERVE overrides the count);
+      // their chunking does not depend on the session count, so the library
+      // does not either. CUDA's host side is lighter: nothing reserved.
+      if (overlap)
+      {
+        const unsigned all = threads == 0 ? ODIA::physicalCores() : threads;
+        unsigned reserve = ms2->provider() == ODIA::PeptDeepPredictor::Provider::CoreML ? all / 2 : 0;
+        if (const char* v = std::getenv("ODIA_OVERLAP_RESERVE"); v != nullptr && *v != '\0')
+        {
+          char* end = nullptr;
+          const long long x = std::strtoll(v, &end, 10);
+          if (end != v && x >= 0) { reserve = static_cast<unsigned>(x); }
+        }
+        cpu_threads = std::max(1u, all > reserve ? all - reserve : 1u);
+      }
       if (!overlap) { rtPhase(logInfo); }
 
       // Guard before sink: the sink's thread may use it until the sink is gone.
@@ -908,7 +931,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           std::vector<std::uint16_t> lengths;
           bool ccs_on_cpu = false;
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-                library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
+                library, ccs_model, true, cpu_threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
           guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
                                                                            std::move(lengths), ccs_on_cpu);
@@ -926,7 +949,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         } wait_for_cpu_phases{cpu_phases};
         if (overlap)
         {
-          writeLogInfo_("RT and CCS predicted on a thread of their own while the GPU predicts MS2 (ODIA_OVERLAP=0: one after the other)");
+          writeLogInfo_("RT and CCS predicted on a thread of their own, " + std::to_string(cpu_threads) +
+                        " sessions, while the GPU predicts MS2 (ODIA_OVERLAP=0: one after the other)");
           cpu_phases = ODIA::parallel::async([&]() {
             try
             {

@@ -58,10 +58,17 @@ This project follows [Semantic Versioning](https://semver.org/).
   calibration) and the CCS phase run on a thread of their own while the GPU
   predicts MS2, which does not depend on them; the streaming writer waits
   for both. On a whole human library on an M4 Max the two CPU phases took
-  77 s of 16 idle cores before 236 s of GPU time. The RT and CCS calls are
-  the same calls as before, so the library is the same (`ODIA_OVERLAP=0`
-  keeps the phases in order, for comparison). The MS2 predictor is now
-  opened before them (trace phase `ms2_sessions`), on every provider.
+  77 s of 16 idle cores before 236 s of GPU time. The GPU phase needs cores
+  for its host side, so on CoreML the overlapped phases run on half of
+  `-threads` (`ODIA_OVERLAP_RESERVE`): on the Astral library, untimed and
+  under a changing load, the phases in order took 238 s, overlapped on all
+  16 cores 232 s (the GPU phase stretched from 153 to 229 s), on 12 cores
+  208 s and on 8 cores 189 s. The RT and CCS calls are the same calls as
+  before whatever the session count, so the library is the same: the Astral
+  CoreML library and the one-H100 whole-proteome library are byte-identical
+  with and without the overlap (`ODIA_OVERLAP=0` keeps the phases in order).
+  The MS2 predictor is now opened before them (trace phase `ms2_sessions`),
+  on every provider.
 - CoreML: the shapes of the peptide-length window are compiled, or loaded
   from the cache, in the background from the predictor's construction on
   (`ODIA_COREML_BUILDERS`, 8), in the order the chunks ask for them, so they

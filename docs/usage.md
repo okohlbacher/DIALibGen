@@ -443,12 +443,18 @@ What runs where, and why:
   nodes on the CPU and hand the rest to CoreML, which is slower than the
   plain CPU path. Since MS2 does not depend on them, the RT phase (with the
   iRT calibration) and the CCS phase run on a thread of their own while the
-  GPU predicts MS2, and the streaming writer waits for both (on a whole
-  human library on an M4 Max they took 77 s of 16 idle cores before 236 s
-  of GPU time; now they hide behind it). The CPU calls are the same calls,
-  so the library is the same; `ODIA_OVERLAP=0` runs the phases in order.
-  The same holds on CUDA, where all three models run on the GPU and the
-  host-side work of RT and CCS overlaps MS2's kernels. Running the LSTMs
+  GPU predicts MS2, and the streaming writer waits for both. The GPU phase
+  has a host side of its own (Core ML's threads, the encoding workers) and
+  slows down when every core is busy, so the overlapped CPU phases run on
+  half the cores (`ODIA_OVERLAP_RESERVE` sets how many they leave free).
+  Measured on the Astral library on an M4 Max, untimed and under a
+  changing background load: phases in order 238 s; overlapped on all 16
+  cores 232 s (the GPU phase stretched from 153 to 229 s); on 12 cores
+  208 s; on 8 cores 189 s. The CPU calls are the same calls whatever the
+  session count, so the library is the same; `ODIA_OVERLAP=0` runs the
+  phases in order. The same holds on CUDA, where all three models run on
+  the GPU, the host-side work of RT and CCS overlaps MS2's kernels and
+  nothing is reserved. Running the LSTMs
   on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`
   unrolls them per sequence length into MatMul/Sigmoid/Tanh steps): the
   unrolled graphs agree with the CPU's LSTM kernel to 6e-7 (RT) and

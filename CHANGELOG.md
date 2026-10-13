@@ -48,6 +48,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `generate` on a GPU (CUDA, CoreML): the RT phase (with the iRT
+  calibration) and the CCS phase run on a thread of their own while the GPU
+  predicts MS2, which does not depend on them; the streaming writer waits
+  for both. On a whole human library on an M4 Max the two CPU phases took
+  77 s of 16 idle cores before 236 s of GPU time. The RT and CCS calls are
+  the same calls as before, so the library is the same (`ODIA_OVERLAP=0`
+  keeps the phases in order, for comparison). The MS2 predictor is now
+  opened before them (trace phase `ms2_sessions`), on every provider.
 - CoreML: the shapes of the peptide-length window are compiled, or loaded
   from the cache, in the background from the predictor's construction on
   (`ODIA_COREML_BUILDERS`, 8), in the order the chunks ask for them, so they

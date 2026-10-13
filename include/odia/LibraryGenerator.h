@@ -286,6 +286,21 @@ namespace ODIA
                                                   const GpuOptions& gpu = {},
                                                   Ms2Sink* sink = nullptr);
 
+    /// The MS2 predictor, opened ahead of predictFragmentIntensities so that
+    /// the caller knows its provider before the phases that precede MS2
+    /// (generate overlaps RT and CCS on the CPU with MS2 on a GPU) and so
+    /// that CoreML's shape builds start now. Prints the provider line and
+    /// records a fallback in @p gpu's warnings, as the phase itself did.
+    static std::unique_ptr<PeptDeepPredictor> openMs2Predictor(const std::string& ms2_model_path,
+                                                              bool prefer_gpu, unsigned sessions,
+                                                              const GpuOptions& gpu);
+
+    /// predictFragmentIntensities with a predictor from openMs2Predictor.
+    static std::size_t predictFragmentIntensities(Library& library, PeptDeepPredictor& predictor,
+                                                  const DigestParams& params, float nce,
+                                                  const std::string& instrument, unsigned sessions,
+                                                  Ms2Sink* sink = nullptr);
+
     /// The line mapping the RT model's raw output onto the iRT scale.
     struct IrtCalibration
     {

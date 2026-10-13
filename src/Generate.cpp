@@ -7,11 +7,15 @@
 #include <odia/Library.h>
 #include <odia/LibraryExport.h>
 #include <odia/LibraryGenerator.h>
+#include <odia/PeptDeepPredictor.h>
 #include <odia/Hardware.h>
 #include <odia/PeptDeepEncoder.h>
 #include <odia/Trace.h>
 #include <OpenMS/SYSTEM/File.h>
+#include "library/Parallel.h"
+#include <atomic>
 #include <filesystem>
+#include <future>
 #include <fstream>
 #include <condition_variable>
 #include <cstdlib>
@@ -107,14 +111,17 @@ namespace
 
   /// Hands MS2 results to the library writer while the prediction goes on.
   ///
-  /// generate predicts RT and CCS first, so a precursor is complete once its
-  /// MS2 spectrum is in: a consumer thread takes each block's kept precursors
-  /// (a queue bounded at about one row group of precursors, at least two
-  /// blocks: MS2 runs on while a row group is encoded, and the copies held
-  /// stay near 200 MB), settles their CCS batching (CcsBatchGuard, once the old
-  /// order's CCS call they belonged to is complete) and passes them to the
-  /// StreamWriter, which writes every complete row group. Strictly in
-  /// precursor order; the output is the one-pass writer's, byte for byte.
+  /// generate predicts RT and CCS before MS2, or on a thread of their own
+  /// while a GPU predicts MS2: a precursor is complete once its MS2 spectrum
+  /// is in and the RT and CCS phases are over. A consumer thread takes each
+  /// block's kept precursors (a queue bounded at about one row group of
+  /// precursors, at least two blocks: MS2 runs on while a row group is
+  /// encoded, and the copies held stay near 200 MB) and holds them until
+  /// the CCS guard is there (setGuard: the RT and CCS phases are done),
+  /// settles their CCS batching (CcsBatchGuard, once the old order's CCS
+  /// call they belonged to is complete) and passes them to the StreamWriter,
+  /// which writes every complete row group. Strictly in precursor order;
+  /// the output is the one-pass writer's, byte for byte.
   class Ms2Stream final : public ODIA::LibraryGenerator::Ms2Sink
   {
   public:
@@ -126,8 +133,27 @@ namespace
     Ms2Stream(ODIA::Library& library, Open open)
       : library_(library), open_(std::move(open)), thread_([this] { run(); }) {}
 
-    /// Before the first rows(); the consumer reads it only after that.
-    void setGuard(ODIA::LibraryGenerator::CcsBatchGuard* guard) { guard_ = guard; }
+    /// The RT and CCS values are final: from now on the consumer settles
+    /// and writes. Any time, from any thread; nothing is written before.
+    void setGuard(ODIA::LibraryGenerator::CcsBatchGuard* guard)
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        guard_ = guard;
+      }
+      changed_.notify_all();
+    }
+
+    /// The RT or CCS phase failed: the next rows() and drain() rethrow it,
+    /// and the consumer stops.
+    void fail(std::exception_ptr error)
+    {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!error_) { error_ = std::move(error); }
+      }
+      changed_.notify_all();
+    }
 
     ~Ms2Stream() override
     {
@@ -168,6 +194,15 @@ namespace
     std::size_t resettled() const { return resettled_; }
 
   private:
+    /// A whole old-order CCS block of kept precursors is not settled yet.
+    /// kept_ and settled_ belong to the consumer thread; read here only by
+    /// it (inside the wait predicate).
+    bool settleable() const
+    {
+      const std::size_t block = ODIA::LibraryGenerator::ccsBlock();
+      return kept_.size() / block * block > settled_;
+    }
+
     void run()
     {
       try
@@ -175,17 +210,46 @@ namespace
         for (;;)
         {
           ODIA::Library::PrecursorRows rows;
+          bool got = false, finished = false;
+          ODIA::LibraryGenerator::CcsBatchGuard* guard = nullptr;
           {
             std::unique_lock<std::mutex> lock(mutex_);
-            changed_.wait(lock, [&] { return !queue_.empty() || done_; });
-            if (abandon_) { return; }
-            if (queue_.empty()) { break; }
-            rows = std::move(queue_.front());
-            queue_.pop_front();
-            queued_rows_ -= rows.precursor.size();
+            // Rows are taken as they come, guard or no guard (the queue must
+            // not fill while RT and CCS are still running); settling and
+            // writing wait for the guard.
+            changed_.wait(lock, [&] {
+              return !queue_.empty() || error_ || abandon_ || (guard_ != nullptr && (done_ || settleable()));
+            });
+            if (abandon_ || error_) { return; }
+            guard = guard_;
+            if (!queue_.empty())
+            {
+              rows = std::move(queue_.front());
+              queue_.pop_front();
+              queued_rows_ -= rows.precursor.size();
+              got = true;
+            }
+            else if (done_) { finished = true; }   // and the guard is there
           }
-          changed_.notify_all();
-          consume(std::move(rows));
+          if (got)
+          {
+            changed_.notify_all();
+            kept_.insert(kept_.end(), rows.precursor.begin(), rows.precursor.end());
+            held_end_.push_back(kept_.size());
+            held_.push_back(std::move(rows));
+          }
+          if (guard != nullptr)
+          {
+            const std::size_t block = ODIA::LibraryGenerator::ccsBlock();
+            const std::size_t complete = kept_.size() / block * block;
+            if (complete > settled_)
+            {
+              resettled_ += guard->settle(library_, kept_, settled_, complete);
+              settled_ = complete;
+            }
+            release();
+          }
+          if (finished) { break; }
         }
         // Every kept precursor is known: the last old-order CCS call is complete.
         resettled_ += guard_->settle(library_, kept_, settled_, kept_.size());
@@ -195,23 +259,9 @@ namespace
       catch (...)
       {
         const std::lock_guard<std::mutex> lock(mutex_);
-        error_ = std::current_exception();
+        if (!error_) { error_ = std::current_exception(); }
         changed_.notify_all();
       }
-    }
-
-    void consume(ODIA::Library::PrecursorRows rows)
-    {
-      kept_.insert(kept_.end(), rows.precursor.begin(), rows.precursor.end());
-      held_end_.push_back(kept_.size());
-      held_.push_back(std::move(rows));
-      const std::size_t complete = kept_.size() / ODIA::LibraryGenerator::ccsBlock() * ODIA::LibraryGenerator::ccsBlock();
-      if (complete > settled_)
-      {
-        resettled_ += guard_->settle(library_, kept_, settled_, complete);
-        settled_ = complete;
-      }
-      release();
     }
 
     void release()
@@ -226,7 +276,7 @@ namespace
     }
 
     ODIA::Library& library_;
-    ODIA::LibraryGenerator::CcsBatchGuard* guard_ = nullptr;
+    ODIA::LibraryGenerator::CcsBatchGuard* guard_ = nullptr;   ///< guarded by mutex_
     Open open_;
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer_;
     std::vector<std::uint32_t> kept_;          ///< kept precursors so far, in order
@@ -755,7 +805,22 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // The other layouts are written in one pass, from the final library.
     const bool stream = (stream_env == nullptr || std::string_view(stream_env) != "0") &&
                         (parquet || format == ODIA::LibraryFormat::DIANNTSV);
+    // When MS2 runs on a GPU, RT and CCS run on the CPU meanwhile, on a
+    // thread of their own: MS2 does not need them, the writer waits for
+    // both, and the CPU's RT and CCS calls are the same calls as before, so
+    // the library is the same. On a whole human library on an M4 Max they
+    // took 77 s of 16 idle cores before 236 s of GPU time. ODIA_OVERLAP=0
+    // keeps the phases in order, for comparison.
+    const char* overlap_env = std::getenv("ODIA_OVERLAP");
+    const bool overlap_wanted = overlap_env == nullptr || std::string_view(overlap_env) != "0";
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
+    // What a failing phase on the CPU thread reports: the message and the
+    // exit code the phase returned when it ran on the main thread.
+    struct PhaseFailure : std::runtime_error
+    {
+      PhaseFailure(ExitCodes c, const std::string& what) : std::runtime_error(what), code(c) {}
+      ExitCodes code;
+    };
     try
     {
       const auto st = ODIA::LibraryGenerator::generate(fasta, p, library, threads);
@@ -770,43 +835,53 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       for (const auto& [name, count] : st.variable_modification_precursors)
       { writeLogInfo_("variable modification '" + name + "': " + std::to_string(count) + " precursors"); }
 
-      if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
-            library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
-      {
-        writeLogError_(std::to_string(miss) + " precursors have no predicted RT. "
-                       "Refusing rather than shipping a library with NaN retention "
-                       "times, which extracts from nowhere and looks like a search bug.");
-        return UNEXPECTED_RESULT;
-      }
-      if (irt_rescale)
-      {
-        standards = getStringOption_("irt_standards");
-        if (standards.empty()) { standards = findDataFile("irt_standards.tsv"); }
-        if (standards.empty())
+      // The RT phase and the iRT calibration; @p info takes the log lines
+      // (written at once on the main thread, collected on the CPU thread).
+      const auto rtPhase = [&](const std::function<void(const std::string&)>& info) {
+        if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
+              library, rt_model, true, threads, p.free_cysteine_rt_correction, gpu); miss)
         {
-          std::ostringstream e;
-          e << "no iRT standards found; pass -irt_standards. Searched:";
-          for (const auto& d : dataDirCandidates()) { e << "\n  " << (d / "irt_standards.tsv").string(); }
-          writeLogError_(e.str());
-          return INPUT_FILE_NOT_FOUND;
+          throw PhaseFailure(UNEXPECTED_RESULT, std::to_string(miss) + " precursors have no predicted RT. "
+                             "Refusing rather than shipping a library with NaN retention "
+                             "times, which extracts from nowhere and looks like a search bug.");
         }
-        const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true, gpu);
-        ODIA::LibraryGenerator::applyIrtCalibration(library, cal);
-        std::ostringstream m;
-        m.setf(std::ios::fixed); m.precision(4);
-        m << "rescaled to iRT: " << cal.slope << " * raw + " << cal.intercept
-          << " from " << cal.peptides << " standards (worst off by "
-          << cal.max_abs_error << " iRT)";
-        writeLogInfo_(m.str());
-      }
-      else
-      {
-        writeLogInfo_("RT column is the model's RAW 0..1 output, NOT iRT "
-                      "(irt_rescale=false). The per-run map is scale-invariant, so "
-                      "this is the pipeline domain; it is NOT interchangeable with an "
-                      "iRT library in another tool.");
-      }
-      finishFingerprint();
+        if (irt_rescale)
+        {
+          standards = getStringOption_("irt_standards");
+          if (standards.empty()) { standards = findDataFile("irt_standards.tsv"); }
+          if (standards.empty())
+          {
+            std::ostringstream e;
+            e << "no iRT standards found; pass -irt_standards. Searched:";
+            for (const auto& d : dataDirCandidates()) { e << "\n  " << (d / "irt_standards.tsv").string(); }
+            throw PhaseFailure(INPUT_FILE_NOT_FOUND, e.str());
+          }
+          const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true, gpu);
+          ODIA::LibraryGenerator::applyIrtCalibration(library, cal);
+          std::ostringstream m;
+          m.setf(std::ios::fixed); m.precision(4);
+          m << "rescaled to iRT: " << cal.slope << " * raw + " << cal.intercept
+            << " from " << cal.peptides << " standards (worst off by "
+            << cal.max_abs_error << " iRT)";
+          info(m.str());
+        }
+        else
+        {
+          info("RT column is the model's RAW 0..1 output, NOT iRT "
+               "(irt_rescale=false). The per-run map is scale-invariant, so "
+               "this is the pipeline domain; it is NOT interchangeable with an "
+               "iRT library in another tool.");
+        }
+        finishFingerprint();
+      };
+      const auto logInfo = [&](const std::string& line) { writeLogInfo_(line); };
+
+      // The MS2 predictor first: its provider decides whether RT and CCS
+      // overlap it, and on CoreML its shape builds start now.
+      std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
+      if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
+      const bool overlap = overlap_wanted && ms2 && ms2->provider() != ODIA::PeptDeepPredictor::Provider::CPU;
+      if (!overlap) { rtPhase(logInfo); }
 
       // Guard before sink: the sink's thread may use it until the sink is gone.
       std::unique_ptr<ODIA::LibraryGenerator::CcsBatchGuard> guard;
@@ -829,17 +904,66 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       if (sink)
       {
-        std::vector<std::uint16_t> lengths;
-        bool ccs_on_cpu = false;
-        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-              library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
-        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
-        guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
-                                                                         std::move(lengths), ccs_on_cpu);
-        sink->setGuard(guard.get());
-        if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu, sink.get()); miss)
-        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        const auto ccsPhase = [&]() {
+          std::vector<std::uint16_t> lengths;
+          bool ccs_on_cpu = false;
+          if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+                library, ccs_model, true, threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
+          { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+          guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
+                                                                           std::move(lengths), ccs_on_cpu);
+        };
+        // The CPU phases on a thread of their own (after the sink: waited for
+        // before the sink goes; their log lines follow once they are done).
+        std::vector<std::string> cpu_log;
+        std::mutex cpu_log_mutex;
+        std::atomic<bool> cancel{false};
+        std::future<void> cpu_phases;
+        struct WaitFor
+        {
+          std::future<void>& f;
+          ~WaitFor() { if (f.valid()) { f.wait(); } }
+        } wait_for_cpu_phases{cpu_phases};
+        if (overlap)
+        {
+          writeLogInfo_("RT and CCS predicted on a thread of their own while the GPU predicts MS2 (ODIA_OVERLAP=0: one after the other)");
+          cpu_phases = ODIA::parallel::async([&]() {
+            try
+            {
+              rtPhase([&](const std::string& line) {
+                const std::lock_guard<std::mutex> lock(cpu_log_mutex);
+                cpu_log.push_back(line);
+              });
+              if (cancel.load()) { return; }
+              ccsPhase();
+              sink->setGuard(guard.get());
+            }
+            catch (...)
+            {
+              sink->fail(std::current_exception());
+              throw;
+            }
+          });
+        }
+        else
+        {
+          ccsPhase();
+          sink->setGuard(guard.get());
+        }
+        try
+        {
+          if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
+                library, *ms2, p, static_cast<float>(nce), instrument, threads, sink.get()); miss)
+          { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        }
+        catch (...)
+        {
+          cancel = true;
+          throw;
+        }
+        if (cpu_phases.valid()) { cpu_phases.get(); }
+        for (const auto& line : cpu_log) { writeLogInfo_(line); }
+        ms2.reset();   // its summary line, and on CoreML the cache's pruning, now
         writer = sink->takeWriter();
         if (sink->resettled())
         { writeLogInfo_("CCS of " + std::to_string(sink->resettled()) + " precursors predicted again in their 0.11.1 batching"); }
@@ -849,9 +973,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       else
       {
+        if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-              library, ms2_model, p, static_cast<float>(nce), instrument, true, threads, gpu); miss)
+              library, *ms2, p, static_cast<float>(nce), instrument, threads); miss)
         { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
+        ms2.reset();
         writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
         if (library.precursorCount() == 0)
         { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
@@ -866,6 +992,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                                                              recompute_decoy_mz);
       writeLogInfo_("decoys: " + std::to_string(made) + " (" + decoys + "), " +
                     std::to_string(skipped) + " skipped");
+    }
+    catch (const PhaseFailure& e)
+    {
+      writeLogError_(e.what());
+      return e.code;
     }
     catch (const std::invalid_argument& e)
     {

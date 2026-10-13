@@ -22,6 +22,7 @@ Switches for measurements and tests; none changes the library's content:
 | variable | default | effect |
 |---|---|---|
 | `ODIA_STREAM` | on | `0`: 0.11.1's order (MS2, then CCS) and the one-pass writer, instead of RT, CCS, MS2 with the writer streaming behind MS2 |
+| `ODIA_OVERLAP` | on | `0`: when MS2 runs on a GPU (CUDA, CoreML), predict RT and CCS on the CPU before MS2 instead of on a thread of their own while the GPU predicts MS2 (the writer then waits for both); the library is the same either way |
 | `ODIA_NUMA_INTERLEAVE` | off | `1`: interleave the run's memory over the NUMA nodes (the default above 32 threads until 0.11.2; the worker pool places its workers on the nodes instead) |
 | `ODIA_POOL_PIN` | on | `0`: do not bind pool worker k to NUMA node k mod n |
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA), 200000 (CoreML) | precursors per MS2 call |
@@ -113,7 +114,7 @@ Regions recorded by `generate`:
 
 | level | names |
 |---|---|
-| 0 | `setup`, `fingerprint`, `fasta_read`, `digest`, `enumerate`, `release`, `rt`, `irt_fit`, `ccs`, `ms2`, `decoys`, `write`, `teardown` (in this order; with `ODIA_STREAM=0`, `ms2` before `ccs`); and the tracer's own `trace_snapshot` |
+| 0 | `setup`, `fingerprint`, `fasta_read`, `digest`, `enumerate`, `release`, `ms2_sessions` (the MS2 predictor's construction; on CoreML its shape builds go on in the background), `rt`, `irt_fit`, `ccs`, `ms2`, `decoys`, `write`, `teardown` (in this order; with `ODIA_STREAM=0`, `ms2` before `ccs` and `ms2_sessions` right before it; when MS2 runs on a GPU, `rt`, `irt_fit` and `ccs` run on another thread concurrently with `ms2`, see `ODIA_OVERLAP`); and the tracer's own `trace_snapshot` |
 | 1 | `rt`: `unique_parse`, `sessions`, `predict`, `assign`; `ccs`: `sessions`, `block`; `ms2`: `sessions`, `reserve`, `block`, `drain`, `drain_sink`, `finalize`, and the writer's `stream_write` (on its own thread); `fingerprint`: `hash_fasta`, `hash_model`; `write`: `write_tail` and `commit` after streaming, or `write_table` and `commit` (Parquet) / `format_rows`, `close` and `commit` (TSV) for the one-pass writer |
 | 2 | `predict` inside each `block`; the host work of the neighbouring blocks runs on a helper thread meanwhile, with `idx` naming its block: `parse` (AASequence::fromString) of the next block, and for the previous block MS2 `post` (fragment selection), `emit` (appending the block in order) and `hand_over` (to the writer), CCS `post` (storing CCS and ion mobility). Block 0 is parsed before the first `block`, and the last block's MS2 `post` and `emit` run in `drain`. The gap between consecutive `predict` events is the time the sessions waited for the host. `ccs_settle` (CcsBatchGuard, on the writer's thread; `idx` = rows predicted again) |
 | 3 | `session_probe` (one CUDA device tried, `idx` = device; the session it builds is kept as that device's first, its `session_create` inside), `session_create` (`session` = index), `chunking` (length grouping), `dispatch` (workers alive), `worker` (one per thread per call), `chunk` (one batch) |

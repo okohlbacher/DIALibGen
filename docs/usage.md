@@ -438,9 +438,17 @@ What runs where, and why:
   (ties at the 12-fragment cap) and a minimum spectrum cosine of 0.987
   against the CPU's (one precursor below 0.99, seven below 0.999) -- the
   same profile as CUDA with TF32 off.
-- **RT and CCS on the CPU.** CoreML has no LSTM operator, and these models
-  are LSTMs: ONNX Runtime would keep the LSTM nodes on the CPU and hand the
-  rest to CoreML, which is slower than the plain CPU path. The predictor
+- **RT and CCS on the CPU, while the GPU predicts MS2.** CoreML has no LSTM
+  operator, and these models are LSTMs: ONNX Runtime would keep the LSTM
+  nodes on the CPU and hand the rest to CoreML, which is slower than the
+  plain CPU path. Since MS2 does not depend on them, the RT phase (with the
+  iRT calibration) and the CCS phase run on a thread of their own while the
+  GPU predicts MS2, and the streaming writer waits for both (on a whole
+  human library on an M4 Max they took 77 s of 16 idle cores before 236 s
+  of GPU time; now they hide behind it). The CPU calls are the same calls,
+  so the library is the same; `ODIA_OVERLAP=0` runs the phases in order.
+  The same holds on CUDA, where all three models run on the GPU and the
+  host-side work of RT and CCS overlaps MS2's kernels. The predictor
   probes each model's node placement and, when an arithmetic operator stays
   on the CPU, uses the CPU path and says so: a `WARNING` naming the model
   and the operator, recorded in the output's provenance as `odia.warnings`

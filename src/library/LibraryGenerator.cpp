@@ -1188,10 +1188,33 @@ namespace ODIA
     }
   } // namespace
 
+  std::unique_ptr<PeptDeepPredictor> LibraryGenerator::openMs2Predictor(
+    const std::string& ms2_model_path, bool prefer_gpu, unsigned sessions, const GpuOptions& gpu)
+  {
+    trace::Scope sessions_step("ms2_sessions", 0);
+    auto predictor = std::make_unique<PeptDeepPredictor>(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
+    sessions_step.fields().rows = static_cast<std::int64_t>(predictor->sessionCount());
+    // State the device: a silent CPU fallback turns a 4-minute stage
+    // into a 25-minute one with nothing in the log to explain it.
+    writeDeviceLine("MS2", *predictor, gpu);
+    return predictor;
+  }
+
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
     const GpuOptions& gpu, Ms2Sink* sink)
+  {
+    if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
+    { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
+    if (library.precursorCount() == 0) { return 0; }
+    const auto predictor = openMs2Predictor(ms2_model_path, prefer_gpu, sessions, gpu);
+    return predictFragmentIntensities(library, *predictor, params, nce, instrument, sessions, sink);
+  }
+
+  std::size_t LibraryGenerator::predictFragmentIntensities(
+    Library& library, PeptDeepPredictor& predictor, const DigestParams& params,
+    float nce, const std::string& instrument, unsigned sessions, Ms2Sink* sink)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
@@ -1200,15 +1223,8 @@ namespace ODIA
     const std::size_t n = library.precursorCount();
     if (n == 0) { return 0; }
 
+    // The predictor's construction is the ms2_sessions phase before this one.
     trace::Scope ms2_phase("ms2", 0);
-    trace::Scope sessions_step("sessions", 1);
-    PeptDeepPredictor predictor(ms2_model_path, prefer_gpu, 1, inferenceSessions(sessions), -1, gpu);
-    sessions_step.fields().rows = static_cast<std::int64_t>(predictor.sessionCount());
-    sessions_step.end();
-    // State the device: a silent CPU fallback turns a 4-minute stage
-    // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("MS2", predictor, gpu);
-
     trace::Scope reserve_step("reserve", 1);
 
     // The new transition arrays are built alongside the old ones and swapped in

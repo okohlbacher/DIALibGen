@@ -403,8 +403,13 @@ What runs where, and why:
   agree with the CPU's within 1.3e-6, no precursor selects a different
   fragment set, and two CoreML runs write the same bytes whatever
   `-machine:gpu_sessions` (here: concurrent batches; 2 gain about 10 % over
-  1 on an M4 Max, 4 nothing more). Whole-proteome numbers are in
-  [the laptop benchmark](../benchmark/laptop/LAPTOP-RESULTS.md) when run.
+  1 on an M4 Max, 4 nothing more). On a whole human library (Astral
+  settings, 3,488,457 precursors) the CoreML library has the CPU's
+  precursors in the CPU's order, identical RT, mobility and CCS,
+  intensities within 4.9e-6, 8 precursors with a different fragment set
+  (ties at the 12-fragment cap) and a minimum spectrum cosine of 0.987
+  against the CPU's (one precursor below 0.99, seven below 0.999) -- the
+  same profile as CUDA with TF32 off.
 - **RT and CCS on the CPU.** CoreML has no LSTM operator, and these models
   are LSTMs: ONNX Runtime would keep the LSTM nodes on the CPU and hand the
   rest to CoreML, which is slower than the plain CPU path. The predictor

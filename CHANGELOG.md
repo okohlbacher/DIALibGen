@@ -13,8 +13,9 @@ This project follows [Semantic Versioning](https://semver.org/).
   padded to 2048 rows, the models' scalar `PRelu` rewritten into `LeakyRelu`
   (the provider's MLProgram builder cannot compile it), compiled models
   cached under `~/Library/Caches/DIALibGen/coreml`. Measured on an M4 Max:
-  MS2 15-18 times faster than one CPU thread, intensities within 1.3e-6 of
-  the CPU's and the same fragment sets on `example/proteins.fasta`. RT and
+  MS2 15-18 times faster than one CPU thread; on a whole human library the
+  CPU's precursors and order, identical RT/CCS, intensities within 4.9e-6,
+  8 of 3.49 M fragment sets different, min cosine 0.987. RT and
   CCS stay on the CPU path, loudly: CoreML has no LSTM operator, the
   predictor reads ONNX Runtime's node placement and falls back when an
   arithmetic operator is left on the CPU (`WARNING`, `odia.warnings`;

@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <deque>
+#include <map>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -509,6 +510,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::prepare_()
   gpu.coreml = true;
   gpu.prebuild_min_residues = window[0];
   gpu.prebuild_max_residues = window[1];
+  gpu.prebuild_discard = true;   // the cache is the product, not the sessions
   try
   {
     ODIA::trace::Scope phase("prepare", 0);
@@ -763,10 +765,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     writeLogInfo_("MS2 model: " + ms2_model);
     std::vector<std::string> device_warnings;
     ODIA::GpuOptions gpu = gpuOptions_(&device_warnings);
-    // CoreML compiles one MS2 shape per residue count: the window's shapes
-    // are built in the background from the predictor's construction on.
-    gpu.prebuild_min_residues = static_cast<int>(p.min_length);
-    gpu.prebuild_max_residues = static_cast<int>(p.max_length);
+    // CoreML compiles one MS2 shape per residue count and batch size: the
+    // shapes the library needs are built in the background from the
+    // predictor's construction on (filled in after the digest, below).
     ODIA::Library library;
     std::string standards;
     setup_phase.fields().rows = threads;
@@ -880,7 +881,26 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       const auto logInfo = [&](const std::string& line) { writeLogInfo_(line); };
 
       // The MS2 predictor first: its provider decides whether RT and CCS
-      // overlap it, and on CoreML its shape builds start now.
+      // overlap it, and on CoreML its shape builds start now, for the
+      // residue counts the library holds (counted from the modified
+      // sequences: the residues are the letters outside the modification
+      // brackets) and only the batch sizes their chunks can need.
+      {
+        const auto& precursors = library.precursors();
+        std::map<int, std::uint64_t> per_length;
+        for (std::size_t i = 0; i < library.precursorCount(); ++i)
+        {
+          int residues = 0, depth = 0;
+          for (const char c : library.strings().get(precursors.modified_sequence[i]))
+          {
+            if (c == '(' || c == '[') { ++depth; }
+            else if (c == ')' || c == ']') { if (depth > 0) { --depth; } }
+            else if (depth == 0 && c >= 'A' && c <= 'Z') { ++residues; }
+          }
+          if (residues > 0) { ++per_length[residues]; }
+        }
+        gpu.prebuild_lengths.assign(per_length.begin(), per_length.end());
+      }
       std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
       if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
       const bool overlap = overlap_wanted && ms2 && ms2->provider() != ODIA::PeptDeepPredictor::Provider::CPU;

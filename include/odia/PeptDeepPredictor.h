@@ -36,9 +36,20 @@ namespace ODIA
     /// several at a time, so the builds overlap the phases before the first
     /// prediction instead of running one after the other inside it (a cold
     /// cache cost a whole-proteome MS2 phase 66 s of serialised compiles).
-    /// generate passes the peptide-length window; 0: nothing ahead of use.
+    /// prepare passes the peptide-length window (every bucket of every
+    /// length); 0: nothing ahead of use.
     int prebuild_min_residues = 0;
     int prebuild_max_residues = 0;
+    /// generate passes instead the residue counts its library holds, with
+    /// how many precursors have each: only their shapes are built, and for
+    /// each length only the buckets a chunk of that many rows can need
+    /// (a session holds its compiled model in memory, about 100 MB; 42 of
+    /// them for 7-30 residues are too much for a small machine and were
+    /// never needed for a small input). Takes precedence over the window.
+    std::vector<std::pair<int, std::uint64_t>> prebuild_lengths;
+    /// Drop each prebuilt session once built (prepare: the compiled model
+    /// in the cache is what matters, not the sessions).
+    bool prebuild_discard = false;
     /// Throw instead of running on the CPU when CUDA was requested but no
     /// CUDA session could be created (missing cuDNN, no visible GPU, a
     /// CPU-only ONNX Runtime).
@@ -144,6 +155,14 @@ namespace ODIA
     /// Whether this ONNX Runtime has the CoreML execution provider (macOS
     /// builds); says nothing about whether a model runs on it.
     static bool coremlProviderAvailable();
+
+    /// The body of `DIALibGen --probe-coreml MODEL UNITS`: in a process of
+    /// its own, compiles the model's probe shape on CoreML and runs one
+    /// batch through it. Exit 0: CoreML runs the model; 2: the model stays
+    /// on the CPU (the reason on stdout); anything else, or a signal: Core
+    /// ML itself failed, which the parent turns into a CPU fallback instead
+    /// of dying with it (a macOS virtual machine without a usable GPU).
+    static int probeCoremlMain(const std::string& model_path, const std::string& units);
 
     PeptDeepPredictor(const PeptDeepPredictor&) = delete;
     PeptDeepPredictor& operator=(const PeptDeepPredictor&) = delete;

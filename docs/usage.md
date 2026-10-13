@@ -413,11 +413,12 @@ What runs where, and why:
   padding instead of 11.5 %, and those rows are the slow ones) and one
   session is compiled per residue count and batch size, with the whole
   graph on CoreML except the `OneHot` of the instrument index. The shapes
-  of the peptide-length window are compiled,
-  or loaded from the cache, in the background from the moment the predictor
-  exists, in the order the chunks will ask for them, so the builds overlap
-  the RT and CCS phases; a worker that needs a shape still being built
-  waits for that one alone. Core ML compiles one model at a time whatever
+  the library needs (its residue counts, each with the batch sizes a chunk
+  of that many precursors can take; a session holds its compiled model in
+  memory, about 100 MB) are compiled, or loaded from the cache, in the
+  background from the moment the predictor exists, in the order the chunks
+  will ask for them, so the builds overlap the RT and CCS phases; a worker
+  that needs a shape still being built waits for that one alone. Core ML compiles one model at a time whatever
   the number of builders (42 shapes for 7-30 residues: 105 s cold with 4, 8
   or 16 builders, about 2.5 s each), and cached loads gain a little from
   parallelism (23 s with 8 builders against 34 s one by one). (Before 0.11.4
@@ -438,6 +439,19 @@ What runs where, and why:
   (ties at the 12-fragment cap) and a minimum spectrum cosine of 0.987
   against the CPU's (one precursor below 0.99, seven below 0.999) -- the
   same profile as CUDA with TF32 off.
+- **The probe.** Before a model is compiled in the run itself, a child
+  process (`DIALibGen --probe-coreml MODEL UNITS`) compiles its probe shape
+  and runs one batch through it, once per process and model: a Core ML
+  that aborts the process (a macOS virtual machine without a usable GPU,
+  GitHub's macOS runners among them) then costs the child, not the run,
+  and the model runs on the CPU with a `WARNING` that names the signal or
+  exit code (`ODIA_COREML_PROBE=0` skips the child, `ODIA_COREML_PROBE_SECONDS`
+  bounds it, 300). A shape Core ML refuses to compile inside the run falls
+  back to a CPU session for its batches, also loudly. `-machine:require_gpu`
+  turns either into an error. Measured on macOS 26 with an M4 Max; on macOS
+  before 14.4 ONNX Runtime skips Core ML's optimisation hints and says so
+  in the log (`ConfigureOptimizationHints`), which does not stop the model
+  from running, and the probe decides the rest.
 - **RT and CCS on the CPU, while the GPU predicts MS2.** CoreML has no LSTM
   operator, and these models are LSTMs: ONNX Runtime would keep the LSTM
   nodes on the CPU and hand the rest to CoreML, which is slower than the
@@ -490,9 +504,14 @@ What runs where, and why:
   compiled graph. Each run ends its MS2 phase with a line such as
   `[MS2] CoreML: 42 shapes built in 35.1 s (summed), 5808438 rows run,
   563914 padding rows (8.8 %)`.
-- **Training on MPS** (`-mode tune -machine:device mps`): the RT and CCS
-  heads train on the GPU with no operator falling back to the CPU in
-  LibTorch 2.10 (the log would say `not currently supported on the MPS
+- **Training on MPS** (`-mode tune`, the default `-machine:device auto` on
+  Apple silicon, or `mps` by name): `auto` first allocates one small tensor
+  on MPS and sums it; a LibTorch that reports MPS but cannot use it (a
+  virtual machine) then trains on the CPU, with a log line and the reason
+  under `device_note` in the provenance (`device_requested: auto`,
+  `device: cpu`), while `-machine:device mps` by name fails loudly. The RT
+  and CCS heads train on the GPU with no operator falling back to the CPU
+  in LibTorch 2.10 (the log would say `not currently supported on the MPS
   backend`; set `PYTORCH_ENABLE_MPS_FALLBACK=1` in the environment **before
   starting DIALibGen** if a future LibTorch needs it, LibTorch reads it at
   load time). Measured on a 3,200-precursor fixture, 30 epochs: 18.6 s of

@@ -255,6 +255,11 @@ int main(int argc, const char** argv)
   ::setenv("OPENMS_DISABLE_UPDATE_CHECK", "ON", 0);
 #endif
 
+  // The Core ML probe child (PeptDeepPredictor::probeCoremlMain): no TOPP
+  // parsing, one line on stdout, the exit code is the verdict.
+  if (argc == 4 && std::strcmp(argv[1], "--probe-coreml") == 0)
+  { return ODIA::PeptDeepPredictor::probeCoremlMain(argv[2], argv[3]); }
+
   bool help = false;
   for (int i = 1; i < argc; ++i)
   { help = help || std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "--helphelp") == 0; }

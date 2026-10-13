@@ -34,10 +34,14 @@ def generate(name, *args):
 
 
 coreml4, result = generate("coreml_c4.tsv", "-machine:device", "coreml", "-machine:gpu_sessions", "4")
-if result.returncode != 0:
-    sys.exit(result.stdout + result.stderr)
 log = result.stdout + result.stderr
+if result.returncode != 0:
+    # A negative code is the signal that killed it: Core ML took the process
+    # down in spite of the probe child, which is the bug to report.
+    sys.exit(f"CoreML generate failed with return code {result.returncode}\n" + log)
 if "[MS2] provider CoreML" not in log:
+    # The probe child or the placement check kept MS2 on the CPU (a Mac or a
+    # virtual machine whose Core ML cannot run the model): nothing to compare.
     reason = [line for line in log.splitlines() if "MS2" in line and "WARNING" in line]
     print("MS2 does not run on CoreML; skipped:", reason[0] if reason else "no CoreML provider line")
     sys.exit(77)

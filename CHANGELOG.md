@@ -69,9 +69,18 @@ This project follows [Semantic Versioning](https://semver.org/).
   with and without the overlap (`ODIA_OVERLAP=0` keeps the phases in order).
   The MS2 predictor is now opened before them (trace phase `ms2_sessions`),
   on every provider.
-- CoreML: the shapes of the peptide-length window are compiled, or loaded
-  from the cache, in the background from the predictor's construction on
-  (`ODIA_COREML_BUILDERS`, 8), in the order the chunks ask for them, so they
+- CoreML: before a model is compiled in the run, a child process
+  (`DIALibGen --probe-coreml`) compiles its probe shape and runs one batch,
+  once per process and model, so that a Core ML that aborts the process (a
+  macOS virtual machine without a usable GPU) leaves the run on the CPU
+  with a `WARNING` instead of taking it down; a shape Core ML refuses inside
+  the run falls back to a CPU session for its batches, loudly.
+- CoreML: the shapes the library needs (its residue counts, each with the
+  batch sizes a chunk of that many precursors can take; `-mode prepare`
+  builds every shape of the window and keeps none in memory) are compiled,
+  or loaded from the cache, in the background from the predictor's
+  construction on (`ODIA_COREML_BUILDERS`, 8), in the order the chunks ask
+  for them, so they
   overlap the RT and CCS phases instead of being built one after the other
   by the first worker to need each while the others waited inside the MS2
   phase (66 s of a cold-cache whole-proteome run, 16 s warm). Measured:

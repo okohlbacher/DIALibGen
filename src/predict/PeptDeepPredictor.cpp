@@ -47,6 +47,14 @@
 #else
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <fcntl.h>
+#include <mach-o/dyld.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+extern char** environ;
+#endif
 
 namespace
 {
@@ -296,6 +304,103 @@ namespace
     return removed;
   }
 
+  /// Core ML's verdict on a model, taken in a child process (`DIALibGen
+  /// --probe-coreml`): the compile of the probe shape and one Run happen
+  /// there first, so that a Core ML that aborts the process (macOS virtual
+  /// machines without a usable GPU, GitHub's macOS runners among them)
+  /// costs the child, not the run. Once per process and model.
+  struct ChildProbe
+  {
+    bool ran = false;      ///< a child could be started at all
+    int exit_code = -1;    ///< 0 usable, 2 model stays on the CPU, else Core ML failed
+    int signal = 0;        ///< the child died of this signal
+    std::string reason;    ///< the child's one line
+  };
+
+  ChildProbe probeCoremlInChild(const std::string& model_path, const std::string& units)
+  {
+    ChildProbe probe;
+#if defined(__APPLE__)
+    // The child must not probe in turn: the environment says it is one.
+    if (const char* in_child = std::getenv("ODIA_COREML_PROBE_CHILD"); in_child != nullptr && *in_child == '1') { return probe; }
+    if (const char* off = std::getenv("ODIA_COREML_PROBE"); off != nullptr && std::string_view(off) == "0") { return probe; }
+    static std::mutex mutex;
+    static std::map<std::string, ChildProbe> done;
+    const std::string key = model_path + "\n" + units;
+    const std::lock_guard<std::mutex> lock(mutex);
+    if (const auto it = done.find(key); it != done.end()) { return it->second; }
+    std::vector<char> exe(4096);
+    std::uint32_t size = static_cast<std::uint32_t>(exe.size());
+    if (_NSGetExecutablePath(exe.data(), &size) != 0) { exe.resize(size); if (_NSGetExecutablePath(exe.data(), &size) != 0) { return probe; } }
+    int pipefd[2];
+    if (::pipe(pipefd) != 0) { return probe; }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, pipefd[1], 1);
+    posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    std::vector<std::string> env_strings{"ODIA_COREML_PROBE_CHILD=1"};
+    for (char** e = environ; e != nullptr && *e != nullptr; ++e)
+    { if (std::string_view(*e).rfind("ODIA_COREML_PROBE_CHILD=", 0) != 0) { env_strings.emplace_back(*e); } }
+    std::vector<char*> envp;
+    for (auto& s : env_strings) { envp.push_back(s.data()); }
+    envp.push_back(nullptr);
+    std::string flag = "--probe-coreml", model = model_path, u = units;
+    char* argv[] = {exe.data(), flag.data(), model.data(), u.data(), nullptr};
+    pid_t pid = 0;
+    const int rc = posix_spawn(&pid, exe.data(), &actions, nullptr, argv, envp.data());
+    posix_spawn_file_actions_destroy(&actions);
+    ::close(pipefd[1]);
+    if (rc != 0) { ::close(pipefd[0]); return probe; }
+    probe.ran = true;
+    // The child's output and its exit, polled together; a child that does
+    // not exit within the limit (ODIA_COREML_PROBE_SECONDS, 300) is killed.
+    ::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+    std::string out;
+    const auto drain = [&]() {
+      char buffer[256];
+      for (;;)
+      {
+        const auto n = ::read(pipefd[0], buffer, sizeof buffer);
+        if (n <= 0) { break; }
+        out.append(buffer, static_cast<std::size_t>(n));
+      }
+    };
+    int limit = 300;
+    if (const char* v = std::getenv("ODIA_COREML_PROBE_SECONDS"); v != nullptr && *v != '\0') { limit = std::max(1, std::atoi(v)); }
+    int status = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;)
+    {
+      drain();
+      const pid_t w = ::waitpid(pid, &status, WNOHANG);
+      if (w == pid) { break; }
+      if (w < 0) { ::close(pipefd[0]); probe.ran = false; return probe; }
+      if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() > limit)
+      {
+        ::kill(pid, SIGKILL);
+        ::waitpid(pid, &status, 0);
+        ::close(pipefd[0]);
+        probe.reason = "the probe process did not finish within " + std::to_string(limit) + " s";
+        probe.exit_code = -1;
+        done[key] = probe;
+        return probe;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    drain();
+    ::close(pipefd[0]);
+    if (const auto nl = out.find('\n'); nl != std::string::npos) { out.resize(nl); }
+    probe.reason = out;
+    if (WIFEXITED(status)) { probe.exit_code = WEXITSTATUS(status); }
+    else if (WIFSIGNALED(status)) { probe.exit_code = -1; probe.signal = WTERMSIG(status); probe.reason = "the probe process died of signal " + std::to_string(probe.signal) + (out.empty() ? "" : " (" + out + ")"); }
+    done[key] = probe;
+#else
+    (void)model_path; (void)units;
+#endif
+    return probe;
+  }
+
   std::string fallbackFix(const std::string& reason)
   {
     std::string lower = reason;
@@ -492,6 +597,10 @@ namespace ODIA
     /// The shapes GpuOptions::prebuild_* asked for, built in the background
     /// by these threads (joined by waitForShapes and the destructor).
     std::vector<std::pair<std::int64_t, std::int64_t>> prebuild;
+    bool prebuild_discard = false;
+    /// Shapes Core ML refused in-process: their batches run on `session`,
+    /// a CPU session built on first need (sessionFor_).
+    std::map<std::pair<std::int64_t, std::int64_t>, bool> coreml_cpu_fallback;
     std::vector<std::thread> builders;
     /// Rows run and rows padded (the difference is wasted GPU time), for
     /// the summary line.
@@ -553,8 +662,8 @@ namespace ODIA
         }
         catch (...) {}
         const std::lock_guard<std::mutex> lock(coreml_mutex);
-        if (built) { coreml_sessions[key] = std::move(built); }
-        else { coreml_sessions.erase(key); }
+        if (built && !prebuild_discard) { coreml_sessions[key] = std::move(built); }
+        else { coreml_sessions.erase(key); }   // failed, or compiled for the cache only
         coreml_built.notify_all();
       }
     }
@@ -677,6 +786,19 @@ namespace ODIA
       else
       {
         trace::Scope probe_step("session_probe", 3);
+        // Core ML first in a process of its own: a compile or Run that
+        // takes the process down (a macOS virtual machine without a usable
+        // GPU) must not take the run with it.
+        // Exit 0: it runs; 2: the child's placement check kept the model on
+        // the CPU, and the one below says why (the compile itself survived);
+        // anything else: Core ML failed, and the run stays off it.
+        const ChildProbe child = probeCoremlInChild(model_path, gpu.coreml_units.empty() ? "CPUAndGPU" : gpu.coreml_units);
+        if (child.ran && child.exit_code != 0 && child.exit_code != 2)
+        {
+          reason = "CoreML: Core ML failed in the probe process (" +
+                   (child.reason.empty() ? "exit code " + std::to_string(child.exit_code) : child.reason) + ")";
+        }
+        else
         try
         {
           {
@@ -917,14 +1039,31 @@ namespace ODIA
       // was built by the first worker to need it while the others waited,
       // one after the other, because the chunks of a block come in length
       // order: 66 s of a cold-cache whole-proteome run, 16 s warm.
-      if (gpu.prebuild_min_residues > 0 && gpu.prebuild_max_residues >= gpu.prebuild_min_residues)
+      // The lengths to build: the library's, with the buckets a chunk of
+      // that many rows can need (a chunk has at most MAX_BATCH_ROWS rows,
+      // and no more than the length's precursors), or every bucket of the
+      // window (prepare).
+      std::vector<std::pair<int, std::uint64_t>> lengths = gpu.prebuild_lengths;
+      if (lengths.empty() && gpu.prebuild_min_residues > 0 && gpu.prebuild_max_residues >= gpu.prebuild_min_residues)
       {
         for (int residues = gpu.prebuild_min_residues; residues <= gpu.prebuild_max_residues; ++residues)
+        { lengths.emplace_back(residues, std::numeric_limits<std::uint64_t>::max()); }
+      }
+      std::sort(lengths.begin(), lengths.end());
+      impl_->prebuild_discard = gpu.prebuild_discard;
+      if (!lengths.empty())
+      {
+        for (const auto& [residues, count] : lengths)
         {
+          if (residues <= 0 || count == 0) { continue; }
           const auto tokens = static_cast<std::int64_t>(residues) + 2;
-          auto buckets = coremlBucketsFor(tokens);
+          const auto buckets = coremlBucketsFor(tokens);
+          const auto largest_chunk = static_cast<std::int64_t>(std::min<std::uint64_t>(count, MAX_BATCH_ROWS));
+          std::int64_t top = buckets.back();
+          for (const auto b : buckets) { if (b >= largest_chunk) { top = b; break; } }
           for (auto it = buckets.rbegin(); it != buckets.rend(); ++it)
           {
+            if (*it > top) { continue; }
             const std::pair<std::int64_t, std::int64_t> key{*it, tokens};
             if (impl_->coreml_sessions.count(key) != 0) { continue; }
             impl_->coreml_sessions[key] = nullptr;   // claimed: being built
@@ -1137,6 +1276,36 @@ namespace ODIA
     return {impl_->coreml_builds, impl_->coreml_build_seconds};
   }
 
+  int PeptDeepPredictor::probeCoremlMain(const std::string& model_path, const std::string& units)
+  {
+    try
+    {
+      GpuOptions gpu;
+      gpu.coreml = true;
+      gpu.coreml_units = units;
+      PeptDeepPredictor predictor(model_path, true, 1, 1, -1, gpu);
+      if (predictor.provider() != Provider::CoreML)
+      {
+        std::cout << (predictor.fallbackReason().empty() ? std::string("CoreML: the model stays on the CPU") : predictor.fallbackReason()) << std::endl;
+        return 2;
+      }
+      // One real batch through the probe shape: the Run is where a broken
+      // Core ML runtime fails, not the compile.
+      const std::vector<OpenMS::AASequence> peptides{OpenMS::AASequence::fromString("ELVISLIVESKING")};   // 14 residues: the probe shape
+      const std::string kind = predictor.impl_->kind;
+      if (kind == "MS2") { predictor.predictMS2(peptides, {2}); }
+      else if (kind == "CCS") { predictor.predictCCS(peptides, {2}); }
+      else { predictor.predictRT(peptides); }
+      std::cout << "CoreML runs " << std::filesystem::path(model_path).filename().string() << std::endl;
+      return 0;
+    }
+    catch (const std::exception& e)
+    {
+      std::cout << "CoreML: " << e.what() << std::endl;
+      return 3;
+    }
+  }
+
   bool PeptDeepPredictor::coremlProviderAvailable()
   {
     for (const auto& name : Ort::GetAvailableProviders()) { if (name == "CoreMLExecutionProvider") { return true; } }
@@ -1155,6 +1324,7 @@ namespace ODIA
     std::unique_lock<std::mutex> lock(impl_->coreml_mutex);
     for (;;)
     {
+      if (impl_->coreml_cpu_fallback.count(key) != 0) { return *impl_->session; }
       const auto it = impl_->coreml_sessions.find(key);
       if (it == impl_->coreml_sessions.end())
       {
@@ -1173,12 +1343,24 @@ namespace ODIA
       building.fields().len = length;
       built = impl_->buildCoreML(rows, length, "odia-coreml", false);
     }
-    catch (...)
+    catch (const std::exception& e)
     {
+      // A shape Core ML will not compile runs on the CPU, this batch and
+      // every later one of that shape, and says so once: the padded rows
+      // cost CPU time but the result is the CPU's.
       lock.lock();
       impl_->coreml_sessions.erase(key);
       impl_->coreml_built.notify_all();
-      throw;
+      if (!impl_->session)
+      {
+        Ort::SessionOptions cpu;
+        configureSession(cpu, 1);
+        impl_->session = std::make_unique<Ort::Session>(impl_->env, impl_->model_bytes.data(), impl_->model_bytes.size(), cpu);
+      }
+      std::cerr << "WARNING: " << impl_->kind << ": CoreML could not build the " << rows << "x" << length
+                << " shape (" << conciseOrtError(e.what()) << "); batches of that shape run on the CPU\n";
+      impl_->coreml_cpu_fallback[key] = true;
+      return *impl_->session;
     }
     lock.lock();
     Ort::Session& session = *(impl_->coreml_sessions[key] = std::move(built));

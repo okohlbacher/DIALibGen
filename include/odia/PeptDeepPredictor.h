@@ -137,6 +137,14 @@ namespace ODIA
     /// needs a shape still being built waits for that one alone.
     std::pair<std::size_t, double> waitForShapes();
 
+    /// CoreML: the compiled-model cache directory of this model (empty on
+    /// the other providers or with the cache off), for reports.
+    std::filesystem::path coremlCacheDir() const;
+
+    /// Whether this ONNX Runtime has the CoreML execution provider (macOS
+    /// builds); says nothing about whether a model runs on it.
+    static bool coremlProviderAvailable();
+
     PeptDeepPredictor(const PeptDeepPredictor&) = delete;
     PeptDeepPredictor& operator=(const PeptDeepPredictor&) = delete;
 

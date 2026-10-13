@@ -30,8 +30,8 @@ DIALibGen::DIALibGen()
 
 void DIALibGen::registerOptionsAndFlags_()
 {
-  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged.", false);
-  setValidStrings_("mode", {"generate", "refine", "tune", "convert"});
+  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged; prepare: macOS, compile the MS2 model's CoreML shapes for -generation:peptide_length into the cache once (~/Library/Caches/DIALibGen/coreml), so that the first -machine:device coreml generate does not.", false);
+  setValidStrings_("mode", {"generate", "refine", "tune", "convert", "prepare"});
   registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
   registerOutputFile_("out", "<file>", "", "Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. .pqp: OpenSWATH's PQP. -out_format selects the other layouts.", false);
@@ -93,14 +93,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32" ||
                                    option == "machine:gpu_sessions" || option == "machine:gpu_devices" ||
                                    option == "machine:device" || option == "machine:coreml_units";
-    if (prediction_device && mode == "generate") { continue; }
+    // prepare takes generate's options: the length window and the CoreML settings.
+    const bool generating = mode == "generate" || mode == "prepare";
+    if (prediction_device && generating) { continue; }
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
     // The built-in identification's settings: refine and tune, and only with -run.
     const bool search = option.starts_with("search:");
     const bool refinement = refinement_options_.count(option) || training || search;
     const bool generation = option.starts_with("generation:") || option == "irt_standards";
-    bool wrong_mode = mode == "generate" ? refinement : generation;
+    bool wrong_mode = generating ? refinement : generation;
     if (mode == "convert") { wrong_mode = refinement || generation || option == "config" || option == "write_config"; }
     // -tune_models also names where -run finds the MS2 model (search:intensities predicted).
     if (mode == "refine" && training && !getFlag_("tune") && !(option == "tune_models" && with_run)) { wrong_mode = true; }
@@ -126,6 +128,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     }
   }
   if (mode == "convert") { return convert_(); }
+  if (mode == "prepare") { return prepare_(); }
   return mode == "generate" ? generate_() : refine_(mode == "tune");
 }
 

@@ -26,6 +26,9 @@ protected:
   /// The search: options, validated (throws std::invalid_argument).
   ODIA::search::SearchParams searchParams_();
   ExitCodes convert_();
+  /// -mode prepare: compiles the CoreML shapes of the bundled MS2 model
+  /// into the cache, for the peptide-length window.
+  ExitCodes prepare_();
   /// GPU settings for prediction from -machine:*; warnings collects CPU fallbacks.
   ODIA::GpuOptions gpuOptions_(std::vector<std::string>* warnings);
   nlohmann::json generationValue_(const std::string& key, const nlohmann::json& value);

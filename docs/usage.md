@@ -423,9 +423,7 @@ What runs where, and why:
   parallelism (23 s with 8 builders against 34 s one by one). (Before 0.11.4
   each shape was built by the first worker to need it while the others
   waited, one after the other, inside the MS2 phase: 66 s of a cold-cache
-  whole-proteome run, 16 s warm.) Each run ends its MS2 phase with a line
-  such as `[MS2] CoreML: 42 shapes built in 35.1 s (summed), 5808438 rows
-  run, 563914 padding rows (8.8 %)`. (With dynamic shapes Core ML's compiler
+  whole-proteome run, 16 s warm.) (With dynamic shapes Core ML's compiler
   rejects the model's reshapes and the provider is slower than one CPU
   thread; the predictor also rewrites the models' scalar `PRelu` into
   `LeakyRelu`, which the provider's MLProgram builder gets wrong.) Core ML
@@ -457,11 +455,20 @@ What runs where, and why:
 - **Compiled-model cache.** Compiling one shape takes 3-4 s and loading it
   back 0.8 s, so compiled models are kept under
   `~/Library/Caches/DIALibGen/coreml/<model>-<content hash>/<rows>x<tokens>`
-  (about 65 MB per MS2 shape, 1.5 GB for all residue counts of a
-  proteome). A first run on a proteome spends 1-2 minutes compiling; later
-  runs reuse the cache. `ODIA_COREML_CACHE=<dir>` moves it,
-  `ODIA_COREML_CACHE=0` keeps nothing. The cache is keyed by the model's
-  content, so a tuned model never meets a stock model's compiled graph.
+  (about 65 MB per MS2 shape; 42 shapes, 2.7 GB, for 7-30 residues with the
+  finer buckets). `DIALibGen -mode prepare` compiles the bundled MS2 model's
+  shapes for `-generation:peptide_length` (default 7-30) into the cache
+  once, for an installation or before a first run, and says where they are;
+  without it the first `coreml` run on a proteome compiles them in the
+  background while RT and CCS run. `ODIA_COREML_CACHE=<dir>` moves the
+  cache, `ODIA_COREML_CACHE=0` keeps nothing, and `ODIA_COREML_CACHE_MAX`
+  caps it (4G by default; bytes, or with K, M or G; `0`: no cap): above the
+  cap the least recently used shapes of *other* models are removed when a
+  run's predictor goes, never the running model's own. The cache is keyed
+  by the model's content, so a tuned model never meets a stock model's
+  compiled graph. Each run ends its MS2 phase with a line such as
+  `[MS2] CoreML: 42 shapes built in 35.1 s (summed), 5808438 rows run,
+  563914 padding rows (8.8 %)`.
 - **Training on MPS** (`-mode tune -machine:device mps`): the RT and CCS
   heads train on the GPU with no operator falling back to the CPU in
   LibTorch 2.10 (the log would say `not currently supported on the MPS

@@ -221,6 +221,81 @@ namespace
     return ec ? std::filesystem::path() : tmp / "dialibgen-coreml";
   }
 
+  /// The compiled-model cache's size cap: ODIA_COREML_CACHE_MAX in bytes,
+  /// with an optional K, M or G suffix (4G by default; 0: no cap). Above it
+  /// the least recently used shapes of other models are removed when a
+  /// predictor goes (pruneCoremlCache).
+  std::uintmax_t coremlCacheMax()
+  {
+    constexpr std::uintmax_t DEFAULT = std::uintmax_t{4} << 30;
+    const char* v = std::getenv("ODIA_COREML_CACHE_MAX");
+    if (v == nullptr || *v == '\0') { return DEFAULT; }
+    char* end = nullptr;
+    const auto x = std::strtoull(v, &end, 10);
+    if (end == v) { return DEFAULT; }
+    std::uintmax_t bytes = x;
+    switch (std::tolower(static_cast<unsigned char>(*end)))
+    {
+      case 'k': bytes <<= 10; break;
+      case 'm': bytes <<= 20; break;
+      case 'g': bytes <<= 30; break;
+      default: break;
+    }
+    return bytes;
+  }
+
+  std::uintmax_t directorySize(const std::filesystem::path& dir)
+  {
+    std::uintmax_t total = 0;
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+    {
+      if (it->is_regular_file(ec)) { total += it->file_size(ec); }
+    }
+    return total;
+  }
+
+  /// Keeps the cache under coremlCacheMax(): the shape directories
+  /// (<root>/<model>-<hash>/<rows>x<tokens>) are removed least recently
+  /// used first (their modification time, which buildCoreML refreshes on
+  /// every use) until the total fits, except the shapes of @p keep, the
+  /// model that is running: they are what the next run needs, whatever
+  /// their size. Returns how many were removed.
+  std::size_t pruneCoremlCache(const std::filesystem::path& root, const std::filesystem::path& keep)
+  {
+    const std::uintmax_t cap = coremlCacheMax();
+    if (cap == 0 || root.empty()) { return 0; }
+    struct Shape { std::filesystem::path dir; std::filesystem::file_time_type used; std::uintmax_t bytes; bool keep; };
+    std::vector<Shape> shapes;
+    std::uintmax_t total = 0;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator model(root, ec), end; !ec && model != end; model.increment(ec))
+    {
+      if (!model->is_directory(ec)) { continue; }
+      for (std::filesystem::directory_iterator shape(model->path(), ec), send; !ec && shape != send; shape.increment(ec))
+      {
+        if (!shape->is_directory(ec)) { continue; }
+        Shape s{shape->path(), shape->last_write_time(ec), directorySize(shape->path()), model->path() == keep};
+        total += s.bytes;
+        shapes.push_back(std::move(s));
+      }
+    }
+    if (total <= cap) { return 0; }
+    std::sort(shapes.begin(), shapes.end(), [](const Shape& a, const Shape& b) { return a.used < b.used; });
+    std::size_t removed = 0;
+    for (const auto& s : shapes)
+    {
+      if (total <= cap) { break; }
+      if (s.keep) { continue; }
+      std::filesystem::remove_all(s.dir, ec);
+      if (ec) { continue; }
+      total -= s.bytes;
+      ++removed;
+      std::filesystem::remove(s.dir.parent_path(), ec);   // an emptied model directory; fails, harmlessly, when not empty
+    }
+    return removed;
+  }
+
   std::string fallbackFix(const std::string& reason)
   {
     std::string lower = reason;
@@ -444,6 +519,12 @@ namespace ODIA
       options.SetLogSeverityLevel(verbose ? ORT_LOGGING_LEVEL_VERBOSE : ORT_LOGGING_LEVEL_ERROR);
       const auto t0 = std::chrono::steady_clock::now();
       auto session = std::make_unique<Ort::Session>(env, model_bytes.data(), model_bytes.size(), options);
+      if (!cache.empty())
+      {
+        // Used now: what the cache's least-recently-used pruning goes by.
+        std::error_code ec;
+        std::filesystem::last_write_time(cache, std::filesystem::file_time_type::clock::now(), ec);
+      }
       // Workers build concurrently (sessionFor_): the counters are shared.
       const std::lock_guard<std::mutex> lock(coreml_mutex);
       coreml_build_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1054,6 +1135,17 @@ namespace ODIA
     return {impl_->coreml_builds, impl_->coreml_build_seconds};
   }
 
+  bool PeptDeepPredictor::coremlProviderAvailable()
+  {
+    for (const auto& name : Ort::GetAvailableProviders()) { if (name == "CoreMLExecutionProvider") { return true; } }
+    return false;
+  }
+
+  std::filesystem::path PeptDeepPredictor::coremlCacheDir() const
+  {
+    return impl_->provider == Provider::CoreML ? impl_->coreml_cache : std::filesystem::path();
+  }
+
   Ort::Session& PeptDeepPredictor::sessionFor_(std::size_t worker, std::int64_t rows, std::int64_t length)
   {
     if (impl_->provider != Provider::CoreML) { return impl_->at(worker); }
@@ -1308,6 +1400,15 @@ namespace ODIA
               << (rows + padded > 0 ? 100.0 * static_cast<double>(padded) / static_cast<double>(rows + padded) : 0.0) << " %)";
       if (rows > 0) { std::cerr << "[" << impl_->kind << "] CoreML: " << summary.str() << "\n"; }
       if (trace::enabled()) { trace::note(std::string("predictor.") + impl_->kind + ".coreml_sessions", summary.str()); }
+      // The sessions and the builders are done with the cache: the least
+      // recently used shapes of other models go when it is over the cap.
+      if (!impl_->coreml_cache.empty())
+      {
+        const std::size_t removed = pruneCoremlCache(impl_->coreml_cache.parent_path(), impl_->coreml_cache);
+        if (removed > 0)
+        { std::cerr << "[" << impl_->kind << "] CoreML: removed " << removed << " least recently used compiled shape(s) of other models from "
+                    << impl_->coreml_cache.parent_path().string() << " (cap ODIA_COREML_CACHE_MAX)\n"; }
+      }
     }
     if (!impl_ || !impl_->ort_profiling) { return; }
     // End explicitly rather than at session destruction, so the file names

@@ -27,6 +27,8 @@ Switches for measurements and tests; none changes the library's content:
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA), 200000 (CoreML) | precursors per MS2 call |
 | `ODIA_COREML_BUCKETS` | 2048 up to 21 residues; 512,1024,2048 from 22 | CoreML: the batch sizes compiled per residue count, for every length (`0`: 2048 alone); a chunk is padded up to the smallest one that holds it |
 | `ODIA_COREML_BUILDERS` | 8 | CoreML: threads that compile or load the length window's shapes in the background from the predictor's construction on |
+| `ODIA_COREML_CACHE` | `~/Library/Caches/DIALibGen/coreml` | CoreML: where compiled models are kept between runs; `0`: nowhere |
+| `ODIA_COREML_CACHE_MAX` | 4G | CoreML: the cache's size cap (bytes, or with K, M, G); above it the least recently used shapes of other models are removed when a predictor goes; `0`: no cap |
 | `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
 | `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |
 | `ODIA_OPENSWATH_THREADS` | 16; 8 without the nested loop | `-run`: the most OpenMP threads an OpenSWATH call (calibration, extraction) gets; never more than `-threads` |

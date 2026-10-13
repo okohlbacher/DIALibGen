@@ -6,7 +6,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 
 | Option | Type | Default | Constraints | Description |
 |---|---|---|---|---|
-| `-mode` | string | `generate` | generate,refine,tune,convert | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged. |
+| `-mode` | string | `generate` | generate,refine,tune,convert,prepare | generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged; prepare: macOS, compile the MS2 model's CoreML shapes for -generation:peptide_length into the cache once (~/Library/Caches/DIALibGen/coreml), so that the first -machine:device coreml generate does not. |
 | `-in` | input-file | (empty) |  | Protein FASTA (generate) or spectral library (refine/tune/convert). |
 | `-out` | output-file | (empty) |  | Output library. .tsv: DIA-NN's TSV library format, read by DIA-NN 1.7 and 2.x. .parquet: DIALibGen's own layout, which embeds provenance; DIA-NN does not read it. .pqp: OpenSWATH's PQP. -out_format selects the other layouts. |
 | `-out_format` | string | `auto` | auto,dialibgen_parquet,diann_tsv,diann2_parquet,openswath_pqp,openswath_tsv | Layout of -out. auto: by extension (.parquet dialibgen_parquet, .tsv diann_tsv, .pqp openswath_pqp). diann2_parquet (.parquet): DIA-NN 2.0's own Parquet library layout, which DIA-NN 2.0 loads. openswath_tsv (.tsv): OpenSWATH's assay TSV, as TargetedFileConverter reads it. |

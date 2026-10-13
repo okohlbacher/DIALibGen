@@ -433,6 +433,54 @@ namespace
 
 }
 
+OpenMS::TOPPBase::ExitCodes DIALibGen::prepare_()
+{
+  // The MS2 model's CoreML shapes for the length window, compiled into the
+  // cache now rather than during the first -machine:device coreml run (a
+  // cold cache cost that run 66 s on a whole proteome; 42 shapes take
+  // about 105 s here, Core ML compiling one at a time). RT and CCS do not
+  // run on CoreML (no LSTM), so
+  // there is nothing to prepare for them. Elsewhere there is nothing to do.
+  if (!ODIA::PeptDeepPredictor::coremlProviderAvailable())
+  {
+    writeLogInfo_("nothing to prepare: this ONNX Runtime has no CoreML provider (macOS only)");
+    return EXECUTION_OK;
+  }
+  std::string ms2_model = getStringOption_("generation:ms2_model");
+  if (ms2_model.empty()) { ms2_model = findModel(kMs2ModelFile); }
+  std::error_code ec;
+  if (ms2_model.empty() || !fs::exists(ms2_model, ec))
+  { writeLogError_("no MS2 model found; set DIALIBGEN_MODEL_DIR or -generation:ms2_model"); return INPUT_FILE_NOT_FOUND; }
+  const auto window = getIntList_("generation:peptide_length");
+  if (window.size() != 2 || window[0] < 1 || window[1] < window[0])
+  { writeLogError_("-generation:peptide_length must be [min, max]"); return ILLEGAL_PARAMETERS; }
+  std::vector<std::string> warnings;
+  ODIA::GpuOptions gpu = gpuOptions_(&warnings);
+  gpu.coreml = true;
+  gpu.prebuild_min_residues = window[0];
+  gpu.prebuild_max_residues = window[1];
+  try
+  {
+    ODIA::trace::Scope phase("prepare", 0);
+    ODIA::PeptDeepPredictor predictor(ms2_model, true, 1, 1, -1, gpu);
+    if (predictor.provider() != ODIA::PeptDeepPredictor::Provider::CoreML)
+    {
+      writeLogError_("the MS2 model cannot run on CoreML: " + predictor.fallbackReason());
+      return UNEXPECTED_RESULT;
+    }
+    const auto [shapes, seconds] = predictor.waitForShapes();
+    std::ostringstream m;
+    m.setf(std::ios::fixed); m.precision(1);
+    m << "prepared " << shapes << " CoreML shape(s) of " << fs::path(ms2_model).filename().string() << " for "
+      << window[0] << "-" << window[1] << " residues in " << seconds << " s (summed over the builders)";
+    const auto cache = predictor.coremlCacheDir();
+    if (!cache.empty()) { m << "; cache " << cache.string(); } else { m << "; the cache is off (ODIA_COREML_CACHE=0), nothing was kept"; }
+    writeLogInfo_(m.str());
+  }
+  catch (const std::exception& e) { writeLogError_(std::string("prepare failed: ") + e.what()); return UNEXPECTED_RESULT; }
+  return EXECUTION_OK;
+}
+
 std::string DIALibGen::bundledModelDir()
 {
   const std::string model = findModel(kRtModelFile);

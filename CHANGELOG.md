@@ -27,6 +27,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   with `-tune_predict_gpu` re-predicting through CoreML. Not bit-identical to
   CPU training; the provenance says so.
 - `-machine:device` and `-machine:coreml_units` are accepted in `generate`.
+- `-mode prepare` (macOS): compiles the bundled MS2 model's CoreML shapes
+  for `-generation:peptide_length` into the cache once, for an installation
+  or before a first run. The cache is capped (`ODIA_COREML_CACHE_MAX`, 4G by
+  default): above it the least recently used shapes of other models go when
+  a run's predictor ends, never the running model's own. Every CoreML MS2
+  phase ends with one line of shapes built, rows run and padding rows.
 - `-machine:cores performance` (macOS, every mode): `-threads 0` counts the
   performance cores only (`hw.perflevel0.physicalcpu`, 12 of the M4 Max's
   16). Opt-in, not the default: on a whole human library 12 threads needed
@@ -51,8 +57,7 @@ This project follows [Semantic Versioning](https://semver.org/).
   Core ML compiles one model at a time whatever the builder count (42
   shapes cold: 105 s with 4, 8 or 16 builders), cached loads 23 s with 8
   builders against 34 s one by one. A worker that needs a shape still being
-  built waits for that one alone. Every CoreML MS2 phase ends with one line
-  of shapes built, rows run and padding rows.
+  built waits for that one alone.
 - CoreML: from 22 residues on, batches are padded to 512, 1024 or 2048 rows
   instead of 2048 alone (`ODIA_COREML_BUCKETS`). The rarer long lengths
   padded 15-38 % of their rows, and a padded row of 25-30 residues costs

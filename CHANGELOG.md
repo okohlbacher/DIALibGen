@@ -3,6 +3,39 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Apple GPU ([usage](docs/usage.md#apple-gpu)). `-machine:device coreml`
+  runs the MS2 model on the GPU through ONNX Runtime's CoreML execution
+  provider: one compiled static-shape session per residue count, batches
+  padded to 2048 rows, the models' scalar `PRelu` rewritten into `LeakyRelu`
+  (the provider's MLProgram builder cannot compile it), compiled models
+  cached under `~/Library/Caches/DIALibGen/coreml`. Measured on an M4 Max:
+  MS2 15-18 times faster than one CPU thread, intensities within 1.3e-6 of
+  the CPU's and the same fragment sets on `example/proteins.fasta`. RT and
+  CCS stay on the CPU path, loudly: CoreML has no LSTM operator, the
+  predictor reads ONNX Runtime's node placement and falls back when an
+  arithmetic operator is left on the CPU (`WARNING`, `odia.warnings`;
+  `-machine:require_gpu` refuses). `-machine:coreml_units gpu|all|ane|cpu`
+  picks the compute units; `-machine:gpu_sessions` is the number of
+  concurrent batches there.
+- `-machine:device mps`: fine-tuning on the Apple GPU (LibTorch's Metal
+  Performance Shaders back end; no operator falls back with LibTorch 2.10),
+  with `-tune_predict_gpu` re-predicting through CoreML. Not bit-identical to
+  CPU training; the provenance says so.
+- `-machine:device` and `-machine:coreml_units` are accepted in `generate`.
+- CTest `coreml_matches_cpu` (skips without the CoreML provider).
+- [Building on macOS](docs/building.md#macos-apple-silicon): the conda-forge
+  packages carry both back ends; environment and compiler notes.
+
+### Changed
+
+- ONNX Runtime's log goes through one process-wide logger; its two per-session
+  CoreML notices (how many nodes the provider took, "some nodes were not
+  assigned") are replaced by the predictor's own provider line and warning.
+
 ## [0.11.3] — 2026-10-13
 
 ### Added (experimental)

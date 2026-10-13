@@ -85,7 +85,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   {
     // The GPU options steer prediction in generate as well as in tune.
     const bool prediction_device = option == "machine:require_gpu" || option == "machine:tf32" ||
-                                   option == "machine:gpu_sessions" || option == "machine:gpu_devices";
+                                   option == "machine:gpu_sessions" || option == "machine:gpu_devices" ||
+                                   option == "machine:device" || option == "machine:coreml_units";
     if (prediction_device && mode == "generate") { continue; }
     const bool training = option.starts_with("tune") || option.starts_with("filter:") ||
       option.starts_with("cohort:") || option.starts_with("train:") || option.starts_with("stop:") || option.starts_with("machine:");
@@ -159,6 +160,13 @@ ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
   gpu.require = getFlag_("machine:require_gpu");
   gpu.tf32 = getStringOption_("machine:tf32") == "true";
   gpu.sessions_per_device = getIntOption_("machine:gpu_sessions");
+  // The Apple GPU is opt-in for prediction: CoreML runs MS2 only (no LSTM
+  // operator) and to float rounding, not exactly. mps names the training
+  // backend; its re-prediction (-tune_predict_gpu) goes through CoreML too.
+  const std::string device = getStringOption_("machine:device");
+  gpu.coreml = device == "coreml" || device == "mps";
+  const std::string units = getStringOption_("machine:coreml_units");
+  gpu.coreml_units = units == "all" ? "ALL" : units == "ane" ? "CPUAndNeuralEngine" : units == "cpu" ? "CPUOnly" : "CPUAndGPU";
   for (const int device : getIntList_("machine:gpu_devices")) { gpu.devices.push_back(device); }
   gpu.warnings = warnings;
   return gpu;

@@ -123,6 +123,8 @@ add_library(odia_library STATIC
   src/library/ThreadPool.cpp
   src/predict/PeptDeepEncoder.cpp
   src/predict/PeptDeepPredictor.cpp
+  src/predict/CoreMLSupport.cpp
+  src/predict/OrtEnv.cpp
   src/library/Trace.cpp
   src/library/Hardware.cpp
 )

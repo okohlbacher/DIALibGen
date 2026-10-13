@@ -386,6 +386,19 @@ if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
                        ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
 endif()
 
+# On a Mac whose ONNX Runtime has the CoreML provider: the MS2 model on the
+# Apple GPU (-machine:device coreml) gives the CPU's library to float rounding,
+# RT and CCS stay bit-identical (they run on the CPU: CoreML has no LSTM), 1
+# and 4 concurrent batches write the same bytes, and -machine:require_gpu
+# refuses the RT fallback. Skips (77) elsewhere.
+if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
+  add_test(NAME coreml_matches_cpu
+           COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/coreml_matches_cpu.py" $<TARGET_FILE:DIALibGen>
+                   "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta" "${CMAKE_CURRENT_BINARY_DIR}/coreml_matches_cpu")
+  set_tests_properties(coreml_matches_cpu PROPERTIES SKIP_RETURN_CODE 77
+                       ENVIRONMENT "DIALIBGEN_MODEL_DIR=${ODIA_MODEL_DIR}")
+endif()
+
 # The whole pipeline, run the way a user runs it, with the result read back.
 # Everything else checks a piece; this catches a library that is written
 # successfully and is wrong. Skips (77) without the models or without pyarrow.

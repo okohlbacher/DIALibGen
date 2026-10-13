@@ -307,7 +307,8 @@ an mzML by up to about 1e-7 relative. Builds configured with
 
 Generation runs the RT, MS2 and CCS models on an NVIDIA GPU when the ONNX
 Runtime it links has the CUDA execution provider and a GPU is visible;
-otherwise on the CPU. Each model prints the device it ended up on:
+otherwise on the CPU (Apple silicon: see [Apple GPU](#apple-gpu), opt-in).
+Each model prints the device it ended up on:
 
 ```text
 [RT] provider CUDA device 0 sessions 4
@@ -372,6 +373,71 @@ library is still exactly 0.11.1's; on a GPU, where the batch composition
 shapes every value at float rounding, the CCS and 1/K0 of precursors kept
 after selection dropped others can differ from 0.11.1's in the last bits.
 `ODIA_STREAM=0` restores the old order (and the one-pass writer).
+
+### Apple GPU
+
+On Apple silicon, `-machine:device coreml` runs the MS2 model on the GPU
+through ONNX Runtime's CoreML execution provider (the conda-forge and release
+builds of ONNX Runtime for macOS arm64 include it); `-machine:device mps`
+does the same for prediction and additionally trains on the GPU
+(`-mode tune`, Metal Performance Shaders through LibTorch). Both are opt-in:
+a Mac without them runs on the CPU as before.
+
+```text
+[RT] provider CPU device -1 sessions 12
+WARNING: RT: peptdeep_rt_dynamic.onnx runs on the CPU although CoreML was requested: CoreML has no operator for LSTM x2: ...
+[MS2] provider CoreML units CPUAndGPU concurrent 4 (on the CPU: OneHot)
+```
+
+What runs where, and why:
+
+- **MS2 on the GPU.** CoreML compiles a model per batch shape (rows x
+  residues), so the predictor fixes both: every batch is padded to 2048 rows
+  (`PeptDeepPredictor::MAX_BATCH_ROWS`) and one session is compiled per
+  residue count, on first use, with the whole graph on CoreML except the
+  `OneHot` of the instrument index. (With dynamic shapes Core ML's compiler
+  rejects the model's reshapes and the provider is slower than one CPU
+  thread; the predictor also rewrites the models' scalar `PRelu` into
+  `LeakyRelu`, which the provider's MLProgram builder gets wrong.) Core ML
+  computes in float32: measured on `example/proteins.fasta`, intensities
+  agree with the CPU's within 1.3e-6, no precursor selects a different
+  fragment set, and two CoreML runs write the same bytes whatever
+  `-machine:gpu_sessions` (here: concurrent batches; 2 gain about 10 % over
+  1 on an M4 Max, 4 nothing more). Whole-proteome numbers are in
+  [the laptop benchmark](../benchmark/laptop/LAPTOP-RESULTS.md) when run.
+- **RT and CCS on the CPU.** CoreML has no LSTM operator, and these models
+  are LSTMs: ONNX Runtime would keep the LSTM nodes on the CPU and hand the
+  rest to CoreML, which is slower than the plain CPU path. The predictor
+  probes each model's node placement and, when an arithmetic operator stays
+  on the CPU, uses the CPU path and says so: a `WARNING` naming the model
+  and the operator, recorded in the output's provenance as `odia.warnings`
+  (tune: `device_warnings`). `-machine:require_gpu` turns that into an
+  error, so on a Mac it refuses every library (RT always falls back).
+- **Compute units.** `-machine:coreml_units gpu` (CPU and GPU, the default)
+  was the fastest on an M4 Max: MS2 at 2048 x 14 tokens ran 15-18 times
+  faster than one CPU thread; `all` lets Core ML use the Neural Engine
+  (about the same), `ane` (CPU and Neural Engine) was 4-5 times slower
+  than the GPU for these batches, `cpu` is Core ML's own CPU path (for
+  checks).
+- **Compiled-model cache.** Compiling one shape takes 3-4 s and loading it
+  back 0.8 s, so compiled models are kept under
+  `~/Library/Caches/DIALibGen/coreml/<model>-<content hash>/<rows>x<tokens>`
+  (about 65 MB per MS2 shape, 1.5 GB for all residue counts of a
+  proteome). A first run on a proteome spends 1-2 minutes compiling; later
+  runs reuse the cache. `ODIA_COREML_CACHE=<dir>` moves it,
+  `ODIA_COREML_CACHE=0` keeps nothing. The cache is keyed by the model's
+  content, so a tuned model never meets a stock model's compiled graph.
+- **Training on MPS** (`-mode tune -machine:device mps`): the RT and CCS
+  heads train on the GPU with no operator falling back to the CPU in
+  LibTorch 2.10 (the log would say `not currently supported on the MPS
+  backend`; set `PYTORCH_ENABLE_MPS_FALLBACK=1` in the environment **before
+  starting DIALibGen** if a future LibTorch needs it, LibTorch reads it at
+  load time). Measured on a 3,200-precursor fixture, 30 epochs: 18.6 s of
+  training on MPS against 55 s on 16 CPU threads. MPS training is not
+  bit-identical to CPU training (the provenance says so under
+  `reproducibility`); the tuned weights differed by an L2 norm of 0.001 of a
+  total change of 8.62 in that run. `-tune_predict_gpu` re-predicts through
+  CoreML, which for RT and CCS means the CPU path with the warning above.
 
 ## Files and provenance
 

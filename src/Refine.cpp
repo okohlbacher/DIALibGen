@@ -314,7 +314,15 @@ void DIALibGen::registerRefinementOptions_()
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
     registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
-    registerStringOption_("machine:device", "<dev>", "cpu", "cpu or cuda[:N]", false);
+    registerStringOption_("machine:device", "<dev>", "cpu",
+                          "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU). Prediction (generate; tune with "
+                          "-tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU through ONNX Runtime's CoreML "
+                          "provider (RT and CCS stay on the CPU: CoreML has no LSTM); cpu and cuda keep the default, CUDA when "
+                          "this ONNX Runtime has it and a GPU is visible, else the CPU", false);
+    registerStringOption_("machine:coreml_units", "<units>", "gpu",
+                          "CoreML compute units: gpu (CPU and GPU; measured fastest on an M4 Max), all (Core ML's choice, "
+                          "Neural Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);
+    setValidStrings_("machine:coreml_units", {"gpu", "all", "ane", "cpu"});
     registerIntOption_("machine:threads", "<n>", 16, "CPU threads used for training (a fixed count: the tuned weights depend on it)", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
@@ -325,7 +333,8 @@ void DIALibGen::registerRefinementOptions_()
     setValidStrings_("machine:tf32", {"true", "false"});
     registerIntOption_("machine:gpu_sessions", "<n>", 4,
                        "ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: "
-                       "2-4 give RT and CCS +30-45 %, 8 is slower. Does not change the output.", false);
+                       "2-4 give RT and CCS +30-45 %, 8 is slower. On CoreML: concurrent batches on the shared compiled "
+                       "model (2 gain about 10 % over 1). Does not change the output.", false);
     setMinInt_("machine:gpu_sessions", 1);
     setMaxInt_("machine:gpu_sessions", 16);
     registerIntList_("machine:gpu_devices", "<ids>", OpenMS::IntList(),
@@ -333,8 +342,9 @@ void DIALibGen::registerRefinementOptions_()
                      "device that works. Does not change the output.", false);
     setMinInt_("machine:gpu_devices", 0);
     registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
-                                         "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime). Without it such a "
-                                         "fallback is a WARNING in the log and in the output's provenance.");
+                                         "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime) or when CoreML "
+                                         "keeps part of it on the CPU (always RT and CCS). Without it such a fallback is a WARNING "
+                                         "in the log and in the output's provenance.");
 
     registerTOPPSubsection_("search", "Built-in identification with -run (experimental): candidates, decoys, extraction, "
                                       "calibration and the run-level guards. See docs/design/built-in-identification.md");

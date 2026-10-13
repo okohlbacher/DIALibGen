@@ -19,6 +19,7 @@
 
 #include <nlohmann/json.hpp>
 #include <torch/torch.h>
+#include <torch/mps.h>
 #include <QCryptographicHash>
 #include <QFile>
 
@@ -563,7 +564,17 @@ namespace ODIA::tune
       if (!torch::cuda::is_available()) { throw std::runtime_error("device " + p.device + " requested but CUDA is not available to this libtorch (no driver, no GPU, or a CPU-only build)"); }
       dev = torch::Device(p.device);
     }
-    else if (p.device != "cpu") { throw std::runtime_error("unknown device " + p.device); }
+    else if (p.device == "mps")
+    {
+      // Apple's GPU through Metal Performance Shaders. The libtorch builds for
+      // macOS arm64 (conda-forge's and pytorch.org's) include it; a Linux or
+      // Windows libtorch answers false here.
+      if (!torch::mps::is_available()) { throw std::runtime_error("device mps requested but this libtorch has no MPS backend (not macOS on Apple silicon, or a build without MPS)"); }
+      dev = torch::Device(torch::kMPS);
+    }
+    else if (p.device == "coreml")
+    { throw std::runtime_error("coreml is the prediction provider (-tune_predict_gpu); fine-tuning on the Apple GPU is -machine:device mps"); }
+    else if (p.device != "cpu") { throw std::runtime_error("unknown device " + p.device + " (cpu, cuda[:N] or mps)"); }
     // Inter-op pool: nothing here launches inter-op work (no at::launch, no
     // TorchScript fork), but ATen sizes the pool to the hardware threads when
     // something first asks for it. ATen accepts the size once per process and
@@ -589,7 +600,11 @@ namespace ODIA::tune
       at::globalContext().setAllowTF32CuDNN(p.tf32);
     }
     torch::manual_seed(p.seed);
-    log << "device " << p.device << (dev.is_cpu() ? " (" + std::to_string(torch::get_num_threads()) + " threads)" : (std::string(p.cudnn ? " (cuDNN on" : " (cuDNN off") + (p.tf32 ? ", TF32 on)" : ", TF32 off)"))) << ", libtorch " << TORCH_VERSION << "\n";
+    log << "device " << p.device
+        << (dev.is_cpu() ? " (" + std::to_string(torch::get_num_threads()) + " threads)"
+            : dev.is_mps() ? std::string(" (Metal Performance Shaders)")
+            : (std::string(p.cudnn ? " (cuDNN on" : " (cuDNN off") + (p.tf32 ? ", TF32 on)" : ", TF32 off)")))
+        << ", libtorch " << TORCH_VERSION << "\n";
 
     // data + cohorts
     Dataset d = loadReport(p, log);
@@ -694,7 +709,10 @@ namespace ODIA::tune
       setLr(lr);
       model->train();
       auto t0 = Clock::now();
-      auto loss_sum = torch::zeros({}, torch::TensorOptions().dtype(torch::kFloat64).device(dev));
+      // MPS has no float64: the epoch's loss is summed in float32 there (a
+      // few thousand batch means; the sum is only logged and checked finite).
+      const auto loss_dtype = dev.is_mps() ? torch::kFloat32 : torch::kFloat64;
+      auto loss_sum = torch::zeros({}, torch::TensorOptions().dtype(loss_dtype).device(dev));
       std::size_t loss_n = 0;
       std::shuffle(block_order.begin(), block_order.end(), rng);
       for (auto bi : block_order)
@@ -713,11 +731,12 @@ namespace ODIA::tune
           clipGradNorm(params, 1.0);
           opt.step();
           ++res.updates;
-          loss_sum += loss.detach().to(torch::kFloat64) * static_cast<double>(idx.size(0));   // no host sync per step
+          loss_sum += loss.detach().to(loss_dtype) * static_cast<double>(idx.size(0));   // no host sync per step
           loss_n += static_cast<std::size_t>(idx.size(0));
         }
       }
       if (dev.is_cuda()) { torch::cuda::synchronize(); }   // the timer must include the queued kernels
+      if (dev.is_mps()) { torch::mps::synchronize(); }
       res.train_seconds += seconds(t0);
       res.epochs_run = epoch + 1;
       const double train_loss = loss_n ? loss_sum.item<double>() / static_cast<double>(loss_n) : NAN;
@@ -776,7 +795,7 @@ namespace ODIA::tune
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
       {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
       {"threads", dev.is_cpu() ? torch::get_num_threads() : 0}, {"interop_threads", at::get_num_interop_threads()},
-      {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA kernels may be nondeterministic."},
+      {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA and MPS kernels may be nondeterministic, and an MPS run is not bit-identical to a CPU run."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},
                   {"batch_size", p.batch_size}, {"epochs", p.epochs}, {"warmup", p.warmup}, {"schedule", "linear warmup then cosine, stepped per epoch"}, {"dropout", 0.1}, {"seed", p.seed}}},
       {"stopping", {{"eval_every", p.eval_every}, {"min_epochs", p.min_epochs}, {"patience_epochs", p.patience}, {"rel_tol", p.rel_tol}, {"abs_tol", p.abs_tol}, {"max_seconds", p.max_seconds}, {"budget_scope", "per-head elapsed wall time, checked at epoch boundaries; final evaluation and export may exceed it"},

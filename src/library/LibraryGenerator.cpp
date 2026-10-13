@@ -905,10 +905,12 @@ namespace ODIA
   {
     void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu)
     {
+      const bool coreml = p.provider() == PeptDeepPredictor::Provider::CoreML;
       std::cerr << "[" << stage << "] provider "
-                << (p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU")
-                << " device " << p.device()
-                << " sessions " << p.sessionCount();
+                << (coreml ? "CoreML" : p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU");
+      if (coreml) { std::cerr << " units " << gpu.coreml_units << " concurrent " << p.sessionCount(); }
+      else { std::cerr << " device " << p.device() << " sessions " << p.sessionCount(); }
+      if (!p.providerNote().empty()) { std::cerr << " (" << p.providerNote() << ")"; }
       // Name every device when the sessions span several.
       const auto& devices = p.sessionDevices();
       if (std::any_of(devices.begin(), devices.end(), [&](int d) { return d != p.device(); }))
@@ -952,7 +954,7 @@ namespace ODIA
     /// cores are mostly free while the device computes.
     unsigned overlapThreads(const PeptDeepPredictor& predictor, unsigned threads)
     {
-      if (predictor.provider() == PeptDeepPredictor::Provider::CUDA) { return std::max(1u, threads / 2); }
+      if (predictor.provider() != PeptDeepPredictor::Provider::CPU) { return std::max(1u, threads / 2); }
       return std::max(1u, threads / 8);
     }
   } // namespace
@@ -1245,6 +1247,9 @@ namespace ODIA
         const long long x = std::strtoll(v, &end, 10);
         if (end != v && x > 0) { return static_cast<std::size_t>(x); }
       }
+      // CoreML pads every batch up to a compiled shape (PeptDeepPredictor::
+      // padded_), so a block twice the CPU's halves the padding.
+      if (predictor.provider() == PeptDeepPredictor::Provider::CoreML) { return std::size_t{200000}; }
       return predictor.provider() == PeptDeepPredictor::Provider::CUDA ? 20000 : 100000;
     }();
     const unsigned threads = parallel::workers(sessions);

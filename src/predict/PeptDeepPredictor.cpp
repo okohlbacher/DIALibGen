@@ -9,6 +9,9 @@
 
 #include "../library/Parallel.h"
 #include "../library/ThreadPool.h"
+#include "CoreMLSupport.h"
+#include "OnnxWire.h"
+#include "OrtEnv.h"
 
 #include <OpenMS/CHEMISTRY/AASequence.h>
 
@@ -17,6 +20,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
+#include <condition_variable>
+#include <map>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +35,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <limits>
 #include <stdexcept>
 
@@ -131,12 +138,85 @@ namespace
     options.SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);
   }
 
+  /// Registers the CoreML provider: an MLProgram (the current Core ML model
+  /// format; the legacy NeuralNetwork format has fewer operators), compiled
+  /// for static shapes only -- with dynamic ones Core ML's compiler rejects
+  /// the models' reshapes ("unbounded dimension") and the provider runs them
+  /// slower than one CPU thread -- and cached on disk, since compiling one
+  /// shape takes 3-4 s and loading it back 0.8 s.
+  void appendCoreML(Ort::SessionOptions& options, const std::string& units,
+                    const std::filesystem::path& cache, const char* log_id)
+  {
+    std::unordered_map<std::string, std::string> provider;
+    provider["ModelFormat"] = "MLProgram";
+    provider["MLComputeUnits"] = units;
+    provider["RequireStaticInputShapes"] = "1";
+    provider["EnableOnSubgraphs"] = "0";
+    if (!cache.empty()) { provider["ModelCacheDirectory"] = cache.string(); }
+    // ODIA_COREML_PROFILE=1: Core ML's compute plan (which unit runs each
+    // operator) in the log, for diagnosis.
+    if (const char* profile = std::getenv("ODIA_COREML_PROFILE"); profile != nullptr && *profile == '1')
+    { provider["ProfileComputePlan"] = "1"; }
+    options.AppendExecutionProvider("CoreML", provider);
+    options.SetLogId(log_id);
+  }
+
+  /// The batch sizes CoreML sessions are compiled for. A chunk is padded up
+  /// to the smallest bucket that holds it. One bucket, MAX_BATCH_ROWS: every
+  /// further bucket is another compiled shape per residue count (0.8-4 s
+  /// each, times 24 residue counts), which costs more than the padding it
+  /// saves at the block sizes used. ODIA_COREML_BUCKETS=512,2048 overrides
+  /// it, for measurements.
+  std::vector<std::int64_t> coremlBuckets()
+  {
+    std::vector<std::int64_t> buckets;
+    if (const char* v = std::getenv("ODIA_COREML_BUCKETS"); v != nullptr && *v != '\0')
+    {
+      std::string_view rest(v);
+      while (!rest.empty())
+      {
+        const auto comma = rest.find(',');
+        const std::string token(rest.substr(0, comma));
+        rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+        char* end = nullptr;
+        const long long x = std::strtoll(token.c_str(), &end, 10);
+        if (end != token.c_str() && x > 0) { buckets.push_back(static_cast<std::int64_t>(x)); }
+      }
+      std::sort(buckets.begin(), buckets.end());
+    }
+    if (buckets.empty() || buckets.back() < static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS))
+    { buckets.push_back(static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS)); }
+    return buckets;
+  }
+
+  /// Where compiled CoreML models live between runs: ODIA_COREML_CACHE, or
+  /// ~/Library/Caches/DIALibGen/coreml, else the temporary directory.
+  /// ODIA_COREML_CACHE=0 keeps nothing (every session compiles its shape).
+  std::filesystem::path coremlCacheRoot()
+  {
+    if (const char* v = std::getenv("ODIA_COREML_CACHE"); v != nullptr && *v != '\0')
+    {
+      if (std::string_view(v) == "0") { return {}; }
+      return std::filesystem::path(v);
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
+    { return std::filesystem::path(home) / "Library" / "Caches" / "DIALibGen" / "coreml"; }
+    std::error_code ec;
+    const auto tmp = std::filesystem::temp_directory_path(ec);
+    return ec ? std::filesystem::path() : tmp / "dialibgen-coreml";
+  }
+
   std::string fallbackFix(const std::string& reason)
   {
     std::string lower = reason;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     const char* docs = "https://github.com/okohlbacher/DIALibGen/blob/main/docs/usage.md#gpu";
+    if (lower.rfind("coreml", 0) == 0)
+    {
+      return std::string("this model runs on the CPU path (no slower than without -machine:device coreml); "
+                         "see https://github.com/okohlbacher/DIALibGen/blob/main/docs/usage.md#apple-gpu");
+    }
     if (lower.find("cudnn") != std::string::npos)
     {
       return std::string("install cuDNN 9 for CUDA 12, including the unversioned libcudnn.so "
@@ -151,6 +231,8 @@ namespace
   std::atomic<std::int64_t> g_trace_instances{0};
   /// Names the temporary optimised-model files apart within one process.
   std::atomic<std::int64_t> g_optimized_files{0};
+  /// Names the CoreML probe sessions' log ids apart within one process.
+  std::atomic<std::int64_t> g_probes{0};
 
   long processId()
   {
@@ -169,47 +251,7 @@ namespace
     std::string_view raw;
   };
 
-  /// The protobuf wire format, just enough of it to walk an ONNX file.
-  struct WireReader
-  {
-    const char* p;
-    const char* end;
-
-    bool varint(std::uint64_t& v)
-    {
-      v = 0;
-      for (int shift = 0; shift < 64 && p < end; shift += 7)
-      {
-        const auto byte = static_cast<std::uint8_t>(*p++);
-        v |= static_cast<std::uint64_t>(byte & 0x7f) << shift;
-        if (!(byte & 0x80)) { return true; }
-      }
-      return false;
-    }
-    /// Next field: number, wire type and, for length-delimited fields, the payload.
-    bool next(std::uint32_t& field, std::uint32_t& type, std::string_view& payload, std::uint64_t& value)
-    {
-      std::uint64_t key = 0;
-      if (p >= end || !varint(key)) { return false; }
-      field = static_cast<std::uint32_t>(key >> 3);
-      type = static_cast<std::uint32_t>(key & 7);
-      switch (type)
-      {
-        case 0: return varint(value);
-        case 1: if (end - p < 8) { return false; } p += 8; return true;
-        case 5: if (end - p < 4) { return false; } p += 4; return true;
-        case 2:
-        {
-          std::uint64_t n = 0;
-          if (!varint(n) || n > static_cast<std::uint64_t>(end - p)) { return false; }
-          payload = std::string_view(p, static_cast<std::size_t>(n));
-          p += n;
-          return true;
-        }
-        default: return false;   // groups are not used by ONNX
-      }
-    }
-  };
+  using WireReader = ODIA::onnxwire::Reader;
 
   /// The float32 initializers of an ONNX model held in raw_data, which is
   /// how every weight matrix of these models is stored. Anything else -- int64
@@ -311,8 +353,8 @@ namespace ODIA
   struct PeptDeepPredictor::Impl
   {
     /// ONNX Runtime keeps ONE environment per process and reference-counts
-    /// it, so every predictor's Env is the same object underneath.
-    Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "odia"};
+    /// it, so every predictor's Env is the same object underneath (OrtEnv.h).
+    Ort::Env& env = ort::env();
     /// The weights every CPU session reads, held once (shareWeights_).
     /// Declared before the options and sessions that point into them, so they
     /// are destroyed after.
@@ -340,7 +382,53 @@ namespace ODIA
     std::vector<std::string> input_names;
     std::vector<std::string> output_names;
     std::string fallback;   ///< see fallbackReason()
+    std::string note;       ///< see providerNote()
     std::vector<int> session_devices;   ///< CUDA device per session; empty on CPU
+
+    // CoreML: the model is compiled per batch shape (rows x residues + 2),
+    // so the sessions are a map built as shapes turn up, from the model
+    // bytes with PRelu rewritten (CoreMLSupport.h). All workers share them:
+    // Run is thread-safe, and the GPU is saturated by one or two streams.
+    std::string model_bytes;
+    std::string dim_rows, dim_length;     ///< the free dimensions' names
+    std::string coreml_units;
+    std::filesystem::path coreml_cache;   ///< per model content; empty = no cache
+    std::vector<std::int64_t> buckets;    ///< batch sizes compiled for, ascending
+    std::map<std::pair<std::int64_t, std::int64_t>, std::unique_ptr<Ort::Session>> coreml_sessions;
+    std::mutex coreml_mutex;
+    std::condition_variable coreml_built;
+    std::size_t coreml_workers = 1;
+    double coreml_build_seconds = 0;      ///< for the trace: compile and load time
+    std::size_t coreml_builds = 0;
+
+    /// A CoreML session for one shape. Builds take 0.8 s (cached) to 4 s
+    /// (compiled); a worker that needs a shape another worker is building
+    /// waits for it rather than building a second copy.
+    std::unique_ptr<Ort::Session> buildCoreML(std::int64_t rows, std::int64_t length, const char* log_id,
+                                              bool verbose)
+    {
+      Ort::SessionOptions options;
+      configureSession(options, 1);
+      options.AddFreeDimensionOverrideByName(dim_rows.c_str(), rows);
+      options.AddFreeDimensionOverrideByName(dim_length.c_str(), length);
+      std::filesystem::path cache;
+      if (!coreml_cache.empty())
+      {
+        cache = coreml_cache / (std::to_string(rows) + "x" + std::to_string(length));
+        std::error_code ec;
+        std::filesystem::create_directories(cache, ec);
+        if (ec) { cache.clear(); }
+      }
+      appendCoreML(options, coreml_units, cache, log_id);
+      options.SetLogSeverityLevel(verbose ? ORT_LOGGING_LEVEL_VERBOSE : ORT_LOGGING_LEVEL_ERROR);
+      const auto t0 = std::chrono::steady_clock::now();
+      auto session = std::make_unique<Ort::Session>(env, model_bytes.data(), model_bytes.size(), options);
+      // Workers build concurrently (sessionFor_): the counters are shared.
+      const std::lock_guard<std::mutex> lock(coreml_mutex);
+      coreml_build_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      ++coreml_builds;
+      return session;
+    }
     /// The names as Run takes them, built once: every batch passes the same.
     std::vector<const char*> input_ptrs;
     const char* output_ptr = nullptr;
@@ -446,7 +534,83 @@ namespace ODIA
     // probe is a real session built with the final options, so it is kept:
     // the k-th one is session k, the first session on that device.
     std::vector<std::unique_ptr<Ort::Session>> probed;
-    if (prefer_gpu)
+    if (prefer_gpu && gpu.coreml)
+    {
+      // Apple. The provider is asked for explicitly (-machine:device coreml
+      // or mps), so every way of not getting it is worth a WARNING.
+      gpu_present = true;
+      bool available = false;
+      for (const auto& name : Ort::GetAvailableProviders())
+      {
+        if (name == "CoreMLExecutionProvider") { available = true; break; }
+      }
+      if (!available) { reason = "CoreML: this ONNX Runtime build has no CoreML provider"; }
+      else
+      {
+        trace::Scope probe_step("session_probe", 3);
+        try
+        {
+          {
+            std::ifstream in(model_path, std::ios::binary);
+            if (!in) { throw std::runtime_error("cannot read " + model_path); }
+            impl_->model_bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+          }
+          if (!coreml::freeDimensionNames(impl_->model_bytes, impl_->dim_rows, impl_->dim_length))
+          { throw std::runtime_error("the model's first input is not [batch, length] with named dimensions"); }
+          const std::size_t rewritten = coreml::rewritePRelu(impl_->model_bytes);
+          impl_->coreml_units = gpu.coreml_units.empty() ? "CPUAndGPU" : gpu.coreml_units;
+          impl_->buckets = coremlBuckets();
+          if (const auto root = coremlCacheRoot(); !root.empty())
+          {
+            impl_->coreml_cache = root / (std::filesystem::path(model_path).stem().string() + "-" +
+                                          std::to_string(coreml::fnv64(impl_->model_bytes)));
+          }
+          // The probe is a real session for a real shape -- the smallest
+          // bucket, 16 tokens (14 residues, the commonest tryptic length) --
+          // whose verbose log says where ONNX Runtime put the nodes. It is
+          // kept: it is the session that shape will run on.
+          const std::int64_t probe_rows = impl_->buckets.front(), probe_length = 16;
+          const std::string log_id = "odia-probe-" + std::to_string(g_probes++);
+          ort::LogCapture capture(log_id);
+          auto probe = impl_->buildCoreML(probe_rows, probe_length, log_id.c_str(), true);
+          const auto placement = coreml::parsePlacement(capture.text());
+          if (!placement.found) { throw std::runtime_error("ONNX Runtime did not report the node placement"); }
+          std::map<std::string, std::size_t> on_cpu;
+          for (const auto& op : placement.cpu_ops) { ++on_cpu[op]; }
+          std::string heavy, light;
+          for (const auto& [op, n] : on_cpu)
+          {
+            auto& where = coreml::heavyOp(op) ? heavy : light;
+            where += (where.empty() ? "" : ", ") + op + (n > 1 ? " x" + std::to_string(n) : "");
+          }
+          if (!heavy.empty())
+          {
+            throw std::runtime_error("CoreML has no operator for " + heavy + ": ONNX Runtime keeps " +
+                                     std::to_string(placement.cpu_ops.size()) + " of the model's nodes on the CPU (" +
+                                     std::to_string(placement.coreml_nodes) + " CoreML partition" +
+                                     (placement.coreml_nodes == 1 ? "" : "s") + ")");
+          }
+          if (!light.empty()) { impl_->note = "on the CPU: " + light; }
+          impl_->provider = Provider::CoreML;
+          impl_->coreml_sessions[{probe_rows, probe_length}] = std::move(probe);
+          if (trace::enabled())
+          {
+            trace::note(std::string("predictor.") + std::filesystem::path(model_path).stem().string() + ".coreml",
+                        std::to_string(placement.coreml_nodes) + " partitions, cpu ops: " + (light.empty() ? "none" : light) +
+                        ", prelu rewritten: " + std::to_string(rewritten) + ", units " + impl_->coreml_units);
+          }
+        }
+        catch (const Ort::Exception& e) { reason = "CoreML: " + conciseOrtError(e.what()); }
+        catch (const std::exception& e) { reason = std::string(e.what()).rfind("CoreML", 0) == 0 ? e.what() : "CoreML: " + std::string(e.what()); }
+        if (impl_->provider != Provider::CoreML)
+        {
+          impl_->model_bytes.clear();
+          impl_->model_bytes.shrink_to_fit();
+          impl_->coreml_sessions.clear();
+        }
+      }
+    }
+    else if (prefer_gpu)
     {
       // Ask before attempting. Registering CUDA blindly on a CPU-only build
       // still falls back correctly, but ONNX Runtime logs a failure to load
@@ -514,8 +678,8 @@ namespace ODIA
 
     // On CUDA session 0 is the first probe, above: registering the provider
     // can succeed while creating a session with it fails, and the probe
-    // covers both.
-    if (impl_->provider != Provider::CUDA)
+    // covers both. On CoreML the probe is the first shape's session.
+    if (impl_->provider == Provider::CPU)
     {
       try { impl_->session = firstCpuSession(); }
       catch (const Ort::Exception& e)
@@ -527,16 +691,17 @@ namespace ODIA
       const std::string model = std::filesystem::path(model_path).filename().string();
       // Requiring the GPU turns every way of ending up on the CPU into an
       // error, the expected no-GPU case included: whoever asked knows.
+      const char* wanted = gpu.coreml ? "CoreML" : "CUDA";
       if (gpu.require)
       {
         throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model +
-                                 " cannot run on CUDA: " + reason + ". Fix: " + fallbackFix(reason));
+                                 " cannot run on " + wanted + ": " + reason + ". Fix: " + fallbackFix(reason));
       }
       // A silent fall back to CPU turns a 2.5-minute library into a
       // 6.5-minute one (H100, whole proteome) with nothing in the log to
       // say why: the caller prints and records this.
       if (gpu_present)
-      { impl_->fallback = model + " runs on the CPU although CUDA was requested: " + reason + ". Fix: " + fallbackFix(reason); }
+      { impl_->fallback = model + " runs on the CPU although " + wanted + " was requested: " + reason + ". Fix: " + fallbackFix(reason); }
     }
 
     if (impl_->provider == Provider::CUDA && gpu_present && !gpu.devices.empty())
@@ -550,15 +715,14 @@ namespace ODIA
     }
 
     Ort::AllocatorWithDefaultOptions allocator;
-    for (std::size_t i = 0; i < impl_->session->GetInputCount(); ++i)
+    Ort::Session& first = impl_->provider == Provider::CoreML ? *impl_->coreml_sessions.begin()->second : *impl_->session;
+    for (std::size_t i = 0; i < first.GetInputCount(); ++i)
     {
-      impl_->input_names.emplace_back(
-        impl_->session->GetInputNameAllocated(i, allocator).get());
+      impl_->input_names.emplace_back(first.GetInputNameAllocated(i, allocator).get());
     }
-    for (std::size_t i = 0; i < impl_->session->GetOutputCount(); ++i)
+    for (std::size_t i = 0; i < first.GetOutputCount(); ++i)
     {
-      impl_->output_names.emplace_back(
-        impl_->session->GetOutputNameAllocated(i, allocator).get());
+      impl_->output_names.emplace_back(first.GetOutputNameAllocated(i, allocator).get());
     }
 
     // Validate by name and count, not just count. Inputs are bound positionally,
@@ -607,7 +771,15 @@ namespace ODIA
     // one builder per device creating that device's sessions in order: CUDA
     // session creation (cuDNN, the device arena) costs about a second each,
     // and one device's builds do not wait for another's.
-    if (impl_->provider == Provider::CUDA)
+    if (impl_->provider == Provider::CoreML)
+    {
+      // Workers, not sessions: the shape sessions are shared. Two concurrent
+      // batches gain about 10 % over one on an M4 Max (the host-side
+      // encoding of one overlaps the GPU work of the other); four gain
+      // nothing more, and cost nothing but the option's default.
+      impl_->coreml_workers = static_cast<std::size_t>(std::max(1, gpu.sessions_per_device));
+    }
+    else if (impl_->provider == Provider::CUDA)
     {
       const std::vector<int> devices = impl_->session_devices;
       const std::size_t n = devices.size();
@@ -770,11 +942,81 @@ namespace ODIA
 
   const std::string& PeptDeepPredictor::fallbackReason() const { return impl_->fallback; }
 
+  const std::string& PeptDeepPredictor::providerNote() const { return impl_->note; }
+
   const std::vector<int>& PeptDeepPredictor::sessionDevices() const { return impl_->session_devices; }
 
   std::size_t PeptDeepPredictor::sessionCount() const
   {
+    if (impl_->provider == Provider::CoreML) { return impl_->coreml_workers; }
     return impl_->replicas.size() + 1;
+  }
+
+  Ort::Session& PeptDeepPredictor::sessionFor_(std::size_t worker, std::int64_t rows, std::int64_t length)
+  {
+    if (impl_->provider != Provider::CoreML) { return impl_->at(worker); }
+    const std::pair<std::int64_t, std::int64_t> key{rows, length};
+    std::unique_lock<std::mutex> lock(impl_->coreml_mutex);
+    for (;;)
+    {
+      const auto it = impl_->coreml_sessions.find(key);
+      if (it == impl_->coreml_sessions.end())
+      {
+        impl_->coreml_sessions[key] = nullptr;   // claimed: being built
+        break;
+      }
+      if (it->second) { return *it->second; }
+      impl_->coreml_built.wait(lock);
+    }
+    lock.unlock();
+    std::unique_ptr<Ort::Session> built;
+    try
+    {
+      trace::Scope building("session_create", 3);
+      building.fields().rows = rows;
+      building.fields().len = length;
+      built = impl_->buildCoreML(rows, length, "odia-coreml", false);
+    }
+    catch (...)
+    {
+      lock.lock();
+      impl_->coreml_sessions.erase(key);
+      impl_->coreml_built.notify_all();
+      throw;
+    }
+    lock.lock();
+    Ort::Session& session = *(impl_->coreml_sessions[key] = std::move(built));
+    impl_->coreml_built.notify_all();
+    return session;
+  }
+
+  const PeptDeepEncoder::Batch& PeptDeepPredictor::padded_(const PeptDeepEncoder::Batch& batch,
+                                                           PeptDeepEncoder::Batch& storage) const
+  {
+    if (impl_->provider != Provider::CoreML) { return batch; }
+    std::int64_t bucket = impl_->buckets.back();
+    for (const auto b : impl_->buckets) { if (b >= static_cast<std::int64_t>(batch.rows)) { bucket = b; break; } }
+    if (bucket == static_cast<std::int64_t>(batch.rows)) { return batch; }
+    // Padded with copies of the last row: valid input, whose predictions are
+    // dropped. The real rows are not affected by it (the models apply no
+    // cross-row operation), and the CoreML library is compared with the
+    // CPU's by the tests on that basis.
+    const auto rows = static_cast<std::size_t>(bucket);
+    storage = batch;
+    storage.rows = rows;
+    const auto grow = [&](auto& values, std::size_t per_row) {
+      if (values.empty()) { return; }
+      const auto last = (batch.rows - 1) * per_row;
+      values.resize(rows * per_row);
+      for (std::size_t r = batch.rows; r < rows; ++r)
+      { std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(last), per_row, values.begin() + static_cast<std::ptrdiff_t>(r * per_row)); }
+    };
+    grow(storage.aa_indices, batch.sequence_length);
+    grow(storage.mod_x, batch.sequence_length * PEPTDEEP_MOD_ELEMENTS.size());
+    grow(storage.charges, 1);
+    grow(storage.nces, 1);
+    grow(storage.instrument_indices, 1);
+    return storage;
   }
 
   void PeptDeepPredictor::forEachChunk_(
@@ -949,11 +1191,16 @@ namespace ODIA
 
   PeptDeepPredictor::~PeptDeepPredictor()
   {
+    if (impl_ && impl_->provider == Provider::CoreML && trace::enabled())
+    {
+      trace::note(std::string("predictor.") + impl_->kind + ".coreml_sessions",
+                  std::to_string(impl_->coreml_builds) + " shapes, " + std::to_string(impl_->coreml_build_seconds) + " s building");
+    }
     if (!impl_ || !impl_->ort_profiling) { return; }
     // End explicitly rather than at session destruction, so the file names
     // can be reported.
     Ort::AllocatorWithDefaultOptions allocator;
-    for (std::size_t i = 0; i < sessionCount(); ++i)
+    for (std::size_t i = 0; i < sessionCount() && impl_->provider != Provider::CoreML; ++i)
     {
       try
       {
@@ -972,10 +1219,12 @@ namespace ODIA
   }
 
   void PeptDeepPredictor::runBatch_(std::size_t session,
-                                    const PeptDeepEncoder::Batch& batch,
+                                    const PeptDeepEncoder::Batch& unpadded,
                                     const std::vector<std::size_t>& group,
                                     std::vector<float>& out)
   {
+    PeptDeepEncoder::Batch storage;
+    const PeptDeepEncoder::Batch& batch = padded_(unpadded, storage);
     const std::int64_t rows = static_cast<std::int64_t>(batch.rows);
     const std::int64_t length = static_cast<std::int64_t>(batch.sequence_length);
     const std::int64_t width = static_cast<std::int64_t>(PEPTDEEP_MOD_ELEMENTS.size());
@@ -993,9 +1242,9 @@ namespace ODIA
 
     trace::Scope running("ort_run", 4);
     tag(running, impl_->kind, session, group.size());
-    auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
-                                       inputs.data(), inputs.size(),
-                                       &impl_->output_ptr, 1);
+    auto results = sessionFor_(session, rows, length).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
+                                                          inputs.data(), inputs.size(),
+                                                          &impl_->output_ptr, 1);
     running.end();
     trace::Scope unpacking("unpack", 4);
     tag(unpacking, impl_->kind, session, group.size());
@@ -1008,7 +1257,7 @@ namespace ODIA
     {
       throw std::runtime_error("model output is not float32");
     }
-    if (info.GetElementCount() != group.size() || info.GetShape().size() != 1)
+    if (info.GetElementCount() != static_cast<std::size_t>(rows) || info.GetShape().size() != 1)
     {
       throw std::runtime_error(
         "model returned " + std::to_string(info.GetElementCount()) + " values for " +
@@ -1110,12 +1359,14 @@ namespace ODIA
   }
 
   void PeptDeepPredictor::runMS2Batch_(std::size_t session,
-                                       const PeptDeepEncoder::Batch& batch,
+                                       const PeptDeepEncoder::Batch& unpadded,
                                        const std::vector<std::size_t>& group,
                                        std::vector<Spectrum>& out)
   {
     {
       {
+      PeptDeepEncoder::Batch storage;
+      const PeptDeepEncoder::Batch& batch = padded_(unpadded, storage);
       const std::int64_t rows = static_cast<std::int64_t>(batch.rows);
       const std::int64_t length = static_cast<std::int64_t>(batch.sequence_length);
       const std::int64_t width = static_cast<std::int64_t>(PEPTDEEP_MOD_ELEMENTS.size());
@@ -1146,9 +1397,9 @@ namespace ODIA
 
       trace::Scope running("ort_run", 4);
       tag(running, impl_->kind, session, group.size());
-      auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
-                                         inputs.data(), inputs.size(),
-                                         &impl_->output_ptr, 1);
+      auto results = sessionFor_(session, rows, length).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
+                                                            inputs.data(), inputs.size(),
+                                                            &impl_->output_ptr, 1);
       running.end();
       trace::Scope unpacking("unpack", 4);
       tag(unpacking, impl_->kind, session, group.size());
@@ -1326,10 +1577,12 @@ namespace ODIA
   }
 
   void PeptDeepPredictor::runCCSBatch_(std::size_t session,
-                                       const PeptDeepEncoder::Batch& batch,
+                                       const PeptDeepEncoder::Batch& unpadded,
                                        const std::vector<std::size_t>& group,
                                        std::vector<float>& out)
   {
+    PeptDeepEncoder::Batch storage;
+    const PeptDeepEncoder::Batch& batch = padded_(unpadded, storage);
     const std::int64_t rows = static_cast<std::int64_t>(batch.rows);
     const std::int64_t length = static_cast<std::int64_t>(batch.sequence_length);
     const std::int64_t width = static_cast<std::int64_t>(PEPTDEEP_MOD_ELEMENTS.size());
@@ -1351,9 +1604,9 @@ namespace ODIA
 
     trace::Scope running("ort_run", 4);
     tag(running, impl_->kind, session, group.size());
-    auto results = impl_->at(session).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
-                                       inputs.data(), inputs.size(),
-                                       &impl_->output_ptr, 1);
+    auto results = sessionFor_(session, rows, length).Run(Ort::RunOptions{nullptr}, impl_->input_ptrs.data(),
+                                                          inputs.data(), inputs.size(),
+                                                          &impl_->output_ptr, 1);
     running.end();
     trace::Scope unpacking("unpack", 4);
     tag(unpacking, impl_->kind, session, group.size());

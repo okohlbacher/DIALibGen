@@ -827,7 +827,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
 
     if (!device_warnings.empty())
     {
-      writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on CUDA ran on the CPU; "
+      writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on the GPU ran on the CPU; "
                     "recorded as odia.warnings" + std::string(parquet ? "" : " (TSV: log only)"));
     }
 

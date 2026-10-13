@@ -5,6 +5,7 @@
 
 #include <odia/PeptDeepEncoder.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -12,13 +13,24 @@
 #include <vector>
 
 namespace OpenMS { class AASequence; }
+namespace Ort { struct Session; }
 
 namespace ODIA
 {
 
-  /// How the models use a GPU. Only consulted when CUDA is requested.
+  /// How the models use a GPU. Only consulted when a GPU is requested.
   struct GpuOptions
   {
+    /// Apple: run the models through ONNX Runtime's CoreML execution
+    /// provider (macOS; -machine:device coreml or mps) instead of CUDA.
+    /// Opt-in: CoreML has no LSTM operator, so RT and CCS stay on the CPU
+    /// with a warning, and the MS2 library agrees with the CPU's to float
+    /// rounding rather than exactly. See usage.md#apple-gpu.
+    bool coreml = false;
+    /// CoreML compute units: "CPUAndGPU" (default: measured fastest),
+    /// "ALL" (Core ML's choice, may use the Neural Engine), "CPUAndNeuralEngine"
+    /// or "CPUOnly".
+    std::string coreml_units = "CPUAndGPU";
     /// Throw instead of running on the CPU when CUDA was requested but no
     /// CUDA session could be created (missing cuDNN, no visible GPU, a
     /// CPU-only ONNX Runtime).
@@ -54,7 +66,7 @@ namespace ODIA
   {
   public:
     /// Which execution provider the session ended up using.
-    enum class Provider { CPU, CUDA };
+    enum class Provider { CPU, CUDA, CoreML };
 
     /// @param model_path a PeptDeep .onnx file.
     /// @param prefer_gpu attempt CUDA first, falling back to CPU (D4).
@@ -85,22 +97,29 @@ namespace ODIA
                                const GpuOptions& gpu = {});
     ~PeptDeepPredictor();
 
-    /// Why CUDA was requested but this predictor runs on the CPU (or skips a
+    /// Why a GPU was requested but this predictor runs on the CPU (or skips a
     /// listed GPU), or empty.
     ///
     /// Set only when a GPU exists and could not be used (for example the
-    /// CUDA provider found no cuDNN): a machine without a GPU, or a CPU-only
-    /// ONNX Runtime, is the expected CPU case and leaves this empty. With
-    /// GpuOptions::require the constructor throws instead.
+    /// CUDA provider found no cuDNN, or CoreML keeps the model's LSTM on the
+    /// CPU): a machine without a GPU, or a CPU-only ONNX Runtime, is the
+    /// expected CPU case and leaves this empty. With GpuOptions::require the
+    /// constructor throws instead.
     const std::string& fallbackReason() const;
+    /// CoreML: what ONNX Runtime kept on the CPU although the model runs on
+    /// CoreML (cheap ops such as OneHot), for the provider line; otherwise
+    /// empty.
+    const std::string& providerNote() const;
     /// The CUDA devices sessions run on, one entry per session; empty on CPU.
     const std::vector<int>& sessionDevices() const;
 
 
-    /// Which CUDA device the session ended up on, or -1 on CPU.
+    /// Which CUDA device the session ended up on, or -1 on CPU and CoreML.
     int device() const;
 
     /// How many sessions batches are actually spread across (at least 1).
+    /// On CoreML: how many batches run concurrently; the sessions there are
+    /// one per batch shape, shared by the workers (coremlSession_).
     std::size_t sessionCount() const;
 
     PeptDeepPredictor(const PeptDeepPredictor&) = delete;
@@ -221,6 +240,15 @@ namespace ODIA
     /// pre-packed-weights container. False if they could not be read, in
     /// which case nothing is shared.
     bool shareWeights_(const std::filesystem::path& optimized);
+
+    /// The session a batch runs on: session @p worker on the CPU and CUDA;
+    /// on CoreML the static-shape session for @p rows x @p length, built on
+    /// first use (any worker needing it meanwhile waits for it).
+    Ort::Session& sessionFor_(std::size_t worker, std::int64_t rows, std::int64_t length);
+    /// CoreML: rows padded up to the batch bucket @p rows belongs to, so that
+    /// every batch is one of a few compiled shapes. Returns @p batch itself
+    /// when nothing is padded.
+    const PeptDeepEncoder::Batch& padded_(const PeptDeepEncoder::Batch& batch, PeptDeepEncoder::Batch& storage) const;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

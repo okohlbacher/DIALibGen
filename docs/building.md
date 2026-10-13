@@ -39,7 +39,9 @@ package are test dependencies only. Model-dependent tests require all three
 ONNX models in `ODIA_MODEL_DIR`. A smaller passing suite without models is
 not a prediction or end-to-end validation. See [validation and coverage](testing.md).
 
-## CPU and CUDA
+## CPU, CUDA and Apple
+
+Apple silicon is covered [below](#macos-apple-silicon).
 
 Portable releases bundle CPU training. A source build linked to CUDA-enabled
 LibTorch can use `-machine:device cuda:0`; provide the matching CUDA and cuDNN
@@ -70,6 +72,48 @@ so cuDNN stays on for training. ONNX Runtime can use the same copy: put a
 Linux ARM64 and Windows use different native runtime packages. The
 [release checks](testing.md#release-verification) require actual CPU training
 on each platform; a successful compilation does not establish that it works.
+
+## macOS (Apple silicon)
+
+The conda-forge packages the CI uses carry both Apple back ends: its
+`onnxruntime-cpp` for osx-arm64 is built with the CoreML execution provider
+(`OrtSessionOptionsAppendExecutionProvider_CoreML` in `libonnxruntime.dylib`,
+linked against CoreML.framework) and its `libtorch=2.10.0=cpu*` build links
+Metal Performance Shaders, so `-machine:device coreml` and `mps` ([usage](usage.md#apple-gpu))
+work from the same environment and ship in the same portable bundle, which
+copies these dylibs. Verified with onnxruntime-cpp 1.31.0 and libtorch
+2.10.0 `cpu_generic_hc627905_1`; nothing is downloaded from pytorch.org or
+the ONNX Runtime releases.
+
+A development environment mirroring the `macos-arm64` CI job (micromamba
+2.8; conda 4.8 cannot solve it):
+
+```bash
+micromamba create -n dialibgen -c conda-forge -c bioconda --channel-priority strict \
+  openms=3.5.0 onnxruntime-cpp libparquet libarrow-dataset libarrow-acero nlohmann_json \
+  xerces-c libsvm eigen zlib bzip2 libzip hdf5 libcurl libboost-devel glpk coin-or-cbc \
+  coin-or-utils qt6-main cmake ninja cxx-compiler python pyyaml numpy pyarrow onnxruntime \
+  llvm-openmp 'libtorch=2.10.0=cpu*'
+```
+
+conda-forge's current `cxx-compiler` (2.0, clang 21) has no activation
+script and its clang hands Apple's linker an LTO library it rejects
+(`ld: -lto_library library filename must be 'libLTO.dylib'`), so build with
+Apple's clang against the conda libraries:
+
+```bash
+P=$CONDA_PREFIX   # the environment above
+export PATH=$P/bin:$PATH SDKROOT=$(xcrun --show-sdk-path)
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=/usr/bin/clang++ -DCMAKE_PREFIX_PATH="$P" -DQT_HOST_PATH="$P" \
+  -DTorch_DIR="$P/share/cmake/Torch" -DODIA_MODEL_DIR=/path/to/models \
+  -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+cmake --build build -j 12
+CUDA_VISIBLE_DEVICES= ctest --test-dir build --output-on-failure
+```
+
+`coreml_matches_cpu` runs on such a build and skips elsewhere. The first run
+of a freshly linked binary can take 20-30 s to start (macOS scans it once).
 
 ## Check documentation
 

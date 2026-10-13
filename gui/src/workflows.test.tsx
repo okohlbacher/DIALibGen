@@ -152,8 +152,8 @@ describe('desktop refinement and fine-tuning', () => {
     fireEvent.change(screen.getByLabelText('filter min charge'), { target: { value: '1' } })
     expect(screen.getByRole('alert').textContent).toContain('charge 1')
     await userEvent.click(screen.getByLabelText('filter allow z1'))
-    fireEvent.change(screen.getByLabelText('machine device'), { target: { value: 'mps' } })
-    expect(screen.getByRole('alert').textContent).toContain('cpu, cuda or cuda:N')
+    fireEvent.change(screen.getByLabelText('machine device'), { target: { value: 'tpu' } })
+    expect(screen.getByRole('alert').textContent).toContain('cpu, cuda, cuda:N or mps')
     expect(bridge.runs).toHaveLength(0)
   })
 

@@ -570,9 +570,29 @@ namespace ODIA::tune
     // has it (a tune on an M4 Max took 85 s on MPS against 847 s on 16 CPU
     // threads), the CPU otherwise; never CUDA, which is asked for by name.
     std::string device = p.device;
+    std::string device_note;   // why auto did not pick MPS, for the provenance
     if (device == "auto")
     {
-      device = torch::mps::is_available() ? "mps" : "cpu";
+      device = "cpu";
+      if (torch::mps::is_available())
+      {
+        // Available is not usable: a macOS virtual machine (GitHub's
+        // runners) reports MPS and then fails its first allocation. One
+        // small tensor decides, and a failure means the CPU, not an abort.
+        try
+        {
+          const auto probe = torch::ones({8}, torch::TensorOptions().device(torch::kMPS)).sum().item<float>();
+          if (probe == 8.0f) { device = "mps"; }
+          else { device_note = "MPS computed " + std::to_string(probe) + " for a sum of eight ones"; }
+        }
+        catch (const std::exception& e)
+        {
+          std::string what = e.what();
+          if (const auto nl = what.find('\n'); nl != std::string::npos) { what.resize(nl); }
+          device_note = "MPS is reported available but a test allocation failed (" + what + ")";
+        }
+        if (!device_note.empty()) { log << "device auto: " << device_note << "; training on the CPU (-machine:device mps asks for it regardless)\n"; }
+      }
       log << "device auto: " << device << (device == "mps" ? " (this LibTorch has Metal Performance Shaders; -machine:device cpu trains on the CPU)" : "") << "\n";
     }
     torch::Device dev(torch::kCPU);
@@ -810,7 +830,7 @@ namespace ODIA::tune
 
     nlohmann::json prov = {
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
-      {"libtorch", TORCH_VERSION}, {"device", device}, {"device_requested", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
+      {"libtorch", TORCH_VERSION}, {"device", device}, {"device_requested", p.device}, {"device_note", device_note}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
       {"threads", dev.is_cpu() ? torch::get_num_threads() : 0}, {"interop_threads", at::get_num_interop_threads()},
       {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA and MPS kernels may be nondeterministic, and an MPS run is not bit-identical to a CPU run."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},

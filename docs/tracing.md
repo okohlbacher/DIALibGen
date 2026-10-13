@@ -25,6 +25,7 @@ Switches for measurements and tests; none changes the library's content:
 | `ODIA_NUMA_INTERLEAVE` | off | `1`: interleave the run's memory over the NUMA nodes (the default above 32 threads until 0.11.2; the worker pool places its workers on the nodes instead) |
 | `ODIA_POOL_PIN` | on | `0`: do not bind pool worker k to NUMA node k mod n |
 | `ODIA_MS2_BLOCK` | 100000 (CPU), 20000 (CUDA), 200000 (CoreML) | precursors per MS2 call |
+| `ODIA_COREML_BUCKETS` | 2048 up to 21 residues; 512,1024,2048 from 22 | CoreML: the batch sizes compiled per residue count, for every length (`0`: 2048 alone); a chunk is padded up to the smallest one that holds it |
 | `ODIA_COREML_BUILDERS` | 8 | CoreML: threads that compile or load the length window's shapes in the background from the predictor's construction on |
 | `ODIA_CCS_BLOCK` | 200000 | precursors per CCS call |
 | `ODIA_ROW_GROUP_ROWS` | 1048576 | Parquet row-group size (changes the file's layout, not its content) |

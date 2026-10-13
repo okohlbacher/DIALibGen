@@ -164,32 +164,44 @@ namespace
     options.SetLogId(log_id);
   }
 
-  /// The batch sizes CoreML sessions are compiled for. A chunk is padded up
-  /// to the smallest bucket that holds it. One bucket, MAX_BATCH_ROWS: every
-  /// further bucket is another compiled shape per residue count (0.8-4 s
-  /// each, times 24 residue counts), which costs more than the padding it
-  /// saves at the block sizes used. ODIA_COREML_BUCKETS=512,2048 overrides
-  /// it, for measurements.
-  std::vector<std::int64_t> coremlBuckets()
+  /// The batch sizes CoreML sessions are compiled for, per residue count
+  /// (@p tokens = residues + 2). A chunk is padded up to the smallest bucket
+  /// that holds it; every bucket is another compiled shape per residue count
+  /// (0.8-4 s each). Up to 21 residues a block has several full chunks per
+  /// length and one partial one, 5-11 % padding: MAX_BATCH_ROWS alone. From
+  /// 22 residues on the lengths are rarer and padded 15-38 %, so 512 and
+  /// 1024 are added (whole human library, 200 k blocks: 11.5 % padded rows
+  /// over the phase against 8.8 %; the saved rows are the slow ones, 2-3 k
+  /// rows/s per session at 25-30 residues against 7-8 k at 7-8).
+  /// ODIA_COREML_BUCKETS=512,2048 overrides it for every length and
+  /// ODIA_COREML_BUCKETS=0 is MAX_BATCH_ROWS alone, for measurements.
+  constexpr std::int64_t FINE_BUCKETS_FROM_RESIDUES = 22;
+  std::vector<std::int64_t> coremlBucketsFor(std::int64_t tokens)
   {
-    std::vector<std::int64_t> buckets;
-    if (const char* v = std::getenv("ODIA_COREML_BUCKETS"); v != nullptr && *v != '\0')
-    {
-      std::string_view rest(v);
-      while (!rest.empty())
+    static const std::vector<std::int64_t> override = [] {
+      std::vector<std::int64_t> buckets;
+      if (const char* v = std::getenv("ODIA_COREML_BUCKETS"); v != nullptr && *v != '\0')
       {
-        const auto comma = rest.find(',');
-        const std::string token(rest.substr(0, comma));
-        rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
-        char* end = nullptr;
-        const long long x = std::strtoll(token.c_str(), &end, 10);
-        if (end != token.c_str() && x > 0) { buckets.push_back(static_cast<std::int64_t>(x)); }
+        std::string_view rest(v);
+        while (!rest.empty())
+        {
+          const auto comma = rest.find(',');
+          const std::string token(rest.substr(0, comma));
+          rest = comma == std::string_view::npos ? std::string_view() : rest.substr(comma + 1);
+          char* end = nullptr;
+          const long long x = std::strtoll(token.c_str(), &end, 10);
+          if (end != token.c_str() && x > 0) { buckets.push_back(static_cast<std::int64_t>(x)); }
+        }
+        std::sort(buckets.begin(), buckets.end());
+        if (buckets.empty() || buckets.back() < static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS))
+        { buckets.push_back(static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS)); }
       }
-      std::sort(buckets.begin(), buckets.end());
-    }
-    if (buckets.empty() || buckets.back() < static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS))
-    { buckets.push_back(static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS)); }
-    return buckets;
+      return buckets;
+    }();
+    if (!override.empty()) { return override; }
+    constexpr auto max_rows = static_cast<std::int64_t>(ODIA::PeptDeepPredictor::MAX_BATCH_ROWS);
+    if (tokens - 2 >= FINE_BUCKETS_FROM_RESIDUES) { return {512, 1024, max_rows}; }
+    return {max_rows};
   }
 
   /// Where compiled CoreML models live between runs: ODIA_COREML_CACHE, or
@@ -396,7 +408,6 @@ namespace ODIA
     std::string dim_rows, dim_length;     ///< the free dimensions' names
     std::string coreml_units;
     std::filesystem::path coreml_cache;   ///< per model content; empty = no cache
-    std::vector<std::int64_t> buckets;    ///< batch sizes compiled for, ascending
     std::map<std::pair<std::int64_t, std::int64_t>, std::unique_ptr<Ort::Session>> coreml_sessions;
     std::mutex coreml_mutex;
     std::condition_variable coreml_built;
@@ -594,7 +605,6 @@ namespace ODIA
           { throw std::runtime_error("the model's first input is not [batch, length] with named dimensions"); }
           const std::size_t rewritten = coreml::rewritePRelu(impl_->model_bytes);
           impl_->coreml_units = gpu.coreml_units.empty() ? "CPUAndGPU" : gpu.coreml_units;
-          impl_->buckets = coremlBuckets();
           if (const auto root = coremlCacheRoot(); !root.empty())
           {
             impl_->coreml_cache = root / (std::filesystem::path(model_path).stem().string() + "-" +
@@ -604,7 +614,7 @@ namespace ODIA
           // bucket, 16 tokens (14 residues, the commonest tryptic length) --
           // whose verbose log says where ONNX Runtime put the nodes. It is
           // kept: it is the session that shape will run on.
-          const std::int64_t probe_rows = impl_->buckets.front(), probe_length = 16;
+          const std::int64_t probe_length = 16, probe_rows = coremlBucketsFor(probe_length).back();
           const std::string log_id = "odia-probe-" + std::to_string(g_probes++);
           ort::LogCapture capture(log_id);
           auto probe = impl_->buildCoreML(probe_rows, probe_length, log_id.c_str(), true);
@@ -829,7 +839,7 @@ namespace ODIA
         for (int residues = gpu.prebuild_min_residues; residues <= gpu.prebuild_max_residues; ++residues)
         {
           const auto tokens = static_cast<std::int64_t>(residues) + 2;
-          auto buckets = impl_->buckets;
+          auto buckets = coremlBucketsFor(tokens);
           for (auto it = buckets.rbegin(); it != buckets.rend(); ++it)
           {
             const std::pair<std::int64_t, std::int64_t> key{*it, tokens};
@@ -1086,8 +1096,9 @@ namespace ODIA
                                                            PeptDeepEncoder::Batch& storage) const
   {
     if (impl_->provider != Provider::CoreML) { return batch; }
-    std::int64_t bucket = impl_->buckets.back();
-    for (const auto b : impl_->buckets) { if (b >= static_cast<std::int64_t>(batch.rows)) { bucket = b; break; } }
+    const auto buckets = coremlBucketsFor(static_cast<std::int64_t>(batch.sequence_length));
+    std::int64_t bucket = buckets.back();
+    for (const auto b : buckets) { if (b >= static_cast<std::int64_t>(batch.rows)) { bucket = b; break; } }
     impl_->coreml_rows += batch.rows;
     impl_->coreml_padded_rows += static_cast<std::uint64_t>(bucket) - batch.rows;
     if (bucket == static_cast<std::int64_t>(batch.rows)) { return batch; }

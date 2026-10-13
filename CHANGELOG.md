@@ -53,6 +53,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   builders against 34 s one by one. A worker that needs a shape still being
   built waits for that one alone. Every CoreML MS2 phase ends with one line
   of shapes built, rows run and padding rows.
+- CoreML: from 22 residues on, batches are padded to 512, 1024 or 2048 rows
+  instead of 2048 alone (`ODIA_COREML_BUCKETS`). The rarer long lengths
+  padded 15-38 % of their rows, and a padded row of 25-30 residues costs
+  three times a short one; on a 5.8 M-precursor library the padding falls
+  from 11.5 % to 8.8 % of the rows run, for 18 more compiled shapes (about
+  65 MB each, built ahead as above).
 - `-machine:device` defaults to `auto`: on Apple silicon fine-tuning runs on
   the GPU (MPS) when LibTorch has the back end, elsewhere on the CPU as
   before (CUDA is still asked for by name). The Astral RT tune on an M4 Max

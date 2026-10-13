@@ -261,8 +261,13 @@ namespace ODIA
     /// first use (any worker needing it meanwhile waits for it).
     Ort::Session& sessionFor_(std::size_t worker, std::int64_t rows, std::int64_t length);
     /// CoreML: rows padded up to the batch bucket @p rows belongs to, so that
-    /// every batch is one of a few compiled shapes. Returns @p batch itself
-    /// when nothing is padded.
+    /// every batch is one of a few compiled shapes: MAX_BATCH_ROWS alone up
+    /// to 21 residues, where a block has many full chunks per length and the
+    /// one partial chunk pads 5-11 %; 512, 1024 and MAX_BATCH_ROWS from 22
+    /// residues on, where the rarer lengths padded 15-38 % (measured on a
+    /// 5.8 M-precursor library: 11.5 % padded rows over the whole phase,
+    /// 8.8 % with the finer buckets, at the cost of two more compiled shapes
+    /// per long length). Returns @p batch itself when nothing is padded.
     const PeptDeepEncoder::Batch& padded_(const PeptDeepEncoder::Batch& batch, PeptDeepEncoder::Batch& storage) const;
 
     struct Impl;

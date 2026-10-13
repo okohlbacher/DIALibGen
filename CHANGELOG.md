@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.11.3] — unreleased
+## [0.11.3] — 2026-10-13
 
 ### Added (experimental)
 
@@ -18,8 +18,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   Faster extraction, calibration and run loading by default (nested
   OpenSWATH window loop with a team of up to 16, calibration split by seed,
   hashes and cache removal in the background, a capped decode team): the
-  full timsTOF `-run` at 16 threads takes 3,317 s instead of 4,574 s with
-  the same report
+  full timsTOF `-run` at 16 threads takes 3,317 s instead of 4,574 s
+  (-27.5 %) with the same report
   ([measured](docs/design/built-in-identification.md#-run-efficiency-defaults-0113)).
 - `-run` reads mzPeak runs (`.mzpeak` archives or their unpacked directory)
   besides mzML, through the vendored mzpeak-openms reader into the same
@@ -67,9 +67,27 @@ This project follows [Semantic Versioning](https://semver.org/).
 - The pruned MS2 model (`peptdeep_ms2_pruned.onnx`) is removed; the full
   model, `peptdeep_ms2_dynamic.onnx`, is the default again. Libraries name the
   full model in their provenance; their content is unchanged. MS2 takes about
-  15 % more CPU than in 0.11.2.
-- **Generation on the CPU is faster again** (whole human-sized proteome,
-  2 x 96-core EPYC: to be measured), with the same library content as 0.11.2:
+  15-19 % more CPU than in 0.11.2.
+- **Generation: the host work runs in parallel**, with the same library
+  content as 0.11.2 and 0.11.1. Whole human-sized proteome (5.8 M precursors),
+  2 x 96-core EPYC 9654, traced, one run each on the same node:
+
+  | version | 16 threads | 96 threads |
+  |---|---|---|
+  | 0.11.2 | 593.6 s | 157.9 s |
+  | 0.11.3 | 682.8 s | 146.2 s |
+
+  0.11.3 is 15 % slower than 0.11.2 at 16 threads and 7.5 % faster at 96:
+  0.11.2 ran the pruned MS2 model, which 0.11.3 removed, and without it MS2
+  needs about 15-19 % more CPU. On a GPU (16 CPU threads, same node for both
+  versions):
+
+  | version | 1 H100 | 2 H100 |
+  |---|---|---|
+  | 0.11.2 | 88.9 s | 65.2 s |
+  | 0.11.3 | 82.4 s | 47.3 s |
+
+  The changes:
   - parallel work runs on a persistent worker pool instead of threads started
     for every step; worker k is bound to NUMA node k mod n (Linux;
     `ODIA_POOL_PIN=0` turns it off). Memory is no longer interleaved over the
@@ -87,7 +105,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   Parquet columns are decoded in parallel (`-mode convert`, `refine` and
   `tune`). Numbers are parsed with `std::from_chars` (or `strtod_l` in the C
   locale) instead of a stream per number. The loaded library is the same at
-  every thread count. A report number that underflows to zero (below
+  every thread count. Loading a TSV library at 16 threads on 2 x 96-core EPYC
+  9654 takes 5.7 s instead of 23.7 s. A report number that underflows to zero (below
   4.9e-324) is now rejected by refine on Linux too.
 - C-terminal modifications are written as DIA-NN writes them,
   `PEPTIDEK(UniMod:2)` instead of `PEPTIDEK.(UniMod:2)`, in the TSV and the

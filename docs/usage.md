@@ -143,9 +143,18 @@ the file is complete. The worker threads are kept for the whole run and, on a
 machine with several NUMA nodes, placed on the nodes in turn, so each keeps
 its memory local.
 
-Measured on 2 x 96-core EPYC 9654 for a 5.8 M-precursor library (Parquet):
-1,156 s and 4.2 GiB peak memory at 8 threads, 595 s and 4.7 GiB at 16, 158 s
-and 9.5 GiB at 96, and 136 s and 15.1 GiB at `-threads 0` (192 physical
+Measured on 2 x 96-core EPYC 9654 for a 5.8 M-precursor library (Parquet),
+one traced run each on the same node:
+
+| version | 16 threads | 96 threads |
+|---|---|---|
+| 0.11.2 | 593.6 s | 157.9 s |
+| 0.11.3 | 682.8 s | 146.2 s |
+
+0.11.2 ran a pruned MS2 model, which 0.11.3 removed; without it MS2 needs
+about 15-19 % more CPU, so 0.11.3 is 15 % slower at 16 threads and 7.5 %
+faster at 96. In 0.11.2's measurements peak memory was 4.2 GiB at 8 threads,
+4.7 GiB at 16, 9.5 GiB at 96 and 15.1 GiB at `-threads 0` (192 physical
 cores). Past one socket's cores the speed-up costs CPU: at 192 threads the run
 used 56 % more CPU-seconds than at 96, because fully loaded cores run at a lower clock. On a
 shared machine a thread count well below the core count is the efficient
@@ -335,8 +344,13 @@ With the models on a GPU, most of the remaining time is host work: digestion,
 precursor enumeration, fragment selection and writing. These run on `-threads`
 threads (the output does not depend on the count); fragment selection overlaps
 the prediction of the next block, and the library is written while MS2 runs.
-On one H100 a whole human-sized proteome (5.8 M precursors) took 91 s at
-`-threads 16`, on two 65 s.
+A whole human-sized proteome (5.8 M precursors) at `-threads 16`, same node
+for both versions:
+
+| version | 1 H100 | 2 H100 |
+|---|---|---|
+| 0.11.2 | 88.9 s | 65.2 s |
+| 0.11.3 | 82.4 s | 47.3 s |
 
 `-machine:tf32` controls TensorFloat-32 math on the GPU, for prediction and
 for `-machine:device cuda` training. It is **off** by default, so a GPU library

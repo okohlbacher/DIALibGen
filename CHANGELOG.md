@@ -30,6 +30,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 - CTest `coreml_matches_cpu` (skips without the CoreML provider).
 - [Building on macOS](docs/building.md#macos-apple-silicon): the conda-forge
   packages carry both back ends; environment and compiler notes.
+- `docs/report/DIALibGen-report-0.11.3.md` and `.pdf`: the report on the tool, its usage and
+  its performance against DIA-NN (runtime, RT and fragment-intensity accuracy, identifications),
+  also attached to the 0.11.3 release.
 
 ### Changed
 

@@ -566,14 +566,22 @@ namespace ODIA::tune
     TuneResult res;
     res.model_out = p.model_out;
 
-    // device
-    torch::Device dev(torch::kCPU);
-    if (p.device.rfind("cuda", 0) == 0)
+    // device. "auto" is the CLI default: the Apple GPU when this LibTorch
+    // has it (a tune on an M4 Max took 85 s on MPS against 847 s on 16 CPU
+    // threads), the CPU otherwise; never CUDA, which is asked for by name.
+    std::string device = p.device;
+    if (device == "auto")
     {
-      if (!torch::cuda::is_available()) { throw std::runtime_error("device " + p.device + " requested but CUDA is not available to this libtorch (no driver, no GPU, or a CPU-only build)"); }
-      dev = torch::Device(p.device);
+      device = torch::mps::is_available() ? "mps" : "cpu";
+      log << "device auto: " << device << (device == "mps" ? " (this LibTorch has Metal Performance Shaders; -machine:device cpu trains on the CPU)" : "") << "\n";
     }
-    else if (p.device == "mps")
+    torch::Device dev(torch::kCPU);
+    if (device.rfind("cuda", 0) == 0)
+    {
+      if (!torch::cuda::is_available()) { throw std::runtime_error("device " + device + " requested but CUDA is not available to this libtorch (no driver, no GPU, or a CPU-only build)"); }
+      dev = torch::Device(device);
+    }
+    else if (device == "mps")
     {
       // Apple's GPU through Metal Performance Shaders. The libtorch builds for
       // macOS arm64 (conda-forge's and pytorch.org's) include it; a Linux or
@@ -581,9 +589,9 @@ namespace ODIA::tune
       if (!torch::mps::is_available()) { throw std::runtime_error("device mps requested but this libtorch has no MPS backend (not macOS on Apple silicon, or a build without MPS)"); }
       dev = torch::Device(torch::kMPS);
     }
-    else if (p.device == "coreml")
+    else if (device == "coreml")
     { throw std::runtime_error("coreml is the prediction provider (-tune_predict_gpu); fine-tuning on the Apple GPU is -machine:device mps"); }
-    else if (p.device != "cpu") { throw std::runtime_error("unknown device " + p.device + " (cpu, cuda[:N] or mps)"); }
+    else if (device != "cpu") { throw std::runtime_error("unknown device " + device + " (auto, cpu, cuda[:N] or mps)"); }
     // Inter-op pool: nothing here launches inter-op work (no at::launch, no
     // TorchScript fork), but ATen sizes the pool to the hardware threads when
     // something first asks for it. ATen accepts the size once per process and
@@ -609,7 +617,7 @@ namespace ODIA::tune
       at::globalContext().setAllowTF32CuDNN(p.tf32);
     }
     torch::manual_seed(p.seed);
-    log << "device " << p.device
+    log << "device " << device
         << (dev.is_cpu() ? " (" + std::to_string(torch::get_num_threads()) + " threads)"
             : dev.is_mps() ? std::string(" (Metal Performance Shaders)")
             : (std::string(p.cudnn ? " (cuDNN on" : " (cuDNN off") + (p.tf32 ? ", TF32 on)" : ", TF32 off)")))
@@ -802,7 +810,7 @@ namespace ODIA::tune
 
     nlohmann::json prov = {
       {"tool", "DIALibGen"}, {"schema_version", 1}, {"head", headName(p.head)}, {"units", ccs ? "1/K0 (model: CCS A^2)" : "minutes (model: rt_norm)"},
-      {"libtorch", TORCH_VERSION}, {"device", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
+      {"libtorch", TORCH_VERSION}, {"device", device}, {"device_requested", p.device}, {"cudnn", p.cudnn}, {"tf32", p.tf32},
       {"threads", dev.is_cpu() ? torch::get_num_threads() : 0}, {"interop_threads", at::get_num_interop_threads()},
       {"reproducibility", "Seed fixes subsampling and batch order within the same build; numeric results may differ across devices, libraries and platforms; CUDA and MPS kernels may be nondeterministic, and an MPS run is not bit-identical to a CPU run."},
       {"recipe", {{"loss", "L1"}, {"optimizer", "Adam"}, {"lr", p.lr}, {"betas", {0.9, 0.999}}, {"eps", 1e-8}, {"weight_decay", 0.0}, {"clip_grad_norm", 1.0},

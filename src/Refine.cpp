@@ -314,11 +314,12 @@ void DIALibGen::registerRefinementOptions_()
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
     registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
-    registerStringOption_("machine:device", "<dev>", "cpu",
-                          "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU). Prediction (generate; tune with "
-                          "-tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU through ONNX Runtime's CoreML "
-                          "provider (RT and CCS stay on the CPU: CoreML has no LSTM); cpu and cuda keep the default, CUDA when "
-                          "this ONNX Runtime has it and a GPU is visible, else the CPU", false);
+    registerStringOption_("machine:device", "<dev>", "auto",
+                          "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU); auto is mps on Apple silicon when this "
+                          "LibTorch has it (not bit-identical to CPU training; the provenance records the device), else cpu. "
+                          "Prediction (generate; tune with -tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU "
+                          "through ONNX Runtime's CoreML provider (RT and CCS stay on the CPU: CoreML has no LSTM); auto, cpu "
+                          "and cuda keep the default, CUDA when this ONNX Runtime has it and a GPU is visible, else the CPU", false);
     registerStringOption_("machine:coreml_units", "<units>", "gpu",
                           "CoreML compute units: gpu (CPU and GPU; measured fastest on an M4 Max), all (Core ML's choice, "
                           "Neural Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);

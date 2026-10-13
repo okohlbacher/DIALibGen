@@ -73,7 +73,7 @@ namespace ODIA::tune
     double max_seconds = 0;
     Select select = Select::CalibratedSd;
     // machine
-    std::string device = "cpu";  ///< "cpu", "cuda[:N]" or "mps" (Apple GPU)
+    std::string device = "cpu";  ///< "cpu", "cuda[:N]", "mps" (Apple GPU) or "auto" (mps when this LibTorch has it, else cpu)
     bool cudnn = true;           ///< CUDA: let libtorch use cuDNN for the LSTM/conv (needs the full cuDNN 9 library set)
     bool tf32 = false;           ///< CUDA: TensorFloat-32 in cuBLAS matmuls and cuDNN convolutions/RNNs
     int threads = 4;

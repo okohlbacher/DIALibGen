@@ -290,7 +290,7 @@ export default function App(): JSX.Element {
           {showAdvanced ? '▾' : '▸'} Advanced ({specs.filter((s) => !s.hidden && s.group === 'advanced').length})</button>
           {showAdvanced && specs.filter((s) => !s.hidden && s.group === 'advanced').map((s) => renderParam(s))}</>}
       </>}
-      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. On Apple silicon, mps trains on the GPU and -tune_predict_gpu re-predicts through CoreML. CUDA training and re-prediction require a suitable source build and matching GPU libraries.</p>
+      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. On Apple silicon the default device (auto) trains on the GPU through MPS; cpu trains on the CPU, and -tune_predict_gpu re-predicts through CoreML. CUDA training and re-prediction require a suitable source build and matching GPU libraries.</p>
         {tuningFailure && <p className="help bad">Could not read fine-tuning options: {tuningFailure}</p>}
         {!options && !tuningFailure && <p className="help">Loading the tool’s fine-tuning options…</p>}
         {trainingSpecs.filter((s) => s.group === 'core').map((s) => renderParam(s, true))}

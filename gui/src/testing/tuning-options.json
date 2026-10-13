@@ -165,8 +165,8 @@
   {
     "name": "machine:device",
     "kind": "string",
-    "value": "cpu",
-    "description": "cpu or cuda[:N]"
+    "value": "auto",
+    "description": "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU); auto is mps on Apple silicon when this LibTorch has it (not bit-identical to CPU training; the provenance records the device), else cpu. Prediction (generate; tune with -tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU through ONNX Runtime's CoreML provider (RT and CCS stay on the CPU: CoreML has no LSTM); auto, cpu and cuda keep the default, CUDA when this ONNX Runtime has it and a GPU is visible, else the CPU"
   },
   {
     "name": "machine:threads",

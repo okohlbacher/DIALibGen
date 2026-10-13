@@ -231,10 +231,13 @@ Training options are grouped under `filter:`, `cohort:`, `train:`, `stop:` and
 the tool reports rejection and fallback decisions. Options such as
 `-cohort:full_fit` or `-cohort:no_inner_val` change the hold-out contract and
 must be reported when presenting accuracy results. CPU is the portable
-release configuration. Source builds can request `-machine:device cuda:0`
-when linked to a compatible CUDA LibTorch installation (see
-[building](building.md#cpu-and-cuda)); add `-tune_predict_gpu` to run the
-re-prediction on the GPU as well. On one H100, tuning the RT head on an Astral
+release configuration on Linux and Windows; on Apple silicon the release
+build trains on the GPU by default (`-machine:device auto` resolves to `mps`
+when LibTorch has Metal Performance Shaders, else to `cpu`; `-machine:device
+cpu` trains on the CPU; see [Apple GPU](#apple-gpu)). Source builds can
+request `-machine:device cuda:0` when linked to a compatible CUDA LibTorch
+installation (see [building](building.md#cpu-and-cuda)); add
+`-tune_predict_gpu` to run the re-prediction on the GPU as well. On one H100, tuning the RT head on an Astral
 run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
 took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
@@ -256,7 +259,9 @@ cores' share: 12.4 s per epoch at 16 threads against 8.1 s at 8 (and 4), with
 2,299 s of system time in an 847-s tune. A Mac reproduces a Linux or Windows
 model with `-machine:threads 16`, and the other way round with `8`. Up to
 0.11.2 the default was 4: tuned models made with default settings differ
-from 0.11.2's, and `-machine:threads 4` reproduces them.
+from 0.11.2's, and `-machine:threads 4` reproduces them. On Apple silicon
+the default device is the GPU anyway (`-machine:device auto` = `mps`, below),
+where the count does not apply.
 
 Tune mode uses training filters such as `-filter:q_value`. Refinement-only
 settings such as `-q_precursor`, `-q_global`, `-q_protein` and observed-value
@@ -384,8 +389,13 @@ On Apple silicon, `-machine:device coreml` runs the MS2 model on the GPU
 through ONNX Runtime's CoreML execution provider (the conda-forge and release
 builds of ONNX Runtime for macOS arm64 include it); `-machine:device mps`
 does the same for prediction and additionally trains on the GPU
-(`-mode tune`, Metal Performance Shaders through LibTorch). Both are opt-in:
-a Mac without them runs on the CPU as before.
+(`-mode tune`, Metal Performance Shaders through LibTorch). Training on the
+GPU is the default on Apple silicon: `-machine:device auto` (the default)
+resolves to `mps` when LibTorch has the back end, and `-machine:device cpu`
+is the way back. Prediction on the GPU stays opt-in (`coreml` or `mps`):
+CoreML loses on small inputs, where loading the compiled shapes dominates,
+and its MS2 output agrees with the CPU's to float rounding rather than
+exactly, so a library made with default settings is still the CPU library.
 
 ```text
 [RT] provider CPU device -1 sessions 12

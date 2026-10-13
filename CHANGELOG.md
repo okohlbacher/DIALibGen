@@ -36,6 +36,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `-machine:device` defaults to `auto`: on Apple silicon fine-tuning runs on
+  the GPU (MPS) when LibTorch has the back end, elsewhere on the CPU as
+  before (CUDA is still asked for by name). The Astral RT tune on an M4 Max
+  took 85 s on MPS against 847 s on 16 CPU threads, with the same held-out
+  metric; MPS training is not bit-identical to CPU training, and the
+  provenance records the resolved `device` and the requested
+  `device_requested`. `-machine:device cpu` trains on the CPU. Prediction on
+  the Apple GPU stays opt-in (`-machine:device coreml`): CoreML loses on
+  small inputs, where loading the compiled shapes dominates (a 400 k-precursor
+  library: 32.5 s against 28.8 s on the CPU), and its MS2 output agrees with
+  the CPU's to float rounding rather than exactly, so a default `generate`
+  still writes the CPU library on every platform.
 - `-machine:threads` defaults to `0`, the platform's fixed count: 16 on Linux
   and Windows as before, **8 on macOS**. On an M4 Max every training
   operator forks LibTorch's OpenMP team and the join waits for the four

@@ -303,6 +303,6 @@ export function tuningError(values: Record<string, unknown>): string | null {
   if (n('cohort:train_size') > 0 && n('cohort:train_frac') > 0) return 'Choose a training size or fraction, not both.'
   if (values['cohort:full_fit'] && (n('cohort:train_size') > 0 || n('cohort:train_frac') > 0)) return 'Full fit cannot be combined with a training subsample.'
   if (values.tune_heads !== 'rt' && n('filter:min_charge') < 2 && !values['filter:allow_z1']) return 'CCS training on charge 1 requires filter allow z1.'
-  if ('machine:device' in values && !/^(cpu|cuda(?::\d+)?|mps|coreml)$/.test(String(values['machine:device']))) return 'Training device must be cpu, cuda, cuda:N or mps (Apple GPU); coreml names the prediction provider.'
+  if ('machine:device' in values && !/^(auto|cpu|cuda(?::\d+)?|mps|coreml)$/.test(String(values['machine:device']))) return 'Training device must be auto, cpu, cuda, cuda:N or mps (Apple GPU); coreml names the prediction provider.'
   return null
 }

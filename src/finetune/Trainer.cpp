@@ -542,6 +542,15 @@ namespace ODIA::tune
     if (pool == 0) { throw std::runtime_error("training set is empty"); }
   }
 
+  int defaultTrainingThreads()
+  {
+#if defined(__APPLE__)
+    return 8;
+#else
+    return 16;
+#endif
+  }
+
   TuneResult finetune(const TuneParams& p, std::ostream& log)
   {
     const auto started = Clock::now();

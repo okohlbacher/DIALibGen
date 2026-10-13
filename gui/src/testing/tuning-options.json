@@ -171,9 +171,9 @@
   {
     "name": "machine:threads",
     "kind": "int",
-    "value": 16,
-    "description": "CPU threads used for training (a fixed count: the tuned weights depend on it)",
-    "min": 1.0
+    "value": 0,
+    "description": "CPU threads used for training. The tuned weights depend on the count, which the provenance records. 0: the platform default, 16 on Linux and Windows and 8 on macOS (where 16 was measured 1.5x slower per epoch; -machine:threads 16 reproduces a Linux or Windows model)",
+    "min": 0.0
   },
   {
     "name": "machine:no_cudnn",

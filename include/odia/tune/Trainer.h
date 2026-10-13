@@ -115,6 +115,15 @@ namespace ODIA::tune
   /// provenance sidecar is written and the model is not.
   TuneResult finetune(const TuneParams& params, std::ostream& log);
 
+  /// The training thread count `-machine:threads 0` stands for: 16 on Linux
+  /// and Windows; 8 on macOS, where every operator forks LibTorch's OpenMP
+  /// team and 16 threads were measured 1.53x slower per epoch than 8 on an
+  /// M4 Max (12 performance + 4 efficiency cores, 2,299 s of system time in
+  /// a 847-s tune). The tuned weights depend on the count (ATen's reduction
+  /// order), which the provenance records; -machine:threads 16 on a Mac
+  /// reproduces a Linux or Windows model.
+  int defaultTrainingThreads();
+
   const char* headName(HeadKind h);
   const char* selectName(Select s);
 }

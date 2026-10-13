@@ -323,7 +323,10 @@ void DIALibGen::registerRefinementOptions_()
                           "CoreML compute units: gpu (CPU and GPU; measured fastest on an M4 Max), all (Core ML's choice, "
                           "Neural Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);
     setValidStrings_("machine:coreml_units", {"gpu", "all", "ane", "cpu"});
-    registerIntOption_("machine:threads", "<n>", 16, "CPU threads used for training (a fixed count: the tuned weights depend on it)", false);
+    registerIntOption_("machine:threads", "<n>", 0,
+                       "CPU threads used for training. The tuned weights depend on the count, which the provenance records. "
+                       "0: the platform default, 16 on Linux and Windows and 8 on macOS (where 16 was measured 1.5x slower per "
+                       "epoch; -machine:threads 16 reproduces a Linux or Windows model)", false);
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     registerStringOption_("machine:tf32", "<true/false>", "false",
@@ -437,7 +440,8 @@ void DIALibGen::registerRefinementOptions_()
 
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
-    for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every", "machine:threads"}) { setMinInt_(name, 1); }
+    for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every"}) { setMinInt_(name, 1); }
+    setMinInt_("machine:threads", 0);
     // Flat refinement options follow the existing effective-config schema;
     // training options have their own prefixes and are recognized in main_.
     const std::map<std::string, std::string> flags = {{"filter", "no_filter"}, {"require_gates", "empirical_library"},
@@ -958,7 +962,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         tp.max_seconds = getDoubleOption_("stop:max_seconds");
         tp.select = getStringOption_("stop:select") == "rmse" ? ODIA::tune::Select::Rmse : ODIA::tune::Select::CalibratedSd;
         tp.device = getStringOption_("machine:device");
+        // 0: the platform default. Resolved here so that the trainer, and the
+        // provenance, see a concrete count (ODIA::tune::defaultTrainingThreads).
         tp.threads = getIntOption_("machine:threads");
+        if (tp.threads <= 0) { tp.threads = ODIA::tune::defaultTrainingThreads(); }
         tp.cudnn = !getFlag_("machine:no_cudnn");
         tp.tf32 = getStringOption_("machine:tf32") == "true";
         tp.seed = static_cast<std::uint32_t>(getIntOption_("machine:seed"));

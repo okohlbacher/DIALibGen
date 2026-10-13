@@ -36,6 +36,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `-machine:threads` defaults to `0`, the platform's fixed count: 16 on Linux
+  and Windows as before, **8 on macOS**. On an M4 Max every training
+  operator forks LibTorch's OpenMP team and the join waits for the four
+  efficiency cores' share: 12.4 s per epoch at 16 threads against 8.1 s at 8
+  (4 ties with 8, 12 takes 10.2 s), with 2,299 s of system time in an 847-s
+  CPU tune (about 100 s at 8). The tuned weights depend on the count, which
+  the provenance records as before; `-machine:threads 16` on a Mac reproduces
+  a Linux or Windows model.
 - ONNX Runtime's log goes through one process-wide logger; its two per-session
   CoreML notices (how many nodes the provider took, "some nodes were not
   assigned") are replaced by the predictor's own provider line and warning.

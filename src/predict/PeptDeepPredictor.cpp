@@ -505,8 +505,10 @@ namespace ODIA
     {
       Ort::SessionOptions options;
       configureSession(options, 1);
-      options.AddFreeDimensionOverrideByName(dim_rows.c_str(), rows);
-      options.AddFreeDimensionOverrideByName(dim_length.c_str(), length);
+      // Through the C API: the C++ wrapper of conda-forge's ONNX Runtime
+      // 1.22 for macOS x64 has no AddFreeDimensionOverrideByName.
+      Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(options, dim_rows.c_str(), rows));
+      Ort::ThrowOnError(Ort::GetApi().AddFreeDimensionOverrideByName(options, dim_length.c_str(), length));
       std::filesystem::path cache;
       if (!coreml_cache.empty())
       {

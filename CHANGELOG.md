@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.11.4] — unreleased
+## [0.11.4] — 2026-10-13
 
 ### Added
 
@@ -95,8 +95,12 @@ This project follows [Semantic Versioning](https://semver.org/).
   from 11.5 % to 8.8 % of the rows run, for 18 more compiled shapes (about
   65 MB each, built ahead as above).
 - `-machine:device` defaults to `auto`: on Apple silicon fine-tuning runs on
-  the GPU (MPS) when LibTorch has the back end, elsewhere on the CPU as
-  before (CUDA is still asked for by name). The Astral RT tune on an M4 Max
+  the GPU (MPS) when LibTorch has the back end and one small tensor summed
+  on it comes back right, elsewhere on the CPU as before (CUDA is still
+  asked for by name). A LibTorch that reports MPS but cannot use it (a macOS
+  virtual machine) trains on the CPU with a log line and the reason under
+  `device_note` in the provenance; `-machine:device mps` by name still fails
+  loudly. The Astral RT tune on an M4 Max
   took 85 s on MPS against 847 s on 16 CPU threads, with the same held-out
   metric; MPS training is not bit-identical to CPU training, and the
   provenance records the resolved `device` and the requested

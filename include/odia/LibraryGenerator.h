@@ -295,6 +295,14 @@ namespace ODIA
                                                               bool prefer_gpu, unsigned sessions,
                                                               const GpuOptions& gpu);
 
+    /// Whether generate predicts RT and CCS on a thread of their own while
+    /// MS2 runs on @p ms2: only where RT and CCS then run on the CPU, which is
+    /// under CoreML (no LSTM operator, so their predictors take the CPU path).
+    /// On CUDA all three models run on the GPU, and overlapping them made them
+    /// contend for it (0.11.4, one H100: 89.2 s against 79.5 s in order); with
+    /// MS2 on the CPU there is nothing to overlap.
+    static bool overlapsCpuPhases(PeptDeepPredictor::Provider ms2);
+
     /// predictFragmentIntensities with a predictor from openMs2Predictor.
     static std::size_t predictFragmentIntensities(Library& library, PeptDeepPredictor& predictor,
                                                   const DigestParams& params, float nce,

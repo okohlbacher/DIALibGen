@@ -806,12 +806,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // The other layouts are written in one pass, from the final library.
     const bool stream = (stream_env == nullptr || std::string_view(stream_env) != "0") &&
                         (parquet || format == ODIA::LibraryFormat::DIANNTSV);
-    // When MS2 runs on a GPU, RT and CCS run on the CPU meanwhile, on a
+    // When MS2 runs on CoreML, RT and CCS run on the CPU meanwhile, on a
     // thread of their own: MS2 does not need them, the writer waits for
     // both, and the CPU's RT and CCS calls are the same calls as before, so
     // the library is the same. On a whole human library on an M4 Max they
-    // took 77 s of 16 idle cores before 236 s of GPU time. ODIA_OVERLAP=0
-    // keeps the phases in order, for comparison.
+    // took 77 s of 16 idle cores before 236 s of GPU time. On CUDA they run
+    // on the GPU and stay in order (LibraryGenerator::overlapsCpuPhases).
+    // ODIA_OVERLAP=0 keeps the phases in order, for comparison.
     const char* overlap_env = std::getenv("ODIA_OVERLAP");
     const bool overlap_wanted = overlap_env == nullptr || std::string_view(overlap_env) != "0";
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
@@ -903,19 +904,19 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
       if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
-      const bool overlap = overlap_wanted && ms2 && ms2->provider() != ODIA::PeptDeepPredictor::Provider::CPU;
+      const bool overlap = overlap_wanted && ms2 && ODIA::LibraryGenerator::overlapsCpuPhases(ms2->provider());
       // While the GPU predicts MS2, its host side (Core ML's own threads,
       // the encoding workers) needs cores: with all 16 CPU sessions busy on
       // CCS, the Astral MS2 phase on an M4 Max took 229 s instead of 153 s
       // and the overlap gained 6 s of 238 (with 12 sessions 208 s, with 8
       // 189 s under a noisier load). The CPU phases therefore leave half
-      // the cores free on CoreML (ODIA_OVERLAP_RESERVE overrides the count);
-      // their chunking does not depend on the session count, so the library
-      // does not either. CUDA's host side is lighter: nothing reserved.
+      // the cores free (ODIA_OVERLAP_RESERVE overrides the count); their
+      // chunking does not depend on the session count, so the library does
+      // not either.
       if (overlap)
       {
         const unsigned all = threads == 0 ? ODIA::physicalCores() : threads;
-        unsigned reserve = ms2->provider() == ODIA::PeptDeepPredictor::Provider::CoreML ? all / 2 : 0;
+        unsigned reserve = all / 2;
         if (const char* v = std::getenv("ODIA_OVERLAP_RESERVE"); v != nullptr && *v != '\0')
         {
           char* end = nullptr;

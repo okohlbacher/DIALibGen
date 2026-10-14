@@ -3,6 +3,7 @@
 
 #include "OrtEnv.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -58,6 +59,27 @@ namespace ODIA::ort
   {
     static Ort::Env instance(ORT_LOGGING_LEVEL_WARNING, "odia", logMessage, nullptr);
     return instance;
+  }
+
+  void releaseBeforeProviders()
+  {
+    // Released by the static's destructor at exit, the environment unloads
+    // ONNX Runtime's provider libraries. The CUDA provider library is loaded
+    // after the environment exists, so its static destructors run first: its
+    // static kernel registry was already freed when the unload released it a
+    // second time, a write into freed heap memory, which glibc caught as
+    // "corrupted double-linked list" after most GPU runs of 0.11.4. An exit
+    // handler registered once the library is loaded runs before them and
+    // releases the environment while the library is intact; the destructor
+    // then has nothing left to release. (Never releasing it is no way out:
+    // ONNX Runtime 1.22, conda-forge's on macOS x64, deletes an environment
+    // still held at exit during its own static destruction, and aborts.)
+    // env() first: the handler must run before the static's destructor.
+    static std::once_flag once;
+    std::call_once(once, [] {
+      env();
+      std::atexit([] { Ort::GetApi().ReleaseEnv(env().release()); });
+    });
   }
 
   LogCapture::LogCapture(std::string id) : id_(std::move(id))

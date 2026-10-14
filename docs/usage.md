@@ -466,10 +466,10 @@ What runs where, and why:
   cores 232 s (the GPU phase stretched from 153 to 229 s); on 12 cores
   208 s; on 8 cores 189 s. The CPU calls are the same calls whatever the
   session count, so the library is the same; `ODIA_OVERLAP=0` runs the
-  phases in order. The same holds on CUDA, where all three models run on
-  the GPU, the host-side work of RT and CCS overlaps MS2's kernels and
-  nothing is reserved. Running the LSTMs
-  on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`
+  phases in order. On CUDA all three models run on the GPU, and the phases
+  stay in order: overlapped there (0.11.4), they contended for the GPU and
+  a whole-proteome run took 89.2 s instead of 79.5 s on one H100. Running
+  the LSTMs on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`
   unrolls them per sequence length into MatMul/Sigmoid/Tanh steps): the
   unrolled graphs agree with the CPU's LSTM kernel to 6e-7 (RT) and
   4.3e-4 A^2 (CCS) on CoreML, within the tolerances the MS2 path is held

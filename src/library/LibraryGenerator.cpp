@@ -1200,6 +1200,11 @@ namespace ODIA
     return predictor;
   }
 
+  bool LibraryGenerator::overlapsCpuPhases(PeptDeepPredictor::Provider ms2)
+  {
+    return ms2 == PeptDeepPredictor::Provider::CoreML;
+  }
+
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,

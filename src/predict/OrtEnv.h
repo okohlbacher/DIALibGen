@@ -16,6 +16,12 @@ namespace ODIA::ort
   /// log to the code that asked for it (LogCapture).
   Ort::Env& env();
 
+  /// Releases env() at exit before the static destructors of a provider
+  /// library loaded so far run (OrtEnv.cpp). Called once the CUDA provider
+  /// has been appended to a session's options; calls after the first do
+  /// nothing.
+  void releaseBeforeProviders();
+
   /// Collects the verbose messages of the sessions whose log id is @p id
   /// (SessionOptions::SetLogId) for as long as it lives. Only the node
   /// placement lines are kept: that is what a caller wants to know, and a

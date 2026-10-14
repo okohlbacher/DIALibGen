@@ -3,6 +3,35 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [0.11.5] — 2026-10-14
+
+### Fixed
+
+- Builds with a CUDA-enabled ONNX Runtime (Linux GPU nodes) could abort
+  when the process exited, after the library had been written and the run
+  reported: glibc's "corrupted double-linked list", exit code 134, after
+  most GPU runs of 0.11.4 on one or two H100s. 0.11.4 kept ONNX Runtime's
+  environment in a static object; released at exit, it unloaded the CUDA
+  provider library, whose own static kernel registry had been destroyed
+  already, and released that registry a second time, a write into freed
+  memory. Once the CUDA provider is in use, the environment is now released
+  at exit before the provider library is torn down. The libraries written
+  were not affected (byte-identical to 0.11.3's). The release packages
+  (CPU-only ONNX Runtime) and macOS load no provider library and were not
+  affected.
+- `generate` on CUDA is as fast as in 0.11.3 again. 0.11.4 predicted RT and
+  CCS on a thread of their own while the GPU predicted MS2, which pays only
+  where RT and CCS run on the CPU (CoreML: no LSTM operator); on CUDA all
+  three models then ran on the GPU at once and contended for it (whole
+  human library, one H100: 89.2 s against 79.5 s in order; two: 57.1 s
+  against 49.0 s). The overlap is now limited to CoreML; on CUDA the phases
+  run in order, as with `ODIA_OVERLAP=0`. The library is the same either
+  way.
+
+### Added
+
+- CTest `generate_overlap_only_cpu_phases`.
+
 ## [0.11.4] — 2026-10-13
 
 ### Added

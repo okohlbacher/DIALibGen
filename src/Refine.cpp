@@ -548,7 +548,7 @@ namespace
       "cohort:train_size", "cohort:train_frac", "cohort:full_fit", "cohort:no_inner_val",
       "train:epochs", "train:warmup", "train:lr", "train:batch_size",
       "stop:eval_every", "stop:min_epochs", "stop:patience", "stop:rel_tol", "stop:abs_tol", "stop:max_seconds",
-      "stop:select", "machine:train_threads", "machine:seed", "machine:no_cudnn"};
+      "stop:select", "machine:device", "machine:tf32", "machine:train_threads", "machine:seed", "machine:no_cudnn"};
     return names;
   }
 }
@@ -570,11 +570,15 @@ OpenMS::ParamValue DIALibGen::trainingSetting_(const std::string& name) const
   if (info.type == PI::INT)
   {
     if (!v.is_number_integer()) { throw std::runtime_error("tuning." + name + " must be an integer"); }
-    return OpenMS::ParamValue(v.get<int>());
+    const long long x = v.get<long long>();
+    if (x < info.min_int || x > info.max_int)
+    { throw std::runtime_error("tuning." + name + " must be between " + std::to_string(info.min_int) + " and " + std::to_string(info.max_int)); }
+    return OpenMS::ParamValue(static_cast<int>(x));
   }
   if (info.type == PI::DOUBLE)
   {
-    if (!v.is_number()) { throw std::runtime_error("tuning." + name + " must be a number"); }
+    if (!v.is_number() || !std::isfinite(v.get<double>()) || v.get<double>() < info.min_float || v.get<double>() > info.max_float)
+    { throw std::runtime_error("tuning." + name + " must be a number within its range (see --helphelp)"); }
     return OpenMS::ParamValue(v.get<double>());
   }
   if (!v.is_string()) { throw std::runtime_error("tuning." + name + " must be a string"); }
@@ -685,7 +689,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       for (const auto& [key, value] : actual.items())
       {
         // An INI from before 0.12 carries the gates' old default, 0.01.
-        if ((key == "q_global" || key == "q_protein") && old_ini_ && !argv_supplied_.count(key) && value == 0.01) { continue; }
+        if ((key == "q_global" || key == "q_protein") && old_ini_ && supplied_.count(key) && !argv_supplied_.count(key) &&
+            value == 0.01) { continue; }
         if (value != expected.at(key))
         { writeLogError_(key + " has no effect in -mode tune; use the training options or select -mode refine"); return ILLEGAL_PARAMETERS; }
       }
@@ -898,9 +903,11 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
             if (!config.empty())
             {
               const json j = json::parse(config);
-              if (j.contains("instrument") && j["instrument"].is_string() && !j["instrument"].get<std::string>().empty())
+              // 0.12 records the instrument as named and the MS2 model's slot.
+              const char* key = j.contains("model_instrument") ? "model_instrument" : "instrument";
+              if (j.contains(key) && j[key].is_string() && !j[key].get<std::string>().empty())
               {
-                search->instrument = j["instrument"].get<std::string>();
+                search->instrument = j[key].get<std::string>();
                 search->instrument_source = "library";
                 if (search->nce <= 0 && j.contains("nce") && j["nce"].is_number() && j["nce"].get<double>() > 0)
                 { search->nce = j["nce"].get<double>(); }
@@ -1093,13 +1100,13 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         tp.abs_tol = setting("stop:abs_tol");
         tp.max_seconds = setting("stop:max_seconds");
         tp.select = setting("stop:select").toString() == "rmse" ? ODIA::tune::Select::Rmse : ODIA::tune::Select::CalibratedSd;
-        tp.device = getStringOption_("machine:device");
+        tp.device = setting("machine:device").toString();
         // 0: the platform default. Resolved here so that the trainer, and the
         // provenance, see a concrete count (ODIA::tune::defaultTrainingThreads).
         tp.threads = static_cast<int>(setting("machine:train_threads"));
         if (tp.threads <= 0) { tp.threads = ODIA::tune::defaultTrainingThreads(); }
         tp.cudnn = setting("machine:no_cudnn").toString() != "true";
-        tp.tf32 = getStringOption_("machine:tf32") == "true";
+        tp.tf32 = setting("machine:tf32").toString() == "true";
         tp.seed = static_cast<std::uint32_t>(static_cast<int>(setting("machine:seed")));
         if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
         { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
@@ -1181,17 +1188,25 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         // auto finds a usable GPU (RT and CCS need cuDNN), the CPU otherwise
         // (CoreML has no LSTM; mps is the training device). The deprecated
         // -tune_predict_gpu still forces the GPU.
-        bool gpu = getFlag_("tune_predict_gpu");
-        {
-          const std::string device = getStringOption_("machine:device");
-          const ODIA::DeviceRoute route = ODIA::chooseDeviceRoute(device == "mps" || device == "coreml" ? "auto" : device,
-                                                                  false, ODIA::probeDeviceCaps(), library.precursorCount(),
-                                                                  static_cast<std::size_t>(-1), want_ccs);
-          gpu = gpu || (route.lstm_gpu && !route.lstm_coreml);
-          writeLogInfo_(std::string("re-prediction on the ") + (gpu ? "GPU (CUDA)" : "CPU"));
-        }
         std::vector<std::string> device_warnings;
         const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
+        bool gpu = getFlag_("tune_predict_gpu");
+        {
+          const std::string device = setting("machine:device").toString();
+          if (gpu && device == "cpu")
+          { throw std::runtime_error("-tune_predict_gpu (deprecated) contradicts -machine:device cpu; drop -tune_predict_gpu"); }
+          // -machine:require_gpu asks the re-prediction for the GPU where there
+          // is a CUDA route at all (a Mac has none for RT and CCS: there it is
+          // the training device's matter, MPS).
+          const ODIA::DeviceCaps caps = ODIA::probeDeviceCaps();
+          const bool require = gpu_options.require && caps.cuda_provider;
+          const ODIA::DeviceRoute route = ODIA::chooseDeviceRoute(device == "mps" || device == "coreml" ? "auto" : device,
+                                                                  require, caps, library.precursorCount(),
+                                                                  static_cast<std::size_t>(-1), want_ccs);
+          if (!route.error.empty()) { throw std::runtime_error(route.error); }
+          gpu = gpu || require || (route.lstm_gpu && !route.lstm_coreml);
+          writeLogInfo_(std::string("re-prediction on the ") + (gpu ? "GPU (CUDA)" : "CPU"));
+        }
         // 0 follows -threads, the run's CPU budget; 0.11.2 lifted the cap of
         // 16 sessions, so 0 meaning "all cores" would take a 2 x 96-core node
         // whatever -threads said. The predictor never exceeds the physical

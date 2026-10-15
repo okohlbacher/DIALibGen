@@ -53,6 +53,7 @@ const OVERLAY: Record<string, Overlay> = {
   fragment_mz_source: { description: 'Recorded source of the effective fragment m/z window.', hidden: true },
   precursor_charges_source: { description: 'Recorded source of the effective precursor charges.', hidden: true },
   instrument_defaults: { description: 'Recorded instrument default files (name and hash).', hidden: true },
+  model_instrument: { description: 'Recorded MS2 model instrument slot.', hidden: true },
   // Refine/tune -write_config carries the training settings here. The GUI passes
   // them as command-line options instead, so this is never a form field.
   tuning: { description: 'Training settings; managed by the fine-tuning controls.', hidden: true },

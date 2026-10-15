@@ -62,8 +62,8 @@ Apple silicon and Linux GPUs. See [migration](docs/usage.md#migration).
   and cuDNN 9 are not shipped: installed, they give the GPU route; without a
   GPU the CPU runs without a warning. A CUDA build of ONNX Runtime counts as
   having the CUDA provider only when its provider library is beside it.
-- `convert` to DIALibGen Parquet (or DIA-NN 2.0 Parquet) keeps the input's
-  fingerprint, recipe and recorded warnings.
+- `convert` to DIALibGen Parquet keeps the input's fingerprint, recipe and
+  recorded warnings (to DIA-NN 2.0 Parquet: the recipe and warnings).
 - Recipes: `irt_standards` is a generation key; tune's (and refine `-tune`'s)
   `-write_config` writes the training settings as a `tuning` object, which
   `-config` reads (explicit options override it).
@@ -106,7 +106,8 @@ differ from 0.12's.
   predicted. The RT and fragment columns are unchanged: an Astral library
   differs from 0.11.5's only in its `IonMobility`/`CCS` columns, the recorded
   config (`predict_ion_mobility`) and the fingerprint (`im=none`, CCS model
-  hash `none`); a timsTOF library only in the recorded config. DIA-NN 1.7.12
+  hash `none`); a timsTOF library at the same charges only in the recorded
+  config (its default charges are now 2-4: instrument defaults, above). DIA-NN 1.7.12
   and 2.0 load such a TSV and DIA-NN 2.0 Parquet library.
 - `-machine:device auto` (the default) now picks the prediction route in
   `generate` and says which in one `device:` line ([usage](docs/usage.md#gpu)).

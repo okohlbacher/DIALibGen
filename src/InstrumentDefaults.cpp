@@ -54,9 +54,11 @@ namespace ODIA::instruments
     void onlyKeys(const fs::path& file, const YAML::Node& node, const std::set<std::string>& allowed,
                   const std::string& where = "")
     {
+      std::set<std::string> seen;
       for (const auto& item : node)
       {
         const std::string key = item.first.as<std::string>();
+        if (!seen.insert(key).second) { fail(file, where + key, "given twice"); }
         if (!allowed.count(key))
         {
           std::string list;
@@ -132,12 +134,19 @@ namespace ODIA::instruments
 
   bool InstrumentFile::names(const std::string& instrument) const
   {
-    const std::string query = fold(instrument), plain = stripped(query);
-    for (const std::string* n : {&name})
-    { if (fold(*n) == query || fold(*n) == plain) { return true; } }
-    for (const auto& alias : aliases)
-    { if (fold(alias) == query || fold(alias) == plain) { return true; } }
-    return false;
+    // As written; without a leading "Orbitrap" ("Orbitrap Exploris 480" names
+    // a file called "Exploris 480"); and without its model number as well
+    // ("timsTOF Ultra 2" names "timsTOF Ultra"). A stored name is never
+    // shortened: "Exploris" must not pick the file of an Exploris 480.
+    const std::string query = fold(instrument);
+    const std::string no_prefix = query.rfind("ORBITRAP", 0) == 0 ? query.substr(8) : query;
+    const std::string plain = stripped(query);
+    const auto matches = [&](const std::string& stored) {
+      const std::string f = fold(stored);
+      return f == query || f == no_prefix || f == plain;
+    };
+    if (matches(name)) { return true; }
+    return std::any_of(aliases.begin(), aliases.end(), matches);
   }
 
   InstrumentFile readInstrumentFile(const fs::path& file)

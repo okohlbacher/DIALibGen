@@ -235,7 +235,8 @@ predicted, `-generation:derive_ion_mobility` (default `true`) adds 1/K0;
 without CCS it has no effect. Until 0.11.5 every library carried both. Apart
 from these two columns and the recorded recipe (`predict_ion_mobility` in the
 config, `im=none` in the fingerprint), an Orbitrap library is the one 0.11.5
-writes, and a timsTOF library differs only in the recorded recipe. DIA-NN
+writes, and a timsTOF library at the same charges differs only in the recorded
+recipe (by default it now has charges 2-4, from timstof.yaml). DIA-NN
 1.7.12 and 2.0 load such a TSV or DIA-NN 2.0 Parquet library (2.0 reports its
 1/K0 as 0). `-tune_heads auto` (the default), `ccs` or `both` on such a
 library with a diaPASEF report trains on the run's observed 1/K0 and then adds

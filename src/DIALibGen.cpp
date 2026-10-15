@@ -86,6 +86,14 @@ namespace
     return s;
   }
 
+  /// "-instance 01" is instance 1 to TOPP (a number).
+  std::string normalInstance(const std::string& s)
+  {
+    try { std::size_t used = 0; const int n = std::stoi(s, &used); if (used == s.size()) { return std::to_string(n); } }
+    catch (const std::exception&) {}
+    return s;
+  }
+
   /// A spectral library rather than a FASTA: .parquet or .tsv, unless the
   /// file starts with '>' (after a BOM or white space), as a FASTA does.
   bool isLibraryInput(const std::string& path)
@@ -266,12 +274,14 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const std::string token = argv[i];
     if (token.starts_with("-")) { supplied_.insert(token.substr(1)); argv_supplied_.insert(token.substr(1)); }
     if (i + 1 < argc && token == "-ini") { ini = argv[i + 1]; }
-    if (i + 1 < argc && token == "-instance") { instance = argv[i + 1]; }
+    if (i + 1 < argc && token == "-instance") { instance = normalInstance(argv[i + 1]); }
   }
-  if (!ini.empty())
+  // A TOPP JSON parameter file is TOPP's to read: this XML reader cannot.
+  if (!ini.empty() && !lower(ini).ends_with(".json"))
   {
     OpenMS::Param parameters;
-    OpenMS::ParamXMLFile().load(ini, parameters);
+    try { OpenMS::ParamXMLFile().load(ini, parameters); }
+    catch (const std::exception& e) { writeLogError_("cannot read the INI " + ini + ": " + e.what()); return ILLEGAL_PARAMETERS; }
     for (auto it = parameters.begin(); it != parameters.end(); ++it)
     {
       const std::string name = it.getName();
@@ -535,6 +545,8 @@ namespace
   bool iniSetsThreads(const std::string& ini, const std::string& instance)
   {
     if (ini.empty()) { return false; }
+    // A JSON parameter file: TOPP reads it; its -threads (or TOPP's 1) applies.
+    if (lower(ini).ends_with(".json")) { return true; }
     try
     {
       OpenMS::Param parameters;
@@ -551,25 +563,37 @@ namespace
   /// deprecated names go, their non-default values moved onto the
   /// replacement, so that the file still loads once they are removed (an
   /// unknown INI parameter is fatal).
-  void finishWrittenIni(const std::string& path, const std::string& merged_from)
+  void finishWrittenIni(const std::string& path, const std::string& merged_from, const std::string& instance)
   {
     OpenMS::Param parameters;
     OpenMS::ParamXMLFile().load(path, parameters);
-    const std::string base = "DIALibGen:1:";
-    if (!iniSetsThreads(merged_from, "1") && parameters.exists(base + "threads"))
+    const std::string base = "DIALibGen:" + instance + ":";
+    if (!iniSetsThreads(merged_from, instance) && parameters.exists(base + "threads"))
     {
       parameters.setValue(base + "threads", 0, "Number of threads; 0 = all physical cores (the default when the "
                           "command line and the INI do not set it)");
     }
-    // Both replacements default to nothing ("" and 0).
-    const auto unset = [](const OpenMS::ParamValue& v) { const std::string s = v.toString(); return s.empty() || s == "0" || s == "false"; };
+    // At its default: "" (a directory), 0 (a count), false (a flag).
+    const auto unset = [](const std::string& key, const OpenMS::ParamValue& v) {
+      const std::string s = v.toString();
+      if (key.ends_with("tune_models") || key.ends_with(":models")) { return s.empty(); }
+      if (key.ends_with("tune_predict_gpu") || key.ends_with("allow_bootstrap")) { return s == "false"; }
+      return s == "0" || s.empty();
+    };
     for (const auto& d : DIALibGen::deprecatedOptions())
     {
       const std::string old_key = base + d.old_name, new_key = base + d.new_name;
       if (!parameters.exists(old_key)) { continue; }
-      if (!unset(parameters.getValue(old_key)))
+      if (*d.new_name != '\0' && parameters.exists(new_key) && !unset(old_key, parameters.getValue(old_key)) &&
+          !unset(new_key, parameters.getValue(new_key)) && parameters.getValue(old_key) != parameters.getValue(new_key))
       {
-        if (*d.new_name != '\0' && parameters.exists(new_key) && unset(parameters.getValue(new_key)))
+        throw std::runtime_error(std::string(d.old_name) + " (deprecated) and " + d.new_name + " disagree (" +
+                                 parameters.getValue(old_key).toString() + " against " +
+                                 parameters.getValue(new_key).toString() + "); keep only " + d.new_name);
+      }
+      if (!unset(old_key, parameters.getValue(old_key)))
+      {
+        if (*d.new_name != '\0' && parameters.exists(new_key) && unset(new_key, parameters.getValue(new_key)))
         { parameters.setValue(new_key, parameters.getValue(old_key), parameters.getDescription(new_key)); }
         else if (*d.new_name == '\0' && std::string(d.old_name) != "search:passes")
         {
@@ -679,9 +703,9 @@ int main(int argc, const char** argv)
   // (a command-line value outranks the INI's, so the INI is looked at first).
   std::vector<const char*> args(argv, argv + argc);
   const std::string ini = valueOf(argc, argv, "-ini");
-  const std::string instance = valueOf(argc, argv, "-instance");
+  const std::string instance = normalInstance(valueOf(argc, argv, "-instance").empty() ? "1" : valueOf(argc, argv, "-instance"));
   if (!help && descriptor == DescriptorRequest::None && argc > 1 && !given(argc, argv, "-threads") &&
-      !iniSetsThreads(ini, instance.empty() ? "1" : instance))
+      !iniSetsThreads(ini, instance))
   {
     args.push_back("-threads");
     args.push_back("0");
@@ -709,11 +733,14 @@ int main(int argc, const char** argv)
   if (rc == OpenMS::TOPPBase::EXECUTION_OK && !help && descriptor == DescriptorRequest::Ini)
   {
     const std::string written = valueOf(argc, argv, "-write_ini");
-    try { if (!written.empty()) { finishWrittenIni(written, ini); } }
+    try { if (!written.empty()) { finishWrittenIni(written, ini, instance); } }
     catch (const std::exception& e)
     {
-      std::cerr << "DIALibGen: cannot finish " << written << ": " << e.what() << std::endl;
-      rc = OpenMS::TOPPBase::CANNOT_WRITE_OUTPUT_FILE;
+      // No half-finished INI: it would carry -threads 1 and the deprecated names.
+      std::error_code ec;
+      fs::remove(written, ec);
+      std::cerr << "Error: -write_ini " << written << ": " << e.what() << std::endl;
+      rc = OpenMS::TOPPBase::ILLEGAL_PARAMETERS;
     }
   }
   return rc;

@@ -141,6 +141,13 @@ export default function App(): JSX.Element {
       setConfigs((old) => ({ ...old, [fallbackMode]: { ...old[fallbackMode], ...stripPrivate(payload),
         ...(fallbackMode === 'generate' ? Object.fromEntries(AUTO_KEYS.map((key) => [key, payload[key] ?? null])) : {}) } }))
       if (typeof payload.__modelDir === 'string') setModelDir(payload.__modelDir)
+      // A tune (or refine -tune) recipe carries its training settings as
+      // "tuning": they become the fine-tuning form's values.
+      if (record(payload.tuning)) {
+        const imported = pick(payload.tuning, (key) => !DEPRECATED_TUNING.includes(key))   // values as written
+        setTuning((old) => ({ ...old, ...imported }))
+        if (fallbackMode === 'refine') setTune(true)
+      }
     }
   }, [])
 
@@ -328,7 +335,7 @@ export default function App(): JSX.Element {
           {showAdvanced ? '▾' : '▸'} Advanced ({specs.filter((s) => !s.hidden && s.group === 'advanced').length})</button>
           {showAdvanced && specs.filter((s) => !s.hidden && s.group === 'advanced').map((s) => renderParam(s))}</>}
       </>}
-      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. The default device (auto) uses a usable GPU, on Apple silicon MPS for training and CoreML for re-prediction; cpu forces the CPU. Re-prediction follows the same device setting. CUDA training and re-prediction require a suitable source build and matching GPU libraries.</p>
+      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. The default device (auto) trains on Apple silicon's GPU (MPS) and re-predicts on the CPU there; on Linux it re-predicts on an NVIDIA GPU when CUDA 12 and cuDNN 9 are installed; cpu forces the CPU. CUDA training (not re-prediction) and its LibTorch require a suitable source build.</p>
         {tuningFailure && <p className="help bad">Could not read fine-tuning options: {tuningFailure}</p>}
         {!options && !tuningFailure && <p className="help">Loading the tool’s fine-tuning options…</p>}
         {trainingSpecs.filter((s) => s.group === 'core').map((s) => renderParam(s, true))}

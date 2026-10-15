@@ -98,7 +98,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     tune, _ = config('-mode', 'tune')
     assert tune['tuning']['tune_heads'] == 'auto' and tune['tuning']['machine:train_threads'] == 0
     generate, _ = config()
-    assert generate['irt_standards'] == '' and generate['instrument'] == 'QE'
+    assert generate['irt_standards'] == '' and generate['instrument'] == 'QE' and generate['model_instrument'] == 'QE'
 
     # ---- deprecated names ------------------------------------------------------
     models = root / 'models'
@@ -187,11 +187,11 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     for name in ('Astral', 'astral', 'Orbitrap Astral', 'AstralZoom', 'Astral Zoom'):
         effective, log = config('-generation:instrument', name)
         assert effective['precursor_mz'] == [380.0, 980.0] and effective['fragment_mz'] == [150.0, 2000.0], name
-        assert effective['nce'] == 25 and effective['instrument'] == 'Lumos', name
+        assert effective['nce'] == 25 and effective['model_instrument'] == 'Lumos' and effective['instrument'] == name, name
         assert effective['instrument_defaults']['instrument'] == 'astral.yaml', name
         assert 'instrument defaults: astral.yaml (Astral) over default.yaml' in log, log
     effective, log = config('-generation:instrument', 'timsTOF Pro 2')
-    assert effective['precursor_charges'] == [2, 3, 4] and effective['instrument'] == 'timsTOF'
+    assert effective['precursor_charges'] == [2, 3, 4] and effective['model_instrument'] == 'timsTOF'
     assert 'has ion mobility: CCS and 1/K0 predicted' in log, log
     effective, log = config()
     assert effective['precursor_mz'] == [350.0, 1200.0] and effective['instrument_defaults']['instrument'] is None
@@ -216,7 +216,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     assert effective['precursor_mz'] == [390.0, 990.0] and effective['fragment_mz'] == [200.0, 1800.0], effective
     assert effective['nce'] == 25, 'Lumos model default'
     effective, _ = config('-generation:instrument', 'E480', env=env)
-    assert effective['precursor_mz'] == [400.0, 1000.0] and effective['nce'] == 27 and effective['instrument'] == 'QE'
+    assert effective['precursor_mz'] == [400.0, 1000.0] and effective['nce'] == 27 and effective['model_instrument'] == 'QE'
     # The user's config directory is searched too.
     config_dir = home / ('Library/Application Support' if sys.platform == 'darwin' else
                          'AppData' if sys.platform == 'win32' else '.config') / 'DIALibGen' / 'instruments'
@@ -257,6 +257,36 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     (user / 'twin.yaml').write_text('name: Exploris 480\nmodel_instrument: QE\n')
     _, log = run('-generation:instrument', 'Exploris 480', '-write_config', fresh(), ok=False, env=env)
     assert 'named by two files of one directory' in log, log
+    # A custom instrument's recipe replays through its file (the recipe names it, not the model slot).
+    custom = root / 'custom.yaml'
+    custom.write_text('name: Custom IM\nmodel_instrument: QE\nion_mobility: true\n')
+    effective, log = config('-instrument_file', custom)
+    assert effective['instrument'] == 'Custom IM' and effective['model_instrument'] == 'QE'
+    assert 'has ion mobility' in log, log
+    replay = root / 'replay.json'
+    replay.write_text(json.dumps(effective))
+    _, log = config('-config', replay, '-instrument_file', custom)
+    assert 'has ion mobility' in log, log
+    # "Orbitrap Exploris 480" names a file called "Exploris 480"; "Exploris" alone does not.
+    (user / 'twin.yaml').unlink()
+    effective, _ = config('-generation:instrument', 'Orbitrap Exploris 480', env=env)
+    assert effective['nce'] == 27, effective
+    effective, _ = config('-generation:instrument', 'Exploris', env=env)
+    assert effective['nce'] == 30, effective
+    single.write_text('name: X\nmodel_instrument: QE\nnce: 25\nnce: 30\n')
+    _, log = run('-instrument_file', single, '-write_config', fresh(), ok=False)
+    assert 'nce: given twice' in log, log
+    # Recipe training values are range-checked like the options.
+    bad = root / 'bad-tuning.json'
+    bad.write_text(json.dumps({'tuning': {'cohort:train_size': -1}}))
+    _, log = run('-mode', 'tune', '-config', bad, '-write_config', fresh(), ok=False)
+    assert 'tuning.cohort:train_size must be between' in log, log
+    # -write_ini refuses an INI whose old and new names disagree, and leaves no file.
+    conflict = root / 'conflict.ini'
+    conflict.write_text(old_training.read_text().replace('name="train_threads" value="0"', 'name="train_threads" value="4"'))
+    target = fresh('.ini')
+    _, log = run('-write_ini', target, '-ini', conflict, ok=False)
+    assert 'disagree' in log and not target.exists(), log
     _, log = run('-generation:instrument', 'Astrall', '-write_config', fresh(), ok=False)
     assert "unknown instrument: 'Astrall'" in log, log
 

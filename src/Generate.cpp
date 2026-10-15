@@ -363,7 +363,7 @@ namespace
     for (const auto& [k, v] : j.items())
     {
       // Recorded for the reader, not settings.
-      if (k == "nce_source" || k == "instrument_named" || k == "precursor_mz_source" || k == "fragment_mz_source" ||
+      if (k == "nce_source" || k == "instrument_named" || k == "model_instrument" || k == "precursor_mz_source" || k == "fragment_mz_source" ||
           k == "precursor_charges_source" || k == "instrument_defaults") { continue; }
       if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
       (void)v;
@@ -918,6 +918,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     const auto recipe = [&]() {
       json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
                                  recompute_decoy_mz, ion_mobility, irt_standards);
+      // The instrument as named, so that a replay resolves it through the same
+      // instrument file (a custom instrument keeps its ion mobility); the MS2
+      // model's slot is recorded beside it.
+      eff["instrument"] = named;
+      eff["model_instrument"] = instrument;
       eff["nce_source"] = nce_source;
       eff["precursor_mz_source"] = precursor_mz_source;
       eff["fragment_mz_source"] = fragment_mz_source;
@@ -964,7 +969,6 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     }
 
     json eff = recipe();
-    if (!instrument_alias_of.empty()) { eff["instrument_named"] = instrument_alias_of; }
     std::error_code ec;
     for (const auto& m : models)
     {

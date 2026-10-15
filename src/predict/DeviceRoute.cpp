@@ -56,7 +56,7 @@ namespace ODIA
       { wheels(fs::path(venv) / "lib"); }
       if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
       { wheels(fs::path(home) / ".local" / "lib"); }
-      for (const char* dir : {"/usr/local/cuda/lib64", "/usr/local/cuda/targets/x86_64-linux/lib",
+      for (const char* dir : {"/usr/local/cuda/lib64", "/usr/local/cuda/targets/x86_64-linux/lib", "/usr/local/cuda/targets/sbsa-linux/lib",
                               "/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib"})
       { out.emplace_back(dir); }
       return out;
@@ -111,6 +111,25 @@ namespace ODIA
       if (name == "CoreMLExecutionProvider") { c.coreml_provider = true; }
     }
     c.diagnostics.push_back("ONNX Runtime providers: " + providers);
+#if defined(__linux__)
+    // A CUDA build of ONNX Runtime names its CUDA provider even when the
+    // provider library (dlopen'ed from beside libonnxruntime when a session
+    // asks for it) is not there: then there is no CUDA route to offer.
+    if (c.cuda_provider)
+    {
+      Dl_info info{};
+      if (dladdr(reinterpret_cast<void*>(&OrtGetApiBase), &info) != 0 && info.dli_fname != nullptr)
+      {
+        std::error_code ec;
+        const auto provider = std::filesystem::path(info.dli_fname).parent_path() / "libonnxruntime_providers_cuda.so";
+        if (!std::filesystem::exists(provider, ec))
+        {
+          c.cuda_provider = false;
+          c.diagnostics.push_back("CUDA provider library missing: " + provider.string());
+        }
+      }
+    }
+#endif
 #if defined(__APPLE__)
     // CUDA_VISIBLE_DEVICES aside, nvidiaGpuVisible() assumes a GPU off Linux
     // (so that a failure there still warns); a Mac has none.

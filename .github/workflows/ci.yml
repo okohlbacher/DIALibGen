@@ -55,8 +55,11 @@ jobs:
       matrix:
         include:
           # macOS needs llvm-openmp; Linux uses the GCC OpenMP runtime.
-          - { name: linux-x64,   runner: ubuntu-24.04,     extra: "libtorch=2.10.0=cpu_generic* libblas=*=*openblas", wheel: false }
-          - { name: linux-arm64, runner: ubuntu-24.04-arm, extra: "libblas=*=*openblas", wheel: true }
+          # Linux ships ONNX Runtime's CUDA build (CUDA 12.9; on arm64 the SBSA one, for server ARM
+          # such as Grace): the user's CUDA 12 and cuDNN 9 are loaded at run time, none is bundled.
+          # The Python ORT of the reference tests stays the CPU build.
+          - { name: linux-x64,   runner: ubuntu-24.04,     extra: "libtorch=2.10.0=cpu_generic* libblas=*=*openblas onnxruntime-cpp=1.31.0=*cuda129 onnxruntime=*=*_cpu", wheel: false, cuda: "12.9" }
+          - { name: linux-arm64, runner: ubuntu-24.04-arm, extra: "libblas=*=*openblas onnxruntime-cpp=1.31.0=*cuda129 onnxruntime=*=*_cpu", wheel: true, cuda: "12.9" }
           - { name: macos-arm64, runner: macos-14,         extra: "llvm-openmp libtorch=2.10.0=cpu*", wheel: false }
           - { name: macos-x64,   runner: macos-15-intel,   extra: "llvm-openmp libtorch=2.10.0=cpu_generic* libblas=*=*openblas", wheel: false }
 
@@ -68,6 +71,10 @@ jobs:
       # Let OpenMS constrain Arrow. Keep comments outside the folded create-args scalar.
       - name: Install OpenMS, ONNX Runtime and the toolchain
         uses: mamba-org/setup-micromamba@add3a49764cedee8ee24e82dfde87f5bc2914462 # v2
+        # The CUDA build of ONNX Runtime needs the __cuda virtual package, which a
+        # runner without a GPU lacks; nothing CUDA is installed by it.
+        env:
+          CONDA_OVERRIDE_CUDA: ${{ matrix.cuda || '' }}
         with:
           environment-name: dialibgen
           create-args: >-
@@ -84,6 +91,7 @@ jobs:
             bzip2
             libzip
             hdf5
+            yaml-cpp=0.8.0
             libcurl
             libboost-devel
             glpk
@@ -313,6 +321,10 @@ jobs:
           # Require data at the path resolved relative to the installed executable.
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
+          for f in default.yaml astral.yaml timstof.yaml; do
+            test -s "$PWD/stage/share/DIALibGen/instruments/$f" \
+              || { echo "::error::the instrument defaults ($f) are not in the install tree"; exit 1; }
+          done
 
           # Require all three bundled prediction models.
           for m in peptdeep_rt_dynamic.onnx peptdeep_ms2_dynamic.onnx peptdeep_ccs_dynamic.onnx; do
@@ -595,6 +607,26 @@ jobs:
               prev=$n
               for so in stage/lib/*.so*; do copy_closure "$so"; done
             done
+            # ONNX Runtime dlopens its CUDA provider from beside libonnxruntime.so, so the
+            # closure cannot see it. Its CUDA 12 and cuDNN 9 dependencies stay unresolved
+            # here on purpose: they are the user's, found at run time; without them (or
+            # without a GPU) prediction runs on the CPU.
+            if [ -n "${{ matrix.cuda }}" ]; then
+              for so in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+                test -f "$CONDA_PREFIX/lib/$so" \
+                  || { echo "::error::the CUDA ONNX Runtime has no $so"; exit 1; }
+                if [ ! -f "stage/lib/$so" ]; then
+                  cp "$CONDA_PREFIX/lib/$so" "stage/lib/$so"
+                  printf 'lib/%s\t%s\n' "$so" "$CONDA_PREFIX/lib/$so" >> runtime-origins.tsv
+                  echo "bundled lib/$so from $CONDA_PREFIX/lib/$so"
+                fi
+              done
+            fi
+            if find stage/lib -maxdepth 1 \( -name 'libcuda.so*' -o -name 'libcudart*' -o -name 'libcublas*' \
+                 -o -name 'libcudnn*' -o -name 'libcufft*' -o -name 'libcurand*' -o -name 'libcusparse*' \
+                 -o -name 'libcusolver*' -o -name 'libnvrtc*' -o -name 'libnvJitLink*' -o -name 'libnccl*' \) | grep .; then
+              echo "::error::CUDA or cuDNN libraries were bundled; they must stay the user's"; exit 1
+            fi
             # shellcheck disable=SC2016
             patchelf --set-rpath '$ORIGIN/../lib' stage/bin/DIALibGen
             readelf -n stage/bin/DIALibGen | grep -qE 'Build ID: [0-9a-f]{40}' \
@@ -611,6 +643,7 @@ jobs:
           grep -q "^Version: $want" portable.txt \
             || { echo "::error::the portable bundle reports the wrong version"; exit 1; }
           test -s stage/share/DIALibGen/irt_standards.tsv
+          test -s stage/share/DIALibGen/instruments/default.yaml
           test -s stage/share/DIALibGen/models/peptdeep_ms2_dynamic.onnx \
             || { echo "::error::the staged bundle carries no models"; exit 1; }
           # OpenMS identifies its data directory by CHEMISTRY/unimod.xml.

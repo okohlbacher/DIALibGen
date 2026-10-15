@@ -3,6 +3,8 @@
 
 #include "OrtEnv.h"
 
+#include <odia/DeviceRoute.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -41,6 +43,10 @@ namespace ODIA::ort
         return;
       }
       if (severity < ORT_LOGGING_LEVEL_WARNING) { return; }
+      // ONNX Runtime's own warnings and errors are for diagnosis (-debug 1):
+      // every error that matters comes back as an exception, which the
+      // caller reports in its own words (a failed CUDA probe, for example).
+      if (severity != ORT_LOGGING_LEVEL_FATAL && ODIA::diagnosticsLevel() == 0) { return; }
       // Two notices every CoreML session logs at warning level, which the
       // predictor reports in its own words (the provider line, and a WARNING
       // when it matters): how many nodes the provider took, and that some

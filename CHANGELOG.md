@@ -22,9 +22,44 @@ ion mobility, and the default prediction route on Apple silicon).
   hash `none`); a timsTOF library only in the recorded config. DIA-NN 1.7.12
   and 2.0 load such a TSV and DIA-NN 2.0 Parquet library.
 
+- `-machine:device auto` (the default) now picks the prediction route in
+  `generate` and says which in one `device:` line ([usage](docs/usage.md#gpu)).
+  Linux: CUDA for MS2 when the ONNX Runtime has the CUDA provider and an NVIDIA
+  GPU is visible, and for RT and CCS only when cuDNN 9 loads (checked before
+  predicting, the way ONNX Runtime opens it); without cuDNN RT and CCS run on
+  the CPU, on a thread of their own while the GPU predicts MS2, with one
+  `WARNING` that names the fix (and a directory where a cuDNN was found off the
+  library path). Apple silicon: MS2 on the GPU (CoreML) from 50,000 precursors
+  per CPU thread (800 k at 16 threads; measured break-even on an M4 Max,
+  `ODIA_COREML_MIN_PRECURSORS` overrides), RT and CCS on the CPU without a
+  warning. **A default library on Apple silicon above that size therefore
+  agrees with the CPU library to float rounding (intensities within 1e-4, RT
+  and CCS identical), not byte for byte**; `-machine:device cpu` keeps the CPU
+  library. `-machine:device cpu`, `cuda[:N]`, `coreml` and `mps` force a route
+  (`cpu` used to change only the training device; `cuda:N` now also names the
+  prediction device). `-machine:require_gpu` asks for the GPU for every model.
+- Messages: shorter, one or two lines with the cause and the fix, without
+  development history or measurements; every warning starts with `WARNING:`.
+  `-debug 1` (or `ODIA_VERBOSE=1`) adds the diagnostics: device checks, the
+  cuDNN loader's result and search, ONNX Runtime's warnings and full errors,
+  CoreML node placement and shape summaries, searched directories. The
+  provider lines (`[MS2] provider CUDA device 0 sessions 4`) are unchanged.
+  Device warnings recorded in `odia.warnings` read differently, so a library
+  that recorded one is not byte-identical to 0.11.5's. See
+  [docs/messages-review.md](docs/messages-review.md).
+
+### Fixed
+
+- A tune range error printed `numeric_limits<double>::max()` in full (309
+  digits) for `filter:rt_spread_max`, `filter:rt_max_minutes`, `stop:abs_tol`
+  and `stop:max_seconds`.
+- With `-machine:device coreml` and `irt_rescale`, the iRT fit reported the RT
+  model's CoreML fallback a second time.
+
 ### Added
 
-- CTest `generate_ion_mobility_decision`.
+- CTests `generate_ion_mobility_decision`, `predict_device_route`;
+  `generate_overlap_only_cpu_phases` covers CUDA with RT and CCS on the CPU.
 
 ## [0.11.5] — 2026-10-14
 

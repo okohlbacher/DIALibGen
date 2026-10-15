@@ -480,13 +480,9 @@ namespace
     if (canonical.empty())
     {
       throw std::runtime_error(
-        "unknown instrument: '" + instrument + "'. Known: QE, Lumos, timsTOF, SciexTOF, ThermoTOF, and the "
-        "aliases upstream groups onto them -- Astral, Fusion, Eclipse, Velos, Elite and the Tribrids are "
-        "Lumos; QE+, QEHF, QEHFX, Q Exactive and Exploris are QE; timsTOF Pro/SCP/HT/Ultra/flex are "
-        "timsTOF; TripleTOF and ZenoTOF are SciexTOF. A leading 'Orbitrap' and a trailing model number "
-        "are ignored, so 'Orbitrap Exploris 480' is accepted. An unrecognised name would index a slot no "
-        "training addressed, which is close to Lumos in practice but would be recorded as though you had "
-        "chosen an instrument. Use Lumos to ask for no instrument correction deliberately.");
+        "unknown instrument: '" + instrument + "'. Use QE, Lumos, timsTOF, SciexTOF or ThermoTOF, or a vendor "
+        "name such as Astral, Exploris 480 or timsTOF Pro (docs/usage.md#generation-settings); Lumos means no "
+        "instrument correction.");
     }
     if (canonical != instrument) { instrument_alias_of = instrument; }
     instrument = canonical;
@@ -527,16 +523,17 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::prepare_()
     ODIA::PeptDeepPredictor predictor(ms2_model, true, 1, 1, -1, gpu);
     if (predictor.provider() != ODIA::PeptDeepPredictor::Provider::CoreML)
     {
-      writeLogError_("the MS2 model cannot run on CoreML: " + predictor.fallbackReason());
+      writeLogError_("nothing prepared: " + predictor.fallbackReason());
       return UNEXPECTED_RESULT;
     }
     const auto [shapes, seconds] = predictor.waitForShapes();
     std::ostringstream m;
     m.setf(std::ios::fixed); m.precision(1);
-    m << "prepared " << shapes << " CoreML shape(s) of " << fs::path(ms2_model).filename().string() << " for "
-      << window[0] << "-" << window[1] << " residues in " << seconds << " s (summed over the builders)";
+    m << "prepared " << shapes << " CoreML shape(s) for peptide lengths " << window[0] << "-" << window[1];
+    if (ODIA::diagnosticsLevel() > 0)
+    { m << " (" << fs::path(ms2_model).filename().string() << ", " << seconds << " s summed over the builders)"; }
     const auto cache = predictor.coremlCacheDir();
-    if (!cache.empty()) { m << "; cache " << cache.string(); } else { m << "; the cache is off (ODIA_COREML_CACHE=0), nothing was kept"; }
+    if (!cache.empty()) { m << "; cache: " << cache.string(); } else { m << "; nothing kept: the cache is off (ODIA_COREML_CACHE=0)"; }
     writeLogInfo_(m.str());
   }
   catch (const std::exception& e) { writeLogError_(std::string("prepare failed: ") + e.what()); return UNEXPECTED_RESULT; }
@@ -671,12 +668,12 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       nce_source = "instrument-default:" + instrument;
     }
     if (!instrument_alias_of.empty())
-    { writeLogInfo_("instrument '" + instrument_alias_of + "' is '" + instrument + "' to this model (upstream's instrument_group)"); }
+    { writeLogInfo_("instrument '" + instrument_alias_of + "' is predicted as " + instrument); }
     if (!nce_was_set)
     {
-      writeLogInfo_("nce not set; using " + std::to_string(nce) + " for " + instrument +
-                    " (recorded as " + nce_source + ")");
-
+      std::ostringstream m;
+      m << "NCE not set; using " << instrument << "'s default, " << nce;
+      writeLogInfo_(m.str());
     }
     // CCS and 1/K0 only where the instrument can use them, unless the
     // caller says otherwise. One line either way: the columns' absence (or
@@ -705,13 +702,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // peptides): ThermoTOF 0.993 -- effectively Lumos -- but SciexTOF only
     // 0.914, with a tenth of the precursors below 0.64.
     if (instrument == "ThermoTOF")
-    { writeLogWarn_("ThermoTOF carries no trained weights in the shipped MS2 checkpoint; its predictions are "
-                    "effectively Lumos's (median spectral cosine 0.993 at the same NCE). Name Lumos to say so."); }
+    { warn_("ThermoTOF has no trained MS2 weights; its spectra are effectively Lumos's. Use "
+            "-generation:instrument Lumos to say so."); }
     if (instrument == "SciexTOF")
-    { writeLogWarn_("SciexTOF (also TripleTOF and ZenoTOF) carries no trained weights in the shipped MS2 "
-                    "checkpoint, and its predictions are NOT those of Lumos: median spectral cosine 0.914 against "
-                    "Lumos at the same NCE, below 0.64 for a tenth of precursors. Neither has been validated on "
-                    "SCIEX data; name Lumos to get the no-correction baseline instead."); }
+    { warn_("SciexTOF (TripleTOF, ZenoTOF) has no trained MS2 weights; its spectra are NOT those of Lumos and "
+            "are not validated on SCIEX data. Use -generation:instrument Lumos for the uncorrected baseline."); }
 
     struct { const char* name; const char* file; std::string* path; } models[] = {
       {"rt_model", kRtModelFile, &rt_model},
@@ -764,17 +759,17 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (m.path->empty())
       {
         std::ostringstream e;
-        e << "no " << m.name << " configured and " << m.file << " was not found. "
-          << "No tagged OpenMS release ships the PeptDeep models; set \"" << m.name
-          << "\" in the config, or put all three .onnx files in one directory and "
-          << "point DIALIBGEN_MODEL_DIR at it. Searched:";
-        for (const auto& d : modelDirCandidates()) { e << "\n  " << d.string(); }
+        e << m.file << " not found; set DIALIBGEN_MODEL_DIR to the directory holding the three PeptDeep "
+          << "models, or give -generation:" << m.name;
+        if (ODIA::diagnosticsLevel() > 0)
+        { e << ". Searched:"; for (const auto& d : modelDirCandidates()) { e << "\n  " << d.string(); } }
+        else { e << " (-debug 1 lists the directories searched)"; }
         writeLogError_(e.str());
         return INPUT_FILE_NOT_FOUND;
       }
       if (!fs::exists(*m.path, ec))
       {
-        writeLogError_(std::string(m.name) + " does not exist: " + *m.path);
+        writeLogError_("-generation:" + std::string(m.name) + " " + *m.path + " does not exist");
         return INPUT_FILE_NOT_FOUND;
       }
     }
@@ -1001,8 +996,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         }
         catch (const std::system_error& e)
         {
-          writeLogWarn_(std::string("no thread for the streaming writer (") + e.what() +
-                        "); predicting in 0.11.1's order and writing after MS2");
+          warn_(std::string("cannot start the streaming writer (") + e.what() +
+                "); the library is written after prediction instead (same output, more memory)");
         }
       }
       if (sink)
@@ -1036,8 +1031,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         } wait_for_cpu_phases{cpu_phases};
         if (overlap)
         {
-          writeLogInfo_(std::string(p.predict_ion_mobility ? "RT and CCS" : "RT") + " predicted on a thread of their own, " + std::to_string(cpu_threads) +
-                        " sessions, while the GPU predicts MS2 (ODIA_OVERLAP=0: one after the other)");
+          writeLogInfo_(std::string(p.predict_ion_mobility ? "RT and CCS" : "RT") + " predicted on the CPU (" + std::to_string(cpu_threads) +
+                        " sessions) while the GPU predicts MS2");
           cpu_phases = ODIA::parallel::async([&]() {
             try
             {
@@ -1123,12 +1118,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       return ILLEGAL_PARAMETERS;
     }
     catch (const std::exception& e)
-    { writeLogError_(std::string("library generation failed: ") + e.what()); return UNEXPECTED_RESULT; }
+    {
+      const std::string what = e.what();
+      writeLogError_(what.rfind("the GPU is required", 0) == 0 ? what : "library generation failed: " + what);
+      return UNEXPECTED_RESULT;
+    }
 
     if (!device_warnings.empty())
     {
-      writeLogWarn_(std::to_string(device_warnings.size()) + " model(s) requested on the GPU ran on the CPU; "
-                    "recorded as odia.warnings" + std::string(parquet ? "" : " (TSV: log only)"));
+      warn_("part of the prediction ran on the CPU instead of the GPU (see the WARNINGs above)" +
+            std::string(parquet ? "; recorded in the library's metadata (odia.warnings)" : ""));
     }
 
     ODIA::trace::Scope write_phase("write", 0);
@@ -1153,13 +1152,12 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       if (format == ODIA::LibraryFormat::DIANNTSV)
       {
-        writeLogWarn_("TSV cannot carry the recipe: the config is NOT embedded and this "
-                      "file is not cache-eligible. Use .parquet to keep them together.");
+        writeLogInfo_("the TSV does not embed the generation settings; .parquet keeps them with the library");
       }
       else if (!ODIA::LibraryExport::carriesRecipe(format))
       {
-        writeLogWarn_(std::string(ODIA::LibraryExport::name(format)) + " cannot carry the recipe: the config "
-                      "is NOT embedded. Use .parquet to keep them together.");
+        writeLogInfo_(std::string(ODIA::LibraryExport::name(format)) + " does not embed the generation settings; "
+                      ".parquet keeps them with the library");
       }
     }
     catch (const std::exception& e)

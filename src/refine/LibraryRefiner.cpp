@@ -809,8 +809,8 @@ namespace ODIA
     stats.ids_unmatched = obs.size() - used.size();
     stats.match_fraction = obs.empty() ? 0.0 : static_cast<double>(used.size()) / static_cast<double>(obs.size());
     if (stats.matched == 0)
-    { throw std::runtime_error("no reference precursor matched the library. That is a join failure -- check that both "
-                               "sides use the same alkylation state and modification naming -- not an empty run."); }
+    { throw std::runtime_error("no reference precursor matched the library; check that -ids and -in use the same fixed "
+                               "modifications (e.g. carbamidomethyl C) and modification names"); }
     if (p.min_match_fraction > 0.0 && stats.match_fraction < p.min_match_fraction)
     { throw std::runtime_error("only " + std::to_string(used.size()) + " of " + std::to_string(obs.size()) +
                                " reference precursors matched, below the required fraction"); }

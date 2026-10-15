@@ -346,8 +346,8 @@ namespace ODIA
     output.commit();
     if (unknown_mods.load())
     {
-      std::cerr << "warning: " << unknown_mods.load() << " modification tokens have no UniMod accession and "
-                   "were written verbatim; DIA-NN may not read those precursors\n";
+      std::cerr << "WARNING: " << unknown_mods.load() << " modifications have no UniMod accession and were written by "
+                   "name; DIA-NN may skip those precursors\n";
     }
   }
 
@@ -482,10 +482,9 @@ namespace ODIA
       // DIALibGen decoy carries its target's sequence: the writer then marks
       // that peptide and its proteins as decoys. Precursors and transitions
       // keep their own flags.
-      std::cerr << "WARNING: the library has " << decoys << " decoys; DIALibGen decoys carry their target's "
-                   "sequence, so OpenSWATH's peptide and protein tables will mark those targets' peptides and "
-                   "proteins as decoys too. For OpenSWATH, generate with decoys 'none' and run "
-                   "OpenSwathDecoyGenerator.\n";
+      std::cerr << "WARNING: " << decoys << " decoys share their targets' sequences, so OpenSWATH would mark those "
+                   "targets as decoys; for OpenSWATH, generate with -generation:decoys none and run "
+                   "OpenSwathDecoyGenerator\n";
     }
     trace::Scope build_step("build_targeted_experiment", 1);
     build_step.fields().rows = static_cast<std::int64_t>(library.transitionCount());

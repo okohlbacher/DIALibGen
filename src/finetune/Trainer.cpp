@@ -32,6 +32,8 @@
 #include <fstream>
 #include <map>
 #include <limits>
+#include <odia/DeviceRoute.h>
+#include <sstream>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -496,7 +498,12 @@ namespace ODIA::tune
       const bool ccs = p.head == HeadKind::CCS;
     auto range = [](const char* name, double value, double low, double high) {
       if (!std::isfinite(value) || value < low || value > high)
-      { throw std::runtime_error(std::string(name) + " must be finite and in [" + std::to_string(low) + ", " + std::to_string(high) + "]"); }
+      {
+        std::ostringstream m;
+        m << name << " must be a finite number ";
+        if (high == std::numeric_limits<double>::max()) { m << ">= " << low; } else { m << "in [" << low << ", " << high << "]"; }
+        throw std::runtime_error(m.str());
+      }
     };
     range("filter:q_value", p.q_value, 0, 1);
     range("cohort:train_frac", p.train_frac, 0, 1);
@@ -560,7 +567,7 @@ namespace ODIA::tune
     {
       std::error_code ec;
       const auto a = std::filesystem::weakly_canonical(p.model_in, ec), b = std::filesystem::weakly_canonical(p.model_out, ec);
-      if (p.model_out == p.model_in || (!ec && a == b)) { throw std::runtime_error("-out must not be the stock model itself"); }
+      if (p.model_out == p.model_in || (!ec && a == b)) { throw std::runtime_error("-tune_out_models must not be the -tune_models directory (it would overwrite the stock model)"); }
     }
     validateParams(p);
     TuneResult res;
@@ -806,9 +813,14 @@ namespace ODIA::tune
       else { traj << "\t\t\t\t"; }
       traj << '\t' << res.train_seconds << '\t' << res.eval_seconds << '\t' << (is_best ? 1 : 0) << '\t' << stop << '\n';
       traj.flush();
-      log << "epoch " << epoch + 1 << "/" << p.epochs << "  lr " << lr << "  loss " << train_loss << "  updates " << res.updates;
-      if (evaluate) { log << "  val " << selectName(p.select) << " " << selected(vm, p.select) << (is_best ? " *" : ""); }
-      log << "  train " << res.train_seconds << " s\n";
+      // Every epoch is in the trajectory file; the log shows progress every
+      // tenth (every one with -debug 1) and the last.
+      if (ODIA::diagnosticsLevel() > 0 || (epoch + 1) % 10 == 0 || !stop.empty())
+      {
+        log << "epoch " << epoch + 1 << "/" << p.epochs << "  lr " << lr << "  loss " << train_loss << "  updates " << res.updates;
+        if (evaluate) { log << "  val " << selectName(p.select) << " " << selected(vm, p.select) << (is_best ? " *" : ""); }
+        log << "  train " << res.train_seconds << " s\n";
+      }
       if (!stop.empty()) { break; }
     }
     train_step.end();

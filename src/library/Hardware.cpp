@@ -151,16 +151,16 @@ namespace ODIA
       if (topology)
       {
         c.cores = static_cast<unsigned>(cores.size());
-        c.reason = "physical cores of the " + std::to_string(cpus.size()) + " CPUs in the affinity mask";
+        c.reason = "physical cores";
       }
       else
       {
         c.cores = static_cast<unsigned>(cpus.size());
-        c.reason = "CPUs in the affinity mask (no core topology in sysfs)";
+        c.reason = "CPUs (no core topology)";
       }
       if (const unsigned quota = cgroupCpuQuota(); quota > 0 && quota < c.cores)
       {
-        c.reason += ", limited to " + std::to_string(quota) + " by the cgroup CPU quota";
+        c.reason += ", limited by the CPU quota";
         c.cores = quota;
       }
 #elif defined(__APPLE__)
@@ -168,7 +168,7 @@ namespace ODIA
       std::size_t size = sizeof cores;
       if (sysctlbyname("hw.physicalcpu", &cores, &size, nullptr, 0) != 0 || cores < 1) { return c; }
       c.cores = static_cast<unsigned>(cores);
-      c.reason = "hw.physicalcpu";
+      c.reason = "physical cores";
       // Performance and efficiency cores alike by default: chunks are handed
       // out one at a time, so a slower core simply takes fewer of them.
       // -machine:cores performance counts the performance cores only.
@@ -180,13 +180,12 @@ namespace ODIA
         if (g_performance_only.load())
         {
           c.cores = static_cast<unsigned>(performance);
-          c.reason = "hw.perflevel0.physicalcpu (the " + std::to_string(performance) + " performance cores; " +
-                     std::to_string(cores - performance) + " efficiency cores left idle, -machine:cores performance)";
+          c.reason = "performance cores only, -machine:cores performance";
         }
         else
         {
-          c.reason += " (" + std::to_string(performance) + " performance and " + std::to_string(cores - performance) +
-                      " efficiency cores)";
+          c.reason += ": " + std::to_string(performance) + " performance, " + std::to_string(cores - performance) +
+                      " efficiency";
         }
       }
 #elif defined(_WIN32)

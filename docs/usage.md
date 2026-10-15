@@ -338,33 +338,61 @@ an mzML by up to about 1e-7 relative. Builds configured with
 
 ## GPU
 
-Generation runs the RT, MS2 and CCS models on an NVIDIA GPU when the ONNX
-Runtime it links has the CUDA execution provider and a GPU is visible;
-otherwise on the CPU (Apple silicon: see [Apple GPU](#apple-gpu), opt-in).
-Each model prints the device it ended up on:
+With the default `-machine:device auto`, generation picks the fastest route
+that works on the machine and says which, in one line, before predicting:
+
+| machine | MS2 | RT and CCS |
+|---|---|---|
+| Linux/Windows, ONNX Runtime with CUDA, NVIDIA GPU visible, cuDNN 9 found | CUDA | CUDA |
+| the same without cuDNN 9 (a `WARNING` with the fix) | CUDA | CPU, while MS2 runs |
+| Mac (Apple silicon), library of at least 50,000 precursors per CPU thread | Apple GPU (CoreML) | CPU, while MS2 runs |
+| anything else (no GPU, a CPU-only ONNX Runtime, a small library on a Mac) | CPU | CPU |
+
+```text
+device: prediction on CUDA (cuDNN 9.1.0)
+device: MS2 on the Apple GPU (CoreML), RT and CCS on the CPU: 3.4 M precursors, CoreML pays from 800 k (-machine:device cpu to stay on the CPU)
+device: prediction on the CPU: 13 k precursors, the Apple GPU pays only from 400 k (-machine:device coreml to use it anyway)
+```
+
+`-machine:device cpu`, `cuda` (`cuda:N` for device N), `coreml` or `mps` force
+a route (until 0.11.5, `cpu` changed only the training device). Each model
+then prints the device it ended up on:
 
 ```text
 [RT] provider CUDA device 0 sessions 4
 ```
 
+The release packages for Linux ship a CPU-only ONNX Runtime; for the GPU,
+build against a CUDA-enabled ONNX Runtime ([building](building.md)), for
+example conda-forge's `onnxruntime-cpp` `cuda129` build. On such a machine
+without one, the line says that the GPU is not used and why.
+
 Requirements on Linux: an NVIDIA driver for CUDA 12 or later, the CUDA 12
-runtime libraries (cudart, cuBLAS, cuBLASLt) and **cuDNN 9 for CUDA 12**,
-including the unversioned `libcudnn.so`, which ONNX Runtime opens by that
-name. Without cuDNN only the MS2 model (a transformer) runs on the GPU; RT and
-CCS (convolution and LSTM layers) cannot create a CUDA session and run on the
-CPU, which on one H100 makes a whole-proteome library about 2.6 times slower.
+runtime libraries (cudart, cuBLAS, cuBLASLt) and **cuDNN 9 for CUDA 12**
+(`libcudnn.so.9` and its `libcudnn_*.so.9` libraries; ONNX Runtime 1.30 and
+1.31 need no unversioned `libcudnn.so` link: on an H100 RT and CCS ran on CUDA
+with only the `.so.9` files). Before predicting, DIALibGen opens
+`libcudnn.so.9` (else `libcudnn.so`) the way ONNX Runtime does (the loader's
+search: `LD_LIBRARY_PATH`, the run path, the system cache) and checks that it
+is cuDNN 9. Without it only the MS2 model (a transformer)
+runs on the GPU; RT and CCS (convolution and LSTM layers) run on the CPU, on
+a thread of their own while the GPU predicts MS2, and a `WARNING` says why
+and how to fix it, naming a directory where a cuDNN was found off the library
+path (a conda environment, a pip `nvidia-cudnn-cu12` wheel, the CUDA toolkit
+or a system directory: looked at, never loaded from). With RT and CCS on the
+CPU, a whole-proteome library on one H100 took about 2.6 times as long (0.11.3,
+phases in order).
 Install cuDNN system-wide (`apt install libcudnn9-cuda-12 libcudnn9-dev-cuda-12`
 from NVIDIA's CUDA repository) or in user space (`pip install nvidia-cudnn-cu12`
-or conda `cudnn=9 cuda-version=12`), create the `libcudnn.so -> libcudnn.so.9`
-link if the package lacks it, and put that directory on `LD_LIBRARY_PATH`.
+or conda `cudnn=9 cuda-version=12`), and put that directory on
+`LD_LIBRARY_PATH`.
 
 When a GPU exists but a model cannot use it, DIALibGen prints a `WARNING`
-naming the model, the reason (for example `dlopen failed for libcudnn.so`) and
-the fix, and records it in Parquet output as the `odia.warnings` metadata key
-(tune: `device_warnings` in the provenance). A machine without a GPU, or a
-CPU-only ONNX Runtime, runs on the CPU without a warning.
-`-machine:require_gpu` turns every CPU fallback, that case included, into an
-error.
+naming the model, the reason and the fix, and records it in Parquet output as
+the `odia.warnings` metadata key (tune: `device_warnings` in the provenance).
+A machine without a GPU, or a CPU-only ONNX Runtime, runs on the CPU without a
+warning. `-machine:require_gpu` asks for the GPU for every model and turns
+every CPU fallback, those cases included, into an error.
 
 Each model runs `-machine:gpu_sessions` CUDA sessions per GPU (default 4).
 Each session has its own stream, so the host-side encoding of one batch
@@ -416,15 +444,48 @@ does the same for prediction and additionally trains on the GPU
 (`-mode tune`, Metal Performance Shaders through LibTorch). Training on the
 GPU is the default on Apple silicon: `-machine:device auto` (the default)
 resolves to `mps` when LibTorch has the back end, and `-machine:device cpu`
-is the way back. Prediction on the GPU stays opt-in (`coreml` or `mps`):
-CoreML loses on small inputs, where loading the compiled shapes dominates,
-and its MS2 output agrees with the CPU's to float rounding rather than
-exactly, so a library made with default settings is still the CPU library.
+is the way back. Prediction (`generate`) uses the GPU by default from 0.12
+on, for a library large enough: loading the compiled shapes from the cache
+costs 15-30 s (up to 60 s when macOS has to read them from disk again), and
+for a small library the CPU is done sooner. Whole `generate` runs on an M4
+Max (Astral settings, cache warm, one run each, 0.12 development build,
+`benchmark/laptop/breakeven` in the project folder):
+
+| precursors | threads | CPU | CoreML |
+|---|---|---|---|
+| 14 k | 1 | 6.8 s | 15.2 s |
+| 111 k | 1 | 48.9 s | 24.6 s |
+| 111 k | 4 | 15.6 s | 56.2 s (probably shapes read from disk again) |
+| 482 k | 4 | 65.6 s | 31.7 s |
+| 14 k | 16 | 1.4 s | 15.3 s |
+| 111 k | 16 | 6.8 s | 39.6 s |
+| 482 k | 16 | 33.7 s | 33.7 s |
+| 1.64 M | 16 | 116.4 s | 67.9 s |
+| 3.40 M | 16 | 251.1 s | 133.1 s |
+| 6.96 M | 16 | 678.6 s | 274.6 s |
+
+The break-even grows with the CPU threads, about 40 k precursors at 1
+thread, 230 k at 4 and 480 k at 16. `-machine:device auto` therefore runs
+MS2 on CoreML from 50,000 precursors per thread (`-threads 16` or `0`:
+800 k; `-threads 4`: 200 k), a margin for a cold page cache
+(`ODIA_COREML_MIN_PRECURSORS` sets the number), after the probe below, and
+RT and CCS on the CPU without a warning. **A default library on Apple silicon then agrees with the CPU's to
+float rounding, not byte for byte** (below; the `coreml_matches_cpu` test
+holds RT, 1/K0 and CCS to 0 and intensities to 1e-4).
+`-machine:device cpu` keeps the CPU library. The first CoreML run after a
+restart or a long pause can take 40 s longer while macOS loads Core ML.
 
 ```text
-[RT] provider CPU device -1 sessions 12
-WARNING: RT: peptdeep_rt_dynamic.onnx runs on the CPU although CoreML was requested: CoreML has no operator for LSTM x2: ...
-[MS2] provider CoreML units CPUAndGPU concurrent 4 (on the CPU: OneHot)
+device: MS2 on the Apple GPU (CoreML), RT and CCS on the CPU: 3.4 M precursors, CoreML pays from 800 k (-machine:device cpu to stay on the CPU)
+[MS2] provider CoreML units CPUAndGPU concurrent 4
+[RT] provider CPU device -1 sessions 8
+```
+
+With `-machine:device coreml` (or `mps`) every model asks for CoreML, whatever
+the library's size, and RT and CCS fall back with a warning:
+
+```text
+WARNING: RT: runs on the CPU, not CoreML: CoreML has no operator for LSTM x2. Fix: none needed: ...
 ```
 
 What runs where, and why:
@@ -544,6 +605,21 @@ What runs where, and why:
   `reproducibility`); the tuned weights differed by an L2 norm of 0.001 of a
   total change of 8.62 in that run. `-tune_predict_gpu` re-predicts through
   CoreML, which for RT and CCS means the CPU path with the warning above.
+
+## Messages and diagnostics
+
+The log says what was done and, for anything that went wrong, the cause and
+the fix, in a line or two. Warnings start with `WARNING:` (also those of the
+TOPP log: `-log`). The `[RT]`, `[MS2]` and `[CCS]` provider lines keep their
+form (`[MS2] provider CUDA device 0 sessions 4`) for scripts.
+
+`-debug 1` (or the environment variable `ODIA_VERBOSE=1`, for the library
+used without the tool) adds the details for diagnosis: the device checks
+(ONNX Runtime's providers, whether an NVIDIA GPU is visible, the cuDNN
+loader's result and the directories looked in), ONNX Runtime's own warnings
+and full error texts, the CoreML node placement and per-run shape summary,
+the directories searched for the models and the iRT standards, and the iRT
+line's coefficients.
 
 ## Files and provenance
 

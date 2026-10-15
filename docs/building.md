@@ -47,8 +47,8 @@ Portable releases bundle CPU training. A source build linked to CUDA-enabled
 LibTorch can use `-machine:device cuda:0`; provide the matching CUDA and cuDNN
 runtime libraries. GPU prediction additionally needs an ONNX Runtime build
 with the CUDA execution provider (for example conda-forge `onnxruntime-cpp`
-built for CUDA 12) and, at run time, cuDNN 9 for CUDA 12 with the unversioned
-`libcudnn.so`: without it the RT and CCS models fall back to the CPU with a
+built for CUDA 12) and, at run time, cuDNN 9 for CUDA 12 (`libcudnn.so.9`)
+on the library path: without it the RT and CCS models run on the CPU, with a
 warning (see [GPU](usage.md#gpu)). The standard CPU archive is not a CUDA
 bundle, and no package bundles cuDNN.
 
@@ -65,9 +65,9 @@ cmake ... -DTorch_DIR=$LIBTORCH/share/cmake/Torch \
 `TORCH_CUDA_ARCH_LIST` skips LibTorch's GPU-detection test project, which
 otherwise inherits this project's C++23 setting as a CUDA dialect nvcc does not
 know. That LibTorch ships the complete cuDNN 9 for CUDA 12 (`lib/libcudnn*.so.9`),
-so cuDNN stays on for training. ONNX Runtime can use the same copy: put a
-`libcudnn.so -> $LIBTORCH/lib/libcudnn.so.9` link in a directory on
-`LD_LIBRARY_PATH`, and both libraries share one loaded cuDNN.
+so cuDNN stays on for training. ONNX Runtime can use the same copy: put
+`$LIBTORCH/lib` on `LD_LIBRARY_PATH`, and both libraries share one loaded
+cuDNN.
 
 Linux ARM64 and Windows use different native runtime packages. The
 [release checks](testing.md#release-verification) require actual CPU training

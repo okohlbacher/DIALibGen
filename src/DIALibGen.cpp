@@ -31,7 +31,7 @@ DIALibGen::DIALibGen()
 
 void DIALibGen::registerOptionsAndFlags_()
 {
-  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged; prepare: macOS, compile the MS2 model's CoreML shapes for -generation:peptide_length into the cache once (~/Library/Caches/DIALibGen/coreml), so that the first -machine:device coreml generate does not.", false);
+  registerStringOption_("mode", "<mode>", "generate", "generate: FASTA to library; refine: apply observed values; tune: train RT/CCS models and re-predict the whole library; convert: rewrite a library in the format of -out, content unchanged; prepare: macOS, compile the MS2 model for the Apple GPU (CoreML) once, so that the first generate on it starts fast.", false);
   setValidStrings_("mode", {"generate", "refine", "tune", "convert", "prepare"});
   registerInputFile_("in", "<file>", "", "Protein FASTA (generate) or spectral library (refine/tune/convert).", false);
   setValidFormats_("in", {"fasta", "parquet", "tsv"}, false);
@@ -279,9 +279,8 @@ int main(int argc, const char** argv)
 #ifndef ENABLE_TDL
   if (want_descriptor && descriptor == DescriptorRequest::CwlOrJson)
   {
-    std::cerr << "DIALibGen: -write_cwl and -write_json need an OpenMS built with\n"
-                 "                     ENABLE_TDL=ON; the OpenMS this binary links has it off.\n"
-                 "                     Use -write_ctd instead." << std::endl;
+    std::cerr << "DIALibGen: -write_cwl and -write_json need an OpenMS built with ENABLE_TDL=ON (this one is not); "
+                 "use -write_ctd" << std::endl;
     return OpenMS::TOPPBase::UNKNOWN_ERROR;
   }
 #endif

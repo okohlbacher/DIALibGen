@@ -390,19 +390,16 @@ namespace
     std::string lower = reason;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const char* docs = "https://github.com/okohlbacher/DIALibGen/blob/main/docs/usage.md#gpu";
+    const char* docs = "docs/usage.md#gpu";
     if (lower.rfind("coreml", 0) == 0)
     {
-      return std::string("this model runs on the CPU path (no slower than without -machine:device coreml); "
-                         "see https://github.com/okohlbacher/DIALibGen/blob/main/docs/usage.md#apple-gpu");
+      return lower.find("lstm") != std::string::npos
+               ? "none needed: this model runs on the CPU as fast as without CoreML (-machine:device auto does not ask)"
+               : "none needed: the model runs on the CPU (-machine:device cpu does not ask for CoreML)";
     }
     if (lower.find("cudnn") != std::string::npos)
-    {
-      return std::string("install cuDNN 9 for CUDA 12, including the unversioned libcudnn.so "
-                         "(apt: libcudnn9-cuda-12 libcudnn9-dev-cuda-12; or pip nvidia-cudnn-cu12 "
-                         "plus a libcudnn.so symlink, on LD_LIBRARY_PATH); see ") + docs;
-    }
-    return std::string("check the NVIDIA driver and the CUDA 12 runtime libraries (cuBLAS, cuDNN 9); see ") + docs;
+    { return std::string("put cuDNN 9 for CUDA 12 (libcudnn.so.9) on LD_LIBRARY_PATH (") + docs + ")"; }
+    return std::string("check the NVIDIA driver and the CUDA 12 libraries (cuBLAS, cuDNN 9) (") + docs + ")";
   }
 
   /// Numbers predictor calls and predictor instances in the trace (tracing only).
@@ -819,10 +816,13 @@ namespace ODIA
           }
           if (!heavy.empty())
           {
-            throw std::runtime_error("CoreML has no operator for " + heavy + ": ONNX Runtime keeps " +
-                                     std::to_string(placement.cpu_ops.size()) + " of the model's nodes on the CPU (" +
-                                     std::to_string(placement.coreml_nodes) + " CoreML partition" +
-                                     (placement.coreml_nodes == 1 ? "" : "s") + ")");
+            if (diagnosticsLevel() > 0)
+            {
+              std::cerr << "diagnostics: " << model_path << ": ONNX Runtime keeps " << placement.cpu_ops.size()
+                        << " nodes on the CPU (" << heavy << (light.empty() ? "" : ", " + light) << "), "
+                        << placement.coreml_nodes << " CoreML partition(s)\n";
+            }
+            throw std::runtime_error("CoreML has no operator for " + heavy);
           }
           if (!light.empty()) { impl_->note = "on the CPU: " + light; }
           impl_->provider = Provider::CoreML;
@@ -929,13 +929,17 @@ namespace ODIA
       if (gpu.require)
       {
         throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model +
-                                 " cannot run on " + wanted + ": " + reason + ". Fix: " + fallbackFix(reason));
+                                 " cannot run on " + wanted + ": " + reason + ". Fix: " + fallbackFix(reason) +
+                                 ", or drop -machine:require_gpu");
       }
       // A silent fall back to CPU turns a 2.5-minute library into a
       // 6.5-minute one (H100, whole proteome) with nothing in the log to
       // say why: the caller prints and records this.
       if (gpu_present)
-      { impl_->fallback = model + " runs on the CPU although " + wanted + " was requested: " + reason + ". Fix: " + fallbackFix(reason); }
+      {
+        impl_->fallback = "runs on the CPU, not " + std::string(wanted) + ": " + reason + ". Fix: " + fallbackFix(reason);
+        if (diagnosticsLevel() > 0) { std::cerr << "diagnostics: " << model_path << " on the CPU: " << reason << "\n"; }
+      }
     }
 
     if (impl_->provider == Provider::CUDA && gpu_present && !gpu.devices.empty())
@@ -945,7 +949,7 @@ namespace ODIA
       const std::string model = std::filesystem::path(model_path).filename().string();
       if (gpu.require)
       { throw std::runtime_error("the GPU is required (-machine:require_gpu) but " + model + " cannot use " + reason); }
-      impl_->fallback = model + " skips an unusable GPU: " + reason;
+      impl_->fallback = "skips an unusable GPU (" + reason + "); check -machine:gpu_devices";
     }
 
     Ort::AllocatorWithDefaultOptions allocator;
@@ -1341,8 +1345,10 @@ namespace ODIA
         configureSession(cpu, 1);
         impl_->session = std::make_unique<Ort::Session>(impl_->env, impl_->model_bytes.data(), impl_->model_bytes.size(), cpu);
       }
-      std::cerr << "WARNING: " << impl_->kind << ": CoreML could not build the " << rows << "x" << length
-                << " shape (" << conciseOrtError(e.what()) << "); batches of that shape run on the CPU\n";
+      // rows x tokens; a peptide's tokens are its residues and two termini.
+      std::cerr << "WARNING: " << impl_->kind << ": CoreML cannot compile batches of " << rows << " peptides of "
+                << length - 2 << " residues; those run on the CPU (same output, slower)\n";
+      if (diagnosticsLevel() > 0) { std::cerr << "diagnostics: " << impl_->kind << ": " << e.what() << "\n"; }
       impl_->coreml_cpu_fallback[key] = true;
       return *impl_->session;
     }
@@ -1566,14 +1572,14 @@ namespace ODIA
       summary << std::fixed << std::setprecision(1) << impl_->coreml_builds << " shapes built in "
               << impl_->coreml_build_seconds << " s (summed), " << rows << " rows run, " << padded << " padding rows ("
               << (rows + padded > 0 ? 100.0 * static_cast<double>(padded) / static_cast<double>(rows + padded) : 0.0) << " %)";
-      if (rows > 0) { std::cerr << "[" << impl_->kind << "] CoreML: " << summary.str() << "\n"; }
+      if (rows > 0 && diagnosticsLevel() > 0) { std::cerr << "[" << impl_->kind << "] CoreML: " << summary.str() << "\n"; }
       if (trace::enabled()) { trace::note(std::string("predictor.") + impl_->kind + ".coreml_sessions", summary.str()); }
       // The sessions and the builders are done with the cache: the least
       // recently used shapes of other models go when it is over the cap.
       if (!impl_->coreml_cache.empty())
       {
         const std::size_t removed = pruneCoremlCache(impl_->coreml_cache.parent_path(), impl_->coreml_cache);
-        if (removed > 0)
+        if (removed > 0 && diagnosticsLevel() > 0)
         { std::cerr << "[" << impl_->kind << "] CoreML: removed " << removed << " least recently used compiled shape(s) of other models from "
                     << impl_->coreml_cache.parent_path().string() << " (cap ODIA_COREML_CACHE_MAX)\n"; }
       }

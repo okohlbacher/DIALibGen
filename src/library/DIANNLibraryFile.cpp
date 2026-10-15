@@ -672,9 +672,8 @@ namespace ODIA
     builder.finish();
     if (builder.outOfRange())
     {
-      std::cerr << "warning: dropped " << builder.outOfRange()
-                << " transitions whose fragment ordinal or charge cannot describe "
-                   "a fragment of the stated peptide\n";
+      std::cerr << "WARNING: dropped " << builder.outOfRange()
+                << " transitions with a fragment number or charge impossible for their peptide\n";
     }
     if (builder.reopened())
     {
@@ -879,9 +878,8 @@ namespace ODIA
     builder.finish();
     if (builder.outOfRange())
     {
-      std::cerr << "warning: dropped " << builder.outOfRange()
-                << " transitions whose fragment ordinal or charge cannot describe "
-                   "a fragment of the stated peptide\n";
+      std::cerr << "WARNING: dropped " << builder.outOfRange()
+                << " transitions with a fragment number or charge impossible for their peptide\n";
     }
     if (builder.reopened())
     {
@@ -1791,8 +1789,8 @@ namespace ODIA
     {
       if (unknown_mods)
       {
-        std::cerr << "warning: " << unknown_mods << " modification tokens have no UniMod accession and "
-                     "were written verbatim; DIA-NN may not read those precursors\n";
+        std::cerr << "WARNING: " << unknown_mods << " modifications have no UniMod accession and were written by "
+                     "name; DIA-NN may skip those precursors\n";
       }
     }
   } // namespace

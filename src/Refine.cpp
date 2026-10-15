@@ -315,45 +315,42 @@ void DIALibGen::registerRefinementOptions_()
 
     registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
     registerStringOption_("machine:device", "<dev>", "auto",
-                          "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU); auto is mps on Apple silicon when this "
-                          "LibTorch has it (not bit-identical to CPU training; the provenance records the device), else cpu. "
-                          "Prediction (generate; tune with -tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU "
-                          "through ONNX Runtime's CoreML provider (RT and CCS stay on the CPU: CoreML has no LSTM); auto, cpu "
-                          "and cuda keep the default, CUDA when this ONNX Runtime has it and a GPU is visible, else the CPU", false);
+                          "Prediction (generate): auto picks the fastest route that works here and says which: CUDA when "
+                          "this ONNX Runtime has it and a GPU is visible (RT and CCS only with cuDNN 9), on a Mac the Apple GPU "
+                          "(CoreML) for MS2 of a library large enough to pay for it, else the CPU; cpu, cuda[:N], coreml (or "
+                          "mps) force one. Fine-tuning: cpu, cuda[:N] or mps; auto is mps on Apple silicon when this LibTorch "
+                          "has it (not bit-identical to CPU training), else cpu. -tune_predict_gpu re-predicts RT and CCS on "
+                          "CUDA when it can", false);
     registerStringOption_("machine:coreml_units", "<units>", "gpu",
-                          "CoreML compute units: gpu (CPU and GPU; measured fastest on an M4 Max), all (Core ML's choice, "
-                          "Neural Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);
+                          "CoreML compute units: gpu (CPU and GPU; the default, fastest), all (Core ML's choice, Neural "
+                          "Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);
     setValidStrings_("machine:coreml_units", {"gpu", "all", "ane", "cpu"});
     registerIntOption_("machine:threads", "<n>", 0,
-                       "CPU threads used for training. The tuned weights depend on the count, which the provenance records. "
-                       "0: the platform default, 16 on Linux and Windows and 8 on macOS (where 16 was measured 1.5x slower per "
-                       "epoch; -machine:threads 16 reproduces a Linux or Windows model)", false);
+                       "CPU threads for training (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend on the "
+                       "count; the provenance records it, and -machine:threads 16 reproduces a Linux model on a Mac", false);
     registerStringOption_("machine:cores", "<which>", "all",
-                          "macOS: the cores -threads 0 counts. all: every physical core (hw.physicalcpu); performance: the "
-                          "performance cores only (hw.perflevel0.physicalcpu), which saves CPU energy, not time (measured: "
-                          "-3 to +16 % wall, 18 % less CPU time). No effect elsewhere. Does not change the output", false);
+                          "macOS: the cores -threads 0 counts. all: every physical core; performance: the performance cores "
+                          "only, which saves energy, not time. No effect elsewhere. Does not change the output", false);
     setValidStrings_("machine:cores", {"all", "performance"});
     registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
     registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
     registerStringOption_("machine:tf32", "<true/false>", "false",
                           "TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU "
-                          "libraries to float rounding. On: faster (one H100, whole proteome: ~25 s less), but about 1 % "
-                          "of precursors select a different fragment set and CCS moves by up to ~1.9 A^2.", false);
+                          "libraries to float rounding. On: faster, but about 1 % of precursors select a different "
+                          "fragment set (docs/usage.md#gpu)", false);
     setValidStrings_("machine:tf32", {"true", "false"});
     registerIntOption_("machine:gpu_sessions", "<n>", 4,
-                       "ONNX Runtime CUDA sessions per GPU and model, each with its own stream. Measured on an H100: "
-                       "2-4 give RT and CCS +30-45 %, 8 is slower. On CoreML: concurrent batches on the shared compiled "
-                       "model (2 gain about 10 % over 1). Does not change the output.", false);
+                       "CUDA: ONNX Runtime sessions per GPU and model, each with its own stream (2-4 are fastest). "
+                       "CoreML: concurrent batches. Does not change the output.", false);
     setMinInt_("machine:gpu_sessions", 1);
     setMaxInt_("machine:gpu_sessions", 16);
     registerIntList_("machine:gpu_devices", "<ids>", OpenMS::IntList(),
                      "CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible "
                      "device that works. Does not change the output.", false);
     setMinInt_("machine:gpu_devices", 0);
-    registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU when its CUDA session cannot be created "
-                                         "(missing cuDNN 9 for CUDA 12, no visible GPU, a CPU-only ONNX Runtime) or when CoreML "
-                                         "keeps part of it on the CPU (always RT and CCS). Without it such a fallback is a WARNING "
-                                         "in the log and in the output's provenance.");
+    registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU: every model asks for the GPU, and "
+                                         "one that cannot have it (no GPU, no cuDNN 9, a CPU-only ONNX Runtime; on a Mac RT "
+                                         "and CCS always) is an error, not a WARNING.");
 
     registerTOPPSubsection_("search", "Built-in identification with -run (experimental): candidates, decoys, extraction, "
                                       "calibration and the run-level guards. See docs/design/built-in-identification.md");
@@ -1109,7 +1106,14 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       { writeLogWarn_(std::to_string(st.lib_unknown_mod_tokens) + " library modification tokens could not be resolved to UniMod; passed through verbatim and may fail the reference join"); }
       }
     }
-    catch (const std::exception& e) { writeLogError_(std::string("refine: ") + e.what()); keptReport(); return UNEXPECTED_RESULT; }
+    catch (const std::exception& e)
+    {
+      // A search failure names its stage already ("search: ...").
+      const std::string what = e.what();
+      writeLogError_(what.rfind("search", 0) == 0 ? what : "refine: " + what);
+      keptReport();
+      return UNEXPECTED_RESULT;
+    }
 
     if (!tune_only)
     {
@@ -1152,16 +1156,16 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                     std::to_string(st.intensity_loss_bearing) + " loss-bearing; " + std::to_string(st.intensity_observed_not_in_library) +
                     " report fragments the library never carried were NOT added");
       if (st.intensity_loss_bearing)
-      { writeLogWarn_(std::to_string(st.intensity_loss_bearing) + " neutral-loss transitions could not be matched: the report has "
-                      "no loss field. Under the default restriction they were dropped from replaced precursors."); }
+      { warn_(std::to_string(st.intensity_loss_bearing) + " neutral-loss transitions have no observed intensity (the "
+              "report has no loss field) and were dropped from the replaced precursors"); }
       if (!p.filter)
-      { writeLogWarn_("MIXED INTENSITY PROVENANCE: matched precursors carry this run's observed intensities, unmatched ones "
-                      "carry MS2-model predictions (-allow_mixed_intensity)."); }
+      { warn_("mixed intensities: matched precursors carry observed, the others predicted intensities "
+              "(-allow_mixed_intensity)"); }
     }
     if (p.write_rt && st.rt_written)
     {
-      writeLogInfo_("NOTE: the RT column now holds the REFERENCE RUN's observed retention times (unit: " +
-                    std::string(rtUnitName(p.rt_unit)) + "), not iRT. This library is a per-run object.");
+      writeLogInfo_("RT now holds the reference run's observed retention times (" + std::string(rtUnitName(p.rt_unit)) +
+                    "), not iRT: use this library for that run's gradient");
     }
     }
 

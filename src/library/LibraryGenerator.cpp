@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <odia/LibraryGenerator.h>
+#include <odia/DeviceRoute.h>
 #include <odia/Hardware.h>
 #include <odia/IonLadder.h>
 #include <odia/PeptDeepEncoder.h>
@@ -904,14 +905,17 @@ namespace ODIA
 
   namespace
   {
-    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu)
+    /// @p quiet: a helper predictor (the iRT fit) whose fallback the RT
+    /// line reports already: its line only in the verbose log.
+    void writeDeviceLine(const char* stage, const PeptDeepPredictor& p, const GpuOptions& gpu, bool quiet = false)
     {
+      if (quiet && diagnosticsLevel() == 0) { return; }
       const bool coreml = p.provider() == PeptDeepPredictor::Provider::CoreML;
       std::cerr << "[" << stage << "] provider "
                 << (coreml ? "CoreML" : p.provider() == PeptDeepPredictor::Provider::CUDA ? "CUDA" : "CPU");
       if (coreml) { std::cerr << " units " << gpu.coreml_units << " concurrent " << p.sessionCount(); }
       else { std::cerr << " device " << p.device() << " sessions " << p.sessionCount(); }
-      if (!p.providerNote().empty()) { std::cerr << " (" << p.providerNote() << ")"; }
+      if (!p.providerNote().empty() && diagnosticsLevel() > 0) { std::cerr << " (" << p.providerNote() << ")"; }
       // Name every device when the sessions span several.
       const auto& devices = p.sessionDevices();
       if (std::any_of(devices.begin(), devices.end(), [&](int d) { return d != p.device(); }))
@@ -922,7 +926,7 @@ namespace ODIA
       std::cerr << "\n";
       // Loud, and recorded: the provider line alone was the only sign that RT
       // and CCS had silently left the GPU.
-      if (!p.fallbackReason().empty())
+      if (!p.fallbackReason().empty() && !quiet)
       {
         const std::string warning = std::string(stage) + ": " + p.fallbackReason();
         std::cerr << "WARNING: " << warning << "\n";
@@ -1509,7 +1513,7 @@ namespace ODIA
     PeptDeepPredictor predictor(rt_model_path, prefer_gpu, 0, 1, -1, one_session);
     // State the device: a silent CPU fallback turns a 4-minute stage
     // into a 25-minute one with nothing in the log to explain it.
-    writeDeviceLine("IRT-FIT", predictor, gpu);
+    writeDeviceLine("IRT-FIT", predictor, gpu, true);
     // Tolerate a standard that cannot be encoded rather than abandoning the
     // calibration: with eleven points, losing one to an exotic modification
     // should cost precision, not the whole line. Their entries come back NaN

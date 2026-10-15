@@ -5,3 +5,6 @@ test/odia-core/** text eol=lf
 third_party/** -text
 # Binary test fixtures.
 test/data/mzpeak/** binary
+# The instrument defaults: the recipe records each file's FNV-1a64, which must
+# not depend on the platform's checkout.
+data/instruments/** text eol=lf

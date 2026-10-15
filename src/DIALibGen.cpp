@@ -7,6 +7,7 @@
 #include <OpenMS/APPLICATIONS/ParameterInformation.h>
 #include <odia/AtomicFile.h>
 #include <odia/DIANNLibraryFile.h>
+#include <odia/DeviceRoute.h>
 #include <odia/Hardware.h>
 #include <odia/LibraryExport.h>
 #include <odia/Trace.h>
@@ -73,13 +74,15 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     }
   }
   const std::string mode = getStringOption_("mode");
+  ODIA::setDiagnosticsLevel(debug_level_);
   const auto& parameters = getParam_();
   // Before anything counts the cores: -threads 0 on macOS may mean the
   // performance cores only (every mode; it changes no output).
   ODIA::preferPerformanceCores(getStringOption_("machine:cores") == "performance");
   // Arrow's pools follow -threads, not the hardware-thread count.
   try { ODIA::DIANNLibraryFile::useThreads(static_cast<unsigned>(std::max(0, getIntOption_("threads")))); }
-  catch (const std::exception& e) { writeLogWarn_(std::string("cannot size Arrow's thread pools: ") + e.what()); }
+  catch (const std::exception& e)
+  { warn_(std::string("cannot apply -threads to the Parquet reader and writer (") + e.what() + "); using their default"); }
   // Inspect the raw path before TOPP's output getter can probe a dangling symlink.
   const std::string write_config = parameters.getValue("write_config").toString();
   if (!write_config.empty() && (fs::exists(write_config) || fs::is_symlink(write_config)))
@@ -169,14 +172,20 @@ ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
   gpu.require = getFlag_("machine:require_gpu");
   gpu.tf32 = getStringOption_("machine:tf32") == "true";
   gpu.sessions_per_device = getIntOption_("machine:gpu_sessions");
-  // The Apple GPU is opt-in for prediction: CoreML runs MS2 only (no LSTM
-  // operator) and to float rounding, not exactly. mps names the training
-  // backend; its re-prediction (-tune_predict_gpu) goes through CoreML too.
+  // CoreML when asked for (generate decides per model, ODIA::chooseDeviceRoute).
+  // mps names the training backend; its re-prediction (-tune_predict_gpu)
+  // goes through CoreML too.
   const std::string device = getStringOption_("machine:device");
   gpu.coreml = device == "coreml" || device == "mps";
   const std::string units = getStringOption_("machine:coreml_units");
   gpu.coreml_units = units == "all" ? "ALL" : units == "ane" ? "CPUAndNeuralEngine" : units == "cpu" ? "CPUOnly" : "CPUAndGPU";
   for (const int device : getIntList_("machine:gpu_devices")) { gpu.devices.push_back(device); }
+  // cuda:N names the device for prediction too, unless -machine:gpu_devices does.
+  if (gpu.devices.empty() && device.starts_with("cuda:"))
+  {
+    try { gpu.devices.push_back(std::stoi(device.substr(5))); }
+    catch (const std::exception&) {}   // the trainer refuses the spelling
+  }
   gpu.warnings = warnings;
   return gpu;
 }

@@ -32,6 +32,9 @@ protected:
   /// GPU settings for prediction from -machine:*; warnings collects CPU fallbacks.
   ODIA::GpuOptions gpuOptions_(std::vector<std::string>* warnings);
   nlohmann::json generationValue_(const std::string& key, const nlohmann::json& value);
+  /// A warning in the tool's log, as "WARNING: <text>" (the prefix that the
+  /// library's own warnings carry, and that scripts look for).
+  void warn_(const std::string& text) const { writeLogWarn_("WARNING: " + text); }
   std::set<std::string> supplied_;
   std::set<std::string> refinement_options_;
 };

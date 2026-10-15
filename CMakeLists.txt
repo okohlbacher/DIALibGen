@@ -125,6 +125,7 @@ add_library(odia_library STATIC
   src/predict/PeptDeepPredictor.cpp
   src/predict/CoreMLSupport.cpp
   src/predict/OrtEnv.cpp
+  src/predict/DeviceRoute.cpp
   src/library/Trace.cpp
   src/library/Hardware.cpp
 )
@@ -147,7 +148,8 @@ target_include_directories(odia_library SYSTEM BEFORE PUBLIC
 target_link_libraries(odia_library PUBLIC
   OpenMS
   ${DIALIBGEN_ARROW_TARGET} ${DIALIBGEN_PARQUET_TARGET}
-  ONNXRuntime::ONNXRuntime)
+  ONNXRuntime::ONNXRuntime
+  ${CMAKE_DL_LIBS})   # the cuDNN check (src/predict/DeviceRoute.cpp)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(odia_library PUBLIC OpenMP::OpenMP_CXX)
 endif()

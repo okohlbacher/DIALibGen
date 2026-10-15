@@ -3,6 +3,7 @@
 
 #include <odia/PeptDeepPredictor.h>
 
+#include <odia/DeviceRoute.h>
 #include <odia/Hardware.h>
 #include <odia/PeptDeepEncoder.h>
 #include <odia/Trace.h>
@@ -83,31 +84,13 @@ namespace
            what.find("CUDA driver version is insufficient") != std::string::npos;
   }
 
-  /// Whether an NVIDIA GPU can be visible to this process at all: not when
-  /// CUDA_VISIBLE_DEVICES hides every device, and on Linux only with the
-  /// NVIDIA kernel driver loaded. Elsewhere assumed, so a failure there still
-  /// warns.
-  bool nvidiaGpuVisible()
-  {
-    if (const char* visible = std::getenv("CUDA_VISIBLE_DEVICES"); visible != nullptr)
-    {
-      const std::string_view v(visible);
-      if (v.empty() || v == "-1" || v == "none" || v == "NoDevFiles") { return false; }
-    }
-#if defined(__linux__)
-    std::error_code ec;
-    return std::filesystem::exists("/proc/driver/nvidia/version", ec);
-#else
-    return true;
-#endif
-  }
-
   /// ONNX Runtime's message without the source path, function signature and
   /// status code it prefixes: "... [ONNXRuntimeError] : 9 : NOT_IMPLEMENTED :
   /// cuDNN is unavailable ...: dlopen failed for libcudnn.so: ..." keeps the
   /// part after the last " : ", which is what a user can act on.
   std::string conciseOrtError(const std::string& what)
   {
+    if (what.find("cuDNN is unavailable") != std::string::npos) { return "no cuDNN 9 (libcudnn.so.9) on the library path"; }
     if (what.find("[ONNXRuntimeError]") == std::string::npos) { return what; }
     const auto last = what.rfind(" : ");
     return last == std::string::npos ? what : what.substr(last + 3);

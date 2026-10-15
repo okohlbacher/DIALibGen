@@ -4,6 +4,7 @@
 #include "DIALibGen.h"
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
+#include <odia/DeviceRoute.h>
 #include <odia/Library.h>
 #include <odia/LibraryExport.h>
 #include <odia/LibraryGenerator.h>
@@ -875,6 +876,25 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       for (const auto& [name, count] : st.variable_modification_precursors)
       { writeLogInfo_("variable modification '" + name + "': " + std::to_string(count) + " precursors"); }
 
+      // Where each model runs: -machine:device, and for auto what this
+      // machine offers and the library's size. One line, and a WARNING with
+      // the fix when a GPU is there but RT and CCS cannot use it.
+      const ODIA::DeviceCaps caps = ODIA::probeDeviceCaps();
+      if (ODIA::diagnosticsLevel() > 0) { for (const auto& line : caps.diagnostics) { writeLogInfo_("device check: " + line); } }
+      const ODIA::DeviceRoute route = ODIA::chooseDeviceRoute(getStringOption_("machine:device"), gpu.require, caps,
+                                                              library.precursorCount(),
+                                                              ODIA::coremlMinPrecursors(threads == 0 ? ODIA::physicalCores()
+                                                                                         : std::min(threads, ODIA::physicalCores())),
+                                                              p.predict_ion_mobility);
+      writeLogInfo_("device: " + route.summary);
+      if (!route.warning.empty())
+      {
+        warn_(route.warning);
+        device_warnings.push_back(route.warning);
+      }
+      ODIA::GpuOptions lstm_gpu = gpu;
+      lstm_gpu.coreml = route.lstm_coreml;
+
       // Sessions of the CPU phases: all of -threads, or fewer while they
       // overlap the GPU's MS2 phase (below).
       unsigned cpu_threads = threads;
@@ -882,11 +902,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       // (written at once on the main thread, collected on the CPU thread).
       const auto rtPhase = [&](const std::function<void(const std::string&)>& info) {
         if (const auto miss = ODIA::LibraryGenerator::predictRetentionTimes(
-              library, rt_model, true, cpu_threads, p.free_cysteine_rt_correction, gpu); miss)
+              library, rt_model, route.lstm_gpu, cpu_threads, p.free_cysteine_rt_correction, lstm_gpu); miss)
         {
-          throw PhaseFailure(UNEXPECTED_RESULT, std::to_string(miss) + " precursors have no predicted RT. "
-                             "Refusing rather than shipping a library with NaN retention "
-                             "times, which extracts from nowhere and looks like a search bug.");
+          throw PhaseFailure(UNEXPECTED_RESULT, std::to_string(miss) + " precursors have no predicted RT (a "
+                             "modification the RT model cannot encode?); no library written");
         }
         if (irt_rescale)
         {
@@ -895,25 +914,24 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           if (standards.empty())
           {
             std::ostringstream e;
-            e << "no iRT standards found; pass -irt_standards. Searched:";
-            for (const auto& d : dataDirCandidates()) { e << "\n  " << (d / "irt_standards.tsv").string(); }
+            e << "no iRT standards file found; give -irt_standards";
+            if (ODIA::diagnosticsLevel() > 0)
+            { e << ". Searched:"; for (const auto& d : dataDirCandidates()) { e << "\n  " << (d / "irt_standards.tsv").string(); } }
             throw PhaseFailure(INPUT_FILE_NOT_FOUND, e.str());
           }
-          const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, true, gpu);
+          const auto cal = ODIA::LibraryGenerator::fitIrtCalibration(rt_model, standards, route.lstm_gpu, lstm_gpu);
           ODIA::LibraryGenerator::applyIrtCalibration(library, cal);
           std::ostringstream m;
-          m.setf(std::ios::fixed); m.precision(4);
-          m << "rescaled to iRT: " << cal.slope << " * raw + " << cal.intercept
-            << " from " << cal.peptides << " standards (worst off by "
-            << cal.max_abs_error << " iRT)";
+          m.setf(std::ios::fixed); m.precision(1);
+          m << "rescaled to iRT with " << cal.peptides << " standards (largest error " << cal.max_abs_error << " iRT)";
+          if (ODIA::diagnosticsLevel() > 0)
+          { m.precision(4); m << ": " << cal.slope << " * raw + " << cal.intercept; }
           info(m.str());
         }
         else
         {
-          info("RT column is the model's RAW 0..1 output, NOT iRT "
-               "(irt_rescale=false). The per-run map is scale-invariant, so "
-               "this is the pipeline domain; it is NOT interchangeable with an "
-               "iRT library in another tool.");
+          info("RT is the model's raw 0..1 scale, not iRT; -generation:irt_rescale true writes iRT for "
+               "a library another tool reads as iRT");
         }
         finishFingerprint();
       };
@@ -940,9 +958,12 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         }
         gpu.prebuild_lengths.assign(per_length.begin(), per_length.end());
       }
+      ODIA::GpuOptions ms2_gpu = gpu;
+      ms2_gpu.coreml = route.ms2_coreml;
       std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
-      if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
-      const bool overlap = overlap_wanted && ms2 && ODIA::LibraryGenerator::overlapsCpuPhases(ms2->provider());
+      if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
+      const bool overlap = overlap_wanted && ms2 &&
+                           ODIA::LibraryGenerator::overlapsCpuPhases(ms2->provider(), !route.lstm_gpu);
       // While the GPU predicts MS2, its host side (Core ML's own threads,
       // the encoding workers) needs cores: with all 16 CPU sessions busy on
       // CCS, the Astral MS2 phase on an M4 Max took 229 s instead of 153 s
@@ -997,7 +1018,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           std::vector<std::uint16_t> lengths;
           bool ccs_on_cpu = false;
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-                library, ccs_model, true, cpu_threads, p.derive_ion_mobility, gpu, &lengths, &ccs_on_cpu); miss)
+                library, ccs_model, route.lstm_gpu, cpu_threads, p.derive_ion_mobility, lstm_gpu, &lengths, &ccs_on_cpu); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
           guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
                                                                            std::move(lengths), ccs_on_cpu);
@@ -1056,14 +1077,17 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         ms2.reset();   // its summary line, and on CoreML the cache's pruning, now
         writer = sink->takeWriter();
         if (sink->resettled())
-        { writeLogInfo_("CCS of " + std::to_string(sink->resettled()) + " precursors predicted again in their 0.11.1 batching"); }
+        {
+          if (ODIA::diagnosticsLevel() > 0)
+          { writeLogInfo_("CCS of " + std::to_string(sink->resettled()) + " precursors re-predicted in their one-pass batching"); }
+        }
         writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
         if (library.precursorCount() == 0)
         { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
       }
       else
       {
-        if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, true, threads, gpu); }
+        if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
               library, *ms2, p, static_cast<float>(nce), instrument, threads); miss)
         { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
@@ -1074,7 +1098,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         if (p.predict_ion_mobility)
         {
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-                library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
+                library, ccs_model, route.lstm_gpu, threads, p.derive_ion_mobility, lstm_gpu); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
         }
       }

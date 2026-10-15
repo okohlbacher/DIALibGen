@@ -4,6 +4,7 @@
 // Which MS2 providers generate overlaps RT and CCS with. 0.11.4 overlapped
 // them with any GPU: on CUDA, where RT and CCS run on the GPU too, the three
 // models then contended for it and a whole-proteome run was 9-12 % slower.
+// On CUDA without cuDNN, RT and CCS run on the CPU and overlap MS2 again.
 
 #include <odia/LibraryGenerator.h>
 
@@ -15,6 +16,8 @@ int main()
   const auto say = [](bool overlap) { return overlap ? "overlap" : "in order"; };
   std::cout << "CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CPU)) << "\n"
             << "CUDA -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CUDA)) << "\n"
-            << "CoreML -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CoreML)) << "\n";
+            << "CoreML -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CoreML)) << "\n"
+            << "CUDA, RT and CCS on the CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CUDA, true)) << "\n"
+            << "CPU, RT and CCS on the CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CPU, true)) << "\n";
   return 0;
 }

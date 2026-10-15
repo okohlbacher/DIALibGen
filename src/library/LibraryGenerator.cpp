@@ -1201,9 +1201,9 @@ namespace ODIA
     return predictor;
   }
 
-  bool LibraryGenerator::overlapsCpuPhases(PeptDeepPredictor::Provider ms2)
+  bool LibraryGenerator::overlapsCpuPhases(PeptDeepPredictor::Provider ms2, bool lstm_on_cpu)
   {
-    return ms2 == PeptDeepPredictor::Provider::CoreML;
+    return ms2 == PeptDeepPredictor::Provider::CoreML || (ms2 == PeptDeepPredictor::Provider::CUDA && lstm_on_cpu);
   }
 
   bool LibraryGenerator::predictsIonMobility(const std::string& request, const std::string& canonical_instrument)

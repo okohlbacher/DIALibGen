@@ -27,7 +27,7 @@ set(ODIA_IRT_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/data/peptdeep_irt_peptides_pre
 foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest odia_terminal_mods
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
                odia_irt_calibration odia_ms2_sessions odia_instrument_dump odia_overlap_decision
-               odia_ion_mobility_decision)
+               odia_ion_mobility_decision odia_device_route)
   add_executable(${helper} tools/${helper}.cpp)
   target_link_libraries(${helper} PRIVATE odia_library)
 endforeach()
@@ -155,7 +155,15 @@ add_test(NAME digest_methionine_excision
 # for the GPU (one H100: 89.2 s against 79.5 s in order).
 add_test(NAME generate_overlap_only_cpu_phases COMMAND odia_overlap_decision)
 set_tests_properties(generate_overlap_only_cpu_phases PROPERTIES PASS_REGULAR_EXPRESSION
-  "CPU -> in order\nCUDA -> in order\nCoreML -> overlap")
+  "CPU -> in order\nCUDA -> in order\nCoreML -> overlap\nCUDA, RT and CCS on the CPU -> overlap\nCPU, RT and CCS on the CPU -> in order")
+
+# The prediction route of -machine:device: auto puts MS2 on CoreML only for a
+# library large enough to pay for the shapes, on CUDA when there is a GPU,
+# and RT and CCS on CUDA only with cuDNN (else a WARNING); cpu, cuda, coreml
+# and -machine:require_gpu force theirs.
+add_test(NAME predict_device_route COMMAND odia_device_route)
+set_tests_properties(predict_device_route PROPERTIES PASS_REGULAR_EXPRESSION
+  "mac auto small: MS2 CPU, RT/CCS CPU\nmac auto large: MS2 CoreML, RT/CCS CPU\nmac cpu large: MS2 CPU, RT/CCS CPU\nmac coreml small: MS2 CoreML, RT/CCS CoreML\nmac auto require: MS2 CoreML, RT/CCS CoreML\ncuda auto: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn auto: MS2 CUDA, RT/CCS CPU, warns\ncuda no cudnn require: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn forced: MS2 CUDA, RT/CCS CUDA\ncuda cpu: MS2 CPU, RT/CCS CPU\ncuda provider no gpu: MS2 CPU, RT/CCS CPU\ncpu ort with gpu: MS2 CPU, RT/CCS CPU\n")
 
 # CCS and 1/K0 only for an instrument with ion mobility unless asked
 # (-generation:predict_ion_mobility): an Orbitrap library carries neither.

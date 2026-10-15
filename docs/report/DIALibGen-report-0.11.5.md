@@ -1,6 +1,6 @@
 ---
 title: "DIALibGen: predicted spectral libraries for DIA proteomics"
-date: "October 2026 — DIALibGen 0.11.4"
+date: "October 2026 — DIALibGen 0.11.5"
 papersize: a4
 geometry: margin=2.2cm
 fontsize: 11pt
@@ -40,7 +40,7 @@ On a MacBook Pro (Apple M4 Max, 16 cores) DIALibGen 0.11.4 generates the same 5.
 on the CPU and in 298 s with the fragment model on the Apple GPU (258 s once its compiled shapes are cached);
 the Astral library is fine-tuned in 71 s with GPU training, the default on Apple silicon (section 3). The
 server runtime rows above were measured with DIALibGen 0.11.3 on a non-public human-plus-entrapment FASTA
-(5.81 M precursors); 0.11.4 keeps the CPU generation path and writes the same library content. Each tool's time
+(5.81 M precursors); 0.11.4 and 0.11.5 keep the CPU generation path and write the same library content. Each tool's time
 includes its own fragment selection and output format. The accuracy and identification rows use libraries
 made with 0.11.1 and 0.11.3 on the public human FASTA (3.49 M precursors); 0.11.4 generates the same CPU library
 content (checked for the generated Astral library and one CPU tune; tuned libraries depend on the training
@@ -214,7 +214,7 @@ not public, so the runtime benchmark cannot be repeated independently; it serves
 human-like sequences (for scale: the public FASTA above gives a 3.49 M-precursor library in 121.7 s on the same
 node, section 3). No timsTOF run is used in this report.
 
-**Software versions.** Four DIALibGen versions appear; their libraries are the same where the table says so.
+**Software versions.** Five DIALibGen versions appear; their libraries are the same where the table says so.
 
 | version | used for | note |
 |:----------------------------------|:-------------------------------------------------------|:-------------------------------------|
@@ -222,6 +222,7 @@ node, section 3). No timsTOF run is used in this report.
 | DIALibGen 0.11.2 | runtime rows that bridge the two servers (section 3) | same library as 0.11.3 |
 | DIALibGen 0.11.3 (source build) | server runtime (section 3); library set B: the DIA-NN 1.7.12 identifications and the entrapment check (section 5, Appendix A) | 0.11.4 generates the same CPU library content |
 | DIALibGen 0.11.4 (Homebrew cask) | laptop runs, CPU and Apple GPU (section 3) | CPU libraries equal the server's to float rounding; CoreML libraries differ slightly in fragment intensities |
+| DIALibGen 0.11.5 (source build, CUDA) | server GPU runtime, one H100 (section 3) | its GPU library is byte-identical to 0.11.3's |
 | DIA-NN 2.0 (Academia, 28 Jan 2025) | predictor runtime; set A tuning, searches and RT reference | |
 | DIA-NN 1.7.12 (open-source Linux build) | set B training identifications and searches; intensity reference | cannot predict libraries |
 
@@ -249,16 +250,20 @@ DIALibGen -in F -config recipe.json -out lib.parquet -threads N
 ```
 
 **Machines.** `kim` and `dax` are identical servers (2 × AMD EPYC 9654, 2 × 96 cores, 384 hardware threads,
-Linux); `data` has the same CPU model (224 hardware threads online) and 2 × NVIDIA H100 PCIe. The laptop is a MacBook Pro
+Linux); `data` and `spock` have the same CPU model (224 hardware threads online) and 2 × NVIDIA H100 PCIe each. The laptop is a MacBook Pro
 with an Apple M4 Max (12 performance and 4 efficiency cores, 40-core GPU, 128 GB, macOS 26.6.2), plugged in,
 the 1-minute load below 3 before every run (a low load average did not mean an idle machine: a background
 indexer used about one core during several runs); it ran DIALibGen 0.11.4 from the Homebrew cask (CoreML for
 the fragment model, Metal for training; the RT and CCS models stay on the CPU because CoreML has no operator for
 their LSTM layers). A first 0.11.4 CPU generate that ran next to a busy 3D viewer (826.1 s) was discarded and
-repeated; both libraries are byte-identical. Server timings were not repeated with 0.11.4: its CPU generation path is unchanged; the 0.11.4 timing
-on the GPU server is pending. Each configuration ran once (0.11.2 at 96 threads on `kim` three times), measured with `/usr/bin/time -v` (on the laptop `/usr/bin/time -l`), and started only when the
+repeated; both libraries are byte-identical. Server CPU timings were not repeated with 0.11.4 or 0.11.5: the CPU
+generation path is unchanged. The one-H100 rows of 0.11.5 were measured on `spock` with 0.11.3 as a control in the
+same session, on GPU 1 with 16 CPU threads of its own socket (another user's job held most of GPU 0's memory); the
+first 0.11.5 run spent 10.1 s loading its libraries before the program started (cold file cache) and was repeated.
+The two-H100 timing of 0.11.5 is pending (the GPUs were not both free while this report was updated); the two-H100
+row is 0.11.3 on `data`. Each configuration ran once (0.11.2 at 96 threads on `kim` three times), measured with `/usr/bin/time -v` (on the laptop `/usr/bin/time -l`), and started only when the
 node was quiet (fewer than 24 hardware threads busy on `kim`/`dax`; load below 0.25 per hardware thread and
-both GPUs idle on `data`). DIALibGen's times include the collection of a timing trace;
+the GPUs used idle and holding no other user's job on `data` and `spock`). DIALibGen's times include the collection of a timing trace;
 its overhead was not measured. DIALibGen and DIA-NN do not write the same library: DIALibGen keeps 12 fragments per
 precursor and its own Parquet layout, DIA-NN its own fragment selection (not counted here) and layout. The times
 are therefore end-to-end times for each tool's library, not for identical prediction work.
@@ -279,7 +284,8 @@ Table: Library generation from the FASTA, 5.8 M precursors
 | DIALibGen 0.11.3 | dax | 96 | 146.2 | 9.7 | 12,532 |
 | DIALibGen 0.11.2 | data | 16 + 1 × H100 | 88.9 | – | – |
 | DIALibGen 0.11.2 | data | 16 + 2 × H100 | 65.2 | – | – |
-| DIALibGen 0.11.3 | data | 16 + 1 × H100 | 82.4 | 4.6 | – |
+| DIALibGen 0.11.3 | spock | 16 + 1 × H100 | 79.2 | 4.6 | – |
+| DIALibGen 0.11.5 | spock | 16 + 1 × H100 | 79.1 | 4.7 | – |
 | DIALibGen 0.11.3 | data | 16 + 2 × H100 | 47.3 | 5.0 | – |
 | DIALibGen 0.11.4 | laptop | 16 (CPU) | 443.6 | 6.0 | 6,532 |
 | DIALibGen 0.11.4 | laptop | 16 + CoreML, cold ² | 298.5 | 7.7 | 1,067 |
@@ -291,7 +297,7 @@ Peak RAM = peak resident memory on the host (GPU memory not included). DIALibGen
 was emptied before the run, so it includes compiling the model's shapes for the GPU; warm: the shapes are loaded
 from the cache.
 
-![Library generation from the FASTA, 5.8 M precursors, wall time. Left: the two identical servers, CPU only. Middle: the GPU server, 16 CPU threads plus one or two H100. Right: the laptop (Apple M4 Max, DIALibGen 0.11.4), CPU at 16 threads and with the fragment model on the Apple GPU (CoreML; cold and warm compiled-model cache). Each configuration was measured once, except DIALibGen 0.11.2 at 96 threads on kim (mean of three); the two tools' libraries differ in fragment selection and layout. "n/m": not measured.](fig/runtime.png){width=100%}
+![Library generation from the FASTA, 5.8 M precursors, wall time. Left: the two identical servers, CPU only. Middle: the GPU servers, 16 CPU threads plus one H100 (spock: DIALibGen 0.11.5 and 0.11.3 in the same session) or two (data: 0.11.3; 0.11.5 not yet measured). Right: the laptop (Apple M4 Max, DIALibGen 0.11.4), CPU at 16 threads and with the fragment model on the Apple GPU (CoreML; cold and warm compiled-model cache). Each configuration was measured once, except DIALibGen 0.11.2 at 96 threads on kim (mean of three); the two tools' libraries differ in fragment selection and layout. "n/m": not measured.](fig/runtime.png){width=100%}
 
 Reading the table:
 
@@ -310,6 +316,11 @@ Reading the table:
 - During the DIA-NN runs, other users' jobs kept about 18 of the node's 384 hardware threads busy on average;
   during the DIALibGen runs, below 1 on `kim` and 1.6–1.9 on `dax`. The effect on DIA-NN's times was not
   measured.
+- **GPU server (0.11.5).** On one H100 0.11.5 takes 79.1 s, 0.11.3 79.2 s in the same session; the
+  libraries are byte-identical. 0.11.4 was slower on NVIDIA GPUs (89.2 s on one H100 and
+  57.1 s on two, against 79.3 s and 48.6 s for 0.11.3): it predicted retention time and ion mobility at the same
+  time as the fragments, which helps on the Apple GPU but made the three models share an NVIDIA GPU. 0.11.5 runs
+  them one after the other there again.
 - **Laptop (0.11.4).** The 16-core M4 Max generates the 5.8 M-precursor library on the CPU in 443.6 s, faster
   than the server at 16 threads (682.8 s) with 40 % less CPU time. With the fragment model on the Apple GPU it
   takes 298.5 s with an empty compiled-model cache and 258.3 s once the shapes are cached; in 0.11.4 the RT and
@@ -633,7 +644,7 @@ Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
 
 # 6. Limitations
 
-- **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 (and 0.11.4, which keeps its CPU path) is slower than 0.11.2 and than DIA-NN 2.0
+- **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 (and 0.11.4 and 0.11.5, which keep its CPU path) is slower than 0.11.2 and than DIA-NN 2.0
   (section 3); it was faster only at 96 threads. DIA-NN on a GPU was not measured.
 - **GPU use**: NVIDIA GPUs need a source build with a CUDA-enabled ONNX Runtime and cuDNN (Appendix A,
   "Threads and GPUs"); the Apple GPU is supported by the macOS release, for the fragment model and training
@@ -653,7 +664,7 @@ Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
 # 7. Availability
 
 - **Source and issues:** <https://github.com/okohlbacher/DIALibGen>
-- **Release 0.11.4:** <https://github.com/okohlbacher/DIALibGen/releases/tag/v0.11.4> (all releases: <https://github.com/okohlbacher/DIALibGen/releases>)
+- **Release 0.11.5:** <https://github.com/okohlbacher/DIALibGen/releases/tag/v0.11.5> (all releases: <https://github.com/okohlbacher/DIALibGen/releases>)
 - **Homebrew tap:** <https://github.com/okohlbacher/homebrew-dialibrarygenerator>
 - **Licence:** BSD-3-Clause. Bundled third-party components keep their own licences (listed in the
   repository's third-party notices).
@@ -665,8 +676,8 @@ Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
   per-precursor values) are in the `scripts/` and `data/` folders of the report bundle; there is no public
   archive yet, so request them from the author.
 - **Software used here:** DIALibGen 0.11.1 (release build), 0.11.2 (server runtime rows), 0.11.3 (built from source against OpenMS 3.5.0,
-  ONNX Runtime 1.30.0 and LibTorch 2.10; GPU build with CUDA 12.8 and cuDNN 9) and 0.11.4 (macOS release from
-  the Homebrew cask), the AlphaPeptDeep RT, MS2 and
+  ONNX Runtime 1.30.0 and LibTorch 2.10; GPU build with CUDA 12.8 and cuDNN 9), 0.11.4 (macOS release from
+  the Homebrew cask) and 0.11.5 (GPU build as for 0.11.3), the AlphaPeptDeep RT, MS2 and
   CCS models bundled with the 0.11.1 release (ONNX files `peptdeep_{rt,ms2,ccs}_dynamic.onnx`; their checksums
   are embedded in every Parquet library), DIA-NN 2.0 (Academia, 28 January 2025) and DIA-NN 1.7.12
   (open-source Linux build).

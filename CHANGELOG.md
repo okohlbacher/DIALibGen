@@ -7,10 +7,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `docs/report/DIALibGen-report-0.11.4.md` and `.pdf` replace the 0.11.3 report: the laptop
+- `docs/report/DIALibGen-report-0.11.5.md` and `.pdf` replace the 0.11.3 report: the laptop
   timings of 0.11.4 (CPU, CoreML with a cold and a warm cache, MPS and CPU tuning), the
-  Apple-GPU options of the release, and the unchanged quality, identification and entrapment
-  sections; also attached to the 0.11.4 release.
+  Apple-GPU options, the one-H100 timing of 0.11.5 with 0.11.3 as a control in the same session
+  (0.11.4 was slower on NVIDIA GPUs; 0.11.5 fixes it), and the unchanged quality, identification
+  and entrapment sections; also attached to the 0.11.5 release (the 0.11.4 version to the 0.11.4
+  release).
 
 ## [0.11.4] — 2026-10-13
 

@@ -1,6 +1,6 @@
 # Parameter reference
 
-Generated from DIALibGen 0.11.5 with `scripts/update-parameters.py`. Do not edit this table by hand.
+Generated from DIALibGen 0.12.1 with `scripts/update-parameters.py`. Do not edit this table by hand.
 
 The schema lists all modes. Without `-mode`, a FASTA generates and a library converts; refinement and training options apply to their respective modes. `--help` shows the options marked in the column *--help* (`--help -mode <mode>` one mode's), `--helphelp` all of them. Generation booleans take `true`/`false`; list items are separate arguments. `-threads` defaults to all physical cores unless the command line or the INI sets it. See [usage](usage.md).
 

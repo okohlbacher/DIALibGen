@@ -307,6 +307,11 @@ namespace ODIA
     return 30.0f;
   }
 
+  bool PeptDeepEncoder::hasIonMobility(const std::string& canonical_instrument)
+  {
+    return canonical_instrument == "timsTOF";
+  }
+
   std::int64_t PeptDeepEncoder::instrumentIndex(const std::string& name)
   {
     // AlphaPeptDeep's list, in its order, pinned in data/peptdeep_meta_inputs.txt

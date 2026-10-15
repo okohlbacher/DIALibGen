@@ -387,14 +387,12 @@ namespace ODIA::search
       }
       if (targets > 0 && static_cast<double>(with) < SearchParams::im_library_min_share * static_cast<double>(targets))
       {
-        throw SearchAbort("search: the run " + run_path + " is diaPASEF and is searched with its ion mobility, but only " +
+        throw SearchAbort("search: the run " + run_path + " is diaPASEF, but only " +
                           std::to_string(with) + " of " + std::to_string(targets) + " library targets (" + percent(with, targets) +
-                          ") have a 1/K0 (an IM value or a CCS), fewer than " + fixed(100.0 * SearchParams::im_library_min_share, 0) +
-                          " %: each precursor is extracted at its calibrated library 1/K0, so the pairs of the other " +
-                          std::to_string(targets - with) + " targets (" + percent(targets - with, targets) + ") would never be "
-                          "extracted -- more than ion mobility gains -- and the 1/K0 calibration needs seeds that have one; "
-                          "give those targets a 1/K0, or search the run by m/z and RT only with search:im_window -1; nothing "
-                          "was searched");
+                          ") have a 1/K0 (IM or CCS), fewer than " + fixed(100.0 * SearchParams::im_library_min_share, 0) +
+                          " %: the others would never be extracted. Generate the library with ion mobility "
+                          "(-generation:instrument timsTOF or -generation:predict_ion_mobility true), or search the run by "
+                          "m/z and RT only (search:im_window -1). Nothing was searched.");
       }
       if (with < targets)
       {

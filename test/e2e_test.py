@@ -92,6 +92,15 @@ def main(binary, fasta, model_dir, workdir):
     check(0.0 <= rt.min() and rt.max() <= 1.0,
           f"RT is the raw 0..1 model domain ({rt.min():.3f}..{rt.max():.3f})")
 
+    # QE, the default instrument, has no ion mobility: no CCS and no 1/K0,
+    # and the log says why. timsTOF has both.
+    check(all(v is None for v in d["CCS"]) and all(v is None for v in d["IM"]),
+          "the default instrument (QE) gets neither CCS nor 1/K0")
+    check("QE has no ion mobility: CCS and 1/K0 not predicted" in log, "the log says why there is no CCS")
+    check(cfg.get("predict_ion_mobility") == "auto", "the embedded recipe records predict_ion_mobility")
+    tims_log = run("tims.parquet", {"instrument": "timsTOF"})
+    check("timsTOF has ion mobility: CCS and 1/K0 predicted" in tims_log, "timsTOF predicts CCS, and says so")
+    d = pq.read_table("tims.parquet").to_pydict()
     ccs = np.array(d["CCS"], dtype=float)
     check(np.isfinite(ccs).all() and 100 < ccs.min(),
           f"CCS is physically plausible ({ccs.min():.0f}..{ccs.max():.0f} A^2)")

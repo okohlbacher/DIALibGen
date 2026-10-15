@@ -122,6 +122,30 @@ standards unless you also pass `-irt_standards standards.tsv`; that option has
 no effect on its own. CCS and derived 1/K0 are distinct
 quantities; `-generation:derive_ion_mobility false` omits the conversion.
 
+### Ion mobility
+
+CCS and 1/K0 are predicted only for an instrument with ion mobility:
+`timsTOF` and its aliases. For every other instrument, the default `QE`
+included, the library carries neither (empty `IonMobility` and `CCS` in the
+TSV, nulls in the Parquet, 0 in the DIA-NN 2.0 Parquet, no drift time in
+OpenSWATH), and generation is faster by the CCS phase. The log says which, in
+one line:
+
+```
+Astral has no ion mobility: CCS and 1/K0 not predicted (-generation:predict_ion_mobility true to predict them)
+```
+
+`-generation:predict_ion_mobility` overrides the instrument: `auto` (default)
+decides by it, `true` always predicts CCS, `false` never does. With CCS
+predicted, `-generation:derive_ion_mobility` (default `true`) adds 1/K0;
+without CCS it has no effect. Until 0.11.5 every library carried both. Apart
+from these two columns and the recorded recipe (`predict_ion_mobility` in the
+config, `im=none` in the fingerprint), an Orbitrap library is the one 0.11.5
+writes, and a timsTOF library differs only in the recorded recipe. DIA-NN
+1.7.12 and 2.0 load such a TSV or DIA-NN 2.0 Parquet library (2.0 reports its
+1/K0 as 0). `-tune_heads ccs` or `both` on such a library trains on the
+run's observed 1/K0 as before and then adds CCS and 1/K0 to every precursor.
+
 ## Speed, threads and memory
 
 `-threads` follows the TOPP default of 1. `-threads 0` uses one thread per
@@ -563,7 +587,7 @@ is needed to get protein groups. The columns:
 | `PrecursorCharge`, `PrecursorMz` | | charge, m/z |
 | `Decoy` | 0 or 1; a decoy carries its target's sequence | decoy flag |
 | `iRT` | library RT, as stored (see below) | reference RT |
-| `IonMobility` | predicted or observed 1/K0 | ion mobility (2.x; 1.7 has none) |
+| `IonMobility` | predicted or observed 1/K0; empty without ion mobility | ion mobility (2.x; 1.7 has none) |
 | `ProductMz`, `LibraryIntensity` | | fragment m/z, relative intensity |
 | `FragmentType`, `FragmentCharge`, `FragmentSeriesNumber`, `FragmentLossType` | `b`/`y`, charge, ordinal, `noloss`/`H2O`/`NH3` | fragment annotation |
 | `UniprotID` | accessions of the protein group, `P1;P2` | protein ids (2.x: `Protein.Ids`) |

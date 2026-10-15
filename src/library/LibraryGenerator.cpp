@@ -4,6 +4,7 @@
 #include <odia/LibraryGenerator.h>
 #include <odia/Hardware.h>
 #include <odia/IonLadder.h>
+#include <odia/PeptDeepEncoder.h>
 #include <odia/PeptDeepPredictor.h>
 #include <odia/PeptideParser.h>
 #include <odia/Trace.h>
@@ -1205,6 +1206,14 @@ namespace ODIA
     return ms2 == PeptDeepPredictor::Provider::CoreML;
   }
 
+  bool LibraryGenerator::predictsIonMobility(const std::string& request, const std::string& canonical_instrument)
+  {
+    if (request == "true") { return true; }
+    if (request == "false") { return false; }
+    if (request != "auto") { throw std::invalid_argument("predict_ion_mobility must be auto, true or false"); }
+    return PeptDeepEncoder::hasIonMobility(canonical_instrument);
+  }
+
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
@@ -2156,7 +2165,9 @@ namespace ODIA
        // Changes the stored RT of every free-cysteine peptide, so a library
        // built with it is not the same library.
        << ";fcys=" << (p.free_cysteine_rt_correction ? 1 : 0)
-       << ";im=" << (p.derive_ion_mobility ? 1 : 0)
+       // "none": no CCS and no 1/K0 at all (an instrument without ion
+       // mobility). A library with them keeps 0.11.5's token.
+       << ";im=" << (!p.predict_ion_mobility ? "none" : p.derive_ion_mobility ? "1" : "0")
        // NOT the stream's fixed(3): min_relative_intensity is routinely 1e-4,
        // which rendered as "0.000" -- the same token as 0.0, so a library that
        // kept every fragment and one that dropped the weak ones shared a key.

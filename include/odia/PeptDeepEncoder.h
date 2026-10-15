@@ -89,6 +89,12 @@ namespace ODIA
     /// caller can report a fallback as though it were the instrument's own.
     static float defaultNce(const std::string& canonical_instrument);
 
+    /// Whether @p canonical_instrument separates ions by mobility (reports a
+    /// 1/K0): timsTOF only. The Orbitraps (QE, Lumos and their aliases, Astral
+    /// included) and the SCIEX and Thermo TOFs have no ion-mobility dimension
+    /// a library value could be used for.
+    static bool hasIonMobility(const std::string& canonical_instrument);
+
     /// Encode one peptide. Throws if it is empty or carries a residue outside
     /// A-Z, which would one-hot to an all-off row and so be indistinguishable
     /// from padding.

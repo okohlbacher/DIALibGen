@@ -56,7 +56,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-test` | bool | `false` |  | Enables the test mode (needed for internal use only) |
 | `-generation:ccs_model` | string | (empty) |  | ccs model |
 | `-generation:decoys` | string | `none` | none,mutate,pseudo_reverse,reverse,shuffle | decoys |
-| `-generation:derive_ion_mobility` | string | `true` | true,false | derive ion mobility |
+| `-generation:derive_ion_mobility` | string | `true` | true,false | Also write 1/K0, derived from the predicted CCS (when CCS is predicted). |
 | `-generation:enzyme` | string | `Trypsin/P` |  | enzyme |
 | `-generation:fixed_modifications` | string list | `Carbamidomethyl (C)` |  | fixed modifications |
 | `-generation:fragment_mz` | double list | `200, 1800` |  | fragment mz |
@@ -74,6 +74,7 @@ The schema lists all modes. `-mode generate` is the default; refinement and trai
 | `-generation:peptide_length` | int list | `7, 30` |  | peptide length |
 | `-generation:precursor_charges` | int list | `1, 2, 3, 4` | 1:8 | precursor charges |
 | `-generation:precursor_mz` | double list | `350, 1200` |  | precursor mz |
+| `-generation:predict_ion_mobility` | string | `auto` | auto,true,false | Predict CCS (and 1/K0, see derive_ion_mobility). auto: only for an instrument with ion mobility (timsTOF); true: always; false: never, the library then carries neither. |
 | `-generation:recompute_decoy_mz` | bool | `false` |  | recompute decoy mz |
 | `-generation:reserved_doubly_charged` | int | `0` | 0: | reserved doubly charged |
 | `-generation:rt_model` | string | (empty) |  | rt model |

@@ -299,7 +299,7 @@ namespace
                        const std::string& rt_model, const std::string& ms2_model,
                        const std::string& ccs_model, double nce,
                        const std::string& instrument, bool irt_rescale,
-                       bool recompute_decoy_mz)
+                       bool recompute_decoy_mz, const std::string& ion_mobility)
   {
     return json{
       {"schema_version", kSchemaVersion},
@@ -317,6 +317,7 @@ namespace
       {"n_terminal_methionine_excision", p.n_terminal_methionine_excision},
       {"free_cysteine_rt_correction", p.free_cysteine_rt_correction},
       {"derive_ion_mobility", p.derive_ion_mobility},
+      {"predict_ion_mobility", ion_mobility},
       {"min_relative_intensity", p.min_relative_intensity},
       {"reserved_doubly_charged", p.reserved_doubly_charged},
       {"decoys", decoys},
@@ -332,7 +333,7 @@ namespace
 {
   json generationDefaults()
   {
-    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false);
+    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto");
     j.erase("schema_version");
     j["nce"] = -1.0; // TOPP sentinel: use the instrument default.
     return j;
@@ -340,12 +341,13 @@ namespace
   void apply_(const json& j, ODIA::DigestParams& p, std::string& decoys,
               std::string& rt_model, std::string& ms2_model, std::string& ccs_model,
               double& nce, std::string& instrument, bool& irt_rescale,
-              bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of)
+              bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of,
+              std::string& ion_mobility)
   {
     if (!j.is_object()) { throw std::runtime_error("config must be a JSON object"); }
     const json ref = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                      nce, instrument, irt_rescale,
-                                     recompute_decoy_mz);
+                                     recompute_decoy_mz, ion_mobility);
     for (const auto& [k, v] : j.items())
     {
       if (k == "nce_source" || k == "instrument_named") { continue; }
@@ -434,6 +436,13 @@ namespace
     }
     if (j.contains("derive_ion_mobility"))
     { p.derive_ion_mobility = j["derive_ion_mobility"]; }
+    if (j.contains("predict_ion_mobility"))
+    {
+      const json& v = j["predict_ion_mobility"];
+      if (v.is_boolean()) { ion_mobility = v.get<bool>() ? "true" : "false"; }
+      else if (v.is_string() && (v == "auto" || v == "true" || v == "false")) { ion_mobility = v.get<std::string>(); }
+      else { throw std::runtime_error("predict_ion_mobility must be auto, true or false"); }
+    }
     if (j.contains("free_cysteine_rt_correction"))
     { p.free_cysteine_rt_correction = j["free_cysteine_rt_correction"]; }
     count("reserved_doubly_charged", p.reserved_doubly_charged, 100);
@@ -549,6 +558,11 @@ void DIALibGen::registerGenerationOptions_()
     std::string description = key;
     std::replace(description.begin(), description.end(), '_', ' ');
     if (key == "nce") { description = "Normalized collision energy (>0 and <=100). -1 selects the instrument default."; }
+    if (key == "predict_ion_mobility")
+    { description = "Predict CCS (and 1/K0, see derive_ion_mobility). auto: only for an instrument with ion mobility "
+                    "(timsTOF); true: always; false: never, the library then carries neither."; }
+    if (key == "derive_ion_mobility")
+    { description = "Also write 1/K0, derived from the predicted CCS (when CCS is predicted)."; }
     if (value.is_boolean())
     {
       registerStringOption_(name, "<true/false>", value.get<bool>() ? "true" : "false", description, false);
@@ -575,6 +589,7 @@ void DIALibGen::registerGenerationOptions_()
     }
   }
   setValidStrings_("generation:decoys", {"none", "mutate", "pseudo_reverse", "reverse", "shuffle"});
+  setValidStrings_("generation:predict_ion_mobility", {"auto", "true", "false"});
   setMinInt_("generation:max_fragment_charge", 1);
   setMaxInt_("generation:max_fragment_charge", 2);
   setMinInt_("generation:precursor_charges", 1);
@@ -608,6 +623,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     bool nce_was_set = false;
     std::string instrument_alias_of;   // the name the caller wrote, when it was an alias
     std::string nce_source = "config";
+    std::string ion_mobility = "auto";   // -generation:predict_ion_mobility, resolved below
 
     const std::string cfg = getStringOption_("config");
     if (!cfg.empty())
@@ -616,7 +632,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (!in) { writeLogError_("cannot read config: " + cfg); return INPUT_FILE_NOT_FOUND; }
       try { apply_(json::parse(in, nullptr, true, true), p, decoys, rt_model,
                    ms2_model, ccs_model, nce, instrument, irt_rescale,
-                   recompute_decoy_mz, nce_was_set, instrument_alias_of); }
+                   recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility); }
       catch (const std::exception& e)
       { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
 
@@ -642,7 +658,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       else if (overrides.contains("nce")) { nce_source = "TOPP"; }
       if (overrides.contains("instrument")) { instrument_alias_of.clear(); }
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
-             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of);
+             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility);
       if (automatic_nce) { nce_was_set = false; }
     }
     catch (const std::exception& e)
@@ -660,6 +676,27 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       writeLogInfo_("nce not set; using " + std::to_string(nce) + " for " + instrument +
                     " (recorded as " + nce_source + ")");
 
+    }
+    // CCS and 1/K0 only where the instrument can use them, unless the
+    // caller says otherwise. One line either way: the columns' absence (or
+    // presence) is otherwise a surprise in the consumer.
+    p.predict_ion_mobility = ODIA::LibraryGenerator::predictsIonMobility(ion_mobility, instrument);
+    {
+      const std::string named = instrument_alias_of.empty() ? instrument : instrument_alias_of;
+      if (ion_mobility != "auto")
+      {
+        writeLogInfo_(std::string(p.predict_ion_mobility ? "CCS and 1/K0 predicted" : "CCS and 1/K0 not predicted") +
+                      " (-generation:predict_ion_mobility " + ion_mobility + ")");
+      }
+      else if (!p.predict_ion_mobility)
+      {
+        writeLogInfo_(named + " has no ion mobility: CCS and 1/K0 not predicted "
+                      "(-generation:predict_ion_mobility true to predict them)");
+      }
+      else
+      { writeLogInfo_(named + " has ion mobility: CCS and 1/K0 predicted"); }
+      if (p.predict_ion_mobility && !p.derive_ion_mobility)
+      { writeLogInfo_("1/K0 not derived from CCS (-generation:derive_ion_mobility false)"); }
     }
     // Neither instrument has trained weights in the shipped MS2 checkpoint
     // (its own constants name four instruments). Measured against Lumos at
@@ -688,7 +725,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     {
       json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                  nce, instrument, irt_rescale,
-                                 recompute_decoy_mz);
+                                 recompute_decoy_mz, ion_mobility);
       eff["nce_source"] = nce_source;
       try
       {
@@ -717,7 +754,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
 
     json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                nce, instrument, irt_rescale,
-                               recompute_decoy_mz);
+                               recompute_decoy_mz, ion_mobility);
     eff["nce_source"] = nce_source;
     if (!instrument_alias_of.empty()) { eff["instrument_named"] = instrument_alias_of; }
     std::error_code ec;
@@ -783,7 +820,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     fp.target_params = ODIA::LibraryGenerator::fingerprintParams(
       p, ODIA::DIANNLibraryFile::hashFile(rt_model),
       ODIA::DIANNLibraryFile::hashFile(ms2_model),
-      ODIA::DIANNLibraryFile::hashFile(ccs_model), nce, instrument, irt_rescale);
+      p.predict_ion_mobility ? ODIA::DIANNLibraryFile::hashFile(ccs_model) : std::string("none"), nce, instrument,
+      irt_rescale);
     fp.decoy_method = decoys;
     fingerprint_phase.end();
     const auto finishFingerprint = [&]() {
@@ -949,6 +987,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (sink)
       {
         const auto ccsPhase = [&]() {
+          if (!p.predict_ion_mobility)
+          {
+            // Nothing to settle: the guard does nothing.
+            guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, false,
+                                                                             std::vector<std::uint16_t>(), false);
+            return;
+          }
           std::vector<std::uint16_t> lengths;
           bool ccs_on_cpu = false;
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
@@ -970,7 +1015,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         } wait_for_cpu_phases{cpu_phases};
         if (overlap)
         {
-          writeLogInfo_("RT and CCS predicted on a thread of their own, " + std::to_string(cpu_threads) +
+          writeLogInfo_(std::string(p.predict_ion_mobility ? "RT and CCS" : "RT") + " predicted on a thread of their own, " + std::to_string(cpu_threads) +
                         " sessions, while the GPU predicts MS2 (ODIA_OVERLAP=0: one after the other)");
           cpu_phases = ODIA::parallel::async([&]() {
             try
@@ -1026,9 +1071,12 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");
         if (library.precursorCount() == 0)
         { throw std::runtime_error("no precursors remain after digestion and fragment selection"); }
-        if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-              library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
-        { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+        if (p.predict_ion_mobility)
+        {
+          if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
+                library, ccs_model, true, threads, p.derive_ion_mobility, gpu); miss)
+          { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
+        }
       }
       std::size_t skipped = 0;
       const auto method = ODIA::parseDecoyMethod(decoys);

@@ -28,7 +28,8 @@ def generate(name, *args):
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = ""
     out = work / name
-    result = subprocess.run([tool, "-in", fasta, "-out", str(out), "-threads", "4", *args],
+    result = subprocess.run([tool, "-in", fasta, "-out", str(out), "-threads", "4",
+                             "-generation:predict_ion_mobility", "true", *args],
                             env=env, capture_output=True, text=True)
     return out, result
 

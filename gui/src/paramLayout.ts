@@ -110,6 +110,13 @@ const OVERLAY: Record<string, Overlay> = {
       'OFF means the RT column is the model’s raw 0..1 output, NOT iRT, and is not interchangeable ' +
       'with another tool’s iRT library. Turn it on only to export.'
   },
+  predict_ion_mobility: {
+    group: 'core',
+    description:
+      'Predict CCS and 1/K0. auto: only for an instrument with ion mobility (timsTOF); an Orbitrap library ' +
+      'then carries neither.',
+    choices: ['auto', 'true', 'false']
+  },
   derive_ion_mobility: {
     group: 'core',
     description: 'Emit 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension.'

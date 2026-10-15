@@ -26,7 +26,8 @@ set(ODIA_IRT_FIXTURE "${CMAKE_CURRENT_SOURCE_DIR}/data/peptdeep_irt_peptides_pre
 
 foreach(helper odia_encode_dump odia_group_dump odia_mod_symbols odia_library_subset odia_digest odia_terminal_mods
                odia_predict_rt odia_predict_ms2 odia_predict_ccs
-               odia_irt_calibration odia_ms2_sessions odia_instrument_dump odia_overlap_decision)
+               odia_irt_calibration odia_ms2_sessions odia_instrument_dump odia_overlap_decision
+               odia_ion_mobility_decision)
   add_executable(${helper} tools/${helper}.cpp)
   target_link_libraries(${helper} PRIVATE odia_library)
 endforeach()
@@ -155,6 +156,12 @@ add_test(NAME digest_methionine_excision
 add_test(NAME generate_overlap_only_cpu_phases COMMAND odia_overlap_decision)
 set_tests_properties(generate_overlap_only_cpu_phases PROPERTIES PASS_REGULAR_EXPRESSION
   "CPU -> in order\nCUDA -> in order\nCoreML -> overlap")
+
+# CCS and 1/K0 only for an instrument with ion mobility unless asked
+# (-generation:predict_ion_mobility): an Orbitrap library carries neither.
+add_test(NAME generate_ion_mobility_decision COMMAND odia_ion_mobility_decision)
+set_tests_properties(generate_ion_mobility_decision PROPERTIES PASS_REGULAR_EXPRESSION
+  "auto QE -> none\nauto Lumos -> none\nauto Astral -> none\nauto Exploris -> none\nauto timsTOF -> CCS\nauto timsTOF Pro -> CCS\nauto SciexTOF -> none\nauto ThermoTOF -> none\ntrue QE -> CCS\ntrue Lumos -> CCS\ntrue Astral -> CCS\ntrue Exploris -> CCS\ntrue timsTOF -> CCS\ntrue timsTOF Pro -> CCS\ntrue SciexTOF -> CCS\ntrue ThermoTOF -> CCS\nfalse QE -> none\nfalse Lumos -> none\nfalse Astral -> none\nfalse Exploris -> none\nfalse timsTOF -> none\nfalse timsTOF Pro -> none\nfalse SciexTOF -> none\nfalse ThermoTOF -> none\nyes refused")
 
 # Peptide- and protein-terminal modifications, counted form by form on a FASTA
 # with known protein termini and an initiator Met; a requested one that

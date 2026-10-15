@@ -3,6 +3,29 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Proposed version: 0.12.0 (the default output changes for instruments without
+ion mobility, and the default prediction route on Apple silicon).
+
+### Changed
+
+- `generate` predicts CCS and 1/K0 only for an instrument with ion mobility
+  (`timsTOF`). For every other instrument -- Astral, the other Orbitraps, the
+  default `QE`, the SCIEX and Thermo TOFs -- the library carries neither
+  ([usage](docs/usage.md#ion-mobility)), and the log says so in one line. New
+  option `-generation:predict_ion_mobility auto|true|false` (default `auto`:
+  by the instrument); `derive_ion_mobility` still controls 1/K0 when CCS is
+  predicted. The RT and fragment columns are unchanged: an Astral library
+  differs from 0.11.5's only in its `IonMobility`/`CCS` columns, the recorded
+  config (`predict_ion_mobility`) and the fingerprint (`im=none`, CCS model
+  hash `none`); a timsTOF library only in the recorded config. DIA-NN 1.7.12
+  and 2.0 load such a TSV and DIA-NN 2.0 Parquet library.
+
+### Added
+
+- CTest `generate_ion_mobility_decision`.
+
 ## [0.11.5] — 2026-10-14
 
 ### Fixed

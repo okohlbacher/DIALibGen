@@ -103,6 +103,12 @@ namespace ODIA
     /// identifications when searching our library against IH1.
     bool derive_ion_mobility = true;
 
+    /// Predict CCS at all. Off for an instrument without ion mobility
+    /// (generate resolves -generation:predict_ion_mobility auto by the
+    /// instrument): the library then carries neither CCS nor 1/K0, whatever
+    /// derive_ion_mobility says.
+    bool predict_ion_mobility = true;
+
     /// Digest the sequence again with the initiator methionine removed.
     ///
     /// Not an option in practice, though it is one here. The initiator Met is
@@ -302,6 +308,13 @@ namespace ODIA
     /// contend for it (0.11.4, one H100: 89.2 s against 79.5 s in order); with
     /// MS2 on the CPU there is nothing to overlap.
     static bool overlapsCpuPhases(PeptDeepPredictor::Provider ms2);
+
+    /// Whether generate predicts CCS (and 1/K0) for -generation:predict_ion_mobility
+    /// @p request ("auto", "true" or "false") on @p canonical_instrument: auto
+    /// predicts them only for an instrument with ion mobility
+    /// (PeptDeepEncoder::hasIonMobility). Throws std::invalid_argument for
+    /// any other request.
+    static bool predictsIonMobility(const std::string& request, const std::string& canonical_instrument);
 
     /// predictFragmentIntensities with a predictor from openMs2Predictor.
     static std::size_t predictFragmentIntensities(Library& library, PeptDeepPredictor& predictor,

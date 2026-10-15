@@ -59,7 +59,7 @@ library can also be searched as it is.
 | `refine` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
 | `tune` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-Version **0.11.5** incorporates library refinement and model training from
+Version **0.12.1** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), [changes](CHANGELOG.md) and the
 [backlog](BACKLOG.md).
@@ -109,19 +109,22 @@ mode in depth; the [parameter reference](docs/parameters.md) lists all options.
 | Write observed values into a library | `refine` | `DIALibGen -mode refine -in predicted.tsv -ids report.parquet -out refined.tsv` |
 | Retrain RT/CCS on a run, re-predict the whole library | `tune` | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
 | Tune, then write observed values, in one call | `refine` with `-tune` | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
-| Tune on a raw run, no external search (experimental) | `tune` with `-run` | `DIALibGen -mode tune -tune_heads rt -in predicted.tsv -run run.mzML -out tuned.tsv` |
+| Tune on a raw run, no external search (experimental) | `tune` with `-run` | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
 
 Existing output files are never overwritten. Options that belong to a different
 mode are rejected when changed from their defaults.
 
 ### Examples
 
-Generate a library for a timsTOF method, using up to 16 parallel inference
-sessions:
+Generate a library for a timsTOF method (the instrument's defaults: charges
+2-4, CCS and 1/K0; all physical cores), and one for the report's Astral
+method (precursor m/z 380-980, fragment m/z 150-2000; see
+[instrument defaults](docs/usage.md#instrument-defaults)):
 
 ```bash
-DIALibGen -in proteins.fasta -out predicted.tsv \
-  -generation:instrument timsTOF -threads 0
+DIALibGen -in proteins.fasta -out predicted.tsv -generation:instrument timsTOF
+DIALibGen -in proteins.fasta -out astral.tsv -generation:instrument Astral \
+  -generation:variable_modifications 'Oxidation (M)'
 ```
 
 Match the digestion, modifications, charge and m/z ranges to the sample
@@ -161,7 +164,7 @@ grouping (see [DIA-NN](#dia-nn)).
 
 ```bash
 # 1. predict; DIA-NN reads the TSV form
-DIALibGen -in proteins.fasta -out predicted.tsv -generation:instrument timsTOF -threads 0
+DIALibGen -in proteins.fasta -out predicted.tsv -generation:instrument timsTOF
 
 # 2. first-pass search of one representative run
 diann --f run01.d --lib predicted.tsv --fasta proteins.fasta --reannotate --met-excision \
@@ -169,7 +172,7 @@ diann --f run01.d --lib predicted.tsv --fasta proteins.fasta --reannotate --met-
 
 # 3a. adapt the predictors to the run and re-predict every precursor ...
 DIALibGen -mode tune -in predicted.tsv -ids first_pass.parquet \
-  -out tuned.tsv -tune_out_models tuned-models -machine:threads 8
+  -out tuned.tsv -tune_out_models tuned-models -machine:train_threads 8
 
 # 3b. ... or keep only what was identified, with its observed RT and 1/K0 ...
 DIALibGen -mode refine -in predicted.tsv -ids first_pass.parquet \
@@ -177,7 +180,7 @@ DIALibGen -mode refine -in predicted.tsv -ids first_pass.parquet \
 
 # 3c. ... or both in one call: tune, re-predict every precursor, then write the observed values
 DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids first_pass.parquet \
-  -out adapted.tsv -write_im -machine:threads 8
+  -out adapted.tsv -write_im -machine:train_threads 8
 
 # 4. final search: one --f per run (DIA-NN does not take a shell glob after a single --f)
 diann --f run01.d --f run02.d --f run03.d --lib tuned.tsv \
@@ -231,8 +234,8 @@ control at 1 %. Decoys are built in memory; target and decoy are each
 predicted from their own sequence, so the two compete on equal terms.
 
 ```bash
-DIALibGen -mode tune -tune_heads rt -in predicted.parquet -run run.mzML -out tuned.tsv -threads 8
-DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -run run.mzML -out adapted.tsv
+DIALibGen -mode tune -in predicted.parquet -run run.mzML -out tuned.tsv -threads 8
+DIALibGen -mode refine -tune -no_filter -in predicted.parquet -run run.mzML -out adapted.tsv
 ```
 
 - The run is a centroided DIA run as mzML or as an mzPeak archive (`.mzpeak`,
@@ -252,7 +255,7 @@ DIALibGen -mode refine -tune -tune_heads rt -no_filter -in predicted.parquet -ru
   1/K0 window would be pulled towards the prediction). `-tune_heads
   ccs|both` and `-write_im` therefore work with such a run; on a run without
   ion mobility (or with `-search:im_window -1`) they are refused before
-  anything is searched. The CCS head is then tuned on the precursors the
+  anything is searched (the default `-tune_heads auto` tunes RT only there). The CCS head is then tuned on the precursors the
   1/K0 window let through, which favours those the library already
   predicted well.
 - Measured on an Orbitrap Astral and a timsTOF run: most identifications are
@@ -350,13 +353,17 @@ DIALibGen -ini DIALibGen.ini -in proteins.fasta -out predicted.tsv
 mkdir -p ctd && DIALibGen -write_ctd ctd/
 ```
 
-`-threads` follows the TOPP default of **1**. Set `-threads 0` for one thread
-per physical core; generation runs one inference session per thread. Training
-has its own `-machine:threads` setting (default 16). Explicit generation CLI/INI settings
-override the optional JSON config; CLI settings override INI settings.
+`-threads` defaults to one thread per **physical** core unless the command line
+or the INI sets it (TOPP's own default, 1, which `--help` shows, is not
+applied); generation runs one inference session per thread. Training has its
+own `-machine:train_threads` setting (default 16 on Linux and Windows, 8 on
+macOS). Explicit generation CLI/INI settings override the optional JSON config,
+which overrides the [instrument defaults](docs/usage.md#instrument-defaults);
+CLI settings override INI settings. `--help` lists the main options,
+`--help -mode <mode>` one mode's, `--helphelp` all.
 
 Release builds include `peptdeep_{rt,ms2,ccs}_dynamic.onnx`. Override them with
-`DIALIBGEN_MODEL_DIR`, the generation model-path options, or `-tune_models`.
+`-models DIR`, `DIALIBGEN_MODEL_DIR` or the generation model-path options.
 For a source installation, `scripts/fetch-models.sh --dir models` downloads and
 verifies the pinned models. See [building](docs/building.md) and
 [third-party notices](THIRD-PARTY-NOTICES.md).
@@ -388,9 +395,11 @@ separate.
   be split; oversized operations are refused before stored offsets can overflow.
 - Portable release training uses CPU. CUDA training is supported by source
   builds with compatible CUDA LibTorch and runtime libraries.
-- GPU prediction needs an ONNX Runtime with the CUDA provider and cuDNN 9 for
-  CUDA 12; without cuDNN, RT and CCS run on the CPU with a warning
-  ([GPU](docs/usage.md#gpu)).
+- GPU prediction needs an ONNX Runtime with the CUDA provider (the Linux x64 and
+  arm64 release packages include one; CUDA and cuDNN are not shipped), the
+  CUDA 12 runtime and cuDNN 9 for CUDA 12; without cuDNN, RT and CCS run on the
+  CPU with a warning; without a GPU everything runs on the CPU without one
+  ([GPU](docs/usage.md#gpu)). The arm64 GPU route is untested on hardware.
 - CWL/JSON descriptor export needs OpenMS built with `ENABLE_TDL=ON`; CTD and
   INI export do not.
 - Windows releases target x64. The macOS desktop app and Homebrew casks

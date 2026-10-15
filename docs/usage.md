@@ -1,7 +1,11 @@
-# Usage and migration to 0.11
+# Usage and migration to 0.12
 
-Run `DIALibGen --helphelp` for the options compiled into your executable.
-The [parameter reference](parameters.md) is generated from its TOPP INI schema.
+`DIALibGen --help` lists the main options (23), `DIALibGen --help -mode <mode>`
+one mode's, `DIALibGen --helphelp` all of them. The
+[parameter reference](parameters.md) is generated from the TOPP INI schema and
+marks which options `--help` shows. An unknown option prints one line with the
+closest name (`Unknown option '-instrument' (did you mean
+-generation:instrument?)`) and exit code 6, not the whole help.
 
 ## Choose a mode
 
@@ -11,32 +15,49 @@ The [parameter reference](parameters.md) is generated from its TOPP INI schema.
 | Apply observed values | `DIALibGen -mode refine -in predicted.tsv -ids report.parquet -out refined.tsv` |
 | Learn RT/CCS and predict the full library | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
 | Tune, then apply observed values, in one call | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
-| Tune on a raw run, no external search (**experimental**) | `DIALibGen -mode tune -tune_heads rt -in predicted.tsv -run run.mzML -out tuned.tsv` |
+| Change the format | `DIALibGen -in tuned.parquet -out tuned.tsv` |
+| Tune on a raw run, no external search (**experimental**) | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
 
 The output format follows the extension. Write `.tsv` for a file a search
 engine reads; DIA-NN 2 does not read DIALibGen's `.parquet`. Write `.parquet`
 for a record that carries its own recipe, or for a library that only a later
 DIALibGen step reads. The examples below use `.parquet` in that second sense.
 
-Generation is the default. The [desktop app](../gui/README.md) exposes all three
-modes, including RT/CCS fine-tuning controls and optional model export.
+Without `-mode` (a stock INI's `mode = generate` does not count), a FASTA as
+`-in` generates and a library (`.parquet`, `.tsv`, unless it starts with `>`)
+converts; a library with `-ids` or `-run` is refused with "give -mode refine
+or -mode tune". With `-write_config` the mode stays `generate`. The
+[desktop app](../gui/README.md) exposes generate, refine and tune, including
+RT/CCS fine-tuning controls and optional model export.
 
 Non-default settings belonging to a different mode are rejected. A complete
 default INI remains usable, but generation settings do not configure refinement
-or tuning, and refinement flags do not configure generation.
+or tuning, and refinement flags do not configure generation. A setting that has
+no effect in the run (`-irt_standards` without `-generation:irt_rescale true`,
+`-generation:recompute_decoy_mz true` with `-generation:decoys none`,
+`-generation:max_variable_modifications` without variable modifications,
+`-generation:derive_ion_mobility false` without CCS, the `-intensity_*` options
+or `-allow_mixed_intensity` without `-write_intensity`, the `-im_*` options
+without `-write_im`, `-machine:coreml_units` off CoreML) prints a `WARNING`
+that names it; from 0.13 these are refused (`-irt_standards` and `machine:*`
+only ever warn: an INI written on a Mac must still run on Linux).
 
 ## Generation settings
 
 Every editable generation setting has a `-generation:<key>` TOPP option. For example:
 
 ```bash
+# The report's Astral library: the instrument implies the rest (instrument defaults, below).
 DIALibGen -in proteins.fasta -out library.parquet \
-  -generation:enzyme 'Trypsin/P' \
-  -generation:precursor_charges 2 3 \
-  -generation:peptide_length 7 30 \
-  -generation:fixed_modifications 'Carbamidomethyl (C)' \
-  -generation:variable_modifications 'Oxidation (M)' \
-  -generation:instrument timsTOF -generation:nce 30 \
+  -generation:instrument Astral -generation:variable_modifications 'Oxidation (M)'
+
+# Everything spelled out (0.11's form; the same library)
+DIALibGen -in proteins.fasta -out library.parquet \
+  -generation:instrument Astral -generation:nce 25 -generation:precursor_mz 380 980 \
+  -generation:fragment_mz 150 2000 -generation:precursor_charges 1 2 3 4 \
+  -generation:peptide_length 7 30 -generation:fixed_modifications 'Carbamidomethyl (C)' \
+  -generation:variable_modifications 'Oxidation (M)' -generation:max_variable_modifications 1 \
+  -generation:decoys none -generation:enzyme Trypsin/P -generation:missed_cleavages 1 \
   -generation:n_terminal_methionine_excision true
 ```
 
@@ -45,12 +66,11 @@ Quote each modification containing spaces. Boolean generation options take
 modification list, for example `{"fixed_modifications": []}` for a
 non-alkylated preparation.
 
-Variable terminal modifications need `-generation:max_variable_modifications 2`
-or higher. With the default of `1`, `Acetyl (N-term)` or `Amidated (C-term)` is
-accepted but silently not applied, and `Acetyl (Protein N-term)` is never
-applied. Check the result, for example with `grep -c '(Acetyl)' library.tsv`.
-Raising the limit also allows two residue-specific variable modifications per
-peptide, so the library grows.
+Variable terminal modifications apply at the default
+`-generation:max_variable_modifications 1` (since 0.11.2; `Acetyl (N-term)`,
+`Amidated (C-term)` and `Acetyl (Protein N-term)` included). The log counts the
+precursors of each variable modification. Raising the limit allows two
+variable modifications per peptide, so the library grows.
 
 ```bash
 DIALibGen -write_config defaults.json
@@ -59,23 +79,96 @@ DIALibGen -write_ini workflow.ini
 ```
 
 For generation, precedence is explicit command-line settings, then supplied
-INI settings, then JSON, then built-in defaults. An INI written by
+INI settings, then JSON, then the instrument's defaults, then default.yaml
+([instrument defaults](#instrument-defaults)). An INI written by
 `-write_ini` materializes settings: those entries count as supplied when the
 INI is loaded. Remove entries that should instead come from JSON. Unknown
 JSON keys and invalid values are errors.
 
-The default instrument is `QE`. Choose the instrument used for acquisition;
-accepted aliases include `Astral`/`Orbitrap Astral` (Lumos), `Exploris` (QE),
-`timsTOF Pro` (timsTOF), and `ZenoTOF` (SciexTOF). `SciexTOF` and `ThermoTOF`
-have no trained weights in the shipped MS2 model and print a warning:
-`ThermoTOF` predicts what `Lumos` predicts (median spectral cosine 0.993 at the
-same NCE), `SciexTOF` does not (0.914, a tenth of precursors below 0.64), and
-neither has been validated on SCIEX data. Omitting NCE uses the
-instrument default: 25 for Lumos and its aliases, 30 otherwise. The native
-option `-generation:nce -1` means automatic, and generated INI files preserve
-that automatic setting. The effective JSON config records the resolved NCE and
-its source; reusing that numeric value fixes NCE until it is changed or the
-native option is set back to -1.
+The default instrument is `QE` (default.yaml's `instrument`). Choose the
+instrument used for acquisition; accepted aliases include `Astral`/`Orbitrap
+Astral` (Lumos), `Exploris` (QE), `timsTOF Pro` (timsTOF), and `ZenoTOF`
+(SciexTOF). Without `-generation:instrument` the log says so: `no
+-generation:instrument: QE assumed, so CCS and 1/K0 are not predicted`.
+`SciexTOF` and `ThermoTOF` have no trained weights in the shipped MS2 model and
+print a warning: `ThermoTOF` predicts what `Lumos` predicts (median spectral
+cosine 0.993 at the same NCE), `SciexTOF` does not (0.914, a tenth of
+precursors below 0.64), and neither has been validated on SCIEX data. Omitting
+NCE uses the instrument's default: 25 for Astral, Lumos and its aliases, 30
+otherwise. The native option `-generation:nce -1` means automatic, and
+generated INI files preserve that automatic setting. The effective JSON config
+records the resolved NCE and its source; reusing that numeric value fixes NCE
+until it is changed or the native option is set back to -1.
+
+### Instrument defaults
+
+What depends on the instrument lives in YAML files, one per instrument, and
+`default.yaml` for everything an instrument file leaves out. The release ships
+them in `share/DIALibGen/instruments/` (in the macOS app and the Windows and
+Linux packages beside the models; a source tree has them in `data/instruments/`):
+
+| file | instrument | what it sets |
+|---|---|---|
+| `default.yaml` | the default instrument (`QE`) and every other one | precursor m/z 350-1200, fragment m/z 200-1800, charges 1-4; per MS2 model slot the NCE (Lumos 25, others 30) and ion mobility (timsTOF only) |
+| `astral.yaml` | Astral, Orbitrap Astral, Astral Zoom (MS2 model: Lumos) | precursor m/z 380-980, fragment m/z 150-2000, charges 1-4, NCE 25, no ion mobility |
+| `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 2-4, precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility |
+
+Each value carries its source in a comment. Precedence, per value: an
+explicit option (command line, INI, `-config` JSON) > the instrument's file >
+`default.yaml`. So `-generation:instrument Astral` alone gives the report's
+Astral library, and `-generation:precursor_mz 350 1200` widens its window.
+The log names the files, in one line, and the values an instrument file
+implied:
+
+```text
+instrument defaults: astral.yaml (Astral) over default.yaml
+Astral method defaults: precursor m/z 380-980, fragment m/z 150-2000, charges 1 2 3 4 (... to change them, e.g. -generation:precursor_mz 350 1200 for a wider window)
+```
+
+`-debug 1` adds the full paths and the directories searched. The recipe
+(`-write_config`, the Parquet's `odia.config_json`) records the resolved values
+with their source (`nce_source`, `precursor_mz_source`, `fragment_mz_source`,
+`precursor_charges_source`: `instrument-default:Astral`, `default`, `TOPP` or
+`config`) and the files under `instrument_defaults` (name and FNV-1a64 of
+`default.yaml` and of the instrument's file). The resolved values are in the
+library's fingerprint as before; the files themselves are not, so a library
+built from the same values is the same library whichever file supplied them.
+
+An instrument file has these keys (unknown keys, wrong types and values out of
+range are errors that name the file and the key):
+
+```yaml
+name: Exploris 480                # required; matched ignoring case, ' ', '-', '_',
+aliases: [E480, Orbitrap Exploris 480]  # a leading "Orbitrap" and a trailing model number
+model_instrument: QE              # required: the MS2 model's slot (QE, Lumos, timsTOF, SciexTOF, ThermoTOF)
+ion_mobility: false               # what -generation:predict_ion_mobility auto does
+nce: 27                           # > 0, <= 100
+precursor_mz: [400, 1000]         # [min, max]
+fragment_mz: [200, 1800]
+precursor_charges: [2, 3, 4]      # 1-8, no repeats
+```
+
+`default.yaml` has `instrument`, `precursor_mz`, `fragment_mz`,
+`precursor_charges` (all required) and `models` (per MS2 model slot: `nce`,
+`ion_mobility`). An instrument without a file of its own (Lumos, Exploris, QE
+HF-X, ...) uses `default.yaml` with its model slot's NCE and ion mobility.
+
+To add an instrument, or to change a shipped one, put a file in a directory of
+your own; the first directory that has a file of a given name wins, so a user's
+`astral.yaml` replaces the shipped one and a user's `default.yaml` the
+defaults:
+
+1. `$DIALIBGEN_INSTRUMENT_DIR` (a list, separated by `:`, on Windows `;`);
+2. the user's directory: `~/.config/DIALibGen/instruments` (Linux, or
+   `$XDG_CONFIG_HOME/DIALibGen/instruments`), `~/Library/Application
+   Support/DIALibGen/instruments` (macOS), `%APPDATA%\DIALibGen\instruments`
+   (Windows);
+3. the shipped `share/DIALibGen/instruments`.
+
+`-instrument_file my-instrument.yaml` reads one instrument's defaults from that
+file instead; `-generation:instrument` may then be omitted, or must be one of
+the file's names. Two files of one directory that claim the same name are an
+error.
 
 ### Modifications
 
@@ -118,13 +211,14 @@ notation, `.(UniMod:1)PEPTIDE` and `PEPTIDE.(UniMod:2)`.
 
 Predicted RT is normalized model output by default. Set
 `-generation:irt_rescale true` for iRT calibration. It uses the bundled
-standards unless you also pass `-irt_standards standards.tsv`; that option has
-no effect on its own. CCS and derived 1/K0 are distinct
+standards unless you also pass `-irt_standards standards.tsv` (recorded in the
+recipe as `irt_standards`); that option has no effect on its own and says so. CCS and derived 1/K0 are distinct
 quantities; `-generation:derive_ion_mobility false` omits the conversion.
 
 ### Ion mobility
 
-CCS and 1/K0 are predicted only for an instrument with ion mobility:
+CCS and 1/K0 are predicted only for an instrument with ion mobility
+(`ion_mobility: true` in its file, or for its MS2 model slot in default.yaml):
 `timsTOF` and its aliases. For every other instrument, the default `QE`
 included, the library carries neither (empty `IonMobility` and `CCS` in the
 TSV, nulls in the Parquet, 0 in the DIA-NN 2.0 Parquet, no drift time in
@@ -143,16 +237,23 @@ from these two columns and the recorded recipe (`predict_ion_mobility` in the
 config, `im=none` in the fingerprint), an Orbitrap library is the one 0.11.5
 writes, and a timsTOF library differs only in the recorded recipe. DIA-NN
 1.7.12 and 2.0 load such a TSV or DIA-NN 2.0 Parquet library (2.0 reports its
-1/K0 as 0). `-tune_heads ccs` or `both` on such a library trains on the
-run's observed 1/K0 as before and then adds CCS and 1/K0 to every precursor.
+1/K0 as 0). `-tune_heads auto` (the default), `ccs` or `both` on such a
+library with a diaPASEF report trains on the run's observed 1/K0 and then adds
+CCS and 1/K0 to every precursor. A 0.11 recipe without `predict_ion_mobility`
+follows this rule too: an Astral recipe from 0.11 now gives a library without
+CCS.
 
 ## Speed, threads and memory
 
-`-threads` follows the TOPP default of 1. `-threads 0` uses one thread per
-**physical** core of the CPUs the process may run on (its affinity mask on
-Linux): hardware threads of one core share its arithmetic units, and on a
-2 x 96-core node 96 sessions on all 384 hardware threads were 12 % slower than
-48 on the physical cores.
+`-threads` defaults to one thread per **physical** core of the CPUs the process
+may run on (its affinity mask and cgroup CPU quota on Linux) when neither the
+command line nor the INI sets it; the log says `-threads 0: N threads (...)`.
+Hardware threads of one core share its arithmetic units: on a 2 x 96-core node
+96 sessions on all 384 hardware threads were 12 % slower than 48 on the
+physical cores. An INI's value is respected, 1 included (`--help` shows TOPP's
+registered default, 1, which DIALibGen does not apply); `-write_ini` writes
+`threads 0`. Under SLURM without CPU binding or a cgroup the whole node counts:
+pass `-threads $SLURM_CPUS_PER_TASK`.
 
 On the CPU, generation runs one ONNX Runtime session per thread, never more
 than the physical cores (0.11.1 capped them at 16), with one shared copy of
@@ -201,8 +302,10 @@ DIALibGen -mode refine -in predicted.parquet -ids report.parquet \
 
 The default workflow filters the library to identified precursors and
 replaces their RT with observed values. Precursor, peptide/global and protein
-q-value gates default to 0.01. An enabled gate requires its corresponding
-column; missing columns are errors. Reports containing multiple runs must be
+q-value gates: only the precursor gate is on by default (`-q_precursor 0.01`);
+the global (peptide) and protein gates (`-q_global`, `-q_protein`) are off
+(1) since 0.12, as every recorded refine run and tuning's training set had it.
+An enabled gate requires its corresponding column; missing columns are errors. Reports containing multiple runs must be
 split before use. When only some matched precursors have observed RT, RT writing
 requires whole-library RT tuning first; otherwise predictions and observed minutes
 could be mixed. Use `-no_write_rt` to retain the original values.
@@ -211,7 +314,7 @@ Useful options:
 
 - `-write_im`: also use observed 1/K0, subject to charge and ramp limits.
 - `-no_filter`: retain unidentified precursors. Pair it with `-no_write_rt` to
-  keep library RT values, or with `-tune -tune_heads rt` (or `both`) to re-predict
+  keep library RT values, or with `-tune` (any heads but `ccs`) to re-predict
   the whole library in reference-run minutes before writing observed RT. CCS-only
   tuning does not establish compatible RT units and is refused in this combination.
 - `-empirical_library`: explicitly declare a pre-filtered empirical reference
@@ -231,9 +334,10 @@ validate downstream error rates with controls appropriate to that comparison.
 ## Model tuning
 
 ```bash
+DIALibGen -mode tune -in predicted.parquet -ids report.parquet -out tuned.parquet
 DIALibGen -mode tune -in predicted.parquet -ids report.parquet \
   -out tuned.parquet -tune_out_models tuned-models \
-  -train:lr 0.0001 -machine:threads 16
+  -train:lr 0.0001 -machine:train_threads 16
 ```
 
 Tuning adapts RT and CCS with LibTorch and re-predicts the complete input
@@ -244,14 +348,22 @@ runs. Tuning needs at least 100 units in each of the protein-held-out
 validation and test cohorts, in practice several hundred identified precursors;
 smaller reports are refused.
 
-The bundled models are the default starting point. `-tune_models DIR` selects
-another model directory. `-tune_heads rt` or `ccs` selects one head;
-`both` is the default. `-tune_out_models DIR` retains ONNX models and training
+The bundled models are the default starting point. `-models DIR` selects
+another model directory (for generate, tune and `-run`; `-tune_models` is its
+deprecated name). `-tune_heads auto`, the default, tunes RT and adds CCS when
+the report has the ion mobility for it: the same data selection and cohort
+check as training decide, before any epoch. A report without 1/K0 (Astral,
+Exploris) tunes RT only, with one line saying so; one with too few usable 1/K0
+values drops CCS with a `WARNING`. `rt`, `ccs` or `both` choose explicitly
+(`both` fails on a report without ion mobility). The provenance records the
+requested and the tuned heads (`tune.heads`). `-tune_out_models DIR` retains ONNX models and training
 sidecars instead of using temporary model files. Tuned ONNX files also embed
 provenance metadata.
 
 Training options are grouped under `filter:`, `cohort:`, `train:`, `stop:` and
-`machine:`. Protein-level cohorts and validation govern checkpoint selection;
+`machine:` (`--helphelp`). `-write_config` in tune (or refine with `-tune`)
+writes them as the recipe's `tuning` object, which `-config` reads back; options
+on the command line or in the INI override it. Protein-level cohorts and validation govern checkpoint selection;
 the tool reports rejection and fallback decisions. Options such as
 `-cohort:full_fit` or `-cohort:no_inner_val` change the hold-out contract and
 must be reported when presenting accuracy results. CPU is the portable
@@ -260,14 +372,17 @@ build trains on the GPU by default (`-machine:device auto` resolves to `mps`
 when LibTorch has Metal Performance Shaders, else to `cpu`; `-machine:device
 cpu` trains on the CPU; see [Apple GPU](#apple-gpu)). Source builds can
 request `-machine:device cuda:0` when linked to a compatible CUDA LibTorch
-installation (see [building](building.md#cpu-and-cuda)); add
-`-tune_predict_gpu` to run the re-prediction on the GPU as well. On one H100, tuning the RT head on an Astral
+installation (see [building](building.md#cpu-and-cuda)). The re-prediction
+follows `-machine:device` as generation does: CUDA when `auto` finds a usable
+GPU with cuDNN 9 (or `cuda` forces it), else the CPU (`-tune_predict_gpu` is
+deprecated). On one H100, tuning the RT head on an Astral
 run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
 took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
 CPU training.
 
-`-machine:threads` is the number of CPU threads LibTorch trains with. Each
+`-machine:train_threads` (deprecated name: `-machine:threads`) is the number of
+CPU threads LibTorch trains with. Each
 training step is a chain of small operations, so the count stops paying
 early: for the RT head on an Astral run (77,029 sequences) on a 2 x 96-core
 EPYC 9654, an epoch took 11.3 s at 4 threads, 6.7 s at 8, 4.4 s at 16, 3.7 s
@@ -281,9 +396,9 @@ macOS**. On an M4 Max (12 performance and 4 efficiency cores) every operator
 forks LibTorch's 16-thread OpenMP team and the join waits for the efficiency
 cores' share: 12.4 s per epoch at 16 threads against 8.1 s at 8 (and 4), with
 2,299 s of system time in an 847-s tune. A Mac reproduces a Linux or Windows
-model with `-machine:threads 16`, and the other way round with `8`. Up to
-0.11.2 the default was 4: tuned models made with default settings differ
-from 0.11.2's, and `-machine:threads 4` reproduces them. On Apple silicon
+model with `-machine:train_threads 16`, and the other way round with `8`. Up
+to 0.11.2 the default was 4: tuned models made with default settings differ
+from 0.11.2's, and `-machine:train_threads 4` reproduces them. On Apple silicon
 the default device is the GPU anyway (`-machine:device auto` = `mps`, below),
 where the count does not apply.
 
@@ -363,10 +478,14 @@ then prints the device it ended up on:
 [RT] provider CUDA device 0 sessions 4
 ```
 
-The release packages for Linux ship a CPU-only ONNX Runtime; for the GPU,
-build against a CUDA-enabled ONNX Runtime ([building](building.md)), for
-example conda-forge's `onnxruntime-cpp` `cuda129` build. On such a machine
-without one, the line says that the GPU is not used and why.
+The release packages for Linux (x64 and arm64, the tarball and the desktop
+packages) ship ONNX Runtime's CUDA build (conda-forge `onnxruntime-cpp` 1.31.0
+`cuda129`; on arm64 the SBSA build, for server ARM such as Grace: Jetson is not
+supported). They do **not** ship CUDA or cuDNN: with an NVIDIA GPU, the CUDA 12
+runtime libraries and cuDNN 9 installed, `auto` predicts on the GPU; without a
+GPU it runs on the CPU without a warning; with a GPU but without CUDA 12 or
+cuDNN 9 it falls back and the `WARNING` names what is missing. The arm64 GPU
+route is built the same way but has not been run on aarch64 NVIDIA hardware.
 
 Requirements on Linux: an NVIDIA driver for CUDA 12 or later, the CUDA 12
 runtime libraries (cudart, cuBLAS, cuBLASLt) and **cuDNN 9 for CUDA 12**
@@ -607,8 +726,8 @@ it does so before anything is predicted.
   training on MPS against 55 s on 16 CPU threads. MPS training is not
   bit-identical to CPU training (the provenance says so under
   `reproducibility`); the tuned weights differed by an L2 norm of 0.001 of a
-  total change of 8.62 in that run. `-tune_predict_gpu` re-predicts through
-  CoreML, which for RT and CCS means the CPU path with the warning above.
+  total change of 8.62 in that run. The re-prediction after tuning runs on
+  the CPU on a Mac (CoreML has no LSTM operator for RT and CCS).
 
 ## Messages and diagnostics
 
@@ -833,6 +952,33 @@ explicit commands.
 
 ## Migration
 
+From 0.11 to 0.12 (0.12.1 is the first release of this line):
+
+| 0.11 | 0.12 |
+|---|---|
+| `-threads` 1 unless given | all physical cores unless the command line or the INI sets it (an INI's 1 is respected) |
+| `-tune_heads both` | `auto`: RT, plus CCS when the report has ion mobility |
+| refine gates `-q_precursor`, `-q_global`, `-q_protein` at 0.01 | `-q_precursor 0.01` only; `-q_global 1 -q_protein 1` are the defaults |
+| m/z windows and charges 350-1200 / 200-1800 / 1-4 for every instrument | from the [instrument files](#instrument-defaults): Astral 380-980 / 150-2000 / 1-4, timsTOF charges 2-4 |
+| CCS and 1/K0 for every instrument | only with ion mobility (timsTOF) |
+| `-mode generate` unless given | a library as `-in` converts |
+| every option in `--help` | 23 in `--help`, the rest in `--helphelp` |
+| unknown option: the error and the whole help | one line with the closest name |
+| `convert` to Parquet drops the recipe | keeps the fingerprint and the recipe |
+
+Deprecated in 0.12, removed in 0.13 (accepted with a `WARNING`; giving the old
+and the new name with different values is an error; `-write_ini` writes only
+the new names, and moves an old INI's values onto them): `-tune_models` (use
+`-models`), `-machine:threads` (`-machine:train_threads`), `-tune_predict_gpu`
+(re-prediction follows `-machine:device`), `-search:passes` (1 is its only
+value) and `-search:allow_bootstrap` (`ODIA_SEARCH_ALLOW_BOOTSTRAP=1`).
+
+An INI written by 0.11 loads in every mode: its values apply as given, and
+because `-write_ini` wrote every default, it keeps the 0.11 defaults it lists
+(`-tune_heads both`, the 0.01 gates, the 350-1200 window, `-threads 1`); the log
+names them in one line, and deleting those lines gives the 0.12 defaults. The
+mode check accepts them where they belong to another mode.
+
 - Existing `DIALibGen -in FASTA -config JSON -out FILE` commands remain valid.
   Generation now also exposes those settings directly to TOPP workflows.
 - Replace `DIALibRefine ...` with `DIALibGen -mode refine ...` for observed-value
@@ -840,12 +986,11 @@ explicit commands.
 - Replace `DIALibRefine -tune ...` with `DIALibGen -mode tune ...` for whole-library
   adaptation. Tune mode does not first filter or overwrite observations; use a
   separate refine invocation when observed-value reconstruction is intended.
-- `-threads` now defaults to 1, consistently with TOPP. Use `-threads 0` for
-  one thread per physical core or an explicit count (on macOS,
-  `-machine:cores performance` makes `-threads 0` count the performance
-  cores only: on an M4 Max 12 threads instead of 16 needed 18 % less CPU time
-  for the same library at -3 % to +16 % wall, so it saves energy, not time).
-  `-machine:threads` controls training separately.
+- 0.11: `-threads` defaulted to 1, consistently with TOPP (0.12: all physical
+  cores). On macOS, `-machine:cores performance` makes `-threads 0` count the
+  performance cores only: on an M4 Max 12 threads instead of 16 needed 18 %
+  less CPU time for the same library at -3 % to +16 % wall, so it saves
+  energy, not time. `-machine:train_threads` controls training separately.
 - Met excision now includes every allowed missed-cleavage peptide. Generated
   peptide space can increase; cache fingerprint v5 prevents reuse of libraries
   made with the old omission. Frozen 0.10.1 benchmark libraries are historical

@@ -3,12 +3,99 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.12.1] — not released yet
 
-Proposed version: 0.12.0 (the default output changes for instruments without
-ion mobility, and the default prediction route on Apple silicon).
+The first release of the 0.12 line (the owner set the version; there is no
+0.12.0). The default output changes for instruments without ion mobility, for
+Astral and timsTOF (instrument defaults), and the default prediction route on
+Apple silicon and Linux GPUs. See [migration](docs/usage.md#migration).
+
+### Changed defaults
+
+- `-threads`: all physical cores when neither the command line nor the INI sets
+  it (was 1, TOPP's default; an INI's value, 1 included, is respected).
+  `-write_ini` writes `threads 0`. The log line `-threads 0: N threads (...)`
+  says how many.
+- `-tune_heads auto` (was `both`): RT always, CCS when the report has the ion
+  mobility for it, decided by the training data selection and cohort check
+  before any epoch. A report without 1/K0 (Astral, Exploris) tunes RT instead of
+  failing; one with too few usable 1/K0 values drops CCS with a `WARNING`. The
+  provenance records `tune.heads` (requested, tuned).
+- Refine: only the precursor q gate is on (`-q_precursor 0.01`); `-q_global`
+  and `-q_protein` default to 1 (off), as every recorded refine run set them.
+- **Instrument defaults in YAML files** ([usage](docs/usage.md#instrument-defaults)):
+  `share/DIALibGen/instruments/default.yaml` (the default instrument QE, the
+  generic windows and charges, NCE and ion mobility per MS2 model slot),
+  `astral.yaml` (precursor m/z 380-980, fragment m/z 150-2000, charges 1-4,
+  NCE 25: the report's Astral library) and `timstof.yaml` (charges 2-4, m/z
+  350-1200 / 200-1800, NCE 30, ion mobility: the diaPASEF benchmark's settings).
+  An explicit option (command line, INI, JSON) wins over the instrument's file,
+  which wins over default.yaml. `-generation:instrument Astral
+  -generation:variable_modifications 'Oxidation (M)'` writes the report's
+  13-option Astral library (TSV byte for byte; the Parquet recipe differs in
+  its recorded sources). **A timsTOF library without explicit charges now has
+  charges 2-4** (was 1-4). `-generation:precursor_mz` and `fragment_mz` have an
+  empty registered default (the instrument's); `-write_config` writes the
+  resolved values with `precursor_mz_source`, `fragment_mz_source`,
+  `precursor_charges_source` and `instrument_defaults` (file names and
+  FNV-1a64). Users add or replace instruments in `$DIALIBGEN_INSTRUMENT_DIR` or
+  the user's `DIALibGen/instruments` directory, or give `-instrument_file`.
+  The files are read with yaml-cpp 0.8 (a new dependency of the tool).
+- No `-mode`: a library as `-in` converts (with `-ids` or `-run` it is refused
+  with "give -mode refine or -mode tune"); a FASTA generates.
+- `-machine:device auto` also routes tune's re-prediction (CUDA when a usable
+  GPU with cuDNN 9 is there, else the CPU).
 
 ### Changed
+
+- `--help` shows 23 options (was all 126); the rest are TOPP `advanced`
+  (`--helphelp`, `-write_ini`, `-write_ctd`). `--help -mode <mode>` shows that
+  mode's: generate 14, refine 14, tune 8, convert 4, prepare 2. Every
+  `generation:` option has a description; texts name their mode and carry no
+  release history. The description line links the docs and states the thread
+  default; the citation names AlphaPeptDeep as the models' paper.
+- An unknown option prints one line with the closest name and exit code 6,
+  not the whole help (`Unknown option '-instrument' (did you mean
+  -generation:instrument?)`).
+- Linux release packages (x64 and arm64: the tarball, the `.deb` and the
+  AppImage) ship ONNX Runtime 1.31.0's CUDA 12.9 build (arm64: SBSA). CUDA 12
+  and cuDNN 9 are not shipped: installed, they give the GPU route; without a
+  GPU the CPU runs without a warning. A CUDA build of ONNX Runtime counts as
+  having the CUDA provider only when its provider library is beside it.
+- `convert` to DIALibGen Parquet (or DIA-NN 2.0 Parquet) keeps the input's
+  fingerprint, recipe and recorded warnings.
+- Recipes: `irt_standards` is a generation key; tune's (and refine `-tune`'s)
+  `-write_config` writes the training settings as a `tuning` object, which
+  `-config` reads (explicit options override it).
+- Settings without an effect print a `WARNING` naming them (refused from
+  0.13; `-irt_standards` and `machine:*` only ever warn): `-irt_standards`
+  without `irt_rescale`, `recompute_decoy_mz` with `decoys none`,
+  `max_variable_modifications` without variable modifications,
+  `derive_ion_mobility false` without CCS, `-intensity_*` and
+  `-allow_mixed_intensity` without `-write_intensity`, `-im_*` without
+  `-write_im`, `-machine:coreml_units` off CoreML.
+- A library for OpenSWATH (`.pqp`, `openswath_tsv`) without decoys gets a hint
+  to add `-generation:decoys`; no instrument named gets one line ("QE assumed").
+- A 0.11 recipe without `predict_ion_mobility` follows the instrument rule
+  (no schema-version special case).
+
+### Deprecated (0.12, removed in 0.13)
+
+Accepted with a `WARNING`; old and new name with different values are an
+error; `-write_ini` writes only the new names (and `-write_ini -ini old.ini`
+moves the old values onto them); `--helphelp` lists them.
+
+- `-tune_models` -> `-models` (one model directory for generate, tune and `-run`).
+- `-machine:threads` -> `-machine:train_threads`.
+- `-tune_predict_gpu`: re-prediction follows `-machine:device`.
+- `-search:passes` (its only value, 1, is accepted silently).
+- `-search:allow_bootstrap` -> `ODIA_SEARCH_ALLOW_BOOTSTRAP=1`.
+
+An INI written by 0.11 loads in every mode; its values apply as given, the
+mode check accepts the 0.11 defaults it lists, and one line names those that
+differ from 0.12's.
+
+### Changed (prediction route, ion mobility, messages)
 
 - `generate` predicts CCS and 1/K0 only for an instrument with ion mobility
   (`timsTOF`). For every other instrument -- Astral, the other Orbitraps, the
@@ -62,6 +149,18 @@ ion mobility, and the default prediction route on Apple silicon).
 
 - CTests `generate_ion_mobility_decision`, `predict_device_route`;
   `generate_overlap_only_cpu_phases` covers CUDA with RT and CCS on the CPU.
+- CTests `cli_defaults` (help, unknown options, mode inference, deprecated
+  names, 0.11 INIs, defaults, instrument files and their validation, the
+  warnings) and `cli_library` (the Astral 13-option command against the
+  2-option one, `-threads` default and INI values, inferred convert, the
+  OpenSWATH hint); `tune_e2e` covers `-tune_heads auto` without and with too
+  little ion mobility.
+- `docs/parameters.md` marks the options `--help` shows and lists the
+  deprecated ones.
+- Desktop app: threads default 0 (all physical cores); m/z windows and charges
+  blank = the instrument's; `-tune_heads auto`; settings saved by 0.11 are
+  migrated (old defaults onto the new ones, `machine:threads` onto
+  `machine:train_threads`, deprecated names dropped by a name list).
 
 ## [0.11.5] — 2026-10-14
 

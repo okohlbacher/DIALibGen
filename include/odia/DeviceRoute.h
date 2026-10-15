@@ -41,6 +41,8 @@ namespace ODIA
     bool lstm_coreml = false;  ///< ... through CoreML (only when forced: it falls back, with a WARNING)
     std::string summary;       ///< one line: which route and why
     std::string warning;       ///< a soft fallback: reason and fix, one line; empty if none
+    std::string error;         ///< the route cannot be honoured (-machine:require_gpu with CoreML: RT
+                               ///< has no GPU path there); refused before anything is predicted
   };
 
   /// Library size from which -machine:device auto runs MS2 on CoreML, for

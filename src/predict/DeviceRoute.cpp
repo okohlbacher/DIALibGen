@@ -242,6 +242,14 @@ namespace ODIA
       // Forced (or required): every model asks for CoreML, and RT and CCS
       // fall back with a WARNING (no LSTM operator), as before 0.12.
       r.ms2_gpu = r.ms2_coreml = r.lstm_gpu = r.lstm_coreml = true;
+      if (require)
+      {
+        // RT (an LSTM) never runs on CoreML: refused at once, before the MS2
+        // shapes are compiled (which on a Mac without a usable GPU can take
+        // longer than anyone waits).
+        r.error = "the GPU is required (-machine:require_gpu) but RT cannot run on the Apple GPU: CoreML has no "
+                  "operator for LSTM. Fix: drop -machine:require_gpu";
+      }
       r.summary = "MS2 on the Apple GPU (CoreML), " + lstm + " on the CPU (" +
                   (coreml ? "-machine:device " + device : std::string("-machine:require_gpu")) + ")";
       return r;

@@ -44,7 +44,8 @@ int main()
   {
     const auto r = ODIA::chooseDeviceRoute(c.device, c.require, *c.caps, c.n, min);
     std::cout << c.name << ": MS2 " << provider(r.ms2_gpu, r.ms2_coreml) << ", RT/CCS "
-              << provider(r.lstm_gpu, r.lstm_coreml) << (r.warning.empty() ? "" : ", warns") << "\n";
+              << provider(r.lstm_gpu, r.lstm_coreml) << (r.warning.empty() ? "" : ", warns")
+              << (r.error.empty() ? "" : ", refused") << "\n";
   }
   return 0;
 }

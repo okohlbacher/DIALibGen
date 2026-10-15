@@ -163,7 +163,7 @@ set_tests_properties(generate_overlap_only_cpu_phases PROPERTIES PASS_REGULAR_EX
 # and -machine:require_gpu force theirs.
 add_test(NAME predict_device_route COMMAND odia_device_route)
 set_tests_properties(predict_device_route PROPERTIES PASS_REGULAR_EXPRESSION
-  "mac auto small: MS2 CPU, RT/CCS CPU\nmac auto large: MS2 CoreML, RT/CCS CPU\nmac cpu large: MS2 CPU, RT/CCS CPU\nmac coreml small: MS2 CoreML, RT/CCS CoreML\nmac auto require: MS2 CoreML, RT/CCS CoreML\ncuda auto: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn auto: MS2 CUDA, RT/CCS CPU, warns\ncuda no cudnn require: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn forced: MS2 CUDA, RT/CCS CUDA\ncuda cpu: MS2 CPU, RT/CCS CPU\ncuda provider no gpu: MS2 CPU, RT/CCS CPU\ncpu ort with gpu: MS2 CPU, RT/CCS CPU\n")
+  "mac auto small: MS2 CPU, RT/CCS CPU\nmac auto large: MS2 CoreML, RT/CCS CPU\nmac cpu large: MS2 CPU, RT/CCS CPU\nmac coreml small: MS2 CoreML, RT/CCS CoreML\nmac auto require: MS2 CoreML, RT/CCS CoreML, refused\ncuda auto: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn auto: MS2 CUDA, RT/CCS CPU, warns\ncuda no cudnn require: MS2 CUDA, RT/CCS CUDA\ncuda no cudnn forced: MS2 CUDA, RT/CCS CUDA\ncuda cpu: MS2 CPU, RT/CCS CPU\ncuda provider no gpu: MS2 CPU, RT/CCS CPU\ncpu ort with gpu: MS2 CPU, RT/CCS CPU\n")
 
 # CCS and 1/K0 only for an instrument with ion mobility unless asked
 # (-generation:predict_ion_mobility): an Orbitrap library carries neither.

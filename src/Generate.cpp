@@ -886,6 +886,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
                                                               ODIA::coremlMinPrecursors(threads == 0 ? ODIA::physicalCores()
                                                                                          : std::min(threads, ODIA::physicalCores())),
                                                               p.predict_ion_mobility);
+      if (!route.error.empty()) { throw std::runtime_error(route.error); }
       writeLogInfo_("device: " + route.summary);
       if (!route.warning.empty())
       {

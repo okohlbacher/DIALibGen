@@ -568,7 +568,8 @@ What runs where, and why:
   on the CPU, uses the CPU path and says so: a `WARNING` naming the model
   and the operator, recorded in the output's provenance as `odia.warnings`
   (tune: `device_warnings`). `-machine:require_gpu` turns that into an
-  error, so on a Mac it refuses every library (RT always falls back).
+  error, so on a Mac it refuses every library (RT always falls back); since 0.12
+it does so before anything is predicted.
 - **Compute units.** `-machine:coreml_units gpu` (CPU and GPU, the default)
   was the fastest on an M4 Max: MS2 at 2048 x 14 tokens ran 15-18 times
   faster than one CPU thread; `all` lets Core ML use the Neural Engine

@@ -619,8 +619,7 @@ form (`[MS2] provider CUDA device 0 sessions 4`) for scripts.
 `-debug 1` (or the environment variable `ODIA_VERBOSE=1`, for the library
 used without the tool) adds the details for diagnosis: the device checks
 (ONNX Runtime's providers, whether an NVIDIA GPU is visible, the cuDNN
-loader's result and the directories looked in), ONNX Runtime's own warnings
-and full error texts, the CoreML node placement and per-run shape summary,
+loader's result and the directories looked in), ONNX Runtime's own warnings, the CoreML node placement and per-run shape summary,
 the directories searched for the models and the iRT standards, and the iRT
 line's coefficients.
 

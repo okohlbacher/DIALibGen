@@ -21,12 +21,12 @@ ion mobility, and the default prediction route on Apple silicon).
   config (`predict_ion_mobility`) and the fingerprint (`im=none`, CCS model
   hash `none`); a timsTOF library only in the recorded config. DIA-NN 1.7.12
   and 2.0 load such a TSV and DIA-NN 2.0 Parquet library.
-
 - `-machine:device auto` (the default) now picks the prediction route in
   `generate` and says which in one `device:` line ([usage](docs/usage.md#gpu)).
   Linux: CUDA for MS2 when the ONNX Runtime has the CUDA provider and an NVIDIA
   GPU is visible, and for RT and CCS only when cuDNN 9 loads (checked before
-  predicting, the way ONNX Runtime opens it); without cuDNN RT and CCS run on
+  predicting, the way ONNX Runtime opens it; `libcudnn.so.9` suffices, no
+  unversioned link is needed); without cuDNN RT and CCS run on
   the CPU, on a thread of their own while the GPU predicts MS2, with one
   `WARNING` that names the fix (and a directory where a cuDNN was found off the
   library path). Apple silicon: MS2 on the GPU (CoreML) from 50,000 precursors
@@ -41,7 +41,7 @@ ion mobility, and the default prediction route on Apple silicon).
 - Messages: shorter, one or two lines with the cause and the fix, without
   development history or measurements; every warning starts with `WARNING:`.
   `-debug 1` (or `ODIA_VERBOSE=1`) adds the diagnostics: device checks, the
-  cuDNN loader's result and search, ONNX Runtime's warnings and full errors,
+  cuDNN loader's result and search, ONNX Runtime's warnings,
   CoreML node placement and shape summaries, searched directories. The
   provider lines (`[MS2] provider CUDA device 0 sessions 4`) are unchanged.
   Device warnings recorded in `odia.warnings` read differently, so a library

@@ -91,8 +91,10 @@ namespace ODIA
       if (v.empty() || v == "-1" || v == "none" || v == "NoDevFiles") { return false; }
     }
 #if defined(__linux__)
+    // WSL 2 has no /proc/driver/nvidia: its GPU is /dev/dxg, CUDA through
+    // the Windows driver's libcuda.
     std::error_code ec;
-    return std::filesystem::exists("/proc/driver/nvidia/version", ec);
+    return std::filesystem::exists("/proc/driver/nvidia/version", ec) || std::filesystem::exists("/dev/dxg", ec);
 #else
     return true;
 #endif
@@ -145,6 +147,22 @@ namespace ODIA
                                 (handle != nullptr ? "loaded" : error != nullptr ? error : "failed"));
         if (handle != nullptr) { opened = name; break; }
       }
+      if (handle == nullptr)
+      {
+        // The CUDA provider library searches its own run path too, which is
+        // ONNX Runtime's directory in every layout this project ships or
+        // builds: look there by the path of the loaded ONNX Runtime (never a
+        // path from the environment).
+        Dl_info ort{};
+        if (dladdr(reinterpret_cast<void*>(&OrtGetApiBase), &ort) != 0 && ort.dli_fname != nullptr)
+        {
+          const std::string beside = (std::filesystem::path(ort.dli_fname).parent_path() / "libcudnn.so.9").string();
+          dlerror();
+          handle = dlopen(beside.c_str(), RTLD_NOW | RTLD_LOCAL);
+          c.diagnostics.push_back("dlopen " + beside + ": " + (handle != nullptr ? "loaded" : "no"));
+          if (handle != nullptr) { opened = beside; }
+        }
+      }
       if (handle != nullptr)
       {
         using Version = std::size_t (*)();
@@ -181,6 +199,20 @@ namespace ODIA
     }
 #endif
     return c;
+  }
+
+  int cudaDeviceIndex(const std::string& device)
+  {
+    if (!device.starts_with("cuda:") || device.size() == 5 || device.size() > 8) { return -1; }
+    for (std::size_t k = 5; k < device.size(); ++k)
+    { if (device[k] < '0' || device[k] > '9') { return -1; } }
+    return std::stoi(device.substr(5));
+  }
+
+  bool validDeviceName(const std::string& device)
+  {
+    return device == "auto" || device == "cpu" || device == "cuda" || device == "coreml" || device == "mps" ||
+           cudaDeviceIndex(device) >= 0;
   }
 
   std::size_t coremlMinPrecursors(unsigned threads)

@@ -355,7 +355,8 @@ device: prediction on the CPU: 13 k precursors, the Apple GPU pays only from 400
 ```
 
 `-machine:device cpu`, `cuda` (`cuda:N` for device N), `coreml` or `mps` force
-a route (until 0.11.5, `cpu` changed only the training device). Each model
+a route (until 0.11.5, `cpu` changed only the training device);
+`-machine:device cpu` with `-machine:require_gpu` is refused. Each model
 then prints the device it ended up on:
 
 ```text
@@ -373,8 +374,10 @@ runtime libraries (cudart, cuBLAS, cuBLASLt) and **cuDNN 9 for CUDA 12**
 1.31 need no unversioned `libcudnn.so` link: on an H100 RT and CCS ran on CUDA
 with only the `.so.9` files). Before predicting, DIALibGen opens
 `libcudnn.so.9` (else `libcudnn.so`) the way ONNX Runtime does (the loader's
-search: `LD_LIBRARY_PATH`, the run path, the system cache) and checks that it
-is cuDNN 9. Without it only the MS2 model (a transformer)
+search: `LD_LIBRARY_PATH`, the run path, the system cache, then ONNX
+Runtime's own directory) and checks that it is cuDNN 9. A GPU counts as
+visible with the NVIDIA driver loaded (`/proc/driver/nvidia/version`, or
+WSL 2's `/dev/dxg`) unless `CUDA_VISIBLE_DEVICES` hides it. Without it only the MS2 model (a transformer)
 runs on the GPU; RT and CCS (convolution and LSTM layers) run on the CPU, on
 a thread of their own while the GPU predicts MS2, and a `WARNING` says why
 and how to fix it, naming a directory where a cuDNN was found off the library

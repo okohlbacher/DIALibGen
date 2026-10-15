@@ -756,6 +756,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::error_code ec;
     for (const auto& m : models)
     {
+      if (m.path == &ccs_model && !p.predict_ion_mobility) { continue; }   // not used
       if (m.path->empty())
       {
         std::ostringstream e;
@@ -774,6 +775,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
     }
 
+    if (const std::string device = getStringOption_("machine:device"); !ODIA::validDeviceName(device))
+    { writeLogError_("-machine:device '" + device + "': use auto, cpu, cuda, cuda:N, coreml or mps"); return ILLEGAL_PARAMETERS; }
+    else if (device == "cpu" && getFlag_("machine:require_gpu"))
+    { writeLogError_("-machine:require_gpu contradicts -machine:device cpu; drop one of them"); return ILLEGAL_PARAMETERS; }
     const unsigned threads = static_cast<unsigned>(std::max(0, getIntOption_("threads")));
     if (threads == 0)
     { writeLogInfo_("-threads 0: " + std::to_string(ODIA::physicalCores()) + " threads (" +
@@ -1082,6 +1087,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       else
       {
+        // Overlap chosen but no streaming writer: RT has not run yet.
+        if (overlap) { rtPhase(logInfo); }
         if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
               library, *ms2, p, static_cast<float>(nce), instrument, threads); miss)

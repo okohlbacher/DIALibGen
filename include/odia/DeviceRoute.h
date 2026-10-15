@@ -62,10 +62,18 @@ namespace ODIA
   DeviceRoute chooseDeviceRoute(const std::string& device, bool require, const DeviceCaps& caps,
                                 std::size_t precursors, std::size_t coreml_min, bool ccs = true);
 
+  /// N of "cuda:N" (a non-negative number, nothing after it); -1 for any
+  /// other spelling.
+  int cudaDeviceIndex(const std::string& device);
+
+  /// Whether @p device is a -machine:device value: auto, cpu, cuda, cuda:N,
+  /// coreml or mps.
+  bool validDeviceName(const std::string& device);
+
   /// Whether an NVIDIA GPU can be visible to this process at all: not when
   /// CUDA_VISIBLE_DEVICES hides every device, and on Linux only with the
-  /// NVIDIA kernel driver loaded. Elsewhere assumed, so a failure there still
-  /// warns.
+  /// NVIDIA kernel driver loaded (or WSL's GPU device, /dev/dxg). Elsewhere
+  /// assumed, so a failure there still warns.
   bool nvidiaGpuVisible();
 
   /// Verbosity of the diagnostics (provider probes, loader errors, search

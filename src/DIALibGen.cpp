@@ -181,11 +181,7 @@ ODIA::GpuOptions DIALibGen::gpuOptions_(std::vector<std::string>* warnings)
   gpu.coreml_units = units == "all" ? "ALL" : units == "ane" ? "CPUAndNeuralEngine" : units == "cpu" ? "CPUOnly" : "CPUAndGPU";
   for (const int device : getIntList_("machine:gpu_devices")) { gpu.devices.push_back(device); }
   // cuda:N names the device for prediction too, unless -machine:gpu_devices does.
-  if (gpu.devices.empty() && device.starts_with("cuda:"))
-  {
-    try { gpu.devices.push_back(std::stoi(device.substr(5))); }
-    catch (const std::exception&) {}   // the trainer refuses the spelling
-  }
+  if (const int n = ODIA::cudaDeviceIndex(device); gpu.devices.empty() && n >= 0) { gpu.devices.push_back(n); }
   gpu.warnings = warnings;
   return gpu;
 }

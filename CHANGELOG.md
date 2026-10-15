@@ -50,6 +50,8 @@ ion mobility, and the default prediction route on Apple silicon).
 
 ### Fixed
 
+- When the streaming writer could not get a thread (a process thread limit)
+  and RT was to overlap MS2 (CoreML, 0.11.4 on), RT was never predicted.
 - A tune range error printed `numeric_limits<double>::max()` in full (309
   digits) for `filter:rt_spread_max`, `filter:rt_max_minutes`, `stop:abs_tol`
   and `stop:max_seconds`.

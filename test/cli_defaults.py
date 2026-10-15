@@ -171,7 +171,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     library = root / 'lib.tsv'
     library.write_text('Precursor.Id\tModified.Sequence\n')
     fasta = root / 'proteins.tsv'
-    fasta.write_text('﻿>sp|P1|X\nPEPTIDEK\n')
+    fasta.write_text('\ufeff>sp|P1|X\nPEPTIDEK\n', encoding='utf-8')
     _, log = run('-in', library, '-ids', library, '-out', fresh('.tsv'), ok=False)
     assert 'give -mode refine or -mode tune' in log, log
     # -write_config keeps generate (a library as -in only names the recipe's mode).

@@ -96,7 +96,8 @@ def main(binary, fasta, model_dir, workdir):
     # and the log says why. timsTOF has both.
     check(all(v is None for v in d["CCS"]) and all(v is None for v in d["IM"]),
           "the default instrument (QE) gets neither CCS nor 1/K0")
-    check("QE has no ion mobility: CCS and 1/K0 not predicted" in log, "the log says why there is no CCS")
+    check("no -generation:instrument: QE assumed, so CCS and 1/K0 are not predicted" in log,
+          "the log says why there is no CCS")
     check(cfg.get("predict_ion_mobility") == "auto", "the embedded recipe records predict_ion_mobility")
     tims_log = run("tims.parquet", {"instrument": "timsTOF"})
     check("timsTOF has ion mobility: CCS and 1/K0 predicted" in tims_log, "timsTOF predicts CCS, and says so")

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "DIALibGen.h"
+#include "InstrumentDefaults.h"
+#include <optional>
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
 #include <odia/DeviceRoute.h>
@@ -80,9 +82,12 @@ namespace
     return {};
   }
 
-  std::vector<fs::path> modelDirCandidates()
+  /// Where the models are looked for: @p first (-models), $DIALIBGEN_MODEL_DIR,
+  /// the bundled directory, OpenMS's data path.
+  std::vector<fs::path> modelDirCandidates(const std::string& first = {})
   {
     std::vector<fs::path> out;
+    if (!first.empty()) { out.emplace_back(first); }
     if (const char* env = std::getenv("DIALIBGEN_MODEL_DIR"); env != nullptr && *env != '\0')
     {
       out.emplace_back(env);
@@ -100,10 +105,10 @@ namespace
     return out;
   }
 
-  std::string findModel(const char* name)
+  std::string findModel(const char* name, const std::string& first = {})
   {
     std::error_code ec;
-    for (const auto& dir : modelDirCandidates())
+    for (const auto& dir : modelDirCandidates(first))
     {
       const fs::path c = dir / name;
       if (fs::exists(c, ec)) { return c.string(); }
@@ -300,7 +305,8 @@ namespace
                        const std::string& rt_model, const std::string& ms2_model,
                        const std::string& ccs_model, double nce,
                        const std::string& instrument, bool irt_rescale,
-                       bool recompute_decoy_mz, const std::string& ion_mobility)
+                       bool recompute_decoy_mz, const std::string& ion_mobility,
+                       const std::string& irt_standards)
   {
     return json{
       {"schema_version", kSchemaVersion},
@@ -325,6 +331,7 @@ namespace
       {"rt_model", rt_model}, {"ms2_model", ms2_model}, {"ccs_model", ccs_model},
       {"instrument", instrument}, {"nce", nce},
       {"irt_rescale", irt_rescale},
+      {"irt_standards", irt_standards},
       {"recompute_decoy_mz", recompute_decoy_mz}};
   }
 }
@@ -334,24 +341,30 @@ namespace
 {
   json generationDefaults()
   {
-    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto");
+    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto", "");
     j.erase("schema_version");
+    j.erase("irt_standards");   // the top-level -irt_standards
     j["nce"] = -1.0; // TOPP sentinel: use the instrument default.
+    // Empty: the instrument's windows, else DigestParams' (resolved in generate_).
+    j["precursor_mz"] = json::array();
+    j["fragment_mz"] = json::array();
     return j;
   }
   void apply_(const json& j, ODIA::DigestParams& p, std::string& decoys,
               std::string& rt_model, std::string& ms2_model, std::string& ccs_model,
               double& nce, std::string& instrument, bool& irt_rescale,
               bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of,
-              std::string& ion_mobility)
+              std::string& ion_mobility, std::string& irt_standards)
   {
     if (!j.is_object()) { throw std::runtime_error("config must be a JSON object"); }
     const json ref = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                      nce, instrument, irt_rescale,
-                                     recompute_decoy_mz, ion_mobility);
+                                     recompute_decoy_mz, ion_mobility, irt_standards);
     for (const auto& [k, v] : j.items())
     {
-      if (k == "nce_source" || k == "instrument_named") { continue; }
+      // Recorded for the reader, not settings.
+      if (k == "nce_source" || k == "instrument_named" || k == "precursor_mz_source" || k == "fragment_mz_source" ||
+          k == "precursor_charges_source" || k == "instrument_defaults") { continue; }
       if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
       (void)v;
     }
@@ -459,6 +472,11 @@ namespace
       nce = j["nce"]; nce_was_set = true;
     }
     if (j.contains("irt_rescale")) { irt_rescale = j["irt_rescale"]; }
+    if (j.contains("irt_standards"))
+    {
+      if (!j["irt_standards"].is_string()) { throw std::runtime_error("irt_standards must be a path (\"\" = the bundled table)"); }
+      irt_standards = j["irt_standards"];
+    }
     if (j.contains("recompute_decoy_mz"))
     { recompute_decoy_mz = j["recompute_decoy_mz"]; }
     if (p.charges.empty()) { throw std::runtime_error("precursor_charges must not be empty"); }
@@ -476,16 +494,10 @@ namespace
       throw std::runtime_error("unknown decoys method: '" + decoys + "' (known: " + all + ")");
     }
 
-    const std::string canonical = ODIA::PeptDeepEncoder::canonicalInstrument(instrument);
-    if (canonical.empty())
-    {
-      throw std::runtime_error(
-        "unknown instrument: '" + instrument + "'. Use QE, Lumos, timsTOF, SciexTOF or ThermoTOF, or a vendor "
-        "name such as Astral, Exploris 480 or timsTOF Pro (docs/usage.md#generation-settings); Lumos means no "
-        "instrument correction.");
-    }
-    if (canonical != instrument) { instrument_alias_of = instrument; }
-    instrument = canonical;
+    // The name as written: generate_ resolves it through the instrument
+    // files and the model's own names (instrument_alias_of is set there).
+    (void)instrument_alias_of;
+    if (instrument.empty()) { throw std::runtime_error("instrument must not be empty"); }
   }
 
 }
@@ -504,10 +516,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::prepare_()
     return EXECUTION_OK;
   }
   std::string ms2_model = getStringOption_("generation:ms2_model");
-  if (ms2_model.empty()) { ms2_model = findModel(kMs2ModelFile); }
+  if (ms2_model.empty()) { ms2_model = findModel(kMs2ModelFile, getParam_().getValue("models").toString()); }
   std::error_code ec;
   if (ms2_model.empty() || !fs::exists(ms2_model, ec))
-  { writeLogError_("no MS2 model found; set DIALIBGEN_MODEL_DIR or -generation:ms2_model"); return INPUT_FILE_NOT_FOUND; }
+  { writeLogError_("no MS2 model found; give -models or -generation:ms2_model, or set DIALIBGEN_MODEL_DIR"); return INPUT_FILE_NOT_FOUND; }
   const auto window = getIntList_("generation:peptide_length");
   if (window.size() != 2 || window[0] < 1 || window[1] < window[0])
   { writeLogError_("-generation:peptide_length must be [min, max]"); return ILLEGAL_PARAMETERS; }
@@ -548,43 +560,76 @@ std::string DIALibGen::bundledModelDir()
 
 void DIALibGen::registerGenerationOptions_()
 {
-  registerTOPPSubsection_("generation", "FASTA digestion, prediction and decoys.");
+  registerTOPPSubsection_("generation", "Generate (FASTA to library)");
+  // Registration order is the order --help prints: the settings a method
+  // needs first, then the rest (advanced: --helphelp).
+  struct Text { const char* key; const char* metavar; const char* text; };
+  static const Text texts[] = {
+    {"instrument", "<name>", "Instrument of the run: Astral, Exploris, Lumos, QE, timsTOF, or a vendor name such as "
+                             "'Orbitrap Astral' or 'timsTOF Pro'. Its defaults (instrument files, see --helphelp "
+                             "-instrument_file) set the NCE, ion mobility (timsTOF) and m/z windows and charges "
+                             "(Astral, timsTOF). Default: default.yaml's (QE)"},
+    {"nce", "<number>", "Collision energy; -1 = the instrument's (Lumos and Astral 25, others 30)"},
+    {"precursor_mz", "<min max>", "Precursor m/z window; match it to the acquisition method. Default: the "
+                                  "instrument's (Astral 380-980), else 350-1200"},
+    {"fragment_mz", "<min max>", "Fragment m/z window. Default: the instrument's (Astral 150-2000), else 200-1800"},
+    {"precursor_charges", "<z>", "Precursor charges. Default: the instrument's (timsTOF 2-4), else 1-4"},
+    {"fixed_modifications", "<names>", "OpenMS names, e.g. 'Carbamidomethyl (C)'; give the option without a value for none"},
+    {"variable_modifications", "<names>", "OpenMS names, e.g. 'Oxidation (M)'; at most "
+                                          "-generation:max_variable_modifications (1) per peptide"},
+    {"enzyme", "<name>", "Protease; Trypsin/P also cuts before P"},
+    {"missed_cleavages", "<n>", "Missed cleavages per peptide"},
+    {"peptide_length", "<min max>", "Peptide length window, in residues"},
+    {"max_variable_modifications", "<n>", "Most variable modifications on one peptide"},
+    {"n_terminal_methionine_excision", "<true/false>", "Also digest each protein without its initiator methionine"},
+    {"fragments", "<min max>", "Fragments per precursor: fewer than min drops the precursor, the most intense up to "
+                               "max are kept"},
+    {"max_fragment_charge", "<z>", "Highest fragment charge (1 or 2)"},
+    {"min_relative_intensity", "<fraction>", "Drop fragments below this fraction of the precursor's most intense one"},
+    {"reserved_doubly_charged", "<n>", "Fragment slots reserved for doubly charged ions; 0 ranks all fragments by "
+                                       "predicted intensity"},
+    {"predict_ion_mobility", "<auto/true/false>", "Predict CCS (and 1/K0, see derive_ion_mobility). auto: only for an "
+                                                  "instrument with ion mobility (timsTOF); true: always; false: never, "
+                                                  "the library then carries neither"},
+    {"derive_ion_mobility", "<true/false>", "Also write 1/K0, derived from the predicted CCS (when CCS is predicted)"},
+    {"irt_rescale", "<true/false>", "Rescale RT to iRT with the standards of -irt_standards; false: RT is the "
+                                    "model's raw 0..1 scale (DIA-NN fits its own RT map)"},
+    {"free_cysteine_rt_correction", "<true/false>", "Add the measured RT offset of unmodified cysteines (nothing to do "
+                                                    "when cysteines are alkylated)"},
+    {"decoys", "<method>", "Decoys in the library: none (DIA-NN makes its own), mutate, pseudo_reverse, reverse, shuffle"},
+    {"recompute_decoy_mz", "<true/false>", "Recompute a decoy's precursor m/z from its decoy sequence (with "
+                                           "-generation:decoys)"},
+    {"rt_model", "<file>", "RT model (ONNX); default: peptdeep_rt_dynamic.onnx in -models"},
+    {"ms2_model", "<file>", "MS2 model (ONNX); default: peptdeep_ms2_dynamic.onnx in -models"},
+    {"ccs_model", "<file>", "CCS model (ONNX); default: peptdeep_ccs_dynamic.onnx in -models"}};
   const auto defaults = generationDefaults();
-  for (const auto& [key, value] : defaults.items())
+  if (defaults.size() != std::size(texts)) { throw std::logic_error("registerGenerationOptions_: a key has no text"); }
+  for (const auto& [key, metavar, text] : texts)
   {
-    const std::string name = "generation:" + key;
-    std::string description = key;
-    std::replace(description.begin(), description.end(), '_', ' ');
-    if (key == "nce") { description = "Normalized collision energy (>0 and <=100). -1 selects the instrument default."; }
-    if (key == "predict_ion_mobility")
-    { description = "Predict CCS (and 1/K0, see derive_ion_mobility). auto: only for an instrument with ion mobility "
-                    "(timsTOF); true: always; false: never, the library then carries neither."; }
-    if (key == "derive_ion_mobility")
-    { description = "Also write 1/K0, derived from the predicted CCS (when CCS is predicted)."; }
+    const json& value = defaults.at(key);
+    const std::string name = std::string("generation:") + key;
+    const bool advanced = advanced_(name);
     if (value.is_boolean())
     {
-      registerStringOption_(name, "<true/false>", value.get<bool>() ? "true" : "false", description, false);
+      registerStringOption_(name, metavar, value.get<bool>() ? "true" : "false", text, false, advanced);
       setValidStrings_(name, {"true", "false"});
     }
     else if (value.is_string())
-    { registerStringOption_(name, "<value>", value.get<std::string>(), description, false); }
+    { registerStringOption_(name, metavar, value.get<std::string>(), text, false, advanced); }
     else if (value.is_number_integer())
-    { registerIntOption_(name, "<number>", value.get<int>(), description, false); setMinInt_(name, 0); }
+    { registerIntOption_(name, metavar, value.get<int>(), text, false, advanced); setMinInt_(name, 0); }
     else if (value.is_number())
-    { registerDoubleOption_(name, "<number>", value.get<double>(), description, false); setMinFloat_(name, key == "nce" ? -1 : 0); }
-    else if (value.is_array())
+    { registerDoubleOption_(name, metavar, value.get<double>(), text, false, advanced); setMinFloat_(name, std::string(key) == "nce" ? -1 : 0); }
+    else if (std::string(key) == "fixed_modifications" || std::string(key) == "variable_modifications")
     {
-      if (key == "fixed_modifications" || key == "variable_modifications")
-      {
-        OpenMS::StringList values;
-        for (const auto& item : value) { values.emplace_back(item.get<std::string>()); }
-        registerStringList_(name, "<names>", values, description, false);
-      }
-      else if (key == "precursor_mz" || key == "fragment_mz")
-      { registerDoubleList_(name, "<min max>", value.get<std::vector<double>>(), description, false); }
-      else
-      { registerIntList_(name, "<numbers>", value.get<std::vector<int>>(), description, false); }
+      OpenMS::StringList values;
+      for (const auto& item : value) { values.emplace_back(item.get<std::string>()); }
+      registerStringList_(name, metavar, values, text, false, advanced);
     }
+    else if (std::string(key) == "precursor_mz" || std::string(key) == "fragment_mz")
+    { registerDoubleList_(name, metavar, value.get<std::vector<double>>(), text, false, advanced); }
+    else
+    { registerIntList_(name, metavar, value.get<std::vector<int>>(), text, false, advanced); }
   }
   setValidStrings_("generation:decoys", {"none", "mutate", "pseudo_reverse", "reverse", "shuffle"});
   setValidStrings_("generation:predict_ion_mobility", {"auto", "true", "false"});
@@ -593,8 +638,14 @@ void DIALibGen::registerGenerationOptions_()
   setMinInt_("generation:precursor_charges", 1);
   setMaxInt_("generation:precursor_charges", 8);
   setMaxFloat_("generation:nce", 100);
-  registerInputFile_("irt_standards", "<file>", "", "iRT calibration standards; defaults to the bundled table.", false);
+  registerInputFile_("irt_standards", "<file>", "", "Generate: iRT standards for -generation:irt_rescale true; "
+                     "default: the bundled table", false, advanced_("irt_standards"));
   setValidFormats_("irt_standards", {"tsv"}, false);
+  registerInputFile_("instrument_file", "<file>", "", "Generate: the instrument's defaults (NCE, ion mobility, m/z "
+                     "windows, charges) from this YAML file. Otherwise one file per instrument from "
+                     "$DIALIBGEN_INSTRUMENT_DIR, then the user's DIALibGen/instruments directory (~/.config, "
+                     "~/Library/Application Support or %APPDATA%), then the shipped share/DIALibGen/instruments; "
+                     "default.yaml for the rest (docs/usage.md#instrument-defaults)", false, advanced_("instrument_file"));
 }
 
 json DIALibGen::generationValue_(const std::string& key, const json& value)
@@ -622,20 +673,32 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::string instrument_alias_of;   // the name the caller wrote, when it was an alias
     std::string nce_source = "config";
     std::string ion_mobility = "auto";   // -generation:predict_ion_mobility, resolved below
+    std::string irt_standards;           // "" = the bundled table
+    // Where the m/z windows came from: the recipe, the command line or INI,
+    // else the instrument's method (or DigestParams' generic default).
+    std::string precursor_mz_source = "default", fragment_mz_source = "default", charges_source = "default";
+    bool instrument_in_config = false;
 
     const std::string cfg = getStringOption_("config");
     if (!cfg.empty())
     {
       std::ifstream in(cfg);
       if (!in) { writeLogError_("cannot read config: " + cfg); return INPUT_FILE_NOT_FOUND; }
-      try { apply_(json::parse(in, nullptr, true, true), p, decoys, rt_model,
-                   ms2_model, ccs_model, nce, instrument, irt_rescale,
-                   recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility); }
+      try
+      {
+        const json recipe = json::parse(in, nullptr, true, true);
+        apply_(recipe, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
+               recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards);
+        instrument_in_config = recipe.contains("instrument");
+        if (recipe.contains("precursor_mz")) { precursor_mz_source = "config"; }
+        if (recipe.contains("fragment_mz")) { fragment_mz_source = "config"; }
+        if (recipe.contains("precursor_charges")) { charges_source = "config"; }
+      }
       catch (const std::exception& e)
       { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
 
       const auto base = fs::path(cfg).parent_path();
-      for (std::string* m : {&rt_model, &ms2_model, &ccs_model})
+      for (std::string* m : {&rt_model, &ms2_model, &ccs_model, &irt_standards})
       {
         if (!m->empty() && fs::path(*m).is_relative())
         { *m = (base / *m).lexically_normal().string(); }
@@ -651,40 +714,159 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         const std::string option = "generation:" + key;
         if (cfg.empty() || supplied_.count(option)) { overrides[key] = generationValue_(key, value); }
       }
+      // An empty window is the default: the instrument's, resolved below.
+      for (const char* key : {"precursor_mz", "fragment_mz"})
+      { if (overrides.contains(key) && overrides[key].empty()) { overrides.erase(key); } }
+      if (overrides.contains("precursor_mz")) { precursor_mz_source = "TOPP"; }
+      if (overrides.contains("fragment_mz")) { fragment_mz_source = "TOPP"; }
+      if (given_("generation:precursor_charges")) { charges_source = "TOPP"; }
+      // The raw path: TOPP's input-file getter refuses a missing file, which
+      // matters only when the standards are used (irt_rescale).
+      if (cfg.empty() || supplied_.count("irt_standards")) { overrides["irt_standards"] = getParam_().getValue("irt_standards").toString(); }
       const bool automatic_nce = overrides.contains("nce") && overrides["nce"] == -1.0;
       if (automatic_nce) { overrides.erase("nce"); }
       else if (overrides.contains("nce")) { nce_source = "TOPP"; }
-      if (overrides.contains("instrument")) { instrument_alias_of.clear(); }
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
-             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility);
+             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards);
       if (automatic_nce) { nce_was_set = false; }
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("generation: ") + e.what()); return ILLEGAL_PARAMETERS; }
 
-    if (!nce_was_set)
+    // The instrument's defaults: an explicit option > its YAML file > default.yaml
+    // (docs/usage.md#instrument-defaults).
+    namespace inst = ODIA::instruments;
+    std::unique_ptr<inst::Catalog> catalog;
+    std::optional<inst::InstrumentFile> instrument_file;
+    bool ion_mobility_default = false;
+    std::string named;   // the instrument as the caller (or default.yaml) named it
+    try
     {
-      nce = ODIA::PeptDeepEncoder::defaultNce(instrument);
-      nce_source = "instrument-default:" + instrument;
+      catalog = std::make_unique<inst::Catalog>(inst::searchPath(dataDirCandidates()));
+      const auto& generic = catalog->defaults();
+      const bool explicit_instrument = given_("generation:instrument") || instrument_in_config;
+      named = explicit_instrument ? instrument : generic.instrument;
+      if (const std::string file = getParam_().getValue("instrument_file").toString(); !file.empty())
+      {
+        if (!fs::exists(file)) { throw std::runtime_error("-instrument_file " + file + " does not exist"); }
+        instrument_file = inst::readInstrumentFile(file);
+        if (!explicit_instrument) { named = instrument_file->name; }
+        else if (!instrument_file->names(named))
+        {
+          throw std::runtime_error("-generation:instrument " + named + " is not the instrument of " + file +
+                                   " (" + instrument_file->name + "); give one of them");
+        }
+      }
+      else if (const inst::InstrumentFile* f = catalog->find(named)) { instrument_file = *f; }
+      const std::string model = instrument_file ? instrument_file->model_instrument
+                                                : ODIA::PeptDeepEncoder::canonicalInstrument(named);
+      if (model.empty())
+      {
+        std::string files;
+        for (const auto& f : catalog->files()) { files += (files.empty() ? "" : ", ") + f.name; }
+        throw std::runtime_error(
+          "unknown instrument: '" + named + "'. Use QE, Lumos, timsTOF, SciexTOF or ThermoTOF, a vendor name such as "
+          "Astral, Exploris 480 or timsTOF Pro, or an instrument file (" + files + "; -instrument_file, "
+          "docs/usage.md#instrument-defaults); Lumos means no instrument correction.");
+      }
+      instrument = model;
+      instrument_alias_of = named != model ? named : std::string();
+      const auto slot = generic.models.find(model);
+      const auto pick = [&](const auto& from_file, const auto& generic_value) {
+        return from_file ? *from_file : generic_value;
+      };
+      const std::string label = "instrument-default:" + (instrument_file ? instrument_file->name : model);
+      if (precursor_mz_source == "default")
+      {
+        const inst::Window w = pick(instrument_file ? instrument_file->precursor_mz : std::nullopt, generic.precursor_mz);
+        p.precursor_mz_min = w[0]; p.precursor_mz_max = w[1];
+        if (instrument_file && instrument_file->precursor_mz) { precursor_mz_source = label; }
+      }
+      if (fragment_mz_source == "default")
+      {
+        const inst::Window w = pick(instrument_file ? instrument_file->fragment_mz : std::nullopt, generic.fragment_mz);
+        p.fragment_mz_min = w[0]; p.fragment_mz_max = w[1];
+        if (instrument_file && instrument_file->fragment_mz) { fragment_mz_source = label; }
+      }
+      if (charges_source == "default")
+      {
+        p.charges = pick(instrument_file ? instrument_file->precursor_charges : std::nullopt, generic.precursor_charges);
+        if (instrument_file && instrument_file->precursor_charges) { charges_source = label; }
+      }
+      if (!nce_was_set)
+      {
+        nce = instrument_file && instrument_file->nce ? *instrument_file->nce
+            : slot != generic.models.end() && slot->second.nce ? *slot->second.nce
+            : ODIA::PeptDeepEncoder::defaultNce(model);
+        nce_source = label;
+      }
+      ion_mobility_default = instrument_file && instrument_file->ion_mobility ? *instrument_file->ion_mobility
+                           : slot != generic.models.end() && slot->second.ion_mobility ? *slot->second.ion_mobility
+                           : ODIA::PeptDeepEncoder::hasIonMobility(model);
+    }
+    catch (const std::exception& e)
+    { writeLogError_(std::string("generation: ") + e.what()); return ILLEGAL_PARAMETERS; }
+    {
+      std::ostringstream m;
+      m << std::defaultfloat << "instrument defaults: "
+        << (instrument_file ? instrument_file->path.filename().string() + " (" + instrument_file->name + ") over " : std::string())
+        << catalog->defaults().path.filename().string();
+      if (ODIA::diagnosticsLevel() > 0)
+      {
+        m << " [" << (instrument_file ? instrument_file->path.string() + ", " : std::string())
+          << catalog->defaults().path.string() << "; searched:";
+        for (const auto& d : catalog->dirs()) { m << " " << d.string(); }
+        m << "]";
+      }
+      writeLogInfo_(m.str());
+      std::vector<std::string> implied;
+      std::ostringstream w;
+      w << std::defaultfloat;
+      if (precursor_mz_source.starts_with("instrument-default:"))
+      { w << "precursor m/z " << p.precursor_mz_min << "-" << p.precursor_mz_max; implied.push_back("-generation:precursor_mz"); }
+      if (fragment_mz_source.starts_with("instrument-default:"))
+      {
+        w << (implied.empty() ? "" : ", ") << "fragment m/z " << p.fragment_mz_min << "-" << p.fragment_mz_max;
+        implied.push_back("-generation:fragment_mz");
+      }
+      if (charges_source.starts_with("instrument-default:"))
+      {
+        w << (implied.empty() ? "" : ", ") << "charges";
+        for (const int z : p.charges) { w << " " << z; }
+        implied.push_back("-generation:precursor_charges");
+      }
+      if (!implied.empty())
+      {
+        std::string options;
+        for (const auto& o : implied) { options += (options.empty() ? "" : ", ") + o; }
+        writeLogInfo_(instrument_file->name + " method defaults: " + w.str() + " (" + options + " to change them" +
+                      (implied.front() == "-generation:precursor_mz" ? ", e.g. -generation:precursor_mz 350 1200 for a "
+                                                                        "wider window)" : std::string(")")));
+      }
     }
     if (!instrument_alias_of.empty())
     { writeLogInfo_("instrument '" + instrument_alias_of + "' is predicted as " + instrument); }
     if (!nce_was_set)
     {
       std::ostringstream m;
-      m << "NCE not set; using " << instrument << "'s default, " << nce;
+      m << "NCE not set; using " << named << "'s default, " << nce;
       writeLogInfo_(m.str());
     }
     // CCS and 1/K0 only where the instrument can use them, unless the
     // caller says otherwise. One line either way: the columns' absence (or
     // presence) is otherwise a surprise in the consumer.
-    p.predict_ion_mobility = ODIA::LibraryGenerator::predictsIonMobility(ion_mobility, instrument);
+    p.predict_ion_mobility = ion_mobility == "auto" ? ion_mobility_default : ion_mobility == "true";
     {
-      const std::string named = instrument_alias_of.empty() ? instrument : instrument_alias_of;
+      const bool instrument_named = given_("generation:instrument") || instrument_in_config;
       if (ion_mobility != "auto")
       {
         writeLogInfo_(std::string(p.predict_ion_mobility ? "CCS and 1/K0 predicted" : "CCS and 1/K0 not predicted") +
                       " (-generation:predict_ion_mobility " + ion_mobility + ")");
+      }
+      else if (!p.predict_ion_mobility && !instrument_named && getParam_().getValue("instrument_file").toString().empty())
+      {
+        writeLogInfo_("no -generation:instrument: " + named + " assumed, so CCS and 1/K0 are not predicted "
+                      "(name the instrument, e.g. -generation:instrument timsTOF for ion mobility)");
       }
       else if (!p.predict_ion_mobility)
       {
@@ -695,6 +877,21 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       { writeLogInfo_(named + " has ion mobility: CCS and 1/K0 predicted"); }
       if (p.predict_ion_mobility && !p.derive_ion_mobility)
       { writeLogInfo_("1/K0 not derived from CCS (-generation:derive_ion_mobility false)"); }
+    }
+    // Settings without an effect here: a WARNING in 0.12, refused from 0.13
+    // (-irt_standards only ever warns: alone it is harmless).
+    {
+      const ODIA::DigestParams defaults;
+      const auto inert = [this](const std::string& option, const std::string& because)
+      { warn_(option + " has no effect " + because + "; remove it (refused from 0.13)"); };
+      if (!irt_standards.empty() && !irt_rescale)
+      { warn_("-irt_standards has no effect without -generation:irt_rescale true"); }
+      if (recompute_decoy_mz && decoys == "none")
+      { inert("-generation:recompute_decoy_mz true", "with -generation:decoys none"); }
+      if (p.max_variable_modifications != defaults.max_variable_modifications && p.variable_modifications.empty())
+      { inert("-generation:max_variable_modifications", "without -generation:variable_modifications"); }
+      if (!p.predict_ion_mobility && !p.derive_ion_mobility)
+      { inert("-generation:derive_ion_mobility false", "when CCS is not predicted"); }
     }
     // Neither instrument has trained weights in the shipped MS2 checkpoint
     // (its own constants name four instruments). Measured against Lumos at
@@ -708,21 +905,34 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     { warn_("SciexTOF (TripleTOF, ZenoTOF) has no trained MS2 weights; its spectra are NOT those of Lumos and "
             "are not validated on SCIEX data. Use -generation:instrument Lumos for the uncorrected baseline."); }
 
+    const std::string models_dir = getParam_().getValue("models").toString();
     struct { const char* name; const char* file; std::string* path; } models[] = {
       {"rt_model", kRtModelFile, &rt_model},
       {"ms2_model", kMs2ModelFile, &ms2_model},
       {"ccs_model", kCcsModelFile, &ccs_model}};
     for (auto& m : models)
     {
-      if (m.path->empty()) { *m.path = findModel(m.file); }
+      if (m.path->empty()) { *m.path = findModel(m.file, models_dir); }
     }
 
+    const auto recipe = [&]() {
+      json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
+                                 recompute_decoy_mz, ion_mobility, irt_standards);
+      eff["nce_source"] = nce_source;
+      eff["precursor_mz_source"] = precursor_mz_source;
+      eff["fragment_mz_source"] = fragment_mz_source;
+      eff["precursor_charges_source"] = charges_source;
+      // Which files gave the defaults (name and FNV-1a64): the values are in
+      // the recipe and the fingerprint already.
+      eff["instrument_defaults"] = {
+        {"defaults", catalog->defaults().path.filename().string()}, {"defaults_fnv1a64", catalog->defaults().hash},
+        {"instrument", instrument_file ? json(instrument_file->path.filename().string()) : json(nullptr)},
+        {"instrument_fnv1a64", instrument_file ? json(instrument_file->hash) : json(nullptr)}};
+      return eff;
+    };
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
-      json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
-                                 nce, instrument, irt_rescale,
-                                 recompute_decoy_mz, ion_mobility);
-      eff["nce_source"] = nce_source;
+      const json eff = recipe();
       try
       {
         ODIA::AtomicFile staged(wc);
@@ -747,11 +957,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     try { format = ODIA::LibraryExport::resolve(out, getStringOption_("out_format")); }
     catch (const std::invalid_argument& e) { writeLogError_(e.what()); return ILLEGAL_PARAMETERS; }
     const bool parquet = format == ODIA::LibraryFormat::DIALibGenParquet;
+    if ((format == ODIA::LibraryFormat::OpenSwathPQP || format == ODIA::LibraryFormat::OpenSwathTSV) && decoys == "none")
+    {
+      writeLogInfo_("OpenSWATH scores against the library's decoys and this one has none: add -generation:decoys "
+                    "shuffle (or mutate, pseudo_reverse, reverse)");
+    }
 
-    json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
-                               nce, instrument, irt_rescale,
-                               recompute_decoy_mz, ion_mobility);
-    eff["nce_source"] = nce_source;
+    json eff = recipe();
     if (!instrument_alias_of.empty()) { eff["instrument_named"] = instrument_alias_of; }
     std::error_code ec;
     for (const auto& m : models)
@@ -760,10 +972,10 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (m.path->empty())
       {
         std::ostringstream e;
-        e << m.file << " not found; set DIALIBGEN_MODEL_DIR to the directory holding the three PeptDeep "
-          << "models, or give -generation:" << m.name;
+        e << m.file << " not found; give -models (or set DIALIBGEN_MODEL_DIR) with the directory holding the three "
+          << "PeptDeep models, or -generation:" << m.name;
         if (ODIA::diagnosticsLevel() > 0)
-        { e << ". Searched:"; for (const auto& d : modelDirCandidates()) { e << "\n  " << d.string(); } }
+        { e << ". Searched:"; for (const auto& d : modelDirCandidates(models_dir)) { e << "\n  " << d.string(); } }
         else { e << " (-debug 1 lists the directories searched)"; }
         writeLogError_(e.str());
         return INPUT_FILE_NOT_FOUND;
@@ -910,7 +1122,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         }
         if (irt_rescale)
         {
-          standards = getStringOption_("irt_standards");
+          standards = irt_standards;
+          if (!standards.empty() && !fs::exists(standards))
+          { throw PhaseFailure(INPUT_FILE_NOT_FOUND, "-irt_standards " + standards + " does not exist"); }
           if (standards.empty()) { standards = findDataFile("irt_standards.tsv"); }
           if (standards.empty())
           {

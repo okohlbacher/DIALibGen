@@ -342,7 +342,7 @@ namespace ODIA::search
       if (params_.ms2_model.empty())
       {
         throw std::invalid_argument("search:intensities predicted needs the PeptDeep MS2 model (peptdeep_ms2_dynamic.onnx; "
-                                    "-tune_models or $DIALIBGEN_MODEL_DIR)");
+                                    "-models or $DIALIBGEN_MODEL_DIR)");
       }
       if (!std::filesystem::exists(params_.ms2_model))
       { throw std::invalid_argument("search:intensities predicted: no MS2 model at " + params_.ms2_model); }

@@ -3,6 +3,7 @@
 
 #include <odia/DIANNLibraryFile.h>
 #include <odia/AtomicFile.h>
+#include <odia/DeviceRoute.h>
 #include <odia/Hardware.h>
 #include <odia/LibraryExport.h>
 #include <memory>
@@ -24,6 +25,7 @@
 #include "DIALibGen.h"
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include <OpenMS/APPLICATIONS/ParameterInformation.h>
 
 #include <nlohmann/json.hpp>
 
@@ -130,7 +132,10 @@ namespace
     if (!j.is_object()) { throw std::runtime_error("refinement config must be a JSON object"); }
     const json ref = effectiveConfig(p);
     for (const auto& [k, v] : j.items())
-    { if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); } }
+    {
+      if (k == "tuning") { continue; }   // the training settings: refine_ reads them
+      if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
+    }
     if (j.contains("schema_version") && j["schema_version"] != 1)
     { throw std::runtime_error("unsupported schema_version " + j["schema_version"].dump() + "; this tool writes 1"); }
 
@@ -189,254 +194,280 @@ namespace
 
 void DIALibGen::registerRefinementOptions_()
   {
-    registerInputFile_("ids", "<file>", "",
-                       "DIA-NN report.parquet, or a pre-filtered library with -empirical_library. Modification names are canonicalised.", false);
+    // Shorthands: every option's advanced flag comes from advanced_ (the
+    // visible list in DIALibGen.cpp), so registration order is help order.
+    const auto flag = [this](const char* name, const std::string& text) { registerFlag_(name, text, advanced_(name)); };
+    const auto deprecated = [](const char* use) { return std::string("Deprecated (0.12, removed in 0.13): use ") + use; };
+    registerInputFile_("ids", "<file>", "", "Refine, tune: the DIA-NN report.parquet of one run (or, with "
+                       "-empirical_library, a pre-filtered library)", false, advanced_("ids"));
     setValidFormats_("ids", {"parquet"}, false);
-    registerInputFile_("run", "<file>", "",
-                       "Experimental: a centroided DIA run (mzML, or mzPeak: a .mzpeak archive or its unpacked directory) that "
-                       "the built-in identification step searches instead "
-                       "of reading -ids. Not yet validated (entrapment and resource gates open); -ids is the validated route. "
-                       "Give exactly one of -ids and -run. Settings: search:.", false);
-    // Not checked by TOPP (OpenMS 3.5 has no mzPeak type): refine_ checks the extension.
-    setValidFormats_("run", {"mzML", "mzpeak"}, false);
-    registerOutputFile_("out_ids", "<file>", "",
-                        "With -run: the identification report (Parquet, DIA-NN column names), which then serves as -ids. "
-                        "Default: <out>.ids.parquet. Never overwritten.", false);
-    setValidFormats_("out_ids", {"parquet"}, false);
-    registerOutputFile_("out_report", "<file>", "",
-                        "Per-axis residual report (TSV), measured BEFORE the overwrite.", false);
-    setValidFormats_("out_report", {"tsv"}, false);
-    registerFlag_("no_filter", "Keep precursors the reference did not identify; requires -no_write_rt or successful RT tuning so RT units stay consistent.");
-    registerFlag_("empirical_library", "Declare -ids a pre-filtered empirical library rather than a report: gates "
-                                       "whose columns are absent are BYPASSED and each bypass is recorded. Without "
-                                       "this, a missing gate column is an error.");
-    registerFlag_("no_write_rt", "Keep predicted RT rather than replacing it with observed RT.");
-    registerFlag_("write_im", "Also overwrite 1/K0 with the observed value for charges >= -im_min_charge; off by default.");
-    registerFlag_("write_intensity", "Replace predicted fragment intensities with the reference run's observed ones. "
-                                     "Needs Fragment.Info/Fragment.Quant.Raw (1.9) or Fr.N.Id/Quantity (2.x), exported with "
-                                     "--report-lib-info or --export-quant respectively. Every match is cross-checked on fragment m/z, and a run that "
-                                     "replaces nothing is an error.");
-    registerDoubleOption_("intensity_min_correlation", "<r>", 0.0, "Require fragment quality greater than this: "
-                          "correlation in DIA-NN 1.9, Score in DIA-NN 2.x. -1 disables the quality gate.", false);
-    registerFlag_("intensity_no_restrict", "Replace a precursor only when EVERY one of its transitions is trusted, else keep "
-                                           "its predictions whole. Neutral-loss transitions cannot match report fragments, so "
-                                           "precursors carrying them keep their predictions. Transition counts cannot change.");
-    registerFlag_("intensity_no_rerank", "Keep a replaced precursor's transitions in their original order.");
-    registerIntOption_("intensity_min_fragments", "<n>", 3, "A replaced precursor keeps at least this many transitions or "
-                       "keeps its predictions whole.", false);
-    registerStringOption_("intensity_norm", "<rule>", "library_max", "How an observed area becomes a library intensity. "
-                          "library_max scales to the maximum that precursor already held, which preserves the file's own "
-                          "convention -- base peak = 1 is not an invariant of these libraries.", false);
-    setValidStrings_("intensity_norm", {"library_max", "base_peak", "sum", "raw"});
-    registerDoubleOption_("intensity_min_relative", "<fraction>", 1e-4,
-                          "Drop observed intensities below this fraction of the kept maximum.", false);
-    registerDoubleOption_("intensity_mz_tol_ppm", "<ppm>", 20.0, "A fragment matches only when the report's m/z agrees with "
-                          "the library's to within this.", false);
-    registerDoubleOption_("intensity_max_mz_mismatch", "<frac>", 0.01, "Refuse when more than this fraction of identity "
-                          "matches fail the m/z check. 1 surveys a suspect pairing instead of failing.", false);
-    registerFlag_("allow_mixed_intensity", "Permit -write_intensity with -no_filter, which leaves observed and predicted "
-                                           "intensities in one library. Recorded in the provenance.");
-    registerDoubleOption_("q_precursor", "<q>", 0.01, "Precursor q-value gate (>= 1 disables).", false);
-    registerDoubleOption_("q_global", "<q>", 0.01, "Global/peptide q-value gate (>= 1 disables).", false);
-    registerDoubleOption_("q_protein", "<q>", 0.01, "Protein q-value gate (>= 1 disables).", false);
-    registerIntOption_("min_fragments", "<n>", 0,
-                       "Minimum DISTINCT reference fragments per precursor; needs fragment identities in -ids. 0 = off.", false);
-    registerStringOption_("rt_unit", "<unit>", "observed",
-                          "observed = the reference's own units; minmax = rescaled to 0..100 over the matched set "
-                          "(refused with -no_filter).", false);
-    setValidStrings_("rt_unit", {"observed", "minmax"});
-    registerStringOption_("dedup", "<rule>", "lowest_q",
-                          "Which observation wins when a precursor was seen more than once: lowest_q (ties: lower "
-                          "PEP, then first seen) or highest_evidence (needs an Evidence column).", false);
-    setValidStrings_("dedup", {"lowest_q", "highest_evidence"});
-    registerIntOption_("im_min_charge", "<z>", 2, "Charges below this never receive an observed 1/K0 (z1 is censored "
-                                                  "at the ramp top on timsTOF diaPASEF).", false);
-    registerDoubleOption_("im_ramp_top", "<1/K0>", 0.0, "The instrument's mobility ramp top, if known; observations "
-                                                        "within -im_ramp_margin of it are treated as censored. 0 = unknown.", false);
-    registerDoubleOption_("im_ramp_margin", "<1/K0>", 0.02, "See -im_ramp_top.", false);
-    registerDoubleOption_("min_match_fraction", "<f>", 0.0,
-                          "Refuse when fewer than this fraction of passing reference precursors match the library. "
-                          "0 = refuse only when nothing matches.", false);
-
+    flag("no_filter", "Refine: keep the precursors the run did not identify (needs -tune or -no_write_rt, so that "
+                      "RT stays in one unit; JSON key filter)");
+    flag("no_write_rt", "Refine: keep the predicted RT (JSON key write_rt)");
+    flag("write_im", "Refine: also write the observed 1/K0 (ion-mobility runs), for charges >= -im_min_charge");
+    flag("write_intensity", "Refine: also write the observed fragment intensities (a report exported with "
+                            "--report-lib-info (DIA-NN 1.9) or --export-quant (2.x)); fragments are cross-checked on "
+                            "m/z, and a run that replaces nothing is an error");
+    registerDoubleOption_("q_precursor", "<q>", 0.01, "Refine: precursor q-value cut-off (>= 1 disables); -q_global "
+                          "and -q_protein add gates (--helphelp)", false, advanced_("q_precursor"));
     // Registered in EVERY build, including one without libtorch, so --help,
     // -write_ini and -write_ctd describe the same tool on every platform. -tune
     // itself is what fails when the stage was not compiled in.
-    registerFlag_("tune", "Fine-tune the RT and CCS models on -ids and re-predict the whole library through them "
-                          "BEFORE refining, so precursors the reference never identified are corrected too. "
-                          "Needs a build with the fine-tuning stage. Turns a seconds-long refinement into a "
-                          "training run plus whole-library inference.");
-    registerStringOption_("tune_models", "<dir>", "", "Directory holding the stock peptdeep_{rt,ccs,ms2}_dynamic.onnx: "
-                                                      "-tune starts from the RT and CCS models, and -run predicts both members "
-                                                      "of every searched target-decoy pair with the MS2 model. "
-                                                      "Default: $DIALIBGEN_MODEL_DIR or the bundled models.", false);
-    registerStringOption_("tune_heads", "<which>", "both", "Which models to tune.", false);
-    setValidStrings_("tune_heads", {"rt", "ccs", "both"});
-    registerStringOption_("tune_out_models", "<dir>", "", "Keep the tuned ONNX files and their .tune.json and "
-                                                          ".trajectory.tsv sidecars here. Default: a scratch "
-                                                          "directory, removed on exit -- the deliverable is the library.", false);
-    registerFlag_("tune_predict_gpu", "Use the GPU for the re-prediction pass (the ONNX one, not training).");
-    registerIntOption_("tune_predict_sessions", "<n>", 0, "ONNX Runtime sessions for the re-prediction pass; 0 = as many as -threads (-threads 0: one per physical core).", false);
-    registerFlag_("tune_keep_free_cysteine_offset",
-                  "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by "
-                  "default: that offset was fitted against the STOCK model, and a model tuned on this run's own "
-                  "identifications has had the chance to learn the effect itself -- applying both counts it twice.");
+    flag("tune", "Refine: fine-tune RT (and CCS) on -ids and re-predict the whole library first, so precursors the run "
+                 "did not identify are corrected too (a training run plus whole-library prediction)");
+    registerStringOption_("tune_heads", "<which>", "auto", "Tune: models to fine-tune; auto = RT, plus CCS when the "
+                          "report has enough ion-mobility data", false, advanced_("tune_heads"));
+    setValidStrings_("tune_heads", {"auto", "rt", "ccs", "both"});
+    registerStringOption_("tune_out_models", "<dir>", "", "Tune: also keep the tuned models (ONNX, with their .tune.json "
+                          "and .trajectory.tsv) in this directory", false, advanced_("tune_out_models"));
 
-    registerTOPPSubsection_("filter", "Fine-tuning: which observations train the model. NOTE: this is the TRAINING-set filter, not the library filter -- that is -q_precursor and friends.");
-    registerDoubleOption_("filter:q_value", "<q>", 0.01, "Precursor Q.Value threshold", false);
-    registerIntOption_("filter:min_charge", "<z>", 2, "CCS only: lowest precursor charge used (RT collapses all charges). z1 is censored at the mobility ramp top on timsTOF", false);
+    registerInputFile_("run", "<file>", "",
+                       "Experimental: a centroided DIA run (mzML, or an mzPeak archive or its unpacked directory) that "
+                       "the built-in identification searches instead of reading -ids; not validated yet (-ids is). "
+                       "Settings: search:", false, advanced_("run"));
+    // Not checked by TOPP (OpenMS 3.5 has no mzPeak type): refine_ checks the extension.
+    setValidFormats_("run", {"mzML", "mzpeak"}, false);
+    registerOutputFile_("out_ids", "<file>", "",
+                        "With -run: the identification report it writes (Parquet, DIA-NN column names), then used "
+                        "as -ids. Default: <out>.ids.parquet. Never overwritten", false, advanced_("out_ids"));
+    setValidFormats_("out_ids", {"parquet"}, false);
+    registerOutputFile_("out_report", "<file>", "",
+                        "Refine, tune: per-axis residuals before the overwrite (TSV)", false, advanced_("out_report"));
+    setValidFormats_("out_report", {"tsv"}, false);
+    flag("empirical_library", "Refine: -ids is a pre-filtered empirical library, not a report: gates whose columns are "
+                              "missing are bypassed and each bypass is recorded (without it a missing gate column "
+                              "is an error; JSON key require_gates)");
+    registerDoubleOption_("q_global", "<q>", 1.0, "Refine: global (peptide-level) q-value cut-off; 1 = off",
+                          false, advanced_("q_global"));
+    registerDoubleOption_("q_protein", "<q>", 1.0, "Refine: protein q-value cut-off; 1 = off", false, advanced_("q_protein"));
+    registerIntOption_("min_fragments", "<n>", 0, "Refine: least distinct fragments the report identified per "
+                       "precursor (needs fragment identities in -ids); 0 = off", false, advanced_("min_fragments"));
+    registerStringOption_("rt_unit", "<unit>", "observed", "Refine: observed = the run's own RT units; minmax = "
+                          "rescaled to 0..100 over the matched set (not with -no_filter or tuning)", false,
+                          advanced_("rt_unit"));
+    setValidStrings_("rt_unit", {"observed", "minmax"});
+    registerStringOption_("dedup", "<rule>", "lowest_q", "Refine: which observation wins for a precursor seen more "
+                          "than once: lowest_q (ties: lower PEP, then first seen) or highest_evidence (needs an "
+                          "Evidence column)", false, advanced_("dedup"));
+    setValidStrings_("dedup", {"lowest_q", "highest_evidence"});
+    registerDoubleOption_("min_match_fraction", "<f>", 0.0, "Refine: refuse when fewer than this fraction of the passing "
+                          "report precursors are in the library; 0 = only when none is", false, advanced_("min_match_fraction"));
+    registerIntOption_("im_min_charge", "<z>", 2, "Refine, with -write_im: charges below this keep their predicted 1/K0 "
+                       "(z1 is censored at the ramp top on timsTOF diaPASEF)", false, advanced_("im_min_charge"));
+    registerDoubleOption_("im_ramp_top", "<1/K0>", 0.0, "Refine, with -write_im: the mobility ramp's top, if known; "
+                          "observations within -im_ramp_margin of it are censored. 0 = unknown", false,
+                          advanced_("im_ramp_top"));
+    registerDoubleOption_("im_ramp_margin", "<1/K0>", 0.02, "Refine, with -write_im: see -im_ramp_top", false,
+                          advanced_("im_ramp_margin"));
+    registerDoubleOption_("intensity_min_correlation", "<r>", 0.0, "Refine, with -write_intensity: least fragment "
+                          "quality (correlation in DIA-NN 1.9, Score in 2.x); -1 disables the gate", false,
+                          advanced_("intensity_min_correlation"));
+    flag("intensity_no_restrict", "Refine, with -write_intensity: replace a precursor only when every transition is "
+                                  "trusted, else keep its predictions (neutral-loss transitions never match; JSON key "
+                                  "intensity_restrict)");
+    flag("intensity_no_rerank", "Refine, with -write_intensity: keep a replaced precursor's transitions in their order "
+                                "(JSON key intensity_rerank)");
+    registerIntOption_("intensity_min_fragments", "<n>", 3, "Refine, with -write_intensity: a replaced precursor keeps "
+                       "at least this many transitions, or keeps its predictions", false, advanced_("intensity_min_fragments"));
+    registerStringOption_("intensity_norm", "<rule>", "library_max", "Refine, with -write_intensity: how an observed area "
+                          "becomes an intensity; library_max scales to the precursor's previous maximum (the file's own "
+                          "convention)", false, advanced_("intensity_norm"));
+    setValidStrings_("intensity_norm", {"library_max", "base_peak", "sum", "raw"});
+    registerDoubleOption_("intensity_min_relative", "<fraction>", 1e-4, "Refine, with -write_intensity: drop observed "
+                          "intensities below this fraction of the kept maximum", false, advanced_("intensity_min_relative"));
+    registerDoubleOption_("intensity_mz_tol_ppm", "<ppm>", 20.0, "Refine, with -write_intensity: a fragment matches only "
+                          "when the report's m/z agrees with the library's within this", false,
+                          advanced_("intensity_mz_tol_ppm"));
+    registerDoubleOption_("intensity_max_mz_mismatch", "<frac>", 0.01, "Refine, with -write_intensity: refuse when more "
+                          "than this fraction of matches fail the m/z check; 1 surveys a suspect pairing", false,
+                          advanced_("intensity_max_mz_mismatch"));
+    flag("allow_mixed_intensity", "Refine: permit -write_intensity with -no_filter, which leaves observed and predicted "
+                                  "intensities in one library (recorded)");
+
+    registerStringOption_("tune_models", "<dir>", "", deprecated("-models"), false, advanced_("tune_models"));
+    flag("tune_predict_gpu", deprecated("-machine:device (re-prediction follows it)"));
+    registerIntOption_("tune_predict_sessions", "<n>", 0, "Tune: ONNX Runtime sessions for the re-prediction; 0 = "
+                       "-threads", false, advanced_("tune_predict_sessions"));
+    flag("tune_keep_free_cysteine_offset", "Tune: keep the free-cysteine RT offset when re-predicting with the tuned RT "
+                                           "model (off: the offset was fitted to the stock model, and a model tuned on "
+                                           "the run has learned the effect)");
+
+    registerTOPPSubsection_("filter", "Fine-tuning: the training set (not the library: that is -q_precursor and the other gates)");
+    registerDoubleOption_("filter:q_value", "<q>", 0.01, "Precursor q-value cut-off of the training set", false,
+                          advanced_("filter:q_value"));
+    registerIntOption_("filter:min_charge", "<z>", 2, "CCS: lowest precursor charge (RT pools all charges; z1 is "
+                       "censored at the ramp top on timsTOF)", false, advanced_("filter:min_charge"));
     setMinInt_("filter:min_charge", 1); setMaxInt_("filter:min_charge", 8);
-    registerFlag_("filter:allow_z1", "CCS: permit filter:min_charge 1 (censored observations enter training)");
-    registerDoubleOption_("filter:rt_spread_max", "<min>", 0.2, "Drop a sequence whose charge states' RTs span more than this (minutes)", false);
-    registerDoubleOption_("filter:rt_max_minutes", "<min>", 0.0, "rt_norm denominator; 0 = the run's maximum observed RT", false);
+    flag("filter:allow_z1", "CCS: permit filter:min_charge 1 (censored observations then train)");
+    registerDoubleOption_("filter:rt_spread_max", "<min>", 0.2, "Drop a sequence whose charge states' RTs span more "
+                          "than this (minutes)", false, advanced_("filter:rt_spread_max"));
+    registerDoubleOption_("filter:rt_max_minutes", "<min>", 0.0, "RT normalisation; 0 = the run's latest observed RT",
+                          false, advanced_("filter:rt_max_minutes"));
 
     registerTOPPSubsection_("cohort", "Fine-tuning: protein-level cohorts (frozen before subsampling)");
-    registerIntOption_("cohort:train_size", "<n>", 0, "Training units (sequences for rt, sequence x charge for ccs); 0 = full pool", false);
-    registerDoubleOption_("cohort:train_frac", "<f>", 0.0, "Alternative to train_size: fraction of the pool", false);
-    registerFlag_("cohort:full_fit", "Train on EVERY unit of the run, the test and validation cohorts included: the closest "
-                                     "fit the data allows. val and TEST are then in-sample; judge this mode by searching a "
-                                     "DIFFERENT run with the result, never by its own numbers");
-    registerFlag_("cohort:no_inner_val", "No inner validation cohort: its units rejoin the pool and checkpoints are selected on TEST, which is then no longer a held-out number");
+    registerIntOption_("cohort:train_size", "<n>", 0, "Training units (sequences for RT, sequence x charge for CCS); "
+                       "0 = the whole pool", false, advanced_("cohort:train_size"));
+    registerDoubleOption_("cohort:train_frac", "<f>", 0.0, "Instead of train_size: the fraction of the pool", false,
+                          advanced_("cohort:train_frac"));
+    flag("cohort:full_fit", "Train on every unit of the run, test and validation included: validation and test are then "
+                            "in-sample, so judge the result on a different run");
+    flag("cohort:no_inner_val", "No inner validation cohort: its units rejoin the pool and checkpoints are selected on "
+                                "the test cohort, which is then no longer held out");
 
     registerTOPPSubsection_("train", "Fine-tuning: recipe");
-    registerIntOption_("train:epochs", "<n>", 100, "Horizon of the cosine schedule (and the maximum epochs)", false);
-    registerIntOption_("train:warmup", "<n>", 10, "Linear warmup epochs", false);
-    registerDoubleOption_("train:lr", "<lr>", 1e-4, "Peak learning rate (Adam)", false);
-    registerIntOption_("train:batch_size", "<n>", 1024, "Batch size within a length group", false);
+    registerIntOption_("train:epochs", "<n>", 100, "Length of the cosine schedule (and the most epochs)", false,
+                       advanced_("train:epochs"));
+    registerIntOption_("train:warmup", "<n>", 10, "Linear warm-up epochs", false, advanced_("train:warmup"));
+    registerDoubleOption_("train:lr", "<lr>", 1e-4, "Peak learning rate (Adam)", false, advanced_("train:lr"));
+    registerIntOption_("train:batch_size", "<n>", 1024, "Batch size within a length group", false,
+                       advanced_("train:batch_size"));
 
     registerTOPPSubsection_("stop", "Fine-tuning: convergence");
-    registerIntOption_("stop:eval_every", "<n>", 1, "Validate every n epochs", false);
-    registerIntOption_("stop:min_epochs", "<n>", 20, "Never stop before this epoch", false);
-    registerIntOption_("stop:patience", "<n>", 10, "Stop after this many epochs without progress (never before max(min_epochs, warmup))", false);
-    registerDoubleOption_("stop:rel_tol", "<f>", 0.005, "Progress = the selection metric beats the anchor by this fraction", false);
-    registerDoubleOption_("stop:abs_tol", "<f>", 0.0, "Progress = beats the anchor by this absolute amount (0 = use rel_tol)", false);
-    registerDoubleOption_("stop:max_seconds", "<s>", 0.0, "Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none)", false);
-    registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false);
+    registerIntOption_("stop:eval_every", "<n>", 1, "Validate every n epochs", false, advanced_("stop:eval_every"));
+    registerIntOption_("stop:min_epochs", "<n>", 20, "Never stop before this epoch", false, advanced_("stop:min_epochs"));
+    registerIntOption_("stop:patience", "<n>", 10, "Stop after this many epochs without progress (not before "
+                       "max(min_epochs, warmup))", false, advanced_("stop:patience"));
+    registerDoubleOption_("stop:rel_tol", "<f>", 0.005, "Progress: the selection metric beats the best so far by this "
+                          "fraction", false, advanced_("stop:rel_tol"));
+    registerDoubleOption_("stop:abs_tol", "<f>", 0.0, "Progress: ... by this absolute amount (0 = use rel_tol)", false,
+                          advanced_("stop:abs_tol"));
+    registerDoubleOption_("stop:max_seconds", "<s>", 0.0, "Time budget per head, checked between epochs (the final "
+                          "evaluation may exceed it); 0 = none", false, advanced_("stop:max_seconds"));
+    registerStringOption_("stop:select", "<metric>", "calibrated_sd", "Selection metric on the validation cohort", false,
+                          advanced_("stop:select"));
     setValidStrings_("stop:select", {"calibrated_sd", "rmse"});
 
-    registerTOPPSubsection_("machine", "Devices: the GPU for prediction (generate; tune with -tune_predict_gpu) and the device for fine-tuning");
+    registerTOPPSubsection_("machine", "Devices");
     registerStringOption_("machine:device", "<dev>", "auto",
-                          "Prediction (generate): auto picks the fastest route that works here and says which: CUDA when "
-                          "this ONNX Runtime has it and a GPU is visible (RT and CCS only with cuDNN 9), on a Mac the Apple GPU "
-                          "(CoreML) for MS2 of a library large enough to pay for it, else the CPU; cpu, cuda[:N], coreml (or "
-                          "mps) force one. Fine-tuning: cpu, cuda[:N] or mps; auto is mps on Apple silicon when this LibTorch "
-                          "has it (not bit-identical to CPU training), else cpu. -tune_predict_gpu re-predicts RT and CCS on "
-                          "CUDA when it can", false);
+                          "Auto: the GPU when one is usable and pays off (NVIDIA: CUDA, RT and CCS with cuDNN 9; Apple: "
+                          "CoreML for MS2 of large libraries, MPS for fine-tuning), else the CPU; cpu: CPU only (the "
+                          "reference); also cuda[:N], coreml, mps", false, advanced_("machine:device"));
     registerStringOption_("machine:coreml_units", "<units>", "gpu",
-                          "CoreML compute units: gpu (CPU and GPU; the default, fastest), all (Core ML's choice, Neural "
-                          "Engine included), ane (CPU and Neural Engine), cpu (Core ML's CPU path, for checks)", false);
+                          "CoreML compute units: gpu (CPU and GPU, fastest), all (Core ML's choice, Neural Engine "
+                          "included), ane (CPU and Neural Engine), cpu (checks)", false, advanced_("machine:coreml_units"));
     setValidStrings_("machine:coreml_units", {"gpu", "all", "ane", "cpu"});
-    registerIntOption_("machine:threads", "<n>", 0,
-                       "CPU threads for training (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend on the "
-                       "count; the provenance records it, and -machine:threads 16 reproduces a Linux model on a Mac", false);
+    registerIntOption_("machine:train_threads", "<n>", 0,
+                       "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend "
+                       "on the count, which is recorded; 16 on a Mac reproduces a Linux model", false,
+                       advanced_("machine:train_threads"));
+    registerIntOption_("machine:threads", "<n>", 0, deprecated("-machine:train_threads"), false, advanced_("machine:threads"));
     registerStringOption_("machine:cores", "<which>", "all",
-                          "macOS: the cores -threads 0 counts. all: every physical core; performance: the performance cores "
-                          "only, which saves energy, not time. No effect elsewhere. Does not change the output", false);
+                          "MacOS: which cores -threads 0 counts: all, or performance (saves energy, not time). Does not "
+                          "change the output", false, advanced_("machine:cores"));
     setValidStrings_("machine:cores", {"all", "performance"});
-    registerFlag_("machine:no_cudnn", "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower");
-    registerIntOption_("machine:seed", "<n>", 20260803, "Seed for the training subsample and batch order", false);
+    flag("machine:no_cudnn", "CUDA fine-tuning without cuDNN (when only its loader shim is installed, as in "
+                             "pytorch.org's libtorch zips); slower");
+    registerIntOption_("machine:seed", "<n>", 20260803, "Seed of the training subsample and batch order", false,
+                       advanced_("machine:seed"));
     registerStringOption_("machine:tf32", "<true/false>", "false",
-                          "TensorFloat-32 math on NVIDIA GPUs, for prediction and training. Off: GPU libraries match CPU "
-                          "libraries to float rounding. On: faster, but about 1 % of precursors select a different "
-                          "fragment set (docs/usage.md#gpu)", false);
+                          "TensorFloat-32 on NVIDIA GPUs, for prediction and fine-tuning: faster, but about 1 % of "
+                          "precursors select a different fragment set (off: GPU and CPU agree to float rounding)",
+                          false, advanced_("machine:tf32"));
     setValidStrings_("machine:tf32", {"true", "false"});
     registerIntOption_("machine:gpu_sessions", "<n>", 4,
-                       "CUDA: ONNX Runtime sessions per GPU and model, each with its own stream (2-4 are fastest). "
-                       "CoreML: concurrent batches. Does not change the output.", false);
+                       "CUDA: ONNX Runtime sessions per GPU and model, each with its own stream; CoreML: concurrent "
+                       "batches. Does not change the output", false, advanced_("machine:gpu_sessions"));
     setMinInt_("machine:gpu_sessions", 1);
     setMaxInt_("machine:gpu_sessions", 16);
     registerIntList_("machine:gpu_devices", "<ids>", OpenMS::IntList(),
-                     "CUDA devices to spread the sessions over, round robin (e.g. 0 1). Default: the first visible "
-                     "device that works. Does not change the output.", false);
+                     "CUDA devices to spread the sessions over (e.g. 0 1). Default: the first that works. Does not "
+                     "change the output", false, advanced_("machine:gpu_devices"));
     setMinInt_("machine:gpu_devices", 0);
-    registerFlag_("machine:require_gpu", "Fail instead of running a model on the CPU: every model asks for the GPU, and "
-                                         "one that cannot have it (no GPU, no cuDNN 9, a CPU-only ONNX Runtime; on a Mac RT "
-                                         "and CCS always) is an error, not a WARNING.");
+    flag("machine:require_gpu", "Fail instead of predicting on the CPU when -machine:device asks for a GPU (or auto finds "
+                                "one) that a model cannot use");
 
-    registerTOPPSubsection_("search", "Built-in identification with -run (experimental): candidates, decoys, extraction, "
-                                      "calibration and the run-level guards. See docs/design/built-in-identification.md");
-    registerStringOption_("search:candidates", "<rule>", "evidence", "Candidate selection: evidence = target-decoy pairs of which "
-                          "the target or the decoy has fragment evidence in the run (search:prefilter_*; the same rule for "
-                          "both); random = a deterministic, label-blind random subset of pairs (search:subset)", false);
+    registerTOPPSubsection_("search", "Built-in identification with -run (experimental; docs/design/built-in-identification.md)");
+    registerStringOption_("search:candidates", "<rule>", "evidence", "Candidate pairs: evidence = target-decoy pairs of "
+                          "which either member has fragment evidence in the run (search:prefilter_*); random = a "
+                          "deterministic, label-blind random subset (search:subset)", false, advanced_("search:candidates"));
     setValidStrings_("search:candidates", {"evidence", "random"});
-    registerIntOption_("search:subset", "<n>", 0, "search:candidates random: targets drawn from the library before the cap "
-                       "(0 = every eligible target)", false);
-    registerIntOption_("search:max_pairs", "<n>", 200000, "Cap on the target-decoy pairs searched; time is linear in pairs (0 = no "
-                       "cap). With evidence candidates the cap is stratified by isolation window, library-RT decile and charge "
-                       "and keeps the pairs with the most evidence", false);
-    registerIntOption_("search:prefilter_depth", "<n>", 5, "search:candidates evidence: keep a pair when its target or its decoy "
-                       "has this many of its 6 most intense predicted fragments among one MS2 spectrum's top peaks", false);
+    registerIntOption_("search:subset", "<n>", 0, "Random candidates: targets drawn before the cap (0 = every eligible "
+                       "target)", false, advanced_("search:subset"));
+    registerIntOption_("search:max_pairs", "<n>", 200000, "Most target-decoy pairs searched; time is linear in pairs (0 = "
+                       "no cap). Evidence candidates are capped per isolation window, RT decile and charge, keeping the "
+                       "most evidence", false, advanced_("search:max_pairs"));
+    registerIntOption_("search:prefilter_depth", "<n>", 5, "Evidence candidates: a pair is kept when either member has "
+                       "this many of its 6 most intense predicted fragments among one spectrum's top peaks", false,
+                       advanced_("search:prefilter_depth"));
     setMinInt_("search:prefilter_depth", 1); setMaxInt_("search:prefilter_depth", 6);
-    registerIntOption_("search:prefilter_top_peaks", "<n>", 1000, "search:candidates evidence: the most intense peaks of each MS2 "
-                       "spectrum the prefilter matches", false);
+    registerIntOption_("search:prefilter_top_peaks", "<n>", 1000, "Evidence candidates: the most intense peaks per MS2 "
+                       "spectrum that the prefilter matches", false, advanced_("search:prefilter_top_peaks"));
     setMinInt_("search:prefilter_top_peaks", 1);
-    registerDoubleOption_("search:prefilter_ppm", "<ppm>", 10.0, "search:candidates evidence: fragment match tolerance, ppm either "
-                          "side", false);
+    registerDoubleOption_("search:prefilter_ppm", "<ppm>", 10.0, "Evidence candidates: fragment tolerance, ppm either "
+                          "side", false, advanced_("search:prefilter_ppm"));
     setMinFloat_("search:prefilter_ppm", 0.1); setMaxFloat_("search:prefilter_ppm", 100.0);
-    registerStringOption_("search:decoys", "<method>", "shuffle", "How the search's in-memory decoys are built from the selected "
-                          "targets; both methods keep the termini. Decoys in the library file are not searched and stay in the output", false);
+    registerStringOption_("search:decoys", "<method>", "shuffle", "How the search builds its in-memory decoys (both keep "
+                          "the termini); decoys in the library are not searched and stay in the output", false,
+                          advanced_("search:decoys"));
     setValidStrings_("search:decoys", {"shuffle", "pseudo_reverse"});
-    registerStringOption_("search:intensities", "<source>", "predicted", "Fragments and intensities of both members of each "
-                          "target-decoy pair: predicted = both predicted by the PeptDeep MS2 model (tune_models, "
-                          "$DIALIBGEN_MODEL_DIR or the bundled models) from their own sequences, each taking its own most "
-                          "intense fragments; library = the library's target assay, the decoy in its target's fragment slots "
-                          "with its target's intensities (makes decoys weaker than null targets; for comparison only)", false);
+    registerStringOption_("search:intensities", "<source>", "predicted", "Validation only: fragments of both pair "
+                          "members. predicted = predicted from each member's own sequence by the MS2 model (-models); "
+                          "library = the target's assay, the decoy in its target's fragment slots (weaker decoys)",
+                          false, advanced_("search:intensities"));
     setValidStrings_("search:intensities", {"predicted", "library"});
-    registerStringOption_("search:instrument", "<name>", "auto", "search:intensities predicted: the MS2 model's instrument "
-                          "(QE, Lumos, timsTOF, SciexTOF, ThermoTOF or an alias); auto = the instrument DIALibGen generate "
-                          "recorded in the library, else timsTOF for an ion-mobility run and QE otherwise", false);
-    registerDoubleOption_("search:nce", "<nce>", -1.0, "search:intensities predicted: the MS2 model's collision energy; -1 = "
-                          "the one recorded in the library with its instrument, else the instrument's default", false);
+    registerStringOption_("search:instrument", "<name>", "auto", "Predicted intensities: the MS2 model's instrument; auto = "
+                          "the one the library records, else timsTOF for an ion-mobility run and QE otherwise", false,
+                          advanced_("search:instrument"));
+    registerDoubleOption_("search:nce", "<nce>", -1.0, "Predicted intensities: the MS2 model's collision energy; -1 = the "
+                          "one the library records with its instrument, else the instrument's", false,
+                          advanced_("search:nce"));
     setMinFloat_("search:nce", -1.0); setMaxFloat_("search:nce", 100.0);
-    registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how", false);
-    registerIntOption_("search:passes", "<n>", 1, "Extraction passes (1 in this version)", false);
+    registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how",
+                       false, advanced_("search:seed"));
+    registerIntOption_("search:passes", "<n>", 1, deprecated("nothing (1 is its only value)"), false, advanced_("search:passes"));
     setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);
-    registerDoubleOption_("search:rt_window", "<s>", 0.0, "Full RT extraction window, seconds (0 = from the calibration)", false);
+    registerDoubleOption_("search:rt_window", "<s>", 0.0, "Full RT extraction window, seconds (0 = from the calibration)",
+                          false, advanced_("search:rt_window"));
     setMinFloat_("search:rt_window", 0.0);
-    registerDoubleOption_("search:mz_ppm", "<ppm>", 0.0, "Full fragment m/z extraction window, ppm (0 = automatic)", false);
+    registerDoubleOption_("search:mz_ppm", "<ppm>", 0.0, "Full fragment m/z extraction window, ppm (0 = automatic)", false,
+                          advanced_("search:mz_ppm"));
     setMinFloat_("search:mz_ppm", 0.0);
-    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility (diaPASEF) runs: "
-                          "0 = automatic, from the run's 1/K0 calibration; > 0 = this width; -1 = off (searched by m/z and RT "
-                          "only, no observed 1/K0: -write_im and the CCS head are refused)", false);
+    registerDoubleOption_("search:im_window", "<1/K0>", 0.0, "Full 1/K0 extraction window on ion-mobility runs: 0 = from "
+                          "the run's 1/K0 calibration; > 0 = this width; -1 = off (no observed 1/K0: -write_im and the "
+                          "CCS head are refused)", false, advanced_("search:im_window"));
     setMinFloat_("search:im_window", -1.0);
-    registerStringOption_("search:ms1", "<true/false>", "true", "Extract MS1 traces and use the MS1 sub-scores", false);
+    registerStringOption_("search:ms1", "<true/false>", "true", "Extract MS1 traces and use the MS1 sub-scores", false,
+                          advanced_("search:ms1"));
     setValidStrings_("search:ms1", {"true", "false"});
-    registerStringOption_("search:rt_im_scores", "<true/false>", "true", "Let the RT and 1/K0 deviation sub-scores into the "
-                          "classifier; false is an ablation for tuning, which exists to correct those deviations", false);
+    registerStringOption_("search:rt_im_scores", "<true/false>", "true", "Validation only: false keeps the RT and 1/K0 "
+                          "deviation sub-scores out of the classifier (an ablation)", false, advanced_("search:rt_im_scores"));
     setValidStrings_("search:rt_im_scores", {"true", "false"});
-    registerDoubleOption_("search:calibration_min_rsq", "<r2>", 0.70, "Least r^2 of the RT calibration on the seed assays", false);
-    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays found in the run that "
-                          "the RT outlier removal must keep", false);
+    registerDoubleOption_("search:calibration_min_rsq", "<r2>", 0.70, "Least r^2 of the RT calibration on the seed assays",
+                          false, advanced_("search:calibration_min_rsq"));
+    registerDoubleOption_("search:calibration_min_coverage", "<f>", 0.30, "Least fraction of the seed assays found in the "
+                          "run that the RT outlier removal must keep", false, advanced_("search:calibration_min_coverage"));
     for (const char* name : {"search:calibration_min_rsq", "search:calibration_min_coverage"})
     { setMinFloat_(name, 0.0); setMaxFloat_(name, 1.0); }
-    registerFlag_("search:allow_bootstrap", "When the RT calibration fails, map the library RT range linearly onto the run "
-                                            "instead of aborting. A test hook, recorded in the provenance");
-    registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = per-window "
-                          "cache files, auto = cache for runs above 3 GB", false);
+    flag("search:allow_bootstrap", deprecated("ODIA_SEARCH_ALLOW_BOOTSTRAP=1"));
+    registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = "
+                          "per-window cache files, auto = cache for runs above 3 GB", false, advanced_("search:readoptions"));
     setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
-    registerStringOption_("search:cache_dir", "<dir>", "", "Directory for cache files (default: the directory of -out_ids); "
-                          "they are removed after the search", false);
-    registerStringOption_("search:ms1_in_memory", "<mode>", "auto", "Hold the MS1 map in memory during extraction instead of "
-                          "reading it again for every batch: auto = when the free memory is at least twice its estimated size "
-                          "(the log says which, and why), on, off. Changes the speed and the memory, never the report", false);
+    registerStringOption_("search:cache_dir", "<dir>", "", "Directory of the cache files (default: that of -out_ids); "
+                          "removed after the search", false, advanced_("search:cache_dir"));
+    registerStringOption_("search:ms1_in_memory", "<mode>", "auto", "Memory: hold the MS1 map in memory during "
+                          "extraction (auto = when the free memory is at least twice its size; on; off). Changes speed "
+                          "and memory, never the report", false, advanced_("search:ms1_in_memory"));
     setValidStrings_("search:ms1_in_memory", {"auto", "on", "off"});
-    registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false);
-    registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored target "
-                          "precursors passes q <= 0.01: no honest decoy set looks like that", false);
+    registerIntOption_("search:min_ids", "<n>", 200, "Abort when fewer target precursors pass q <= 0.01", false,
+                       advanced_("search:min_ids"));
+    registerDoubleOption_("search:max_target_fraction", "<f>", 0.5, "Abort when more than this fraction of the scored "
+                          "targets passes q <= 0.01 (no honest decoy set looks like that)", false,
+                          advanced_("search:max_target_fraction"));
     setMinFloat_("search:max_target_fraction", 0.01); setMaxFloat_("search:max_target_fraction", 1.0);
-    registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors, targets and decoys, up to this precursor q-value "
-                          "go into -out_ids", false);
+    registerDoubleOption_("search:report_max_q", "<q>", 0.10, "Precursors (targets and decoys) up to this q-value go "
+                          "into -out_ids", false, advanced_("search:report_max_q"));
     setMinFloat_("search:report_max_q", 0.01); setMaxFloat_("search:report_max_q", 1.0);
-    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Prefix of entrapment protein ids, at the start of an id or "
-                          "right after a '|' (sp|ENTRAP_P12345|...): log and record the combined entrapment FDP estimate and "
-                          "the entrapment winner test. A validation aid", false);
-    registerStringOption_("search:selftest", "<true/false>", "true", "Also score with swapped and with random pair labels, "
-                          "and abort unless both identify (almost) nothing. These catch a classifier that leaks labels, not "
-                          "decoys that are built weaker than null targets", false);
+    registerStringOption_("search:entrapment_tag", "<prefix>", "", "Validation only: prefix of entrapment protein ids "
+                          "(at the start or after a '|'); logs and records the entrapment FDP estimate and winner test",
+                          false, advanced_("search:entrapment_tag"));
+    registerStringOption_("search:selftest", "<true/false>", "true", "Also score with swapped and with random pair labels "
+                          "and abort unless both identify (almost) nothing (catches a classifier that leaks labels)",
+                          false, advanced_("search:selftest"));
     setValidStrings_("search:selftest", {"true", "false"});
-    registerIntOption_("search:batch_size", "<n>", 100, "Advanced: precursors per extraction batch within one isolation window (500 before 0.11.3; the report does not depend on it)", false);
-    registerIntOption_("search:chunk", "<n>", 20000, "Advanced: precursors per extraction call; target-decoy pairs stay together. "
-                       "Each chunk takes batch-sized pieces from across the m/z range, so OpenSWATH, which parallelises over "
-                       "isolation windows, has work for its threads; it bounds extraction memory only, not the calibration's", false);
+    registerIntOption_("search:batch_size", "<n>", 100, "Memory: precursors per extraction batch within one isolation "
+                       "window (the report does not depend on it)", false, advanced_("search:batch_size"));
+    registerIntOption_("search:chunk", "<n>", 20000, "Memory: precursors per extraction call (pairs stay together); "
+                       "bounds extraction memory, not the calibration's", false, advanced_("search:chunk"));
     for (const char* name : {"search:subset", "search:max_pairs", "search:seed", "search:min_ids"}) { setMinInt_(name, 0); }
     setMinInt_("search:batch_size", 1);
     setMinInt_("search:chunk", 2);
@@ -445,6 +476,7 @@ void DIALibGen::registerRefinementOptions_()
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every"}) { setMinInt_(name, 1); }
     setMinInt_("machine:threads", 0);
+    setMinInt_("machine:train_threads", 0);
     // Flat refinement options follow the existing effective-config schema;
     // training options have their own prefixes and are recognized in main_.
     const std::map<std::string, std::string> flags = {{"filter", "no_filter"}, {"require_gates", "empirical_library"},
@@ -478,7 +510,7 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     }
     s.nce = getDoubleOption_("search:nce");
     s.seed = static_cast<std::uint64_t>(count("search:seed"));
-    s.passes = getIntOption_("search:passes");
+    s.passes = getIntOption_("search:passes");   // deprecated: 1, its only value
     s.rt_window = getDoubleOption_("search:rt_window");
     s.mz_ppm = getDoubleOption_("search:mz_ppm");
     s.im_window = getDoubleOption_("search:im_window");
@@ -488,7 +520,9 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.chunk = count("search:chunk");
     s.calibration_min_rsq = getDoubleOption_("search:calibration_min_rsq");
     s.calibration_min_coverage = getDoubleOption_("search:calibration_min_coverage");
-    s.allow_bootstrap = getFlag_("search:allow_bootstrap");
+    // ODIA_SEARCH_ALLOW_BOOTSTRAP=1, or the deprecated -search:allow_bootstrap.
+    if (const char* e = std::getenv("ODIA_SEARCH_ALLOW_BOOTSTRAP"); e != nullptr && std::string(e) == "1") { s.allow_bootstrap = true; }
+    s.allow_bootstrap = s.allow_bootstrap || getFlag_("search:allow_bootstrap");
     s.readoptions = ODIA::search::parseReadMode(getStringOption_("search:readoptions"));
     s.cache_dir = getStringOption_("search:cache_dir");
     s.ms1_in_memory = ODIA::search::parseMs1InMemory(getStringOption_("search:ms1_in_memory"));
@@ -502,6 +536,69 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     return s;
   }
 
+
+namespace
+{
+  /// The training settings a recipe's "tuning" object holds (and -write_config writes).
+  const std::vector<std::string>& trainingSettings()
+  {
+    static const std::vector<std::string> names = {
+      "tune_heads", "tune_keep_free_cysteine_offset",
+      "filter:q_value", "filter:min_charge", "filter:allow_z1", "filter:rt_spread_max", "filter:rt_max_minutes",
+      "cohort:train_size", "cohort:train_frac", "cohort:full_fit", "cohort:no_inner_val",
+      "train:epochs", "train:warmup", "train:lr", "train:batch_size",
+      "stop:eval_every", "stop:min_epochs", "stop:patience", "stop:rel_tol", "stop:abs_tol", "stop:max_seconds",
+      "stop:select", "machine:train_threads", "machine:seed", "machine:no_cudnn"};
+    return names;
+  }
+}
+
+OpenMS::ParamValue DIALibGen::trainingSetting_(const std::string& name) const
+{
+  // The command line, a deprecated name's value, the INI, the recipe, the default.
+  if (argv_supplied_.count(name)) { return getParam_().getValue(name); }
+  if (const auto alias = aliased_.find(name); alias != aliased_.end()) { return alias->second; }
+  if (supplied_.count(name) || !tuning_recipe_.contains(name)) { return getParam_().getValue(name); }
+  const json& v = tuning_recipe_.at(name);
+  const auto& info = findEntry_(name);
+  using PI = OpenMS::ParameterInformation;
+  if (info.type == PI::FLAG)
+  {
+    if (!v.is_boolean()) { throw std::runtime_error("tuning." + name + " must be true or false"); }
+    return OpenMS::ParamValue(v.get<bool>() ? "true" : "false");
+  }
+  if (info.type == PI::INT)
+  {
+    if (!v.is_number_integer()) { throw std::runtime_error("tuning." + name + " must be an integer"); }
+    return OpenMS::ParamValue(v.get<int>());
+  }
+  if (info.type == PI::DOUBLE)
+  {
+    if (!v.is_number()) { throw std::runtime_error("tuning." + name + " must be a number"); }
+    return OpenMS::ParamValue(v.get<double>());
+  }
+  if (!v.is_string()) { throw std::runtime_error("tuning." + name + " must be a string"); }
+  const std::string text = v.get<std::string>();
+  if (!info.valid_strings.empty() && std::find(info.valid_strings.begin(), info.valid_strings.end(), text) == info.valid_strings.end())
+  { throw std::runtime_error("tuning." + name + ": '" + text + "' is not one of its values"); }
+  return OpenMS::ParamValue(text);
+}
+
+json DIALibGen::trainingRecipe_() const
+{
+  json out = json::object();
+  for (const auto& name : trainingSettings())
+  {
+    const OpenMS::ParamValue v = trainingSetting_(name);
+    const auto type = findEntry_(name).type;
+    using PI = OpenMS::ParameterInformation;
+    if (type == PI::FLAG) { out[name] = v.toString() == "true"; }
+    else if (type == PI::INT) { out[name] = static_cast<int>(v); }
+    else if (type == PI::DOUBLE) { out[name] = static_cast<double>(v); }
+    else { out[name] = v.toString(); }
+  }
+  return out;
+}
 
 DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
   {
@@ -541,7 +638,21 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       if (!in) { writeLogError_("cannot read config: " + cfg); return INPUT_FILE_NOT_FOUND; }
       try
       {
-        applyJson_(json::parse(in, nullptr, true, true), p);
+        const json recipe = json::parse(in, nullptr, true, true);
+        applyJson_(recipe, p);
+        if (recipe.contains("tuning"))
+        {
+          const json& t = recipe["tuning"];
+          if (!t.is_object()) { throw std::runtime_error("tuning must be a JSON object"); }
+          for (const auto& [k, v] : t.items())
+          {
+            if (std::find(trainingSettings().begin(), trainingSettings().end(), k) == trainingSettings().end())
+            { throw std::runtime_error("unknown config key: tuning." + k); }
+            (void)v;
+          }
+          tuning_recipe_ = t;
+          if (!tune) { warn_("the recipe's tuning settings have no effect without -tune"); }
+        }
         // Explicit TOPP options (CLI or INI) override the JSON compatibility config.
         json overrides = json::object();
         const std::map<std::string, std::string> flags = {{"filter", "no_filter"}, {"require_gates", "empirical_library"},
@@ -561,7 +672,10 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
     { writeLogError_("-mode tune preserves the whole library and writes predictions only; filtering or observed-value replacement requires -mode refine"); return ILLEGAL_PARAMETERS; }
     if (tune && p.rt_unit == ODIA::RefineParams::RtUnit::MinMax)
     { writeLogError_("tuning and rt_unit=minmax are incompatible: predictions use the reference run's minutes"); return ILLEGAL_PARAMETERS; }
-    if (p.write_rt && !p.filter && (!tune || getStringOption_("tune_heads") == "ccs"))
+    std::string heads;
+    try { heads = trainingSetting_("tune_heads").toString(); }
+    catch (const std::exception& e) { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
+    if (p.write_rt && !p.filter && (!tune || heads == "ccs"))
     { writeLogError_("observed RT with the filter off would mix reference-run minutes with library predictions; use -no_write_rt or -tune with the RT head (rt or both)"); return ILLEGAL_PARAMETERS; }
     if (tune_only)
     {
@@ -570,12 +684,46 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       const json expected = effectiveConfig(defaults), actual = effectiveConfig(p);
       for (const auto& [key, value] : actual.items())
       {
+        // An INI from before 0.12 carries the gates' old default, 0.01.
+        if ((key == "q_global" || key == "q_protein") && old_ini_ && !argv_supplied_.count(key) && value == 0.01) { continue; }
         if (value != expected.at(key))
         { writeLogError_(key + " has no effect in -mode tune; use the training options or select -mode refine"); return ILLEGAL_PARAMETERS; }
       }
     }
 
-    const json eff = effectiveConfig(p);
+    // Settings without an effect on this refinement: a WARNING in 0.12,
+    // refused from 0.13. Only values other than the default count.
+    if (!tune_only)
+    {
+      const ODIA::RefineParams d;
+      const auto inert = [this](const char* option, const char* needs)
+      { warn_(std::string("-") + option + " has no effect without -" + needs + "; remove it (refused from 0.13)"); };
+      if (!p.write_intensity)
+      {
+        if (p.intensity_min_correlation != d.intensity_min_correlation) { inert("intensity_min_correlation", "write_intensity"); }
+        if (p.intensity_restrict != d.intensity_restrict) { inert("intensity_no_restrict", "write_intensity"); }
+        if (p.intensity_rerank != d.intensity_rerank) { inert("intensity_no_rerank", "write_intensity"); }
+        if (p.intensity_min_fragments != d.intensity_min_fragments) { inert("intensity_min_fragments", "write_intensity"); }
+        if (p.intensity_norm != d.intensity_norm) { inert("intensity_norm", "write_intensity"); }
+        if (p.intensity_min_relative != d.intensity_min_relative) { inert("intensity_min_relative", "write_intensity"); }
+        if (p.intensity_mz_tol_ppm != d.intensity_mz_tol_ppm) { inert("intensity_mz_tol_ppm", "write_intensity"); }
+        if (p.intensity_max_mz_mismatch != d.intensity_max_mz_mismatch) { inert("intensity_max_mz_mismatch", "write_intensity"); }
+        if (p.allow_mixed_intensity != d.allow_mixed_intensity) { inert("allow_mixed_intensity", "write_intensity"); }
+      }
+      if (!p.write_im)
+      {
+        if (p.im_min_charge != d.im_min_charge) { inert("im_min_charge", "write_im"); }
+        if (p.im_ramp_top != d.im_ramp_top) { inert("im_ramp_top", "write_im"); }
+        if (p.im_ramp_margin != d.im_ramp_margin) { inert("im_ramp_margin", "write_im"); }
+      }
+    }
+
+    json eff = effectiveConfig(p);
+    if (tune)
+    {
+      try { eff["tuning"] = trainingRecipe_(); }
+      catch (const std::exception& e) { writeLogError_(std::string("config: ") + e.what()); return ILLEGAL_PARAMETERS; }
+    }
     if (const std::string wc = getStringOption_("write_config"); !wc.empty())
     {
       try
@@ -666,7 +814,8 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       // (SearchParams::require_ion_mobility); search:im_window -1 is refused here.
       std::vector<std::string> needs_im;
       if (p.write_im) { needs_im.push_back("-write_im"); }
-      if (tune && getStringOption_("tune_heads") != "rt") { needs_im.push_back("-tune_heads " + getStringOption_("tune_heads")); }
+      // auto settles on the heads once the report is there (no ion mobility: RT only).
+      if (tune && heads != "rt" && heads != "auto") { needs_im.push_back("-tune_heads " + heads); }
       std::string needs_im_text;
       for (const auto& n : needs_im) { needs_im_text += (needs_im_text.empty() ? "" : " and ") + n; }
       if (!needs_im.empty() && getDoubleOption_("search:im_window") == -1.0)
@@ -679,22 +828,19 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       // is checked before it.
       if (tune)
       {
-        const std::string heads = getStringOption_("tune_heads");
-        (void)heads;   // read by the model checks of a build with fine-tuning
-        const int epochs = getIntOption_("train:epochs"), warmup = getIntOption_("train:warmup");
+        const int epochs = static_cast<int>(trainingSetting_("train:epochs")), warmup = static_cast<int>(trainingSetting_("train:warmup"));
         if (epochs < 1 || warmup < 0 || warmup > epochs)
         { writeLogError_("train:warmup must be in [0, train:epochs]"); return ILLEGAL_PARAMETERS; }
-        if (getIntOption_("cohort:train_size") > 0 && getDoubleOption_("cohort:train_frac") > 0)
+        if (static_cast<int>(trainingSetting_("cohort:train_size")) > 0 && static_cast<double>(trainingSetting_("cohort:train_frac")) > 0)
         { writeLogError_("give cohort:train_size or cohort:train_frac, not both"); return ILLEGAL_PARAMETERS; }
 #ifdef DIALIBGEN_WITH_FINETUNE
-        std::string models = getStringOption_("tune_models");
-        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
-        if (models.empty()) { models = bundledModelDir(); }
+        const std::string models = modelDirectory_();
         if (models.empty())
-        { writeLogError_("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); return ILLEGAL_PARAMETERS; }
+        { writeLogError_("-tune needs -models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); return ILLEGAL_PARAMETERS; }
         for (const char* head : {"rt", "ccs"})
         {
-          if (heads == (std::string(head) == "rt" ? "ccs" : "rt")) { continue; }
+          // auto needs the RT model; it tunes CCS only when that model is there.
+          if (std::string(head) == "rt" ? heads == "ccs" : heads != "ccs" && heads != "both") { continue; }
           const std::string file = std::string("peptdeep_") + head + "_dynamic.onnx";
           if (!std::filesystem::exists(std::filesystem::path(models) / file))
           { writeLogError_("no " + file + " in " + models); return ILLEGAL_PARAMETERS; }
@@ -724,15 +870,13 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       {
         // The MS2 model both members of every pair are predicted with: where
         // -tune finds its stock models.
-        std::string models = getStringOption_("tune_models");
-        if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
-        if (models.empty()) { models = bundledModelDir(); }
+        const std::string models = modelDirectory_();
         const std::filesystem::path ms2 = models.empty() ? std::filesystem::path() : std::filesystem::path(models) / "peptdeep_ms2_dynamic.onnx";
         if (models.empty() || !std::filesystem::exists(ms2))
         {
           writeLogError_("-run predicts the fragments of every target and decoy it searches (search:intensities predicted) "
                          "and needs peptdeep_ms2_dynamic.onnx: " +
-                         (models.empty() ? std::string("give -tune_models or $DIALIBGEN_MODEL_DIR") : "none in " + models));
+                         (models.empty() ? std::string("give -models or $DIALIBGEN_MODEL_DIR") : "none in " + models));
           return ILLEGAL_PARAMETERS;
         }
         search->ms2_model = ms2.string();
@@ -882,15 +1026,9 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       if (tune)
       {
         namespace fs = std::filesystem;
-        std::string models = getStringOption_("tune_models");
+        const std::string models = modelDirectory_();
         if (models.empty())
-        { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
-        if (models.empty()) { models = bundledModelDir(); }
-        if (models.empty())
-        { throw std::runtime_error("-tune needs -tune_models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); }
-
-        const std::string heads = getStringOption_("tune_heads");
-        const bool want_rt = heads != "ccs", want_ccs = heads != "rt";
+        { throw std::runtime_error("-tune needs -models (or $DIALIBGEN_MODEL_DIR): the stock peptdeep models to start from"); }
 
         // A foreign library can carry mass-only modifications that the model
         // cannot encode. Reject these before training either head.
@@ -932,6 +1070,72 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         }
         else { directory.path = keep; fs::create_directories(directory.path); }
         const fs::path& work = directory.path;
+        ODIA::tune::TuneParams tp;
+        const auto setting = [this](const char* name) { return trainingSetting_(name); };
+        tp.report = ids;
+        tp.q_value = setting("filter:q_value");
+        tp.min_charge = static_cast<int>(setting("filter:min_charge"));
+        tp.allow_z1 = setting("filter:allow_z1").toString() == "true";
+        tp.rt_spread_max = setting("filter:rt_spread_max");
+        tp.rt_max_minutes = setting("filter:rt_max_minutes");
+        tp.train_size = static_cast<std::size_t>(std::max(0, static_cast<int>(setting("cohort:train_size"))));
+        tp.train_frac = setting("cohort:train_frac");
+        tp.inner_val = setting("cohort:no_inner_val").toString() != "true";
+        tp.full_fit = setting("cohort:full_fit").toString() == "true";
+        tp.epochs = static_cast<int>(setting("train:epochs"));
+        tp.warmup = static_cast<int>(setting("train:warmup"));
+        tp.lr = setting("train:lr");
+        tp.batch_size = static_cast<int>(setting("train:batch_size"));
+        tp.eval_every = static_cast<int>(setting("stop:eval_every"));
+        tp.min_epochs = static_cast<int>(setting("stop:min_epochs"));
+        tp.patience = static_cast<int>(setting("stop:patience"));
+        tp.rel_tol = setting("stop:rel_tol");
+        tp.abs_tol = setting("stop:abs_tol");
+        tp.max_seconds = setting("stop:max_seconds");
+        tp.select = setting("stop:select").toString() == "rmse" ? ODIA::tune::Select::Rmse : ODIA::tune::Select::CalibratedSd;
+        tp.device = getStringOption_("machine:device");
+        // 0: the platform default. Resolved here so that the trainer, and the
+        // provenance, see a concrete count (ODIA::tune::defaultTrainingThreads).
+        tp.threads = static_cast<int>(setting("machine:train_threads"));
+        if (tp.threads <= 0) { tp.threads = ODIA::tune::defaultTrainingThreads(); }
+        tp.cudnn = setting("machine:no_cudnn").toString() != "true";
+        tp.tf32 = getStringOption_("machine:tf32") == "true";
+        tp.seed = static_cast<std::uint32_t>(static_cast<int>(setting("machine:seed")));
+        if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
+        { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
+        if (tp.train_size && tp.train_frac > 0)
+        { throw std::runtime_error("give cohort:train_size or cohort:train_frac, not both"); }
+
+        // The heads. auto: RT, and CCS when the report has the ion mobility
+        // for it -- the same data selection and cohort check as training, so
+        // that a report with too few usable 1/K0 values drops CCS instead of
+        // failing the run.
+        bool want_rt = heads != "ccs", want_ccs = heads == "ccs" || heads == "both";
+        std::string heads_note;
+        if (heads == "auto")
+        {
+          const fs::path ccs_model = fs::path(models) / "peptdeep_ccs_dynamic.onnx";
+          if (!fs::exists(ccs_model)) { heads_note = "no CCS model in " + models; }
+          else if (ODIA::tune::reportIonMobilityRows(ids) == 0) { heads_note = "the report has no ion mobility"; }
+          else
+          {
+            ODIA::tune::TuneParams probe = tp;
+            probe.head = ODIA::tune::HeadKind::CCS;
+            probe.model_in = ccs_model.string();
+            std::ostringstream quiet;
+            try { ODIA::tune::validateTrainingReport(probe, quiet); want_ccs = true; }
+            catch (const std::exception& e)
+            {
+              heads_note = std::string("too little usable ion mobility: ") + e.what();
+              warn_("-tune_heads auto: CCS not tuned (" + heads_note + "); -tune_heads both makes this an error");
+            }
+          }
+          writeLogInfo_(std::string("-tune_heads auto: ") + (want_ccs ? "RT and CCS (the report has ion mobility)"
+                                                                       : "RT only (" + heads_note + ")"));
+        }
+        tune_prov["heads"] = {{"requested", heads}, {"tuned", want_rt && want_ccs ? "both" : want_ccs ? "ccs" : "rt"},
+                              {"note", heads_note}};
+
         for (const char* head : {"rt", "ccs"})
         {
           if ((std::string(head) == "rt" && !want_rt) || (std::string(head) == "ccs" && !want_ccs)) { continue; }
@@ -942,40 +1146,6 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           }
         }
 
-        ODIA::tune::TuneParams tp;
-        tp.report = ids;
-        tp.q_value = getDoubleOption_("filter:q_value");
-        tp.min_charge = getIntOption_("filter:min_charge");
-        tp.allow_z1 = getFlag_("filter:allow_z1");
-        tp.rt_spread_max = getDoubleOption_("filter:rt_spread_max");
-        tp.rt_max_minutes = getDoubleOption_("filter:rt_max_minutes");
-        tp.train_size = static_cast<std::size_t>(std::max(0, getIntOption_("cohort:train_size")));
-        tp.train_frac = getDoubleOption_("cohort:train_frac");
-        tp.inner_val = !getFlag_("cohort:no_inner_val");
-        tp.full_fit = getFlag_("cohort:full_fit");
-        tp.epochs = getIntOption_("train:epochs");
-        tp.warmup = getIntOption_("train:warmup");
-        tp.lr = getDoubleOption_("train:lr");
-        tp.batch_size = getIntOption_("train:batch_size");
-        tp.eval_every = getIntOption_("stop:eval_every");
-        tp.min_epochs = getIntOption_("stop:min_epochs");
-        tp.patience = getIntOption_("stop:patience");
-        tp.rel_tol = getDoubleOption_("stop:rel_tol");
-        tp.abs_tol = getDoubleOption_("stop:abs_tol");
-        tp.max_seconds = getDoubleOption_("stop:max_seconds");
-        tp.select = getStringOption_("stop:select") == "rmse" ? ODIA::tune::Select::Rmse : ODIA::tune::Select::CalibratedSd;
-        tp.device = getStringOption_("machine:device");
-        // 0: the platform default. Resolved here so that the trainer, and the
-        // provenance, see a concrete count (ODIA::tune::defaultTrainingThreads).
-        tp.threads = getIntOption_("machine:threads");
-        if (tp.threads <= 0) { tp.threads = ODIA::tune::defaultTrainingThreads(); }
-        tp.cudnn = !getFlag_("machine:no_cudnn");
-        tp.tf32 = getStringOption_("machine:tf32") == "true";
-        tp.seed = static_cast<std::uint32_t>(getIntOption_("machine:seed"));
-        if (tp.epochs < 1 || tp.warmup < 0 || tp.warmup > tp.epochs)
-        { throw std::runtime_error("train:warmup must be in [0, train:epochs]"); }
-        if (tp.train_size && tp.train_frac > 0)
-        { throw std::runtime_error("give cohort:train_size or cohort:train_frac, not both"); }
         // Validate every requested head before the first expensive training run.
         for (const bool ccs : {false, true})
         {
@@ -1006,15 +1176,27 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
           return json::parse(input);
         };
 
-        const bool free_cys = getFlag_("tune_keep_free_cysteine_offset");
-        const bool gpu = getFlag_("tune_predict_gpu");
+        const bool free_cys = setting("tune_keep_free_cysteine_offset").toString() == "true";
+        // Re-prediction follows -machine:device as generate does: CUDA when
+        // auto finds a usable GPU (RT and CCS need cuDNN), the CPU otherwise
+        // (CoreML has no LSTM; mps is the training device). The deprecated
+        // -tune_predict_gpu still forces the GPU.
+        bool gpu = getFlag_("tune_predict_gpu");
+        {
+          const std::string device = getStringOption_("machine:device");
+          const ODIA::DeviceRoute route = ODIA::chooseDeviceRoute(device == "mps" || device == "coreml" ? "auto" : device,
+                                                                  false, ODIA::probeDeviceCaps(), library.precursorCount(),
+                                                                  static_cast<std::size_t>(-1), want_ccs);
+          gpu = gpu || (route.lstm_gpu && !route.lstm_coreml);
+          writeLogInfo_(std::string("re-prediction on the ") + (gpu ? "GPU (CUDA)" : "CPU"));
+        }
         std::vector<std::string> device_warnings;
         const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
         // 0 follows -threads, the run's CPU budget; 0.11.2 lifted the cap of
         // 16 sessions, so 0 meaning "all cores" would take a 2 x 96-core node
         // whatever -threads said. The predictor never exceeds the physical
         // cores (Hardware.h).
-        const int requested_sessions = getIntOption_("tune_predict_sessions");
+        const int requested_sessions = getIntOption_("tune_predict_sessions");   // a resource, not a recipe
         const unsigned sessions = static_cast<unsigned>(
           std::max(0, requested_sessions > 0 ? requested_sessions : getIntOption_("threads")));
 

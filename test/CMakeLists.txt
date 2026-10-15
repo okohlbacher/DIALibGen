@@ -472,6 +472,22 @@ if(TARGET DIALibGen AND ODIA_PYTHON)
     "${CMAKE_CURRENT_SOURCE_DIR}/topp_parameters.py" $<TARGET_FILE:DIALibGen>)
 endif()
 
+# The 0.12 command line without prediction: help, unknown options, mode
+# inference, deprecated names, 0.11 INIs, defaults, instrument files, warnings.
+if(TARGET DIALibGen AND ODIA_PYTHON)
+  add_test(NAME cli_defaults COMMAND ${ODIA_PYTHON}
+    "${CMAKE_CURRENT_SOURCE_DIR}/cli_defaults.py" $<TARGET_FILE:DIALibGen> "${CMAKE_CURRENT_SOURCE_DIR}/../data")
+endif()
+
+# ... and with prediction: the report's 13-option Astral command against the
+# 2-option one, -threads by default, the inferred convert, the OpenSWATH hint.
+if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}" AND EXISTS "${ODIA_MS2_MODEL_PATH}")
+  add_test(NAME cli_library COMMAND ${ODIA_PYTHON}
+    "${CMAKE_CURRENT_SOURCE_DIR}/cli_library.py" $<TARGET_FILE:DIALibGen>
+    "${CMAKE_CURRENT_SOURCE_DIR}/../example/proteins.fasta" "${ODIA_MODEL_DIR}")
+  set_tests_properties(cli_library PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "CUDA_VISIBLE_DEVICES=")
+endif()
+
 if(TARGET DIALibGen AND ODIA_PYTHON)
   add_test(NAME parameter_docs_current COMMAND ${ODIA_PYTHON}
     "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/update-parameters.py" $<TARGET_FILE:DIALibGen> --check)

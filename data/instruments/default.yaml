@@ -1,0 +1,27 @@
+# DIALibGen's generation defaults for every instrument (docs/usage.md#instrument-defaults).
+# An instrument's own file (astral.yaml, timstof.yaml, ...) overrides what it lists;
+# an explicit option (command line, INI, -config) overrides both.
+
+# The instrument when -generation:instrument is not given.
+instrument: QE
+
+# Windows and charges of an instrument without its own values. The DIA-NN parity
+# settings of the predicted-library benchmarks (benchmark/env.sh, DIGEST; report
+# section 3); charges 1-4 reach every precursor DIA-NN identified on Astral
+# (include/odia/LibraryGenerator.h, DigestParams::charges).
+precursor_mz: [350, 1200]
+fragment_mz: [200, 1800]
+precursor_charges: [1, 2, 3, 4]
+
+# Per MS2 model instrument (the five slots of the PeptDeep checkpoint), for an
+# instrument that has no file of its own: the collision energy, and whether the
+# instrument measures ion mobility (-generation:predict_ion_mobility auto).
+# QE 30 is peptdeep's default and Lumos 25 AlphaDIA's (neither measured here);
+# timsTOF 30 is upstream's (src/predict/PeptDeepEncoder.cpp, defaultNce). Only
+# timsTOF separates ions by mobility.
+models:
+  QE:        {nce: 30, ion_mobility: false}
+  Lumos:     {nce: 25, ion_mobility: false}
+  timsTOF:   {nce: 30, ion_mobility: true}
+  SciexTOF:  {nce: 30, ion_mobility: false}
+  ThermoTOF: {nce: 30, ion_mobility: false}

@@ -16,6 +16,7 @@ runtime package or SDK and records their versions in `runtime-dependencies.json`
 | `LLVM-OpenMP-LICENSE.txt` | LLVM OpenMP 22.1.8 conda package LICENSE, https://github.com/llvm/llvm-project |
 | `Boost-LICENSE.txt` | Boost `LICENSE_1_0.txt` (the same text in every Boost version; the release builds use the conda-forge Boost headers, 1.90 on Linux and macOS and 1.92 on Windows, for Boost.JSON and Boost.Compat), https://www.boost.org/LICENSE_1_0.txt |
 | `nlohmann-json-LICENSE.txt` | nlohmann/json 3.12 package LICENSE.MIT, https://github.com/nlohmann/json |
+| `yaml-cpp-LICENSE.txt` | yaml-cpp 0.8.0 conda-forge package LICENSE (MIT), https://github.com/jbeder/yaml-cpp |
 | `LGPL-3.0-only.txt` | Qt LGPL-3.0 license text, https://code.qt.io/cgit/qt/qtbase.git/tree/LICENSES/LGPL-3.0-only.txt |
 | `GPL-3.0-or-later.txt` | GNU GPL version 3 text, https://www.gnu.org/licenses/gpl-3.0.txt; each component's grant determines “only” versus “or later” |
 | `mzpeak-openms-LICENSE.txt` | mzpeak-openms `LICENSE` at tag partitioned-read-2026-10-11 (daa8d1d), https://github.com/okohlbacher/mzpeak-openms; compiled into DIALibGen (`third_party/mzpeak-openms`) |

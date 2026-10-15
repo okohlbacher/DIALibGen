@@ -10,13 +10,21 @@
     200.0,
     1800.0
   ],
+  "fragment_mz_source": "default",
   "fragments": [
     3,
     12
   ],
   "free_cysteine_rt_correction": true,
   "instrument": "QE",
+  "instrument_defaults": {
+    "defaults": "default.yaml",
+    "defaults_fnv1a64": "aad1b0ef6988874a",
+    "instrument": null,
+    "instrument_fnv1a64": null
+  },
   "irt_rescale": false,
+  "irt_standards": "",
   "max_fragment_charge": 2,
   "max_variable_modifications": 1,
   "min_relative_intensity": 0.0001,
@@ -35,11 +43,13 @@
     3,
     4
   ],
-  "predict_ion_mobility": "auto",
+  "precursor_charges_source": "default",
   "precursor_mz": [
     350.0,
     1200.0
   ],
+  "precursor_mz_source": "default",
+  "predict_ion_mobility": "auto",
   "recompute_decoy_mz": false,
   "reserved_doubly_charged": 0,
   "rt_model": "",

@@ -49,24 +49,47 @@ import pyarrow.parquet as pq
 pq.write_table(pq.read_table(sys.argv[1]).drop(["IM"]), sys.argv[2])
 PY_PREFLIGHT
 if "$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/no-im.parquet" -out "$TMP/not-written.tsv" \
-   -tune_models "$MODELS" -tune_out_models "$TMP/preflight-models" \
+   -tune_heads both -models "$MODELS" -tune_out_models "$TMP/preflight-models" \
    > "$TMP/preflight.log" 2>&1; then fail "missing CCS IM was accepted"; fi
 grep -q 'IM' "$TMP/preflight.log" || { cat "$TMP/preflight.log"; fail "wrong preflight error"; }
 if find "$TMP/preflight-models" -type f 2>/dev/null | grep -q .; then fail "RT artifacts written before CCS validation"; fi
 if "$BIN" -mode refine -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/not-written.tsv" \
-   -tune -tune_models "$MODELS" -tune_out_models "$TMP/gate-models" \
+   -q_global 0.01 -q_protein 0.01 -tune -models "$MODELS" -tune_out_models "$TMP/gate-models" \
    > "$TMP/gate.log" 2>&1; then fail "missing refinement gates accepted"; fi
 if find "$TMP/gate-models" -type f 2>/dev/null | grep -q .; then fail "models trained before refinement validation"; fi
 
-# One invocation: tune both heads, re-predict, refine, write a library.
-# -q_global/-q_protein 1 disable the gates whose columns a synthetic report does
-# not carry; the precursor gate still applies.
+# -tune_heads auto (the default): a report without ion mobility tunes RT only,
+# and one whose few 1/K0 values cannot fill the CCS cohorts drops CCS with a
+# WARNING; neither is an error.
+"$PY" - "$TMP/report.parquet" "$TMP/few-im.parquet" <<'PY_FEW_IM' || exit 1
+import sys
+import pyarrow as pa, pyarrow.parquet as pq
+t = pq.read_table(sys.argv[1])
+im = t.column("IM").to_pylist()
+im = [v if i < 40 else 0.0 for i, v in enumerate(im)]
+pq.write_table(t.set_column(t.schema.get_field_index("IM"), "IM", pa.array(im, pa.float64())), sys.argv[2])
+PY_FEW_IM
+for case in no-im few-im; do
+  "$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/$case.parquet" -out "$TMP/auto-$case.tsv" \
+     -models "$MODELS" -filter:rt_max_minutes 30 -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 \
+     -stop:patience 100 -machine:device cpu -machine:train_threads 2 > "$TMP/auto-$case.log" 2>&1 \
+     || { cat "$TMP/auto-$case.log" >&2; fail "-tune_heads auto failed on $case"; }
+  grep -q -- '-tune_heads auto: RT only' "$TMP/auto-$case.log" || { cat "$TMP/auto-$case.log"; fail "$case: auto did not settle on RT"; }
+  "$PY" -c "import json,sys; t=json.load(open(sys.argv[1]))['tune']; assert t['heads']['requested']=='auto' and t['heads']['tuned']=='rt' and 'ccs' not in t, t['heads']" \
+     "$TMP/auto-$case.tsv.refine.json" || fail "$case: provenance does not record RT only"
+done
+grep -q 'WARNING: -tune_heads auto: CCS not tuned' "$TMP/auto-few-im.log" || fail "few-im: no WARNING for the dropped CCS head"
+if grep -q 'WARNING: -tune_heads auto' "$TMP/auto-no-im.log"; then fail "no-im: a run without ion mobility must not warn"; fi
+
+# One invocation: tune both heads (auto: the report has ion mobility),
+# re-predict, refine, write a library. The default gates are the precursor q
+# alone, which the synthetic report carries.
 "$BIN" -mode refine -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/refined.tsv" \
-   -q_global 1 -q_protein 1 -no_filter \
-   -tune -tune_models "$MODELS" -tune_out_models "$TMP/tuned" \
+   -no_filter \
+   -tune -models "$MODELS" -tune_out_models "$TMP/tuned" \
    -filter:rt_max_minutes 30 \
    -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 \
-   -machine:device cpu -machine:threads 2 -machine:seed 20260803 \
+   -machine:device cpu -machine:train_threads 2 -machine:seed 20260803 \
    > "$TMP/run.log" 2>&1 || { cat "$TMP/run.log" >&2; fail "DIALibGen -mode refine -tune exited non-zero"; }
 
 # The deliverable is a LIBRARY. This is the claim the merge added.
@@ -185,6 +208,7 @@ p = json.load(open(sys.argv[1]))
 t = p.get("tune") or {}
 def die(m): print("FAIL: " + m, file=sys.stderr); sys.exit(1)
 if not t: die("the refine sidecar has no tune section")
+if t.get("heads", {}).get("tuned") != "both": die("auto did not tune both heads on an ion-mobility report: %r" % t.get("heads"))
 for head in ("rt", "ccs"):
     h = t.get(head) or die(f"no {head} section in the tune provenance")
     if h.get("repredicted", 0) < 1:

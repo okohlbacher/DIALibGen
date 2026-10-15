@@ -62,8 +62,14 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
     assert all(r['CCS'] == '' or math.isnan(float(r['CCS'])) for r in actual)
     assert provenance['library']['matched_targets'] == 1 and provenance['library']['decoys_kept'] == 1
     assert provenance['residual_before']['rt']['mean'] == 40
-    for field in ('Q.Value', 'Global.Q.Value', 'PG.Q.Value', 'Decoy'):
+    for field in ('Q.Value', 'Decoy'):
         run('missing-' + field, [row()], error='reference has no', omit=(field,))
+    # The global and protein gates are off by default (0.12): their columns are
+    # needed only when the gate is on.
+    for field, gate in (('Global.Q.Value', '-q_global'), ('PG.Q.Value', '-q_protein')):
+        run('missing-' + field, [row()], gate, 0.01, error='reference has no', omit=(field,))
+        actual, _ = run('missing-off-' + field, [row()], omit=(field,))
+        assert len(actual) == 6, field
     run('missing-rt', [row()], error='reference has no RT', omit=('RT',))
     run('missing-im', [row()], '-write_im', error='reference has no IM', omit=('IM',))
     actual, provenance = run('filter-only', [row()], '-no_write_rt', omit=('RT', 'IM'))
@@ -81,8 +87,12 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-report-contract-') as directo
         alias[alternate] = alias.pop(original)
     actual, _ = run('column-aliases', [alias], '-write_im')
     assert {float(r['RT']) for r in actual} == {10}
-    actual, provenance = run('empirical', [row()], '-empirical_library', omit=('Q.Value', 'Global.Q.Value', 'PG.Q.Value', 'Decoy'))
+    actual, provenance = run('empirical', [row()], '-empirical_library', '-q_global', 0.01, '-q_protein', 0.01,
+                             omit=('Q.Value', 'Global.Q.Value', 'PG.Q.Value', 'Decoy'))
     assert set(provenance['gates_bypassed']) == {'Q.Value', 'Global.Q.Value', 'PG.Q.Value'}
+    actual, provenance = run('empirical-default', [row()], '-empirical_library',
+                             omit=('Q.Value', 'Global.Q.Value', 'PG.Q.Value', 'Decoy'))
+    assert set(provenance['gates_bypassed']) == {'Q.Value'}
     run('empirical-compact', [row(**{'Product.Mz': [303.0, 304.0]})], '-empirical_library',
         error='compact Parquet empirical references are not supported')
     for value in (None, float('nan'), float('inf'), -0.1):

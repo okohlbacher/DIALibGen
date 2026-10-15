@@ -17,7 +17,15 @@ with tempfile.TemporaryDirectory(prefix="dialibgen-parameters-") as directory:
     if result.returncode:
         raise SystemExit(result.stderr.strip() or f"Schema export failed: {result.returncode}")
     root = ET.parse(ini).getroot()
-
+    # -write_ini leaves the deprecated names out (an INI must load once they
+    # are removed); --helphelp still lists them.
+    helphelp = subprocess.run([str(args.binary.resolve()), "--helphelp"], capture_output=True, text=True)
+    deprecated = []
+    for line in (helphelp.stdout + helphelp.stderr).splitlines():
+        marker = "Deprecated (0.12, removed in 0.13): use "
+        if line.strip().startswith("-") and marker in line:
+            replacement = line[line.index(marker) + len(marker):].split(" (default:")[0]
+            deprecated.append("| `" + line.split()[0] + "` | " + replacement.replace("|", "\\|") + " |")
 
 def cell(value):
     return str(value).replace("|", "\\|").replace("\n", " ")
@@ -34,9 +42,10 @@ def rows(node, prefix=""):
                 default = ", ".join(child.get("value", "") for child in item)
             constraints = item.get("restrictions", "")
             kind = item.get("type", "") + (" list" if item.tag == "ITEMLIST" else "")
+            shown = "" if item.get("advanced") == "true" else "yes"
             yield "| " + " | ".join(map(cell, ("`-" + name + "`", kind,
                                                 "`" + default + "`" if default else "(empty)",
-                                                constraints, item.get("description", "")))) + " |"
+                                                constraints, shown, item.get("description", "")))) + " |"
 
 
 tool = root.find("./NODE")
@@ -47,11 +56,17 @@ version = tool.find("./ITEM[@name='version']")
 label = version.get("value", "unknown") if version is not None else "unknown"
 text = ("# Parameter reference\n\nGenerated from DIALibGen " + label +
         " with `scripts/update-parameters.py`. Do not edit this table by hand.\n\n"
-        "The schema lists all modes. `-mode generate` is the default; refinement and "
-        "training options apply to their respective modes. Generation booleans take "
-        "`true`/`false`; list items are separate arguments. See [usage](usage.md).\n\n"
-        "| Option | Type | Default | Constraints | Description |\n"
-        "|---|---|---|---|---|\n" + "\n".join(rows(instance)) + "\n")
+        "The schema lists all modes. Without `-mode`, a FASTA generates and a library converts; "
+        "refinement and training options apply to their respective modes. `--help` shows the "
+        "options marked in the column *--help* (`--help -mode <mode>` one mode's), `--helphelp` "
+        "all of them. Generation booleans take `true`/`false`; list items are separate arguments. "
+        "`-threads` defaults to all physical cores unless the command line or the INI sets it. "
+        "See [usage](usage.md).\n\n"
+        "| Option | Type | Default | Constraints | --help | Description |\n"
+        "|---|---|---|---|---|---|\n" + "\n".join(rows(instance)) + "\n" +
+        ("\n## Deprecated options\n\nAccepted with a WARNING in 0.12 and removed in 0.13; `-write_ini` "
+         "does not write them.\n\n| Option | Replacement |\n|---|---|\n" + "\n".join(deprecated) + "\n"
+         if deprecated else ""))
 target = Path(__file__).resolve().parents[1] / "docs" / "parameters.md"
 if args.check:
     if not target.exists() or target.read_text() != text:

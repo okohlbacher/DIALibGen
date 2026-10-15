@@ -107,6 +107,11 @@ namespace ODIA::tune
     std::string model_out, model_in_sha256, model_out_sha256;
   };
 
+  /// Rows of @p report (a DIA-NN report.parquet) with an observed 1/K0
+  /// (IM > 0): none on an instrument without ion mobility, whose reports
+  /// carry IM 0 or no IM column.
+  std::size_t reportIonMobilityRows(const std::string& report);
+
   /// Validate report filtering and held-out cohort sizes before any training.
   void validateTrainingReport(const TuneParams& params, std::ostream& log);
 

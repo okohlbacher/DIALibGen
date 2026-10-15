@@ -110,17 +110,23 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     log = refused('-write_im needs observed 1/K0 values, and search:im_window -1', '-mode', 'refine', '-in', library,
                   '-run', mzml, '-out', fresh(), '-write_im', '-search:im_window', -1)
     assert 'search run' not in log, log
-    for mode, extra in (('tune', []), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter'])):
+    both = ['-tune_heads', 'both']
+    for mode, extra in (('tune', both), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter', *both])):
         log = refused_tune('needs observed 1/K0 values, and search:im_window -1', '-mode', mode, *extra, '-in', library,
                            '-run', mzml, '-out', fresh(), '-tune_models', models, '-search:im_window', -1)
         assert 'search run' not in log and 'search candidates' not in log, log
+    # -tune_heads auto (the default) settles on its heads after the search: RT
+    # only when the run has no usable 1/K0, so search:im_window -1 is no refusal.
+    log = run('-mode', 'tune', '-in', library, '-run', mzml, '-out', fresh(), '-models', models,
+              '-search:im_window', -1, ok=False)
+    assert 'search:im_window -1' not in log and 'search run: reading ' in log, log
     # Otherwise whether the run has ion mobility is known once it is read:
     # -write_im reaches the search (identify_e2e checks both kinds of run).
     log = run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-write_im', ok=False)
     assert 'search run: reading ' + str(mzml) in log and 'search:im_window -1' not in log, log
 
     # Refused BEFORE the search, not after it: a head without its stock model ...
-    for mode, extra in (('tune', []), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter'])):
+    for mode, extra in (('tune', both), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter', *both])):
         log = refused_tune('no peptdeep_ccs_dynamic.onnx in', '-mode', mode, *extra, '-in', library, '-run', mzml,
                            '-out', fresh(), '-tune_models', models)
         assert 'search run' not in log and 'search candidates' not in log, log
@@ -139,8 +145,11 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
         for row in rows[1:]:
             row[column] = ''
             writer.writerow(row)
-    log = refused('has a Protein.Group', '-mode', 'refine', '-in', nopg, '-run', mzml, '-out', fresh())
+    log = refused('has a Protein.Group', '-mode', 'refine', '-in', nopg, '-run', mzml, '-out', fresh(), '-q_protein', 0.01)
     assert 'search run' not in log, log
+    # The protein gate is off by default (0.12): refine then needs no groups.
+    log = run('-mode', 'refine', '-in', nopg, '-run', mzml, '-out', fresh(), ok=False)
+    assert 'has a Protein.Group' not in log and 'search run: reading ' in log, log
     refused_tune('has a Protein.Group', '-mode', 'tune', '-tune_heads', 'rt', '-in', nopg, '-run', mzml, '-out', fresh(),
                  '-tune_models', models)
 

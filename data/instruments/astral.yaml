@@ -1,0 +1,13 @@
+# Thermo Orbitrap Astral, narrow-window DIA (docs/usage.md#instrument-defaults).
+# Source of every value: the report's Astral benchmark library (Appendix A,
+# reports/dialibgen-report) and DIA-NN's first-pass settings of those runs
+# (--min-pr-mz 380 --max-pr-mz 980 --min-fr-mz 150 --max-fr-mz 2000).
+name: Astral
+aliases: [Orbitrap Astral, Astral Zoom]
+# The PeptDeep checkpoint has no Astral slot; upstream groups it with Lumos.
+model_instrument: Lumos
+ion_mobility: false
+nce: 25
+precursor_mz: [380, 980]
+fragment_mz: [150, 2000]
+precursor_charges: [1, 2, 3, 4]

@@ -51,6 +51,14 @@ environment (1.90 in the Linux and macOS release builds, 1.92 on Windows).
 Constants pinned from the same upstream, for the same reason and under the same
 terms.
 
+### `data/instruments/*.yaml`
+
+DIALibGen's own instrument defaults (BSD-3-Clause, like the code). The values
+come from the sources cited in each file's comments: the report's Astral
+benchmark and DIA-NN settings, the diaPASEF benchmark's digest, DIA-NN 2.0's
+README advice on charges for timsTOF data, and the NCE defaults of AlphaPeptDeep
+and AlphaDIA already recorded in `src/predict/PeptDeepEncoder.cpp`.
+
 ### `data/irt_standards.tsv`
 
 The 11 Biognosys iRT standard peptides and their iRT values, as published in
@@ -101,6 +109,7 @@ corresponding-source release asset.
 | Coin-OR solver libraries | EPL; the exact version and terms are in the inventory |
 | Eigen | MPL-2.0 |
 | nlohmann/json | MIT |
+| yaml-cpp (reads the instrument defaults) | MIT |
 | mzpeak-openms (compiled in) | BSD-3-Clause; its MSNumpress Apache-2.0 |
 | libzip | BSD-3-Clause |
 | Boost.JSON and Boost.Compat (header-only, compiled in for the mzPeak reader) | BSL-1.0 |

@@ -104,9 +104,12 @@ namespace ODIA
     /// and 64% in DIA-NN, and filtering alone beats their transfer-learning arm.
     bool filter = true;
 
+    /// The precursor gate only, by default (0.12): every recorded refine run
+    /// turned the other two off, and tuning's training set uses the
+    /// precursor q alone. >= 1 disables a gate.
     double q_precursor = 0.01;
-    double q_global = 0.01;    ///< peptide-level, across runs
-    double q_protein = 0.01;
+    double q_global = 1.0;     ///< peptide-level, across runs
+    double q_protein = 1.0;
 
     /// The reference is a DIA-NN REPORT and must carry every enabled gate's
     /// column and a Decoy column. When false the input is declared a

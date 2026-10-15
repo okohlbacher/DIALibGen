@@ -233,9 +233,12 @@ endif()
 set(DIALIBGEN_DATA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/data")
 
 if(DIALIBGEN_BUILD_TOOL)
-  add_executable(DIALibGen src/DIALibGen.cpp src/Generate.cpp src/Refine.cpp)
+  # The instrument defaults (data/instruments/*.yaml) are YAML: yaml-cpp, the
+  # tool's own dependency (the SDK libraries do not need it).
+  find_package(yaml-cpp 0.7 CONFIG REQUIRED)
+  add_executable(DIALibGen src/DIALibGen.cpp src/Generate.cpp src/Refine.cpp src/InstrumentDefaults.cpp)
   target_link_libraries(DIALibGen PRIVATE
-    odia_search odia_refine nlohmann_json::nlohmann_json)
+    odia_search odia_refine nlohmann_json::nlohmann_json yaml-cpp::yaml-cpp)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
     # Retain ELF identity when AppImage packaging rewrites RPATHs.
     target_link_options(DIALibGen PRIVATE "-Wl,--build-id=sha1")

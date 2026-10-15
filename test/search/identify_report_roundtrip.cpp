@@ -119,6 +119,7 @@ int main(int argc, char** argv)
   {
     ODIA::RefineParams p;
     p.write_im = true;
+    p.q_global = p.q_protein = 0.01;   // every gate on (only q_precursor is by default)
     ODIA::RefineStats st;
     const auto obs = ODIA::LibraryRefiner::readObservations(path, p, st);
     std::cout << "refine reader: " << st.ids_rows << " rows, " << st.ids_passing << " passing, " << st.ids_decoy

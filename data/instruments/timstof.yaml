@@ -1,0 +1,20 @@
+# Bruker timsTOF, diaPASEF (docs/usage.md#instrument-defaults).
+# Sources:
+#   charges 2-4: the diaPASEF benchmark's DIA-NN digest (benchmark/env.sh, DIGEST:
+#     --min-pr-charge 2 --max-pr-charge 4), the timsTOF recipe of the report's
+#     section 3 (precursor_charges [2, 3, 4]), and DIA-NN 2.0's README ("always
+#     set minimum precursor charge to 2 ... for searching timsTOF data"): z1 is
+#     censored at the top of the mobility ramp.
+#   precursor m/z 350-1200, fragment m/z 200-1800: the same digest and recipe; the
+#     identified precursors of that benchmark span m/z 400-1200 (benchmark/audits/audit4.md).
+#   nce 30: the section 3 recipe and upstream's timsTOF default; 40 scored better on
+#     one diaPASEF method (src/predict/PeptDeepEncoder.cpp, defaultNce) but is not
+#     a default: one ramp was measured.
+name: timsTOF
+aliases: [timsTOF Pro, timsTOF Pro 2, timsTOF SCP, timsTOF HT, timsTOF Ultra, timsTOF Ultra 2, timsTOF Flex]
+model_instrument: timsTOF
+ion_mobility: true
+nce: 30
+precursor_mz: [350, 1200]
+fragment_mz: [200, 1800]
+precursor_charges: [2, 3, 4]

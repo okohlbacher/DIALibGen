@@ -532,6 +532,16 @@ namespace ODIA::tune
     }
   }
 
+  std::size_t reportIonMobilityRows(const std::string& report)
+  {
+    const auto table = readParquet(report, {}, {"IM"});
+    const auto column = table->GetColumnByName("IM");
+    if (!column) { return 0; }
+    std::size_t n = 0;
+    for (const double v : toDoubles(column)) { n += std::isfinite(v) && v > 0 ? 1 : 0; }
+    return n;
+  }
+
   void validateTrainingReport(const TuneParams& p, std::ostream& log)
   {
     validateParams(p);
@@ -567,7 +577,7 @@ namespace ODIA::tune
     {
       std::error_code ec;
       const auto a = std::filesystem::weakly_canonical(p.model_in, ec), b = std::filesystem::weakly_canonical(p.model_out, ec);
-      if (p.model_out == p.model_in || (!ec && a == b)) { throw std::runtime_error("-tune_out_models must not be the -tune_models directory (it would overwrite the stock model)"); }
+      if (p.model_out == p.model_in || (!ec && a == b)) { throw std::runtime_error("-tune_out_models must not be the -models directory (it would overwrite the stock model)"); }
     }
     validateParams(p);
     TuneResult res;
@@ -617,7 +627,7 @@ namespace ODIA::tune
       dev = torch::Device(torch::kMPS);
     }
     else if (device == "coreml")
-    { throw std::runtime_error("coreml is the prediction provider (-tune_predict_gpu); fine-tuning on the Apple GPU is -machine:device mps"); }
+    { throw std::runtime_error("coreml is a prediction provider; fine-tuning on the Apple GPU is -machine:device mps"); }
     else if (device != "cpu") { throw std::runtime_error("unknown device " + device + " (auto, cpu, cuda[:N] or mps)"); }
     // Inter-op pool: nothing here launches inter-op work (no at::launch, no
     // TorchScript fork), but ATen sizes the pool to the hardware threads when

@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory() as directory:
         result = run('-mode', 'refine', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'enable -tune' in result.stdout + result.stderr
         assert config('-mode', 'refine', '-tune', *args)['filter'] is True
-    for args in (('-q_precursor', 0.001), ('-q_global', 1), ('-min_fragments', 3), ('-empirical_library',)):
+    for args in (('-q_precursor', 0.001), ('-q_global', 0.5), ('-min_fragments', 3), ('-empirical_library',)):
         result = run('-mode', 'tune', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'has no effect' in result.stdout + result.stderr
     assert not config('-mode', 'tune', '-filter:q_value', 0.001, '-no_filter', '-no_write_rt')['filter']
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert not any(tune[k] for k in ('filter', 'write_rt', 'write_im', 'write_intensity'))
     recipe.write_text('{"filter":true}')
     run('-mode', 'tune', '-config', recipe, '-write_config', root / 'invalid.json', ok=False)
-    for config_key, value in [('q_precursor', 0.001), ('q_global', 1), ('min_fragments', 3), ('require_gates', False)]:
+    for config_key, value in [('q_precursor', 0.001), ('q_global', 0.5), ('min_fragments', 3), ('require_gates', False)]:
         recipe.write_text(json.dumps({config_key: value}))
         run('-mode', 'tune', '-config', recipe, '-write_config', root / 'invalid.json', ok=False)
     recipe.write_text(json.dumps(tune))

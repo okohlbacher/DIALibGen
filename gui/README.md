@@ -25,8 +25,10 @@ Generation lets you set digestion, modifications, instrument and fragment
 selection. Leave NCE blank for the instrument default, such as QE 30 or Lumos
 25; a numeric value remains explicit when the instrument changes. Precursor
 charges must be unique integers from 1 to 8; fragment charges are limited to
-1 and 2. One inference thread is the default; zero requests automatic
-parallelism and uses more memory.
+1 and 2. Leave the precursor and fragment m/z windows blank for the
+instrument's own (Astral 380-980 and 150-2000; others 350-1200 and 200-1800);
+entered values are used as given. Threads default to 0, one per physical core;
+enter a number to limit it (more threads use more memory).
 
 Refinement exposes quality gates, filtering, observed RT/mobility and fragment
 intensity replacement. It can also fine-tune the models before applying those
@@ -37,11 +39,12 @@ option. The CLI refuses combinations that would mix RT units.
 ## Fine-tuning
 
 1. Select Fine-tune, an input library, a single-run DIA-NN report and a new output.
-2. Choose RT, CCS or both heads. Leave the model directory blank for discovered
+2. Choose the heads: auto (the default) tunes RT, plus CCS when the report has
+   enough ion-mobility data; or RT, CCS or both. Leave the model directory blank for discovered
    models (bundled in releases), or choose a directory containing the selected heads' ONNX files.
 3. Set the training recipe. Controls include observation filters, protein
    cohorts, learning rate, epochs, batch size, stopping rules, device and seed.
-   Training threads are separate from inference threads.
+   Training threads (machine:train_threads) are separate from inference threads.
 4. Optionally choose a directory to retain tuned ONNX models, provenance and
    training trajectories. Without it, models are temporary and the output
    library is retained.

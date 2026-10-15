@@ -87,7 +87,8 @@ describe('App', () => {
     const sent = bridge.runs[0] as { in: string; out: string; threads: number; config: Record<string, unknown> }
     expect(sent.in).toBe('/d/p.fasta')
     expect(sent.out).toBe('/d/lib.parquet')
-    expect(sent.threads).toBe(1)
+    // 0 = all physical cores, the tool's own default.
+    expect(sent.threads).toBe(0)
     expect(sent.config.enzyme).toBe('Trypsin/P')
     expect(Object.keys(sent.config).some((k) => k.startsWith('__'))).toBe(false)
   })
@@ -95,7 +96,8 @@ describe('App', () => {
   it('accepts fractional collision energy and m/z despite whole-number native defaults', async () => {
     await renderApp()
     await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
-    for (const [label, value] of [['nce', '27.5'], ['precursor mz minimum', '350.25'], ['fragment mz maximum', '1750.75']]) {
+    for (const [label, value] of [['nce', '27.5'], ['precursor mz minimum', '350.25'], ['precursor mz maximum', '1200'],
+      ['fragment mz minimum', '200'], ['fragment mz maximum', '1750.75']]) {
       const input = screen.getByLabelText(label) as HTMLInputElement
       fireEvent.change(input, { target: { value } })
       expect(input.step).toBe('any')
@@ -103,6 +105,57 @@ describe('App', () => {
     }
     await startRun()
     expect(bridge.runs[0]).toMatchObject({ config: { nce: 27.5, precursor_mz: [350.25, 1200], fragment_mz: [200, 1750.75] } })
+  })
+
+  it('leaves the m/z windows to the instrument until the user enters them', async () => {
+    await renderApp({}, (b) => { b.api.writeConfig = vi.fn().mockResolvedValue(true) })
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    const blank = (label: string) => (screen.getByLabelText(label) as HTMLInputElement).value === ''
+    expect(['precursor mz minimum', 'precursor mz maximum', 'fragment mz minimum', 'fragment mz maximum'].every(blank)).toBe(true)
+    expect(screen.getByText(/Astral 380-980; others 350-1200/)).toBeTruthy()
+    expect(screen.getByText(/Astral 150-2000; others 200-1800/)).toBeTruthy()
+    await startRun()
+    const config = (bridge.runs[0] as { config: Record<string, unknown> }).config
+    expect(config).not.toHaveProperty('precursor_mz')
+    expect(config).not.toHaveProperty('fragment_mz')
+    // Entered, then cleared again: back to the instrument's window.
+    act(() => bridge.emitDone({ ok: true, code: 0, bytes: 50 }))
+    fireEvent.change(screen.getByLabelText('precursor mz minimum'), { target: { value: '400' } })
+    expect(screen.getByRole('alert').textContent).toContain('precursor mz')
+    fireEvent.change(screen.getByLabelText('precursor mz maximum'), { target: { value: '900' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Save…' }))
+    expect(vi.mocked(bridge.api.writeConfig).mock.calls[0][1]).toMatchObject({ precursor_mz: [400, 900] })
+    fireEvent.change(screen.getByLabelText('precursor mz minimum'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('precursor mz maximum'), { target: { value: '' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /generate library/i }))
+    expect((bridge.runs[1] as { config: object }).config).not.toHaveProperty('precursor_mz')
+  })
+
+  it('keeps a window from an imported recipe as given, and blank when the recipe omits it', async () => {
+    await renderApp({}, (b) => { b.api.readConfig = async () => ({ instrument: 'Astral', precursor_mz: [380, 980] }) })
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    await userEvent.click(screen.getByRole('button', { name: 'Load…' }))
+    expect((screen.getByLabelText('precursor mz minimum') as HTMLInputElement).value).toBe('380')
+    expect((screen.getByLabelText('fragment mz minimum') as HTMLInputElement).value).toBe('')
+  })
+
+  it('shows the recorded window sources and the iRT standards path as advanced settings only', async () => {
+    await renderApp()
+    expect(screen.queryByLabelText('precursor mz source')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    expect(screen.queryByLabelText('precursor mz source')).toBeNull()
+    expect(screen.queryByLabelText('fragment mz source')).toBeNull()
+    expect((screen.getByLabelText('irt standards') as HTMLInputElement).disabled).toBe(true)
+    await userEvent.click(screen.getByLabelText('irt rescale'))
+    expect((screen.getByLabelText('irt standards') as HTMLInputElement).disabled).toBe(false)
+  })
+
+  it('defaults to all physical cores and says so', async () => {
+    await renderApp()
+    expect((screen.getByLabelText('threads') as HTMLInputElement).value).toBe('0')
+    expect(screen.getByText(/0 \(the default\) uses one thread per physical core/)).toBeTruthy()
   })
 
   it('rejects fractional and negative thread counts before invoking the native command', async () => {

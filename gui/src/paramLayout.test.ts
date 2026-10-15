@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { buildSpecs, inferKind, inertBecause } from './paramLayout'
+import { buildSpecs, inferKind, inertBecause, invalidValue, tuningSpecs } from './paramLayout'
+import nativeTuning from './testing/tuning-options.json'
+import type { TuningOption } from './types'
 import { SAMPLE_CONFIG } from './testing/mockBridge'
 
 describe('inferKind', () => {
@@ -57,6 +59,28 @@ describe('buildSpecs', () => {
     }
   })
 
+  it('hides the recorded sources and the echoed training settings, and describes the iRT standards', () => {
+    const specs = buildSpecs({ ...SAMPLE_CONFIG, tuning: { 'train:epochs': 1 } })
+    for (const n of ['precursor_mz_source', 'fragment_mz_source', 'tuning']) expect(specs.find((s) => s.name === n)?.hidden).toBe(true)
+    expect(specs.find((s) => s.name === 'irt_standards')).toMatchObject({ group: 'advanced', hidden: false, kind: 'string' })
+    expect(specs.find((s) => s.name === 'irt_standards')?.description).not.toMatch(/not yet described/i)
+  })
+
+  it('lets the m/z windows and the collision energy be blank (the instrument decides)', () => {
+    const specs = buildSpecs({ ...SAMPLE_CONFIG, precursor_mz: null, fragment_mz: null })
+    for (const n of ['precursor_mz', 'fragment_mz', 'nce']) {
+      const spec = specs.find((s) => s.name === n)!
+      expect(spec.auto).toBe(true)
+      expect(invalidValue(spec, null)).toBeNull()
+    }
+    expect(specs.find((s) => s.name === 'precursor_mz')).toMatchObject({ kind: 'double-range', group: 'core' })
+    expect(specs.find((s) => s.name === 'fragment_mz')?.kind).toBe('double-range')
+    expect(specs.find((s) => s.name === 'precursor_mz')?.description).toMatch(/Astral 380-980; others 350-1200/)
+    expect(specs.find((s) => s.name === 'fragment_mz')?.description).toMatch(/Astral 150-2000; others 200-1800/)
+    expect(invalidValue(specs.find((s) => s.name === 'precursor_mz')!, [900, 400])).not.toBeNull()
+    expect(invalidValue(specs.find((s) => s.name === 'enzyme')!, null)).not.toBeNull()
+  })
+
   it('puts the core settings first and in pipeline order', () => {
     const core = buildSpecs(SAMPLE_CONFIG).filter((s) => s.group === 'core' && !s.hidden)
     expect(core[0].name).toBe('enzyme')
@@ -73,7 +97,22 @@ describe('buildSpecs', () => {
   })
 })
 
+describe('tuningSpecs', () => {
+  it('keeps every native training option, advanced or not, and shows the train threads as core', () => {
+    const specs = tuningSpecs(nativeTuning as TuningOption[])
+    expect(specs).toHaveLength((nativeTuning as TuningOption[]).length)
+    expect(specs.find((s) => s.name === 'machine:train_threads')?.group).toBe('core')
+    expect(specs.find((s) => s.name === 'machine:threads')).toBeUndefined()
+    expect(specs.find((s) => s.name === 'tune_heads')?.choices).toEqual(['auto', 'rt', 'ccs', 'both'])
+  })
+})
+
 describe('inertBecause', () => {
+  it('disables the iRT standards unless iRT rescaling is on', () => {
+    expect(inertBecause('irt_standards', { irt_rescale: false })).toMatch(/no effect/i)
+    expect(inertBecause('irt_standards', { irt_rescale: true })).toBeNull()
+  })
+
   it('disables the variable-mod cap when there are no variable mods', () => {
     expect(inertBecause('max_variable_modifications', { variable_modifications: [] })).toMatch(/no effect/i)
     expect(inertBecause('max_variable_modifications', { variable_modifications: ['Oxidation (M)'] })).toBeNull()

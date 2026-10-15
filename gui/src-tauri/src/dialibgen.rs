@@ -124,7 +124,7 @@ pub struct RunParams {
     /// DIALIBGEN_MODEL_DIR. The tool searches its own locations when unset.
     #[serde(default)]
     model_dir: Option<String>,
-    /// 1 matches the TOPP default; 0 requests all available cores.
+    /// 0 (the tool's default) requests all physical cores.
     #[serde(default)]
     threads: Option<i64>,
 }
@@ -368,9 +368,15 @@ pub struct TuningOption {
     choices: Option<Vec<String>>,
 }
 
+/// Deprecated in 0.12 and removed in 0.13. Skipped by name, never by the INI's
+/// `advanced` flag: most training options are advanced now and must still be offered.
+const DEPRECATED_OPTIONS: [&str; 5] =
+    ["tune_models", "machine:threads", "tune_predict_gpu", "search:passes", "search:allow_bootstrap"];
+
 fn training_key(name: &str) -> bool {
-    matches!(name, "tune_heads" | "tune_predict_gpu" | "tune_predict_sessions" | "tune_keep_free_cysteine_offset")
-        || ["filter:", "cohort:", "train:", "stop:", "machine:"].iter().any(|prefix| name.starts_with(prefix))
+    !DEPRECATED_OPTIONS.contains(&name)
+        && (matches!(name, "tune_heads" | "tune_predict_sessions" | "tune_keep_free_cysteine_offset")
+            || ["filter:", "cohort:", "train:", "stop:", "machine:"].iter().any(|prefix| name.starts_with(prefix)))
 }
 
 fn parse_tuning_options(xml: &[u8]) -> Result<Vec<TuningOption>, String> {
@@ -486,7 +492,7 @@ fn tuning_argv(schema: &[TuningOption], values: &Map<String, Value>) -> Result<V
                 let text = value.as_str().ok_or_else(invalid)?;
                 if let Some(choices) = &option.choices {
                     if !choices.iter().any(|choice| choice == text) { return Err(invalid()); }
-                } else if key != "machine:device" || !(text == "cpu" || text == "cuda"
+                } else if key != "machine:device" || !(matches!(text, "auto" | "cpu" | "cuda" | "mps" | "coreml")
                     || text.strip_prefix("cuda:").is_some_and(|index| !index.is_empty() && index.bytes().all(|c| c.is_ascii_digit()) && index.parse::<u32>().is_ok())) {
                     return Err(invalid());
                 }
@@ -506,10 +512,12 @@ fn tuning_argv(schema: &[TuningOption], values: &Map<String, Value>) -> Result<V
 
 /// Filter the form's values against the tool's own key set, so a key the tool
 /// would reject (it refuses unknown keys outright) can never reach the file.
+/// `tuning` (the training settings a tune config echoes) travels as command-line
+/// options instead, so it is never written into the recipe.
 fn build_config(reference: &Map<String, Value>, wanted: &Map<String, Value>) -> Map<String, Value> {
     let mut out = Map::new();
     for (k, v) in wanted {
-        if reference.contains_key(k) && !v.is_null() {
+        if reference.contains_key(k) && k != "tuning" && !v.is_null() {
             out.insert(k.clone(), v.clone());
         }
     }
@@ -601,8 +609,9 @@ fn validate_run_inputs(params: &RunParams) -> Result<(), String> {
     unused_output(Path::new(output))?;
     if !report.is_empty() { unused_output(Path::new(report))?; }
     if !models.is_empty() {
-        let heads = params.tuning.get("tune_heads").and_then(Value::as_str).unwrap_or("both");
-        for head in ["rt", "ccs"].iter().filter(|&&head| heads == "both" || heads == head) {
+        // auto tunes RT and maybe CCS, decided at run time: guard both files.
+        let heads = params.tuning.get("tune_heads").and_then(Value::as_str).unwrap_or("auto");
+        for head in ["rt", "ccs"].iter().filter(|&&head| matches!(heads, "auto" | "both") || heads == head) {
             for suffix in [".onnx", ".onnx.tune.json", ".onnx.trajectory.tsv"] {
                 unused_output(&Path::new(models).join(format!("peptdeep_{head}_dynamic{suffix}")))?;
             }
@@ -648,8 +657,10 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
     // An explicit incomplete directory must never fall back to bundled models.
     let model_dir = if params.mode == Mode::Generate || params.mode == Mode::Tune || params.tune {
         let heads = if params.mode == Mode::Generate { None } else {
-            Some(match params.tuning.get("tune_heads").and_then(Value::as_str).unwrap_or("both") {
-                "rt" => vec!["rt".into()], "ccs" => vec!["ccs".into()], _ => vec!["rt".into(), "ccs".into()],
+            // auto decides CCS from the report at run time, so both stock models are required.
+            Some(match params.tuning.get("tune_heads").and_then(Value::as_str).unwrap_or("auto") {
+                "rt" => vec!["rt".into()], "ccs" => vec!["ccs".into()],
+                _ => vec!["rt".into(), "ccs".into()],
             })
         };
         let selected = match models(app.clone(), params.model_dir.clone(), heads) {
@@ -693,7 +704,7 @@ pub fn run<R: tauri::Runtime>(app: AppHandle<R>, state: State<'_, RunManager>, p
         .arg("-out")
         .arg(defang_path(params.out.trim()))
         .arg("-threads")
-        .arg(params.threads.unwrap_or(1).to_string())
+        .arg(params.threads.unwrap_or(0).to_string())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if let Some(format) = params.out_format.as_deref() { cmd.args(["-out_format", format]); }
@@ -842,7 +853,7 @@ pub fn shutdown(state: &RunManager) {
 mod tests {
     use super::*;
 
-    // Exported by the verified 0.11.0 CLI; runtime options always come from the
+    // Exported by the 0.12 CLI (`-write_ini`); runtime options always come from the
     // selected executable, while this fixture detects parser/schema drift.
     const TOPP_INI: &[u8] = include_bytes!("../testdata/tuning-options.ini");
 
@@ -879,9 +890,12 @@ mod tests {
     #[test]
     fn native_topp_training_schema_preserves_types_ranges_entities_and_encoding() {
         let options = parse_tuning_options(TOPP_INI).unwrap();
-        assert_eq!(options.len(), 28);
+        assert_eq!(options.len(), 32);
         assert!(options.iter().all(|option| training_key(&option.name)));
-        assert!(!options.iter().any(|option| ["tune", "tune_models", "tune_out_models"].contains(&option.name.as_str())));
+        assert!(!options.iter().any(|option| ["tune", "models", "tune_out_models"].contains(&option.name.as_str())));
+        // Almost every training option is advanced="true" now; the flag must not filter.
+        assert!(options.iter().any(|option| option.name == "train:epochs"));
+        assert!(options.iter().any(|option| option.name == "machine:train_threads"));
         let option = |name| options.iter().find(|option| option.name == name).unwrap();
         assert_eq!(option("filter:min_charge").min, Some(1.0));
         assert_eq!(option("filter:min_charge").max, Some(8.0));
@@ -889,8 +903,23 @@ mod tests {
         assert_eq!(option("train:epochs").max, None);
         assert_eq!(option("train:lr").value, serde_json::json!(0.0001));
         assert_eq!(option("cohort:full_fit").value, false);
-        assert_eq!(option("tune_heads").choices, Some(vec!["rt".into(), "ccs".into(), "both".into()]));
-        assert!(option("filter:rt_max_minutes").description.contains("run's maximum"));
+        assert_eq!(option("tune_heads").choices, Some(vec!["auto".into(), "rt".into(), "ccs".into(), "both".into()]));
+        assert_eq!(option("tune_heads").value, "auto");
+        assert_eq!(option("machine:device").value, "auto");
+        assert_eq!(option("machine:train_threads").min, Some(0.0));
+        assert!(option("filter:rt_max_minutes").description.contains("run's latest observed RT"));
+        // Deprecated names are skipped by name even if an older binary still writes them.
+        let legacy = String::from_utf8(TOPP_INI.to_vec()).unwrap().replace(
+            "<ITEM name=\"seed\" value=\"20260803\"",
+            "<ITEM name=\"threads\" value=\"4\" type=\"int\" description=\"old\"/><ITEM name=\"seed\" value=\"20260803\"").replace(
+            "<ITEM name=\"tune_heads\"",
+            "<ITEM name=\"tune_predict_gpu\" value=\"false\" type=\"bool\" description=\"old\"/><ITEM name=\"tune_models\" value=\"\" type=\"string\" description=\"old\"/><ITEM name=\"tune_heads\"");
+        assert_ne!(legacy.as_bytes(), TOPP_INI);
+        let names: Vec<_> = parse_tuning_options(legacy.as_bytes()).unwrap().into_iter().map(|option| option.name).collect();
+        assert_eq!(names.len(), 32);
+        for name in DEPRECATED_OPTIONS { assert!(!names.iter().any(|n| n == name), "{name}"); }
+        assert!(tuning_argv(&options, &obj(r#"{"tune_predict_gpu":true}"#)).is_err());
+        assert!(tuning_argv(&options, &obj(r#"{"machine:threads":4}"#)).is_err());
         let minimal = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><PARAMETERS><NODE name=\"DIALibGen\"><NODE name=\"1\"><NODE name=\"train\"><ITEM name=\"epochs\" type=\"int\" value=\"100\" description=\"caf\xe9 &amp; &lt;epochs&gt;\"/></NODE></NODE></NODE></PARAMETERS>";
         assert_eq!(parse_tuning_options(minimal).unwrap()[0].description, "café & <epochs>");
         for invalid in [b"<broken>".as_slice(), b"<!DOCTYPE x><PARAMETERS/>",
@@ -903,18 +932,29 @@ mod tests {
     }
 
     #[test]
+    fn frontend_tuning_fixture_is_what_the_parser_reads_from_the_native_schema() {
+        let fixture: Value = serde_json::from_str(include_str!("../../src/testing/tuning-options.json")).unwrap();
+        assert_eq!(serde_json::to_value(parse_tuning_options(TOPP_INI).unwrap()).unwrap(), fixture);
+    }
+
+    #[test]
     fn training_arguments_reject_wrong_types_ranges_and_option_injection() {
         let options = parse_tuning_options(TOPP_INI).unwrap();
-        let args = tuning_argv(&options, &obj(r#"{"train:epochs":25,"train:lr":0.0002,"tune_heads":"rt","cohort:full_fit":true,"machine:no_cudnn":false,"machine:device":"cuda:1"}"#)).unwrap();
+        let args = tuning_argv(&options, &obj(r#"{"train:epochs":25,"train:lr":0.0002,"tune_heads":"rt","cohort:full_fit":true,"machine:no_cudnn":false,"machine:device":"cuda:1","machine:train_threads":0}"#)).unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["-machine:train_threads", "0"]));
+        for device in ["auto", "cpu", "mps", "coreml"] {
+            let args = tuning_argv(&options, &obj(&format!(r#"{{"machine:device":"{device}","tune_heads":"auto"}}"#))).unwrap();
+            assert!(args.windows(2).any(|pair| pair == ["-machine:device", device]) && args.windows(2).any(|pair| pair == ["-tune_heads", "auto"]));
+        }
         assert!(args.contains(&"-cohort:full_fit".into()));
         assert!(!args.contains(&"true".into()));
         assert!(!args.contains(&"-machine:no_cudnn".into()));
         assert!(args.windows(2).any(|pair| pair == ["-train:epochs", "25"]));
         assert!(args.windows(2).any(|pair| pair == ["-machine:device", "cuda:1"]));
-        for invalid in [r#"{"-force":true}"#, r#"{"tune_models":"-force"}"#, r#"{"train:epochs":2.5}"#,
+        for invalid in [r#"{"-force":true}"#, r#"{"tune_models":"-force"}"#, r#"{"models":"-force"}"#, r#"{"train:epochs":2.5}"#,
             r#"{"train:epochs":"25"}"#, r#"{"train:epochs":0}"#, r#"{"train:epochs":2147483648}"#,
             r#"{"filter:min_charge":9}"#, r#"{"train:lr":"NaN"}"#, r#"{"train:lr":null}"#,
-            r#"{"cohort:full_fit":"false"}"#, r#"{"tune_heads":"rt -force"}"#,
+            r#"{"cohort:full_fit":"false"}"#, r#"{"tune_heads":"rt -force"}"#, r#"{"tune_heads":"all"}"#, r#"{"machine:train_threads":-1}"#,
             r#"{"machine:device":"-force"}"#, r#"{"machine:device":"cuda:1 -force"}"#,
             r#"{"machine:device":"cuda:"}"#, r#"{"machine:device":"cuda:999999999999999"}"#] {
             assert!(tuning_argv(&options, &obj(invalid)).is_err(), "{invalid}");
@@ -968,6 +1008,22 @@ mod tests {
             std::os::unix::fs::symlink(dir.path().join("missing"), &report).unwrap();
             assert!(validate(training).is_err());
         }
+    }
+
+    #[test]
+    fn auto_heads_guard_every_possible_tuned_output() {
+        let dir = private_tempdir().unwrap();
+        let validate = |tuning: Value| validate_run_inputs(&serde_json::from_value::<RunParams>(serde_json::json!({
+            "mode":"tune", "in":"input.tsv", "ids":"ids.parquet", "out":dir.path().join("out.tsv"),
+            "tuneOutModels":dir.path().display().to_string(), "tuning":tuning})).unwrap());
+        let ccs = dir.path().join("peptdeep_ccs_dynamic.onnx");
+        std::fs::write(&ccs, "preserve").unwrap();
+        // CCS is decided at run time under auto (the default), so its file must be free too.
+        for tuning in [serde_json::json!({"tune_heads":"auto"}), serde_json::json!({}), serde_json::json!({"tune_heads":"both"}),
+                       serde_json::json!({"tune_heads":"ccs"})] {
+            assert!(validate(tuning.clone()).is_err(), "{tuning}");
+        }
+        assert!(validate(serde_json::json!({"tune_heads":"rt"})).is_ok());
     }
 
     #[cfg(unix)]
@@ -1126,7 +1182,7 @@ printf 'library' > "$out"
             assert_eq!(invoke("default_config", serde_json::json!({"mode":mode})).unwrap()["requested_mode"], mode);
         }
         assert!(invoke("default_config", serde_json::json!({"mode":"-force"})).is_err());
-        assert_eq!(invoke("tuning_options", serde_json::json!({})).unwrap().as_array().unwrap().len(), 28);
+        assert_eq!(invoke("tuning_options", serde_json::json!({})).unwrap().as_array().unwrap().len(), 32);
         let model_dir = dir.path().join("models with spaces");
         std::fs::create_dir(&model_dir).unwrap();
         let model_query = serde_json::json!({"dir": model_dir});
@@ -1238,12 +1294,17 @@ printf 'library' > "$out"
             fallback["modelDir"] = Value::Null;
             fallback["out"] = dir.path().join(format!("fallback-{mode}.tsv")).display().to_string().into();
             if mode == "tune" {
+                // No thread count given: the tool's own default, all physical cores.
+                fallback.as_object_mut().unwrap().remove("threads");
                 fallback["in"] = "library.tsv".into();
                 fallback["ids"] = "report.parquet".into();
                 fallback["config"] = serde_json::json!({});
             }
             assert_eq!(invoke("run", serde_json::json!({"params":fallback})).unwrap()["started"], true);
             assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap()["ok"], true);
+            let argv = std::fs::read_to_string(dir.path().join("argv.txt")).unwrap();
+            let expected = if mode == "tune" { "0" } else { "3" };
+            assert!(argv.lines().collect::<Vec<_>>().windows(2).any(|pair| pair == ["-threads", expected]), "{mode}");
             assert_eq!(std::fs::read_to_string(dir.path().join("model-env.txt")).unwrap(), fallback_models.canonicalize().unwrap().display().to_string());
             if mode == "generate" {
                 let config = read_config(dir.path().join("received.json").display().to_string()).unwrap();
@@ -1340,6 +1401,15 @@ printf 'library' > "$out"
         assert_eq!(got.get("decoys").unwrap(), "reverse");
         assert!(!got.contains_key("no_such_key"));
         assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn config_never_carries_the_training_settings() {
+        // A tune/refine -write_config echoes them; they travel as command-line options.
+        let reference = obj(r#"{"filter":false,"tuning":{"train:epochs":100}}"#);
+        let got = build_config(&reference, &obj(r#"{"filter":false,"tuning":{"train:epochs":1}}"#));
+        assert!(!got.contains_key("tuning"));
+        assert_eq!(got.len(), 1);
     }
 
     #[test]

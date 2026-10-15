@@ -34,6 +34,9 @@ export interface ParamSpec {
   max?: number
   /// Not shown in the form: managed elsewhere in the UI, or not a setting.
   hidden?: boolean
+  /// Null (blank in the form) is valid and means "the tool decides": the key is
+  /// left out of the config it is sent.
+  auto?: boolean
 }
 
 type Overlay = Omit<Partial<ParamSpec>, 'name' | 'kind'> & { description: string }
@@ -46,6 +49,13 @@ const OVERLAY: Record<string, Overlay> = {
     hidden: true
   },
   nce_source: { description: 'Recorded source of the effective collision energy.', hidden: true },
+  precursor_mz_source: { description: 'Recorded source of the effective precursor m/z window.', hidden: true },
+  fragment_mz_source: { description: 'Recorded source of the effective fragment m/z window.', hidden: true },
+  precursor_charges_source: { description: 'Recorded source of the effective precursor charges.', hidden: true },
+  instrument_defaults: { description: 'Recorded instrument default files (name and hash).', hidden: true },
+  // Refine/tune -write_config carries the training settings here. The GUI passes
+  // them as command-line options instead, so this is never a form field.
+  tuning: { description: 'Training settings; managed by the fine-tuning controls.', hidden: true },
   instrument_named: { description: 'Recorded instrument spelling before alias resolution.', hidden: true },
   enzyme: {
     group: 'core',
@@ -71,10 +81,15 @@ const OVERLAY: Record<string, Overlay> = {
   peptide_length: { group: 'core', description: 'Peptide length window, in residues.', min: 1, max: 100 },
   precursor_charges: {
     group: 'core',
+    auto: true,
     description:
-      'Unique charge states from 1 to 8. Match these to the acquisition method.'
+      'Unique charge states from 1 to 8. Match these to the acquisition method. Leave blank for the instrument’s (timsTOF 2-4; others 1-4).'
   },
-  precursor_mz: { group: 'core', description: 'Precursor m/z window. Match it to the instrument method.' },
+  precursor_mz: {
+    group: 'core',
+    auto: true,
+    description: 'Precursor m/z window. Match it to the acquisition method. Leave blank for the instrument’s window (Astral 380-980; others 350-1200).'
+  },
   fixed_modifications: {
     group: 'core',
     label: 'fixed modifications',
@@ -100,10 +115,10 @@ const OVERLAY: Record<string, Overlay> = {
   },
   instrument: {
     group: 'core',
-    description: 'Instrument the MS2 model conditions on.',
+    description: 'Instrument the MS2 model conditions on. Astral also sets the m/z windows when they are left blank.',
     choices: ['QE', 'Lumos', 'timsTOF', 'SciexTOF', 'ThermoTOF', 'Astral', 'Fusion', 'Eclipse', 'Velos', 'Elite', 'OrbitrapTribrid', 'ThermoTribrid']
   },
-  nce: { group: 'core', description: 'Leave blank for the instrument default (QE 30, Lumos 25). Enter a value to override it.', min: 0, max: 100 },
+  nce: { group: 'core', auto: true, description: 'Leave blank for the instrument default (QE 30; Lumos and Astral 25). Enter a value to override it.', min: 0, max: 100 },
   irt_rescale: {
     group: 'core',
     description:
@@ -122,7 +137,11 @@ const OVERLAY: Record<string, Overlay> = {
     description: 'Emit 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension.'
   },
 
-  fragment_mz: { group: 'advanced', description: 'Fragment m/z window.' },
+  fragment_mz: {
+    group: 'advanced',
+    auto: true,
+    description: 'Fragment m/z window. Leave blank for the instrument’s window (Astral 150-2000; others 200-1800).'
+  },
   max_fragment_charge: { group: 'advanced', description: 'Highest fragment charge supported by the MS2 model.', min: 1, max: 2 },
   fragments: { group: 'advanced', description: 'Fragments kept per precursor, as [minimum, maximum].', min: 1, max: 50 },
   min_relative_intensity: {
@@ -149,6 +168,10 @@ const OVERLAY: Record<string, Overlay> = {
     group: 'advanced',
     description: 'Recompute decoy precursor and fragment m/z from the decoy sequence instead of inheriting the target’s.'
   },
+  irt_standards: {
+    group: 'advanced',
+    description: 'iRT standards table (TSV) for iRT rescaling. Empty uses the bundled table.'
+  },
 
   // The three model paths are set by the Models picker, which points the whole
   // trio at one directory. Leaving them in the form as well would give two
@@ -170,6 +193,8 @@ function isInt(n: number): boolean {
 /// silently become a range.
 export function inferKind(name: string, value: unknown): ParamKind {
   if (typeof value === 'boolean') return 'bool'
+  if (value == null && (name === 'precursor_mz' || name === 'fragment_mz')) return 'double-range'
+  if (value == null && name === 'precursor_charges') return 'int-list'
   if (typeof value === 'number') {
     if (name === 'nce' || name === 'min_relative_intensity') return 'double'
     return isInt(value) ? 'int' : 'double'
@@ -215,7 +240,8 @@ export function buildSpecs(defaults: Record<string, unknown>): ParamSpec[] {
         ? [...o.choices, defaults[name] as string] : o?.choices,
       min: o?.min,
       max: o?.max,
-      hidden: o?.hidden ?? false
+      hidden: o?.hidden ?? false,
+      auto: o?.auto ?? false
     }
   })
 }
@@ -232,6 +258,9 @@ export function inertBecause(name: string, values: Record<string, unknown>): str
   }
   if (name === 'recompute_decoy_mz' && values.decoys === 'none') {
     return 'No effect: no decoys are being generated.'
+  }
+  if (name === 'irt_standards' && values.irt_rescale === false) {
+    return 'No effect: irt rescale is off.'
   }
   return null
 }
@@ -271,7 +300,7 @@ export function refinementSpecs(defaults: Record<string, unknown>): ParamSpec[] 
 }
 
 export function tuningSpecs(options: import('./types').TuningOption[]): ParamSpec[] {
-  const core = ['tune_heads', 'train:epochs', 'train:lr', 'train:batch_size', 'machine:device', 'machine:threads']
+  const core = ['tune_heads', 'train:epochs', 'train:lr', 'train:batch_size', 'machine:device', 'machine:train_threads']
   return options.map((option) => ({ ...option,
     max: option.max ?? (option.kind === 'int' ? 2147483647 : undefined),
     label: option.name === 'tune_heads' ? 'training heads' : option.name.replace(/^train:/, 'training ').replace(/[:_]/g, ' '),
@@ -280,7 +309,7 @@ export function tuningSpecs(options: import('./types').TuningOption[]): ParamSpe
 
 export function invalidValue(spec: ParamSpec, value: unknown): string | null {
   const invalid = (reason: string) => `${spec.label}: ${reason}`
-  if (spec.name === 'nce' && value == null) return null
+  if (spec.auto && value == null) return null
   const number = (n: unknown, integer: boolean): boolean => typeof n === 'number' && Number.isFinite(n)
     && (!integer || Number.isSafeInteger(n)) && (spec.min == null || n >= spec.min) && (spec.max == null || n <= spec.max)
   if (spec.kind === 'int' || spec.kind === 'double') {

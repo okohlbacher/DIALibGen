@@ -2,44 +2,39 @@
   {
     "name": "tune_heads",
     "kind": "string",
-    "value": "both",
-    "description": "Which models to tune.",
+    "value": "auto",
+    "description": "Tune: models to fine-tune; auto = RT, plus CCS when the report has enough ion-mobility data",
     "choices": [
+      "auto",
       "rt",
       "ccs",
       "both"
     ]
   },
   {
-    "name": "tune_predict_gpu",
-    "kind": "bool",
-    "value": false,
-    "description": "Use the GPU for the re-prediction pass (the ONNX one, not training)."
-  },
-  {
     "name": "tune_predict_sessions",
     "kind": "int",
     "value": 0,
-    "description": "ONNX Runtime sessions for the re-prediction pass; 0 = default.",
+    "description": "Tune: ONNX Runtime sessions for the re-prediction; 0 = -threads",
     "min": 0.0
   },
   {
     "name": "tune_keep_free_cysteine_offset",
     "kind": "bool",
     "value": false,
-    "description": "Keep DIALibGen's free-cysteine RT offset when re-predicting with a TUNED RT model. Off by default: that offset was fitted against the STOCK model, and a model tuned on this run's own identifications has had the chance to learn the effect itself -- applying both counts it twice."
+    "description": "Tune: keep the free-cysteine RT offset when re-predicting with the tuned RT model (off: the offset was fitted to the stock model, and a model tuned on the run has learned the effect)"
   },
   {
     "name": "filter:q_value",
     "kind": "double",
     "value": 0.01,
-    "description": "Precursor Q.Value threshold"
+    "description": "Precursor q-value cut-off of the training set"
   },
   {
     "name": "filter:min_charge",
     "kind": "int",
     "value": 2,
-    "description": "CCS only: lowest precursor charge used (RT collapses all charges). z1 is censored at the mobility ramp top on timsTOF",
+    "description": "CCS: lowest precursor charge (RT pools all charges; z1 is censored at the ramp top on timsTOF)",
     "min": 1.0,
     "max": 8.0
   },
@@ -47,7 +42,7 @@
     "name": "filter:allow_z1",
     "kind": "bool",
     "value": false,
-    "description": "CCS: permit filter:min_charge 1 (censored observations enter training)"
+    "description": "CCS: permit filter:min_charge 1 (censored observations then train)"
   },
   {
     "name": "filter:rt_spread_max",
@@ -59,45 +54,45 @@
     "name": "filter:rt_max_minutes",
     "kind": "double",
     "value": 0.0,
-    "description": "rt_norm denominator; 0 = the run's maximum observed RT"
+    "description": "RT normalisation; 0 = the run's latest observed RT"
   },
   {
     "name": "cohort:train_size",
     "kind": "int",
     "value": 0,
-    "description": "Training units (sequences for rt, sequence x charge for ccs); 0 = full pool",
+    "description": "Training units (sequences for RT, sequence x charge for CCS); 0 = the whole pool",
     "min": 0.0
   },
   {
     "name": "cohort:train_frac",
     "kind": "double",
     "value": 0.0,
-    "description": "Alternative to train_size: fraction of the pool"
+    "description": "Instead of train_size: the fraction of the pool"
   },
   {
     "name": "cohort:full_fit",
     "kind": "bool",
     "value": false,
-    "description": "Train on EVERY unit of the run, the test and validation cohorts included: the closest fit the data allows. val and TEST are then in-sample; judge this mode by searching a DIFFERENT run with the result, never by its own numbers"
+    "description": "Train on every unit of the run, test and validation included: validation and test are then in-sample, so judge the result on a different run"
   },
   {
     "name": "cohort:no_inner_val",
     "kind": "bool",
     "value": false,
-    "description": "No inner validation cohort: its units rejoin the pool and checkpoints are selected on TEST, which is then no longer a held-out number"
+    "description": "No inner validation cohort: its units rejoin the pool and checkpoints are selected on the test cohort, which is then no longer held out"
   },
   {
     "name": "train:epochs",
     "kind": "int",
     "value": 100,
-    "description": "Horizon of the cosine schedule (and the maximum epochs)",
+    "description": "Length of the cosine schedule (and the most epochs)",
     "min": 1.0
   },
   {
     "name": "train:warmup",
     "kind": "int",
     "value": 10,
-    "description": "Linear warmup epochs",
+    "description": "Linear warm-up epochs",
     "min": 0.0
   },
   {
@@ -131,26 +126,26 @@
     "name": "stop:patience",
     "kind": "int",
     "value": 10,
-    "description": "Stop after this many epochs without progress (never before max(min_epochs, warmup))",
+    "description": "Stop after this many epochs without progress (not before max(min_epochs, warmup))",
     "min": 0.0
   },
   {
     "name": "stop:rel_tol",
     "kind": "double",
     "value": 0.005,
-    "description": "Progress = the selection metric beats the anchor by this fraction"
+    "description": "Progress: the selection metric beats the best so far by this fraction"
   },
   {
     "name": "stop:abs_tol",
     "kind": "double",
     "value": 0.0,
-    "description": "Progress = beats the anchor by this absolute amount (0 = use rel_tol)"
+    "description": "Progress: ... by this absolute amount (0 = use rel_tol)"
   },
   {
     "name": "stop:max_seconds",
     "kind": "double",
     "value": 0.0,
-    "description": "Wall-clock budget per head, checked at epoch boundaries; final evaluation/export may exceed it (0 = none)"
+    "description": "Time budget per head, checked between epochs (the final evaluation may exceed it); 0 = none"
   },
   {
     "name": "stop:select",
@@ -166,20 +161,32 @@
     "name": "machine:device",
     "kind": "string",
     "value": "auto",
-    "description": "Fine-tuning runs on cpu, cuda[:N] or mps (the Apple GPU); auto is mps on Apple silicon when this LibTorch has it (not bit-identical to CPU training; the provenance records the device), else cpu. Prediction (generate; tune with -tune_predict_gpu): coreml or mps run the MS2 model on the Apple GPU through ONNX Runtime's CoreML provider (RT and CCS stay on the CPU: CoreML has no LSTM); auto, cpu and cuda keep the default, CUDA when this ONNX Runtime has it and a GPU is visible, else the CPU"
+    "description": "Auto: the GPU when one is usable and pays off (NVIDIA: CUDA, RT and CCS with cuDNN 9; Apple: CoreML for MS2 of large libraries, MPS for fine-tuning), else the CPU; cpu: CPU only (the reference); also cuda[:N], coreml, mps"
   },
   {
-    "name": "machine:threads",
+    "name": "machine:coreml_units",
+    "kind": "string",
+    "value": "gpu",
+    "description": "CoreML compute units: gpu (CPU and GPU, fastest), all (Core ML's choice, Neural Engine included), ane (CPU and Neural Engine), cpu (checks)",
+    "choices": [
+      "gpu",
+      "all",
+      "ane",
+      "cpu"
+    ]
+  },
+  {
+    "name": "machine:train_threads",
     "kind": "int",
     "value": 0,
-    "description": "CPU threads used for training. The tuned weights depend on the count, which the provenance records. 0: the platform default, 16 on Linux and Windows and 8 on macOS (where 16 was measured 1.5x slower per epoch; -machine:threads 16 reproduces a Linux or Windows model)",
+    "description": "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend on the count, which is recorded; 16 on a Mac reproduces a Linux model",
     "min": 0.0
   },
   {
     "name": "machine:cores",
     "kind": "string",
     "value": "all",
-    "description": "macOS: the cores -threads 0 counts. all: every physical core (hw.physicalcpu); performance: the performance cores only (hw.perflevel0.physicalcpu), which saves CPU energy, not time (measured: -3 to +16 % wall, 18 % less CPU time). No effect elsewhere. Does not change the output",
+    "description": "MacOS: which cores -threads 0 counts: all, or performance (saves energy, not time). Does not change the output",
     "choices": [
       "all",
       "performance"
@@ -189,13 +196,33 @@
     "name": "machine:no_cudnn",
     "kind": "bool",
     "value": false,
-    "description": "CUDA: do not use cuDNN (needed when only its loader shim is installed, as in pytorch.org's libtorch zips); slower"
+    "description": "CUDA fine-tuning without cuDNN (when only its loader shim is installed, as in pytorch.org's libtorch zips); slower"
   },
   {
     "name": "machine:seed",
     "kind": "int",
     "value": 20260803,
-    "description": "Seed for the training subsample and batch order",
+    "description": "Seed of the training subsample and batch order",
     "min": 0.0
+  },
+  {
+    "name": "machine:tf32",
+    "kind": "bool",
+    "value": false,
+    "description": "TensorFloat-32 on NVIDIA GPUs, for prediction and fine-tuning: faster, but about 1 % of precursors select a different fragment set (off: GPU and CPU agree to float rounding)"
+  },
+  {
+    "name": "machine:gpu_sessions",
+    "kind": "int",
+    "value": 4,
+    "description": "CUDA: ONNX Runtime sessions per GPU and model, each with its own stream; CoreML: concurrent batches. Does not change the output",
+    "min": 1.0,
+    "max": 16.0
+  },
+  {
+    "name": "machine:require_gpu",
+    "kind": "bool",
+    "value": false,
+    "description": "Fail instead of predicting on the CPU when -machine:device asks for a GPU (or auto finds one) that a model cannot use"
   }
 ]

@@ -1,4 +1,4 @@
-// In-memory bridge using the native 0.11.0 `-mode generate -write_config` dump.
+// In-memory bridge using the native 0.12 `-mode generate -write_config` dump.
 // Only the three machine-specific model paths are normalized to empty strings
 // in generation-defaults.json. Native contract tests check this fixture for drift.
 

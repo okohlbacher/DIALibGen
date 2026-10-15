@@ -39,17 +39,19 @@ describe('desktop refinement and fine-tuning', () => {
     expect(button('Refine library').disabled).toBe(false)
     await userEvent.click(button('Refine library'))
     expect(bridge.runs[0]).toEqual({ mode: 'refine', in: '/data/library.parquet', ids: '/data/report.parquet', out: '/data/tuned.parquet',
-      outReport: '/data/residuals.tsv', config: refinementDefaults, modelDir: null, threads: 1 })
+      outReport: '/data/residuals.tsv', config: refinementDefaults, modelDir: null, threads: 0 })
   })
 
-  it.each(['rt', 'ccs', 'both'])('fine-tunes the %s head selection with only required model files', async (head) => {
+  it.each(['auto', 'rt', 'ccs', 'both'])('fine-tunes the %s head selection with only required model files', async (head) => {
     await setup((b) => {
       b.api.models = vi.fn(async (_dir, heads) => ({ dir: '/models', missing: heads ? [] : ['ms2.onnx'] }))
     })
     await mode('tune')
     fillRefinement()
+    expect((screen.getByLabelText('training heads') as HTMLSelectElement).value).toBe('auto')
     await userEvent.selectOptions(screen.getByLabelText('training heads'), head)
-    const wanted = head === 'both' ? ['rt', 'ccs'] : [head]
+    // auto decides CCS from the report at run time, so both stock models are needed.
+    const wanted = head === 'both' || head === 'auto' ? ['rt', 'ccs'] : [head]
     await waitFor(() => expect(bridge.api.models).toHaveBeenLastCalledWith(undefined, wanted))
     expect(screen.queryByLabelText('write rt')).toBeNull()
     expect(screen.queryByLabelText('q precursor')).toBeNull()
@@ -247,6 +249,93 @@ describe('desktop refinement and fine-tuning', () => {
     expect((screen.getByLabelText('model directory') as HTMLInputElement).value).toBe('/saved/rt')
     fillRefinement(); await userEvent.click(button('Fine-tune library'))
     expect(bridge.runs[0]).toMatchObject({ mode: 'tune', threads: 2, tuning: { tune_heads: 'rt', 'train:epochs': 42 } })
+  })
+
+  it('migrates settings saved by a version-1 GUI onto the 0.12 defaults and drops removed options', async () => {
+    bridge = installMockBridge()
+    const generate = { ...SAMPLE_CONFIG, precursor_mz: [350, 1200], fragment_mz: [200, 1800], enzyme: 'Lys-C', retired_key: 1 }
+    const refine = { ...refinementDefaults, q_global: 0.01, q_protein: 0.01, q_precursor: 0.02 }
+    bridge.api.loadSettings = async () => ({ schemaVersion: 1, presets: {}, lastUsed: { ...generate, __gui: { version: 1, mode: 'generate',
+      configs: { generate, refine }, threads: 1, tune: true,
+      tuning: { tune_heads: 'both', 'machine:threads': 6, tune_models: '/old', tune_predict_gpu: true, 'search:passes': 2,
+        'search:allow_bootstrap': true, 'train:epochs': 42 } } } })
+    await act(async () => { render(<App />) })
+    await screen.findByLabelText('enzyme')
+    expect((screen.getByLabelText('enzyme') as HTMLSelectElement).value).toBe('Lys-C')
+    expect((screen.getByLabelText('threads') as HTMLInputElement).value).toBe('0')
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    for (const label of ['precursor mz minimum', 'fragment mz minimum']) expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe('')
+    await mode('refine')
+    expect((screen.getByLabelText('q global') as HTMLInputElement).value).toBe('1')
+    expect((screen.getByLabelText('q protein') as HTMLInputElement).value).toBe('1')
+    expect((screen.getByLabelText('q precursor') as HTMLInputElement).value).toBe('0.02')
+    fillRefinement()
+    await screen.findByLabelText('training heads')
+    expect((screen.getByLabelText('training heads') as HTMLSelectElement).value).toBe('auto')
+    expect((screen.getByLabelText('training epochs') as HTMLInputElement).value).toBe('42')
+    await userEvent.click(button('Refine library'))
+    const run = bridge.runs[0] as { threads: number; config: Record<string, unknown>; tuning: Record<string, unknown> }
+    expect(run.threads).toBe(0)
+    expect(run.config).not.toHaveProperty('retired_key')
+    expect(run.config).toMatchObject({ q_global: 1, q_protein: 1, q_precursor: 0.02 })
+    expect(run.tuning).toMatchObject({ tune_heads: 'auto', 'train:epochs': 42, 'machine:train_threads': 6 })
+    for (const key of ['machine:threads', 'tune_models', 'tune_predict_gpu', 'search:passes', 'search:allow_bootstrap']) {
+      expect(run.tuning).not.toHaveProperty(key)
+    }
+    expect(bridge.saved[0]).toMatchObject({ __gui: { version: 2 } })
+  })
+
+  it('keeps explicit version-1 choices that differ from the old defaults', async () => {
+    bridge = installMockBridge()
+    const generate = { ...SAMPLE_CONFIG, precursor_mz: [380, 980], fragment_mz: [150, 2000] }
+    bridge.api.loadSettings = async () => ({ schemaVersion: 1, presets: {}, lastUsed: { ...generate, __gui: { version: 1, mode: 'tune',
+      configs: { generate }, threads: 8, tuning: { tune_heads: 'ccs' } } } })
+    await act(async () => { render(<App />) })
+    await screen.findByLabelText('training heads')
+    expect((screen.getByLabelText('training heads') as HTMLSelectElement).value).toBe('ccs')
+    await mode('generate')
+    await userEvent.click(screen.getByRole('button', { name: /advanced/i }))
+    expect((screen.getByLabelText('precursor mz minimum') as HTMLInputElement).value).toBe('380')
+    expect((screen.getByLabelText('fragment mz maximum') as HTMLInputElement).value).toBe('2000')
+    expect((screen.getByLabelText('threads') as HTMLInputElement).value).toBe('8')
+  })
+
+  it('round-trips a version-2 file and ignores unknown options in it', async () => {
+    let saved: Record<string, unknown> = {}
+    await setup((b) => {
+      b.api.writeConfig = vi.fn(async (_path, value) => { saved = value; return true })
+      b.api.readConfig = async () => saved
+    })
+    await mode('tune'); fillRefinement()
+    await userEvent.click(screen.getByRole('button', { name: 'Save…' }))
+    expect(saved).toMatchObject({ __gui: { version: 2, mode: 'tune', tuning: { tune_heads: 'auto' } } })
+    const gui = saved.__gui as { configs: Record<string, object>; tuning: object }
+    saved = { ...saved, stray: 1, __gui: { ...gui, configs: { ...gui.configs, tune: { ...gui.configs.tune, stray: 1 } },
+      tuning: { ...gui.tuning, 'future:gone': 3 } } }
+    await userEvent.click(screen.getByRole('button', { name: 'Load…' }))
+    expect(button('Fine-tune library').disabled).toBe(false)
+    await userEvent.click(button('Fine-tune library'))
+    const run = bridge.runs[0] as { config: Record<string, unknown>; tuning: Record<string, unknown> }
+    expect(run.config).not.toHaveProperty('stray')
+    expect(run.tuning).not.toHaveProperty('future:gone')
+  })
+
+  it('does not offer or send removed options and never sends the echoed training settings', async () => {
+    await setup((b) => {
+      const original = b.api.defaultConfig
+      b.api.defaultConfig = async (selected) => ({ ...await original(selected), ...(selected === 'tune' ? { tuning: { 'train:epochs': 1 } } : {}) })
+    })
+    await mode('tune'); fillRefinement()
+    await userEvent.click(screen.getByRole('button', { name: /Advanced fine-tuning/ }))
+    expect(screen.queryByLabelText('tuning')).toBeNull()
+    expect(screen.getByLabelText('machine train threads')).toBeTruthy()
+    expect(screen.queryByLabelText('machine threads')).toBeNull()
+    expect(screen.queryByLabelText('tune predict gpu')).toBeNull()
+    expect(button('Fine-tune library').disabled).toBe(false)
+    await userEvent.click(button('Fine-tune library'))
+    const run = bridge.runs[0] as { config: Record<string, unknown>; tuning: Record<string, unknown> }
+    expect(run.config).not.toHaveProperty('tuning')
+    expect(run.tuning).toMatchObject({ 'machine:train_threads': 0, tune_heads: 'auto' })
   })
 
   it('loads plain native JSON into the current mode, but applies legacy presets to generation', async () => {

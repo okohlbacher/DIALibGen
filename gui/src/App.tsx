@@ -10,6 +10,17 @@ interface Outcome { ok: boolean; text: string; path?: string }
 const MAX_LOG_LINES = 2000
 const modes: Mode[] = ['generate', 'refine', 'tune']
 const record = (v: unknown): v is Values => !!v && typeof v === 'object' && !Array.isArray(v)
+// Settings saved by a GUI of this format (written as __gui.version) still load.
+const SAVED_VERSION = 2
+const SAVED_VERSIONS = [1, SAVED_VERSION]
+// Blank in the form = the tool decides; the key is then left out of the config it is sent.
+const AUTO_KEYS = ['nce', 'precursor_mz', 'fragment_mz', 'precursor_charges']
+const autoBlanks = (): Values => Object.fromEntries(AUTO_KEYS.map((key) => [key, null]))
+// Deprecated in 0.12 (removed in 0.13). Skipped by name, not by the INI's advanced
+// flag: most training options are advanced now and must still be offered.
+const DEPRECATED_TUNING = ['tune_models', 'machine:threads', 'tune_predict_gpu', 'search:passes', 'search:allow_bootstrap']
+const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+const pick = (v: Values, keep: (key: string) => boolean): Values => Object.fromEntries(Object.entries(v).filter(([key]) => keep(key)))
 
 function humanBytes(n: number): string {
   const units = ['B', 'kB', 'MB', 'GB', 'TB']
@@ -23,10 +34,32 @@ export function stripPrivate(v: Values): Values {
 }
 function toolConfig(v: Values): Values {
   const config = stripPrivate(v)
-  if (config.nce == null) delete config.nce
+  for (const key of AUTO_KEYS) if (config[key] == null) delete config[key]
+  // Refine/tune -write_config echoes the training settings; they go out as options.
+  delete config.tuning
   // The desktop's checked directory owns these paths, including native imports.
   for (const key of ['rt_model', 'ms2_model', 'ccs_model']) delete config[key]
   return config
+}
+
+// auto decides CCS from the report at run time, so both stock models must be present.
+const headsFor = (tuneHeads: unknown): ModelHead[] => tuneHeads === 'rt' ? ['rt'] : tuneHeads === 'ccs' ? ['ccs'] : ['rt', 'ccs']
+
+/// A settings file written by a version-1 GUI saved every value, untouched defaults
+/// included. Map the old defaults onto the new ones so they keep following the tool.
+function migrateConfig(config: Values): Values {
+  const out = { ...config }
+  for (const key of ['q_global', 'q_protein']) if (out[key] === 0.01) out[key] = 1
+  if (sameJson(out.precursor_mz, [350, 1200])) out.precursor_mz = null
+  if (sameJson(out.fragment_mz, [200, 1800])) out.fragment_mz = null
+  if (sameJson(out.precursor_charges, [1, 2, 3, 4])) out.precursor_charges = null
+  return out
+}
+function migrateTuning(tuning: Values): Values {
+  const out = { ...tuning }
+  if ('machine:threads' in out && !('machine:train_threads' in out)) out['machine:train_threads'] = out['machine:threads']
+  if (out.tune_heads === 'both') out.tune_heads = 'auto'
+  return pick(out, (key) => !DEPRECATED_TUNING.includes(key))
 }
 
 export default function App(): JSX.Element {
@@ -49,7 +82,7 @@ export default function App(): JSX.Element {
   const [tuneOutModels, setTuneOutModels] = useState('')
   const [modelDir, setModelDir] = useState('')
   const [modelCheck, setModelCheck] = useState<{ key: string; status: ModelStatus } | null>(null)
-  const [threads, setThreads] = useState<number | null>(1)
+  const [threads, setThreads] = useState<number | null>(0)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showTrainingAdvanced, setShowTrainingAdvanced] = useState(false)
   const [log, setLog] = useState<string[]>([])
@@ -62,43 +95,51 @@ export default function App(): JSX.Element {
   // Invalidates a file dialog/default response when a newer mode/recipe wins.
   const revision = useRef(0)
   const defaults = nativeDefaults[mode] ?? null
-  const values = configs[mode] ?? {}
+  // Restored settings may hold keys the tool no longer has (or another mode's); they are ignored, not an error.
+  const values = useMemo(() => defaults ? pick(configs[mode] ?? {}, (key) => key in defaults) : configs[mode] ?? {}, [configs, mode, defaults])
   const usesTuning = mode === 'tune' || (mode === 'refine' && tune)
   const specs = useMemo(() => !defaults ? [] : mode === 'generate' ? buildSpecs(defaults) : refinementSpecs(defaults), [defaults, mode])
   const trainingSpecs = useMemo(() => tuningSpecs(options ?? []), [options])
-  const heads: ModelHead[] = tuning.tune_heads === 'rt' ? ['rt'] : tuning.tune_heads === 'ccs' ? ['ccs'] : ['rt', 'ccs']
+  // Restored settings may hold options the tool no longer has; they are ignored, not an error.
+  const activeTuning = useMemo(() => options ? pick(tuning, (key) => options.some((s) => s.name === key)) : tuning, [tuning, options])
+  const heads = headsFor(activeTuning.tune_heads)
   const modelKey = mode === 'generate' ? `${modelDir}:all` : usesTuning ? `${modelDir}:${heads.join(',')}` : ''
   const models = modelCheck?.key === modelKey ? modelCheck.status : null
   const modelsReady = !modelKey || (!!models && models.missing.length === 0)
 
   const applySaved = useCallback((payload: Values, fallbackMode: Mode) => {
     const gui = payload.__gui
-    if (gui != null && (!record(gui) || gui.version !== 1 || !modes.includes(gui.mode as Mode))) {
+    if (gui != null && (!record(gui) || !SAVED_VERSIONS.includes(gui.version as number) || !modes.includes(gui.mode as Mode))) {
       throw new Error('unsupported desktop settings format')
     }
     revision.current += 1
     if (record(gui)) {
       const selected = gui.mode as Mode
+      const legacy = gui.version === 1
       const restored: Configs = {}
       if (record(gui.configs)) {
         for (const name of modes) if (record(gui.configs[name])) restored[name] = stripPrivate(gui.configs[name] as Values)
       }
       // The visible native config is authoritative; the metadata preserves other modes.
       restored[selected] = { ...restored[selected], ...stripPrivate(payload) }
+      if (legacy) for (const name of modes) if (restored[name]) restored[name] = migrateConfig(restored[name])
+      const saved = record(gui.tuning) ? legacy ? migrateTuning(gui.tuning) : gui.tuning : {}
+      // Version 1 saved the old default of one thread; the new default is all physical cores.
+      const threads = legacy && gui.threads === 1 ? 0 : gui.threads
       setConfigs((old) => Object.fromEntries(modes.map((name) => [name, { ...old[name], ...restored[name] }])))
       setMode(selected)
-      if (record(gui.tuning)) setTuning((old) => ({ ...old, ...gui.tuning as Values }))
+      setTuning((old) => ({ ...old, ...saved }))
       if (typeof gui.tune === 'boolean') setTune(gui.tune)
       for (const [key, setter] of [['modelDir', setModelDir], ['tuneOutModels', setTuneOutModels], ['outReport', setOutReport],
         ['fasta', setFasta], ['library', setLibrary], ['ids', setIds], ['out', setOut]] as const) {
         if (typeof gui[key] === 'string') setter(gui[key] as string)
       }
       setLayout(isLayout(gui.layout) ? gui.layout : DEFAULT_LAYOUT)
-      if (typeof gui.threads === 'number') setThreads(gui.threads)
+      if (typeof threads === 'number') setThreads(threads)
     } else {
       setMode(fallbackMode)
       setConfigs((old) => ({ ...old, [fallbackMode]: { ...old[fallbackMode], ...stripPrivate(payload),
-        ...(fallbackMode === 'generate' ? { nce: payload.nce ?? null } : {}) } }))
+        ...(fallbackMode === 'generate' ? Object.fromEntries(AUTO_KEYS.map((key) => [key, payload[key] ?? null])) : {}) } }))
       if (typeof payload.__modelDir === 'string') setModelDir(payload.__modelDir)
     }
   }, [])
@@ -122,10 +163,11 @@ export default function App(): JSX.Element {
     if (!initialized || nativeDefaults[mode]) return
     let alive = true
     setConfigError(null)
-    void window.dialibgen.defaultConfig(mode).then((d) => {
+    void window.dialibgen.defaultConfig(mode).then((raw) => {
       if (!alive) return
+      const d = pick(raw, (key) => key !== 'tuning')
       setNativeDefaults((old) => ({ ...old, [mode]: d }))
-      setConfigs((old) => ({ ...old, [mode]: { ...d, ...(mode === 'generate' ? { nce: null } : {}), ...old[mode] } }))
+      setConfigs((old) => ({ ...old, [mode]: { ...d, ...(mode === 'generate' ? autoBlanks() : {}), ...old[mode] } }))
     }).catch((e: unknown) => { if (alive) setConfigError(String(e)) })
     return () => { alive = false }
   }, [initialized, mode, nativeDefaults])
@@ -170,22 +212,18 @@ export default function App(): JSX.Element {
   const outLayout = effectiveLayout(layout, out)
   const outFormat = outLayout ? outFormatFor(outLayout) : undefined
   const threadsValid = threads !== null && Number.isSafeInteger(threads) && threads >= 0 && threads <= 2147483647
-  const configValidation = defaults && (Object.keys(toolConfig(values)).find((key) => !(key in defaults))
-    ? 'The configuration contains an option from another mode or an unknown option.'
-    : specs.map((spec) => invalidValue(spec, values[spec.name])).find(Boolean))
-  const tuneValidation = usesTuning && (Object.keys(tuning).some((key) => !options?.some((s) => s.name === key))
-    ? 'The fine-tuning settings contain an unknown option.'
-    : trainingSpecs.map((spec) => invalidValue(spec, tuning[spec.name])).find(Boolean) || tuningError(tuning))
-  const modeValidation = mode === 'tune' && defaults && Object.keys(defaults).some((key) => JSON.stringify(values[key]) !== JSON.stringify(defaults[key]))
+  const configValidation = defaults && specs.map((spec) => invalidValue(spec, values[spec.name])).find(Boolean)
+  const tuneValidation = usesTuning && (trainingSpecs.map((spec) => invalidValue(spec, activeTuning[spec.name])).find(Boolean) || tuningError(activeTuning))
+  const modeValidation = mode === 'tune' && defaults && Object.keys(defaults).some((key) => !sameJson(values[key], defaults[key]))
     ? 'Fine-tune mode requires its native prediction-only configuration. Reset settings or select Refine to replace observed values.'
     : mode === 'refine' && usesTuning && values.rt_unit === 'minmax' ? 'Fine-tuning requires observed RT units, not minmax.'
-      : mode === 'refine' && values.write_rt === true && values.filter === false && (!usesTuning || tuning.tune_heads === 'ccs')
+      : mode === 'refine' && values.write_rt === true && values.filter === false && (!usesTuning || activeTuning.tune_heads === 'ccs')
         ? 'Observed RT with filtering off requires RT fine-tuning, or turn off write rt.' : null
   const validation = configValidation || tuneValidation || modeValidation
   const inputReady = mode === 'generate' ? !!fasta.trim() : /\.(parquet|tsv)$/.test(library) && /\.parquet$/.test(ids)
   const canRun = initialized && threadsValid && !running && inputReady && !!out.trim() && !!outLayout && modelsReady
     && !!defaults && !!info?.ok && (!usesTuning || !!options?.length) && !validation && (mode === 'generate' || !outReport || /\.tsv$/.test(outReport))
-  const snapshot = (): Values => ({ ...toolConfig(values), __gui: { version: 1, mode, configs, tuning, tune, modelDir,
+  const snapshot = (): Values => ({ ...toolConfig(values), __gui: { version: SAVED_VERSION, mode, configs, tuning: activeTuning, tune, modelDir,
     tuneOutModels, outReport, threads, fasta, library, ids, out, ...(layout !== DEFAULT_LAYOUT ? { layout } : {}) } })
 
   async function start(): Promise<void> {
@@ -200,7 +238,7 @@ export default function App(): JSX.Element {
       const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out, ...(outFormat ? { outFormat } : {}),
         config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
         ...(mode !== 'generate' ? { ids, ...(outReport ? { outReport } : {}) } : {}),
-        ...(usesTuning ? { tuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
+        ...(usesTuning ? { tuning: activeTuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
       if (launchRef.current !== launch) return
       if (!result.started) { setRunning(false); setOutcome({ ok: false, text: result.reason ?? 'could not start' }) }
       else if (launch.cancelled) await cancel()
@@ -230,7 +268,7 @@ export default function App(): JSX.Element {
   function reset(): void {
     if (!defaults) return
     revision.current += 1
-    setConfigs((old) => ({ ...old, [mode]: { ...defaults, ...(mode === 'generate' ? { nce: null } : {}) } }))
+    setConfigs((old) => ({ ...old, [mode]: { ...defaults, ...(mode === 'generate' ? autoBlanks() : {}) } }))
     if (usesTuning && options) setTuning(Object.fromEntries(options.map((s) => [s.name, s.value])))
   }
   const renderParam = (spec: ParamSpec, training = false) => <ParamField key={spec.name} spec={spec}
@@ -266,7 +304,7 @@ export default function App(): JSX.Element {
       {mode !== 'generate' && <PathField id="out-report" label="residual report (optional TSV)" value={outReport} set={setOutReport} />}
       <div className="field"><label htmlFor="threads">threads</label><input id="threads" type="number" min={0} max={2147483647} step={1}
         value={threads ?? ''} aria-invalid={!threadsValid} onChange={(e) => setThreads(e.target.value === '' ? null : Number(e.target.value))} />
-        <p className={`help${threadsValid ? '' : ' bad'}`}>{threadsValid ? '1 is the default. 0 uses one thread per physical core.' : 'Enter a whole number of threads (0 or more).'}</p></div>
+        <p className={`help${threadsValid ? '' : ' bad'}`}>{threadsValid ? '0 (the default) uses one thread per physical core.' : 'Enter a whole number of threads (0 or more).'}</p></div>
       {validation && <p className="help bad" role="alert">{validation}</p>}
       {mode !== 'generate' && outReport && !/\.tsv$/.test(outReport) && <p className="help bad">The residual report name must end in .tsv.</p>}
       <div className="row"><button type="button" disabled={!canRun} onClick={() => void start()}>{running ? 'Running…' : mode === 'generate' ? 'Generate library' : mode === 'refine' ? 'Refine library' : 'Fine-tune library'}</button>
@@ -290,7 +328,7 @@ export default function App(): JSX.Element {
           {showAdvanced ? '▾' : '▸'} Advanced ({specs.filter((s) => !s.hidden && s.group === 'advanced').length})</button>
           {showAdvanced && specs.filter((s) => !s.hidden && s.group === 'advanced').map((s) => renderParam(s))}</>}
       </>}
-      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. On Apple silicon the default device (auto) trains on the GPU through MPS; cpu trains on the CPU, and -tune_predict_gpu re-predicts through CoreML. CUDA training and re-prediction require a suitable source build and matching GPU libraries.</p>
+      {usesTuning && <><h3>Fine-tuning</h3><p className="help">CPU training is included in release builds. The default device (auto) uses a usable GPU, on Apple silicon MPS for training and CoreML for re-prediction; cpu forces the CPU. Re-prediction follows the same device setting. CUDA training and re-prediction require a suitable source build and matching GPU libraries.</p>
         {tuningFailure && <p className="help bad">Could not read fine-tuning options: {tuningFailure}</p>}
         {!options && !tuningFailure && <p className="help">Loading the tool’s fine-tuning options…</p>}
         {trainingSpecs.filter((s) => s.group === 'core').map((s) => renderParam(s, true))}

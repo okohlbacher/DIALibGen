@@ -41,22 +41,25 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
 
   if (spec.kind === 'int-range' || spec.kind === 'double-range') {
     const step = spec.kind === 'int-range' ? 1 : 'any'
-    const pair = Array.isArray(value) ? (value as number[]) : [0, 0]
+    // An auto range (null) shows two blank boxes; clearing both returns to auto.
+    const pair = Array.isArray(value) ? (value as number[]) : spec.auto ? [Number.NaN, Number.NaN] : [0, 0]
     const set = (i: 0 | 1, s: string) => {
       const next = [pair[0], pair[1]]
       next[i] = num(s)
-      onChange(next)
+      onChange(spec.auto && next.every(Number.isNaN) ? null : next)
     }
     return (
       <div className={cls}>
         {label}
         <div className="row tight">
           <input id={id} type="number" step={step} min={spec.min} max={spec.max} disabled={off}
-                 aria-label={`${spec.label} minimum`} value={Number.isFinite(pair[0]) ? String(pair[0]) : ''}
+                 aria-label={`${spec.label} minimum`} placeholder={spec.auto ? 'instrument default' : undefined}
+                 value={Number.isFinite(pair[0]) ? String(pair[0]) : ''}
                  onChange={(e) => set(0, e.target.value)} />
           <span className="between">to</span>
           <input type="number" step={step} min={spec.min} max={spec.max} disabled={off}
-                 aria-label={`${spec.label} maximum`} value={Number.isFinite(pair[1]) ? String(pair[1]) : ''}
+                 aria-label={`${spec.label} maximum`} placeholder={spec.auto ? 'instrument default' : undefined}
+                 value={Number.isFinite(pair[1]) ? String(pair[1]) : ''}
                  onChange={(e) => set(1, e.target.value)} />
         </div>
         {help}
@@ -69,16 +72,12 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
     return (
       <div className={cls}>
         {label}
-        <input id={id} type="text" disabled={off} value={items.join(', ')} placeholder="e.g. 1, 2, 3, 4"
-               onChange={(e) =>
-                 onChange(
-                   e.target.value
-                     .split(',')
-                     .map((s) => s.trim())
-                     .filter((s) => s !== '')
-                     .map(Number)
-                 )
-               } />
+        <input id={id} type="text" disabled={off} value={items.join(', ')}
+               placeholder={spec.auto ? 'instrument default' : 'e.g. 1, 2, 3, 4'}
+               onChange={(e) => {
+                 const list = e.target.value.split(',').map((s) => s.trim()).filter((s) => s !== '').map(Number)
+                 onChange(spec.auto && list.length === 0 ? null : list)
+               }} />
         {help}
       </div>
     )
@@ -122,7 +121,7 @@ export default function ParamField({ spec, value, onChange, inert }: Props): JSX
       <div className={cls}>
         {label}
         <input id={id} type="number" step={spec.kind === 'double' ? 'any' : 1} min={spec.min} max={spec.max}
-               placeholder={spec.name === 'nce' ? 'automatic' : undefined}
+               placeholder={spec.auto ? 'automatic' : undefined}
                disabled={off} value={value === null || value === undefined ? '' : String(value)}
                onChange={(e) => onChange(e.target.value === '' ? null : num(e.target.value))} />
         {help}

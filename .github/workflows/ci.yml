@@ -899,11 +899,42 @@ jobs:
           set -euo pipefail
           DMG="dist-bundles/DIALibGen-gui-${{ matrix.name }}.dmg"
           test -f "$DMG" || { echo "::error::no $DMG to notarize"; exit 1; }
+          # stapler can fail after an Accepted notarization (CloudKit -1005, Error 68), and
+          # Tauri's own .app staple fails silently while the ticket propagates: retry with
+          # backoff (30/60/120/240 s); `stapler validate` below still fails a real failure.
+          staple() {
+            for i in 1 2 3 4 5; do
+              echo "stapler staple $(basename "$1"): attempt $i"
+              xcrun stapler staple "$1" && return 0
+              [ "$i" -lt 5 ] || break
+              echo "::warning::stapling $(basename "$1") failed (attempt $i); retrying in $((30 << (i - 1))) s"
+              sleep $((30 << (i - 1)))
+            done
+            echo "::error::stapling $(basename "$1") failed 5 times"
+            return 1
+          }
+          # The app in the image needs its own ticket: if Tauri's staple failed, staple the
+          # app and the copy in the image (re-signed and notarized below).
+          shopt -s nullglob
+          apps=(gui/src-tauri/target/release/bundle/macos/*.app)
+          [ "${#apps[@]}" -gt 0 ] || { echo "::error::no .app bundle to staple"; exit 1; }
+          if ! xcrun stapler validate "${apps[0]}"; then
+            staple "${apps[0]}"
+            RW="$RUNNER_TEMP/rw.dmg" MNT="$RUNNER_TEMP/dmg-rw"
+            hdiutil convert "$DMG" -format UDRW -o "$RW"
+            hdiutil attach "$RW" -readwrite -nobrowse -noautoopen -mountpoint "$MNT"
+            staple "$MNT/$(basename "${apps[0]}")"
+            xcrun stapler validate "$MNT/$(basename "${apps[0]}")"
+            hdiutil detach "$MNT"
+            rm "$DMG"
+            hdiutil convert "$RW" -format UDZO -o "$DMG"
+          fi
           # Re-sign the final DMG with the configured identity.
           codesign --force --timestamp --keychain "$MACOS_KEYCHAIN" \
             --sign "$MACOS_SIGN_IDENTITY" "$DMG"
           bash .github/notarize.sh "$DMG"
-          xcrun stapler staple "$DMG"
+          staple "$DMG"
+          xcrun stapler validate "$DMG"
 
       # Check signature integrity and Gatekeeper acceptance.
       - name: The signed artefacts are what they claim to be

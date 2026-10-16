@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [0.12.1] — not released yet
+## [0.12.1] — 2026-10-16
 
 The first release of the 0.12 line (the owner set the version; there is no
 0.12.0). The default output changes for instruments without ion mobility, for

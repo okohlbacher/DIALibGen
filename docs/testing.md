@@ -84,7 +84,7 @@ application.
 
 These are candidate results. Final tagged-build results, public asset checksums
 and Homebrew installation verification belong to the
-[0.11.5 release record](https://github.com/okohlbacher/DIALibGen/releases/tag/v0.11.5);
+[0.12.1 release record](https://github.com/okohlbacher/DIALibGen/releases/tag/v0.12.1);
 tagged-build and asset checks must pass before publication. Homebrew installation
 checks then validate the public downloads before the tap is updated.
 

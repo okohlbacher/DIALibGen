@@ -191,7 +191,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
         assert effective['instrument_defaults']['instrument'] == 'astral.yaml', name
         assert 'instrument defaults: astral.yaml (Astral) over default.yaml' in log, log
     effective, log = config('-generation:instrument', 'timsTOF Pro 2')
-    assert effective['precursor_charges'] == [2, 3, 4] and effective['model_instrument'] == 'timsTOF'
+    assert effective['precursor_charges'] == [1, 2, 3, 4] and effective['model_instrument'] == 'timsTOF'
     assert 'has ion mobility: CCS and 1/K0 predicted' in log, log
     effective, log = config()
     assert effective['precursor_mz'] == [350.0, 1200.0] and effective['instrument_defaults']['instrument'] is None
@@ -224,7 +224,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     (config_dir / 'default.yaml').write_text((data_dir / 'instruments' / 'default.yaml').read_text()
                                              .replace('instrument: QE', 'instrument: timsTOF'))
     effective, log = config()
-    assert effective['instrument'] == 'timsTOF' and effective['precursor_charges'] == [2, 3, 4], effective
+    assert effective['instrument'] == 'timsTOF' and effective['precursor_charges'] == [1, 2, 3, 4], effective
     (config_dir / 'default.yaml').unlink()
     # -instrument_file
     single = root / 'mine.yaml'

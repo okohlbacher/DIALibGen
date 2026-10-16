@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 The first release of the 0.12 line (the owner set the version; there is no
 0.12.0). The default output changes for instruments without ion mobility, for
-Astral and timsTOF (instrument defaults), and the default prediction route on
+Astral (instrument defaults), and the default prediction route on
 Apple silicon and Linux GPUs. See [migration](docs/usage.md#migration).
 
 ### Changed defaults
@@ -27,14 +27,15 @@ Apple silicon and Linux GPUs. See [migration](docs/usage.md#migration).
   `share/DIALibGen/instruments/default.yaml` (the default instrument QE, the
   generic windows and charges, NCE and ion mobility per MS2 model slot),
   `astral.yaml` (precursor m/z 380-980, fragment m/z 150-2000, charges 1-4,
-  NCE 25: the report's Astral library) and `timstof.yaml` (charges 2-4, m/z
-  350-1200 / 200-1800, NCE 30, ion mobility: the diaPASEF benchmark's settings).
+  NCE 25: the report's Astral library) and `timstof.yaml` (charges 1-4 as in 0.11,
+  m/z 350-1200 / 200-1800, NCE 30, ion mobility; the diaPASEF benchmark's
+  charges 2-4 need `-generation:precursor_charges 2 3 4`).
   An explicit option (command line, INI, JSON) wins over the instrument's file,
   which wins over default.yaml. `-generation:instrument Astral
   -generation:variable_modifications 'Oxidation (M)'` writes the report's
   13-option Astral library (TSV byte for byte; the Parquet recipe differs in
-  its recorded sources). **A timsTOF library without explicit charges now has
-  charges 2-4** (was 1-4). `-generation:precursor_mz` and `fragment_mz` have an
+  its recorded sources). A default timsTOF library keeps 0.11's charges 1-4
+  (its TSV equals 0.11.5's). `-generation:precursor_mz` and `fragment_mz` have an
   empty registered default (the instrument's); `-write_config` writes the
   resolved values with `precursor_mz_source`, `fragment_mz_source`,
   `precursor_charges_source` and `instrument_defaults` (file names and
@@ -106,8 +107,8 @@ differ from 0.12's.
   predicted. The RT and fragment columns are unchanged: an Astral library
   differs from 0.11.5's only in its `IonMobility`/`CCS` columns, the recorded
   config (`predict_ion_mobility`) and the fingerprint (`im=none`, CCS model
-  hash `none`); a timsTOF library at the same charges only in the recorded
-  config (its default charges are now 2-4: instrument defaults, above). DIA-NN 1.7.12
+  hash `none`); a timsTOF library only in the recorded
+  config. DIA-NN 1.7.12
   and 2.0 load such a TSV and DIA-NN 2.0 Parquet library.
 - `-machine:device auto` (the default) now picks the prediction route in
   `generate` and says which in one `device:` line ([usage](docs/usage.md#gpu)).

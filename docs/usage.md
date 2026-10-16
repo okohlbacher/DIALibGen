@@ -111,7 +111,7 @@ Linux packages beside the models; a source tree has them in `data/instruments/`)
 |---|---|---|
 | `default.yaml` | the default instrument (`QE`) and every other one | precursor m/z 350-1200, fragment m/z 200-1800, charges 1-4; per MS2 model slot the NCE (Lumos 25, others 30) and ion mobility (timsTOF only) |
 | `astral.yaml` | Astral, Orbitrap Astral, Astral Zoom (MS2 model: Lumos) | precursor m/z 380-980, fragment m/z 150-2000, charges 1-4, NCE 25, no ion mobility |
-| `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 2-4, precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility |
+| `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 1-4, precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility (the diaPASEF benchmark searched charges 2-4: `-generation:precursor_charges 2 3 4`) |
 
 Each value carries its source in a comment. Precedence, per value: an
 explicit option (command line, INI, `-config` JSON) > the instrument's file >
@@ -235,8 +235,8 @@ predicted, `-generation:derive_ion_mobility` (default `true`) adds 1/K0;
 without CCS it has no effect. Until 0.11.5 every library carried both. Apart
 from these two columns and the recorded recipe (`predict_ion_mobility` in the
 config, `im=none` in the fingerprint), an Orbitrap library is the one 0.11.5
-writes, and a timsTOF library at the same charges differs only in the recorded
-recipe (by default it now has charges 2-4, from timstof.yaml). DIA-NN
+writes, and a timsTOF library differs only in the recorded
+recipe (timstof.yaml keeps 0.11's charges 1-4). DIA-NN
 1.7.12 and 2.0 load such a TSV or DIA-NN 2.0 Parquet library (2.0 reports its
 1/K0 as 0). `-tune_heads auto` (the default), `ccs` or `both` on such a
 library with a diaPASEF report trains on the run's observed 1/K0 and then adds
@@ -960,7 +960,7 @@ From 0.11 to 0.12 (0.12.1 is the first release of this line):
 | `-threads` 1 unless given | all physical cores unless the command line or the INI sets it (an INI's 1 is respected) |
 | `-tune_heads both` | `auto`: RT, plus CCS when the report has ion mobility |
 | refine gates `-q_precursor`, `-q_global`, `-q_protein` at 0.01 | `-q_precursor 0.01` only; `-q_global 1 -q_protein 1` are the defaults |
-| m/z windows and charges 350-1200 / 200-1800 / 1-4 for every instrument | from the [instrument files](#instrument-defaults): Astral 380-980 / 150-2000 / 1-4, timsTOF charges 2-4 |
+| m/z windows and charges 350-1200 / 200-1800 / 1-4 for every instrument | from the [instrument files](#instrument-defaults): Astral 380-980 / 150-2000 / 1-4; timsTOF as before (350-1200 / 200-1800 / 1-4) |
 | CCS and 1/K0 for every instrument | only with ion mobility (timsTOF) |
 | `-mode generate` unless given | a library as `-in` converts |
 | every option in `--help` | 23 in `--help`, the rest in `--helphelp` |

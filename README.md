@@ -117,7 +117,7 @@ mode are rejected when changed from their defaults.
 ### Examples
 
 Generate a library for a timsTOF method (the instrument's defaults: charges
-2-4, CCS and 1/K0; all physical cores), and one for the report's Astral
+1-4, CCS and 1/K0; all physical cores), and one for the report's Astral
 method (precursor m/z 380-980, fragment m/z 150-2000; see
 [instrument defaults](docs/usage.md#instrument-defaults)):
 

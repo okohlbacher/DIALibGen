@@ -1,6 +1,6 @@
 ---
 title: "DIALibGen: predicted spectral libraries for DIA proteomics"
-date: "October 2026 — DIALibGen 0.11.3"
+date: "October 2026 — DIALibGen 0.12.1"
 papersize: a4
 geometry: margin=2.2cm
 fontsize: 11pt
@@ -28,7 +28,7 @@ Measured against DIA-NN 2.0's built-in predictor on one Orbitrap Astral dataset 
 |:----------------------------------------------|:-------------|:-----------|
 | library from a FASTA, 5.8 M precursors, 96 CPU threads | 146 s (0.11.3) | 172 s |
 | the same at 16 CPU threads | 683 s (0.11.3) | 458 s |
-| the same on 2 × H100 GPUs | 47 s | – (not measured) |
+| the same on 2 × H100 GPUs, 16 CPU threads | 48 s (0.12.1) | – (not measured) |
 | median \|ΔRT\| (min), 16,068 held-out precursors, LOWESS-calibrated; untuned → fine-tuned on the same training peptides (0.11.1) | 0.243 → **0.093** | 0.290 → 0.142 ¹ |
 | median cosine to observed y-ion intensities, 40,419 precursors, ions stored by both libraries (0.11.1) | **0.986** | 0.977 |
 | precursors passing DIA-NN 2.0's estimated 1 % FDR, run 01, untuned → fine-tuned library (0.11.1; the tuned libraries were trained on this run) | 89,232 → **96,156** | 88,130 → 90,843 |
@@ -36,28 +36,37 @@ Measured against DIA-NN 2.0's built-in predictor on one Orbitrap Astral dataset 
 ¹ A second DIA-NN tune, trained on DIA-NN's own search results (more training precursors, validation proteins
 included), reached 0.099 min (section 4).
 
-On a MacBook Pro (Apple M4 Max, 16 cores) the same 5.8 M-precursor library takes 499 s on the CPU and 389 s with
-the fragment model on the Apple GPU (a development build, not in 0.11.3); the Astral library is fine-tuned in
-85 s with GPU training (section 3). The runtime rows above use DIALibGen 0.11.3 on a non-public
-human-plus-entrapment FASTA (5.81 M precursors), and each tool's time includes its own fragment selection and
-output format; the accuracy and identification rows use 0.11.1, whose untuned library is identical to 0.11.3's,
-on the public human FASTA (3.49 M precursors). DIALibGen also predicts and can tune CCS/ion mobility; this
+On a MacBook Pro (Apple M4 Max, 16 cores) DIALibGen 0.11.4 generates the same 5.8 M-precursor library in 444 s
+on the CPU and in 298 s with the fragment model on the Apple GPU (258 s once its compiled shapes are cached);
+the Astral library is fine-tuned in 71 s with GPU training, the default on Apple silicon (section 3). The
+server runtime rows above were measured with DIALibGen 0.11.3 on a non-public human-plus-entrapment FASTA
+(5.81 M precursors); 0.11.4 and 0.11.5 keep the CPU generation path and write the same library content. Each tool's time
+includes its own fragment selection and output format. The accuracy and identification rows use libraries
+made with 0.11.1 and 0.11.3 on the public human FASTA (3.49 M precursors); 0.11.4 generates the same CPU library
+content (checked for the generated Astral library and one CPU tune; tuned libraries depend on the training
+setup). DIALibGen also predicts and can tune CCS/ion mobility; this
 report evaluates only RT, fragment intensities and identification counts. The CPU timings for the two tools come from two identical machines (section 3). The accuracy tables
 use run 01 of the ProteoBench Astral DIA dataset (section 4); no other instrument was tested.
 
 # 1. What DIALibGen is
 
 DIALibGen digests a protein FASTA in silico and predicts, for every precursor, the retention time (RT), the
-fragment-ion intensities and the collisional cross section (CCS), from which it derives the inverse reduced
-ion mobility (1/K0, in V·s/cm²). Prediction uses the open AlphaPeptDeep models, run through ONNX Runtime from C++; digestion,
+fragment-ion intensities and, for instruments that separate ions by mobility (timsTOF), the collisional cross
+section (CCS), from which it derives the inverse reduced ion mobility (1/K0, in V·s/cm²); since 0.12 a library for
+an instrument without ion mobility (Astral, other Orbitraps) carries no CCS or 1/K0. Prediction uses the open AlphaPeptDeep models, run through ONNX Runtime from C++; digestion,
 modifications and file handling use OpenMS. Prediction runs on the CPU or on NVIDIA GPUs. DIA-NN 2.0 predicts
 libraries itself; DIALibGen is a standalone, scriptable predictor that also writes OpenSWATH formats, records
 how each library was made, and can fine-tune its RT and CCS models on your own run.
 
 Release packages exist for Linux (x64, arm64), macOS (Intel, Apple silicon) and Windows (x64): a command-line
-archive and a desktop app that drives the same program. The prediction models are bundled. Apple-GPU support
-(fragment prediction through CoreML, training through Metal) exists on a development branch and is not part
-of 0.11.3; section 3 reports its timings.
+archive and a desktop app that drives the same program. The prediction models are bundled. Since 0.11.4 the
+macOS release uses the Apple GPU: fine-tuning trains there by default on Apple silicon
+(`-machine:device auto` resolves to Metal, MPS); since 0.12.1 `auto` also predicts the fragments there
+(CoreML) for libraries of at least 50,000 precursors per CPU thread, and `-machine:device coreml` does so for any
+size (RT and CCS stay on the CPU, which CoreML cannot replace for these models).
+`-mode prepare` compiles the GPU shapes of the fragment model once, ahead of a first run. Since 0.12.1 the Linux
+packages include ONNX Runtime's CUDA build, so prediction runs on an NVIDIA GPU when the CUDA 12 runtime and
+cuDNN 9 are installed, and on the CPU otherwise.
 
 ## Modes
 
@@ -69,14 +78,15 @@ or observed, but has no scale problem.
 
 | mode | input | output |
 |:-----------|:-------------------------------------|:-------------------------------------------|
-| `generate` (default) | protein FASTA | predicted library: RT, fragment intensities, CCS and 1/K0 for every precursor of the digest |
+| `generate` (default for a FASTA) | protein FASTA | predicted library: RT, fragment intensities (and, with ion mobility, CCS and 1/K0) for every precursor of the digest |
 | `refine` | library + identifications from one run | observed RT (and, with `-write_im`, 1/K0) written into the library; by default only the identified precursors are kept |
 | `tune` | library + identifications from one run | the whole library re-predicted with RT and/or CCS models fine-tuned on that run; with the RT model tuned, RT in that run's minutes |
-| `convert` | library | the same library in another format |
+| `convert` (default for a library) | library | the same library in another format |
+| `prepare` (macOS) | – | the fragment model's CoreML shapes compiled into the cache, for later `-machine:device coreml` runs |
 
 **generate** needs no run data. It digests the FASTA, enumerates the precursors (charges, modifications,
-m/z range), predicts RT, fragment intensities (b/y ions, charge 1–2 by default) and CCS, derives 1/K0 from
-the CCS (by default), and writes the library.
+m/z range), predicts RT, fragment intensities (b/y ions, charge 1–2 by default) and, for an instrument with ion
+mobility, CCS, derives 1/K0 from the CCS (by default), and writes the library.
 
 **refine** writes observed values; it does not tune by default.
 
@@ -127,9 +137,10 @@ precursors missed in the first run stay missed, and the error-rate estimate refe
    the RT model: RT = model output × the denominator of step 2, so the library is in the run's minutes. Fragment
    intensities, precursor keys and m/z are unchanged.
 8. Record the recipe (cohorts, settings, seed, thread count) in the Parquet output or the `.refine.json`
-   sidecar of a TSV, and in the tuned ONNX files, which are kept only with `-tune_out_models`. The tuned weights
-   depend on `-machine:threads` (16); training on a GPU (`-machine:device cuda:0`, source build with CUDA
-   LibTorch) is not bit-identical to the CPU.
+   sidecar of a TSV, and in the tuned ONNX files, which are kept only with `-tune_out_models`. CPU training uses
+   `-machine:threads` (16 on Linux and Windows, 8 on macOS); the documentation states that the tuned weights
+   may differ between thread counts (on our Mac, 8 and 16 gave identical weights). Training on a GPU (CUDA in
+   a source build, or Metal on Apple silicon) is not bit-identical to the CPU.
 
 On data without ion mobility (Astral, Orbitrap), pass `-tune_heads rt`: the default `both` needs observed
 1/K0 in the report.
@@ -154,29 +165,31 @@ A typical workflow:
 1. `generate` a library from the FASTA (DIA-NN TSV, or `-out_format diann2_parquet`);
 2. search one representative run with DIA-NN and that library;
 3. `refine` with that search's report (a library carrying the observed RTs, an "empirical" library), or
-   `tune` (an adapted predicted library), or `refine -tune -no_filter` for both; `-tune_heads rt` without ion
-   mobility;
+   `tune` (an adapted predicted library), or `refine -tune -no_filter` for both; `tune` picks RT, plus CCS when the
+   report has ion mobility (`-tune_heads auto`, the default since 0.12);
 4. search the other runs with the result.
 
-With DIA-NN 2.x, for an Astral run:
+With DIA-NN 2.x, for an Astral run (DIALibGen 0.12.1; all physical cores by default):
 
 ```bash
-DIALibGen -in proteins.fasta -out predicted.tsv -generation:instrument Astral -threads 0
+DIALibGen -in proteins.fasta -out predicted.tsv -generation:instrument Astral
 diann --f run01.raw --lib predicted.tsv --fasta proteins.fasta --reannotate \
   --met-excision --out first_pass.parquet --threads 16
-DIALibGen -mode tune -in predicted.tsv -ids first_pass.parquet -tune_heads rt \
-  -out tuned.tsv -threads 0
+DIALibGen -mode tune -in predicted.tsv -ids first_pass.parquet -out tuned.tsv
 ```
 
-Choose `-generation:instrument` and `-generation:nce` for your instrument (the Astral results here use
-`Astral`, which selects AlphaPeptDeep's Lumos-group fragment model, at NCE 25), and match digestion,
+Choose `-generation:instrument` for your instrument (the Astral results here use `Astral`, which selects
+AlphaPeptDeep's Lumos-group fragment model). Since 0.12.1 the instrument's file of defaults also sets the NCE,
+the m/z windows and the charges: for `Astral` NCE 25, precursor m/z 380–980, fragment m/z 150–2000 and charges
+1–4, the settings of this report's Astral libraries; for `timsTOF` charges 1–4 and m/z 350–1200 / 200–1800; other
+instruments use the generic defaults (350–1200 / 200–1800, charges 1–4). Match digestion,
 modifications, charges and m/z ranges to the experiment. Modifications are given by name (OpenMS or UniMod),
 one per residue; this report evaluates only carbamidomethylated cysteine and oxidised methionine, and
 accuracy for other instrument settings or modifications is not established here. A whole human proteome
 takes 5–10 GB of RAM to generate and 6–7 GB to tune (section 3); its OpenSWATH PQP export needs about 60 GB.
 
-Installation, the exact command lines used for the benchmark libraries, their settings and the thread and GPU
-options are in Appendix A.
+Installation, the command lines of the benchmark libraries (in their 0.12.1 form), their settings and the
+thread and GPU options are in Appendix A.
 
 # 2. Data
 
@@ -207,15 +220,18 @@ not public, so the runtime benchmark cannot be repeated independently; it serves
 human-like sequences (for scale: the public FASTA above gives a 3.49 M-precursor library in 121.7 s on the same
 node, section 3). No timsTOF run is used in this report.
 
-**Software versions.** Three DIALibGen versions appear; their libraries are the same where the table says so.
+**Software versions.** Six DIALibGen versions produced the results; their libraries are the same where the table
+says so. The command lines are written for 0.12.1, the release this report accompanies; of 0.12.1 only the
+server GPU runtime was measured.
 
 | version | used for | note |
 |:----------------------------------|:-------------------------------------------------------|:-------------------------------------|
-| DIALibGen 0.11.1 (release build) | library set A: accuracy and DIA-NN 2.0 identifications (sections 4, 5) | its untuned library is identical to 0.11.3's |
+| DIALibGen 0.11.1 (release build) | library set A: accuracy and DIA-NN 2.0 identifications (sections 4, 5) | its untuned library is identical to 0.11.3's and 0.11.4's (CPU) |
 | DIALibGen 0.11.2 | runtime rows that bridge the two servers (section 3) | same library as 0.11.3 |
-| DIALibGen 0.11.3 (source build) | runtime headline (section 3); library set B: the DIA-NN 1.7.12 identifications (section 5, Appendix A) | |
-| DIALibGen 0.11.3 (Homebrew cask) | laptop CPU runs (section 3) | same libraries as the server build to float rounding |
-| DIALibGen Apple-GPU development build | laptop CoreML and MPS runs (section 3) | not in 0.11.3; fragment intensities differ slightly from the CPU's |
+| DIALibGen 0.11.3 (source build) | server runtime (section 3); library set B: the DIA-NN 1.7.12 identifications and the entrapment check (section 5, Appendix A) | 0.11.4 generates the same CPU library content |
+| DIALibGen 0.11.4 (Homebrew cask) | laptop runs, CPU and Apple GPU (section 3) | CPU libraries equal the server's to float rounding; CoreML libraries differ slightly in fragment intensities |
+| DIALibGen 0.11.5 (source build, CUDA) | server GPU runtime, one H100 (section 3) | its GPU library is byte-identical to 0.11.3's |
+| DIALibGen 0.12.1 (release package, Linux x64) | server GPU runtime, one and two H100 (section 3); the command lines (section 1, Appendices A and B) | its GPU library equals 0.11.3's (Parquet table; only the recorded recipe differs); its Astral (Appendix A) and timsTOF (section 3) commands write the same TSV as 0.11's longer commands |
 | DIA-NN 2.0 (Academia, 28 Jan 2025) | predictor runtime; set A tuning, searches and RT reference | |
 | DIA-NN 1.7.12 (open-source Linux build) | set B training identifications and searches; intensity reference | cannot predict libraries |
 
@@ -237,19 +253,34 @@ diann --fasta F --fasta-search --predictor --gen-spec-lib --cut 'K*,R*' \
   --max-fr-mz 1800 --unimod4 --met-excision --var-mods 0 --threads N \
   --out-lib lib.parquet
 
+# DIALibGen 0.12.1 (timstof.yaml supplies NCE 30 and the m/z windows)
+DIALibGen -in F -out lib.parquet -generation:instrument timsTOF \
+  -generation:precursor_charges 2 3 4 -generation:min_relative_intensity 0 -threads N
+
+# the runs here (0.11.x) used the same settings as a recipe, which 0.12.1 also reads:
 # recipe.json: {"precursor_charges":[2,3,4],"instrument":"timsTOF",
 #               "min_relative_intensity":0.0,"nce":30.0}
 DIALibGen -in F -config recipe.json -out lib.parquet -threads N
 ```
 
 **Machines.** `kim` and `dax` are identical servers (2 × AMD EPYC 9654, 2 × 96 cores, 384 hardware threads,
-Linux); `data` has the same CPU model (224 hardware threads online) and 2 × NVIDIA H100 PCIe. The laptop is a MacBook Pro
+Linux); `data` and `spock` have the same CPU model (224 hardware threads online) and 2 × NVIDIA H100 PCIe each. The laptop is a MacBook Pro
 with an Apple M4 Max (12 performance and 4 efficiency cores, 40-core GPU, 128 GB, macOS 26.6.2), plugged in,
-nothing else running; its CPU runs used DIALibGen 0.11.3 from the Homebrew cask, its GPU runs a development
-build (CoreML for the fragment model, Metal for training; RT and CCS models stay on the CPU, which has no
-CoreML operator for them). Each configuration ran once (0.11.2 at 96 threads on `kim` three times), measured with `/usr/bin/time -v`, and started only when the
+the 1-minute load below 3 before every run (a low load average did not mean an idle machine: a background
+indexer used about one core during several runs); it ran DIALibGen 0.11.4 from the Homebrew cask (CoreML for
+the fragment model, Metal for training; the RT and CCS models stay on the CPU because CoreML has no operator for
+their LSTM layers). A first 0.11.4 CPU generate that ran next to a busy 3D viewer (826.1 s) was discarded and
+repeated; both libraries are byte-identical. Server CPU timings were not repeated with 0.11.4 or 0.11.5: the CPU
+generation path is unchanged. The one-H100 rows of 0.11.5 were measured on `spock` with 0.11.3 as a control in the
+same session, on GPU 1 with 16 CPU threads of its own socket (another user's job held most of GPU 0's memory); the
+first 0.11.5 run spent 10.1 s loading its libraries before the program started (cold file cache) and was repeated.
+The 0.12.1 rows (the published Linux x64 package, which ships ONNX Runtime's CUDA build, with cuDNN 9 on the
+library path; the same recipe as above) were measured on `spock` on 16 October 2026 with 0.11.3 as a control in the
+same session: one H100 on GPU 1 with CPUs of its own socket, as for 0.11.5, and two H100 with both GPUs idle; the
+first 0.11.3 control on one H100 spent 9.2 s loading its libraries before the program started and was repeated.
+Five more 0.12.1 runs on two H100 took 47.9–48.8 s. Each configuration ran once (0.11.2 at 96 threads on `kim` three times), measured with `/usr/bin/time -v` (on the laptop `/usr/bin/time -l`), and started only when the
 node was quiet (fewer than 24 hardware threads busy on `kim`/`dax`; load below 0.25 per hardware thread and
-both GPUs idle on `data`). DIALibGen's times include the collection of a timing trace;
+the GPUs used idle and holding no other user's job on `data` and `spock`). DIALibGen's times include the collection of a timing trace;
 its overhead was not measured. DIALibGen and DIA-NN do not write the same library: DIALibGen keeps 12 fragments per
 precursor and its own Parquet layout, DIA-NN its own fragment selection (not counted here) and layout. The times
 are therefore end-to-end times for each tool's library, not for identical prediction work.
@@ -270,18 +301,24 @@ Table: Library generation from the FASTA, 5.8 M precursors
 | DIALibGen 0.11.3 | dax | 96 | 146.2 | 9.7 | 12,532 |
 | DIALibGen 0.11.2 | data | 16 + 1 × H100 | 88.9 | – | – |
 | DIALibGen 0.11.2 | data | 16 + 2 × H100 | 65.2 | – | – |
-| DIALibGen 0.11.3 | data | 16 + 1 × H100 | 82.4 | 4.6 | – |
+| DIALibGen 0.11.3 | spock | 16 + 1 × H100 | 79.2 | 4.6 | – |
+| DIALibGen 0.11.5 | spock | 16 + 1 × H100 | 79.1 | 4.7 | – |
 | DIALibGen 0.11.3 | data | 16 + 2 × H100 | 47.3 | 5.0 | – |
-| DIALibGen 0.11.3 | laptop | 16 (CPU) | 498.7 | 6.1 | 6,822 |
-| DIALibGen 0.11.3 | laptop | 12 (CPU) | 484.8 | 5.7 | 5,557 |
-| DIALibGen Apple-GPU build | laptop | 16 + CoreML ² | 389.5 | 6.8 | 1,235 |
+| DIALibGen 0.11.3 ³ | spock | 16 + 1 × H100 | 79.6 | 4.7 | – |
+| DIALibGen 0.12.1 ³ | spock | 16 + 1 × H100 | 77.7 | 4.6 | – |
+| DIALibGen 0.11.3 ³ | spock | 16 + 2 × H100 | 48.6 | 5.1 | – |
+| DIALibGen 0.12.1 ³ | spock | 16 + 2 × H100 | 48.3 | 5.0 | – |
+| DIALibGen 0.11.4 | laptop | 16 (CPU) | 443.6 | 6.0 | 6,532 |
+| DIALibGen 0.11.4 | laptop | 16 + CoreML, cold ² | 298.5 | 7.7 | 1,067 |
+| DIALibGen 0.11.4 | laptop | 16 + CoreML, warm ² | 258.3 | 7.9 | 1,486 |
 
 ¹ mean of three runs (158.10 / 158.22 / 158.24 s); every other row is a single run. CPU time = user + system.
 Peak RAM = peak resident memory on the host (GPU memory not included). DIALibGen 0.11.3 was not run at
-8 threads. ² MS2 model on the Apple GPU, RT and CCS on the CPU; includes compiling the model for the GPU (the
-compiled-model cache was emptied before the run).
+8 threads. ² MS2 model on the Apple GPU, RT and CCS on the CPU at the same time; cold: the compiled-model cache
+was emptied before the run, so it includes compiling the model's shapes for the GPU; warm: the shapes are loaded
+from the cache. ³ one session, 16 October 2026.
 
-![Library generation from the FASTA, 5.8 M precursors, wall time. Left: the two identical servers, CPU only. Middle: the GPU server, 16 CPU threads plus one or two H100. Right: the laptop (Apple M4 Max), CPU at 16 and 12 threads and with the fragment model on the Apple GPU (CoreML, a development build). Each configuration was measured once, except DIALibGen 0.11.2 at 96 threads on kim (mean of three); the two tools' libraries differ in fragment selection and layout. "n/m": not measured.](fig/runtime.png){width=100%}
+![Library generation from the FASTA, 5.8 M precursors, wall time. Left: the two identical servers, CPU only. Middle: `spock`, 16 CPU threads plus one or two H100, DIALibGen 0.12.1 (release package) and 0.11.3 in the same session. Right: the laptop (Apple M4 Max, DIALibGen 0.11.4), CPU at 16 threads and with the fragment model on the Apple GPU (CoreML; cold and warm compiled-model cache). Each configuration was measured once, except DIALibGen 0.11.2 at 96 threads on kim (mean of three); the two tools' libraries differ in fragment selection and layout. "n/m": not measured.](fig/runtime.png){width=100%}
 
 Reading the table:
 
@@ -300,13 +337,24 @@ Reading the table:
 - During the DIA-NN runs, other users' jobs kept about 18 of the node's 384 hardware threads busy on average;
   during the DIALibGen runs, below 1 on `kim` and 1.6–1.9 on `dax`. The effect on DIA-NN's times was not
   measured.
-- **Laptop.** The 16-core M4 Max generates the 5.8 M-precursor library in 498.7 s, faster than the server at
-  16 threads (682.8 s) with 37 % less CPU time; 12 threads take 484.8 s; in this single comparison the four extra
-  threads did not shorten the run. With the fragment model on the Apple GPU the run takes 389.5 s and
-  1,235 CPU-s, including the one-off compilation of the model for the GPU. The laptop CPU library equals the
-  server's to float rounding, and 16 and 12 threads give identical bytes; the CoreML library has the CPU's RT,
-  CCS and 1/K0 exactly and differs only in fragment intensities, at the level of CUDA with TF32 off (for the
-  Astral library 8 of 3.49 M fragment sets, minimum cosine 0.987; details in the benchmark's results file).
+- **GPU server (0.12.1, 0.11.5).** The 0.12.1 release package takes 77.7 s on one H100 and 48.3 s on two, against
+  79.6 s and 48.6 s for 0.11.3 in the same session; its library equals 0.11.3's apart from the recorded recipe.
+  On one H100 0.11.5 took 79.1 s, 0.11.3 79.2 s in its own session; those libraries are byte-identical. 0.11.4 was slower on NVIDIA GPUs (89.2 s on one H100 and
+  57.1 s on two, against 79.3 s and 48.6 s for 0.11.3): it predicted retention time and ion mobility at the same
+  time as the fragments, which helps on the Apple GPU but made the three models share an NVIDIA GPU. 0.11.5 runs
+  them one after the other there again.
+- **Laptop (0.11.4).** The 16-core M4 Max generates the 5.8 M-precursor library on the CPU in 443.6 s, faster
+  than the server at 16 threads (682.8 s) with 40 % less CPU time. With the fragment model on the Apple GPU it
+  takes 298.5 s with an empty compiled-model cache and 258.3 s once the shapes are cached; in 0.11.4 the RT and
+  CCS phases run on the CPU while the GPU predicts the fragments, and the shapes are compiled in the
+  background. Earlier runs on the same laptop with 0.11.3 (498.7 s CPU) and with the
+  Apple-GPU development build on top of it (389.5 s CoreML, empty cache) are single runs under other
+  conditions: the CoreML difference fits these changes but cannot be attributed to them entirely, and the CPU
+  path is unchanged, so its difference reflects conditions. The generated library content is identical to
+  0.11.3's on both paths. The laptop CPU library equals the server's up to small numerical differences and
+  rare fragment-selection changes (38 of 5.8 M precursors); the CoreML library has the CPU's RT, CCS and 1/K0
+  exactly and differs in fragment intensities and rare fragment selections, at the level of CUDA with TF32 off
+  (Astral library: 8 of 3.49 M fragment sets, minimum cosine 0.987).
 
 **Fine-tuning.** The Astral library of Appendix A (3,488,457 precursors): generation, then tuning the RT model on
 run 01's 42,785 identifications and re-predicting the whole library.
@@ -317,21 +365,24 @@ Table: Astral library, generation and fine-tuning (wall time; peak RAM on the ho
 |:---------------------------------------|------------:|------------:|------------:|
 | server CPU, 96 threads (dax, one socket) | 121.7 (8.8 GiB) | 181.1 (7.0 GiB) | 146 (16 threads) |
 | server, 2 × H100 (data), 16 CPU threads | n/m ³ | 51.9 (6.3 GiB) | GPU |
-| laptop CPU, 16 threads | 246.3 (5.4 GiB) | 847.4 (5.8 GiB) | 768 (16 threads) |
-| laptop, CoreML / Metal, 16 threads | 172.6 (5.9 GiB) | 84.9 (6.7 GiB) | 51 (GPU) |
+| laptop CPU, 16 threads, 0.11.4 | 235.8 (5.4 GiB) | 638.8 (5.8 GiB) | 578 (8 threads) |
+| laptop Apple GPU, CoreML (warm cache) / Metal, 0.11.4 | 157.5 (6.4 GiB) | 70.8 (6.9 GiB) | 40 (GPU) |
 
 ³ The server-GPU generation of this library could not be timed cleanly: another user's job occupied one of the
 GPUs. Writing the DIA-NN TSV took 16 s on the server.
 
-![Generation and RT fine-tuning of the 3.49 M-precursor Astral library with DIALibGen 0.11.3 (laptop GPU bars: a development build), wall time per configuration. Tuning starts from run 01's 42,785 library-free identifications and includes training and the whole-library re-prediction, not the DIA-NN search. Servers: 2 × EPYC 9654 (dax) and the same with 2 × H100 (data); laptop: Apple M4 Max. "n/m": not measured.](fig/finetune.png){width=100%}
+![Generation and RT fine-tuning of the 3.49 M-precursor Astral library (servers: DIALibGen 0.11.3; laptop: 0.11.4), wall time per configuration. Tuning starts from run 01's 42,785 library-free identifications and includes training and the whole-library re-prediction, not the DIA-NN search. Servers: 2 × EPYC 9654 (dax) and the same with 2 × H100 (data); laptop: Apple M4 Max. "n/m": not measured.](fig/finetune.png){width=100%}
 
 All four tunes reach the same held-out accuracy: the tune's selection metric (standard deviation of the RT
 residuals after a straight-line calibration) on the 8,442 held-out test units is 0.393–0.395 min in every
 case, against 0.607 min for the pretrained model. That metric is the tune's internal score, not the median
-\|ΔRT\| of section 4. On the laptop CPU, training is the slow part (768 of 847 s on 16 threads; LibTorch
-training on this CPU spends about half its time in system calls), and training on the Apple GPU brings it to
-51 s. Training is not bit-identical across platforms: the laptop CPU's tuned RTs differ from the server's by a
-median of 0.022 min (maximum 0.53), the GPU-trained ones from the laptop CPU's by 0.014 min (maximum 0.70).
+\|ΔRT\| of section 4. On the laptop CPU, training is the slow part (578 of 639 s on 8 threads, the macOS
+default since 0.11.4; 0.11.3 trained on 16 threads in 768 s, with 2,299 s of system time against 501 s now),
+and training on the Apple GPU, the default on Apple silicon, brings it to 40 s. On this Mac, 8 and 16 training
+threads gave identical tuned weights (the documentation states that they may differ). Training is not
+bit-identical across platforms: the laptop CPU's tuned RTs differ from the server's by a median of 0.022 min
+(maximum 0.53), the GPU-trained ones from the laptop CPU's by 0.016 min (maximum 0.55). Part of the
+0.11.3-to-0.11.4 differences on the laptop may be conditions: some 0.11.3 runs started at a higher load.
 
 **DIA-NN 1.7.12.** The DIA-NN 1.7.12 available on our cluster is the open-source Linux build, whose deep-learning
 predictor is not included. Given only a FASTA it writes a library with 0 precursors, so it has no library
@@ -539,12 +590,88 @@ precursor counts: protein-group gains and quantitative accuracy were not assesse
 
 ![Whole-run precursor identifications passing DIA-NN's estimated 1 % FDR, per run, without match-between-runs or entrapment validation; all tuned libraries were trained on run 01, runs 02 and 03 are technical replicates. Left: DIA-NN 1.7.12 with no library and with library set B (DIALibGen 0.11.3, tuned on library-free identifications). Right: DIA-NN 2.0 with the four predicted libraries of set A (both predictors tuned on the shared training pool).](fig/ids.png){width=100%}
 
+## Entrapment check of the 1 % FDR
+
+**Design.** Five of the seven search configurations of this section (DIA-NN 2.0's own tuned library and
+DIA-NN 1.7.12 with the untuned library were left out) were repeated on ProteoBench's entrapment database for
+these runs: a pre-digested FASTA of 1,420,868 human target peptides (contaminants included) and, for each, one
+entrapment twin with the same amino-acid composition in shuffled order (ratio r = 1, paired 1:1; the twins
+cannot be in the sample). No in-silico digestion was applied anywhere; otherwise the settings of the searches
+above were kept, except that the reports were written down to q ≤ 0.05 so that the matched-FDP cut-off can lie
+above q = 0.01 (the counts at q ≤ 0.01 equal DIA-NN's own log counts in every search). Libraries: DIA-NN 2.0's
+predicted library of the entrapment FASTA (7,008,740 precursors); DIALibGen 0.11.1 untuned and tuned (set-A
+recipe: tuned on run 01's identifications from a DIA-NN 1.7.12 search of the untuned library; 7,007,990
+precursors); DIA-NN 1.7.12 library-free; and DIALibGen 0.11.3 tuned on the library-free identifications of
+run 01 (set-B recipe). Each precursor at the cut-off is a target or an entrapment hit by its stripped
+sequence. With T targets and E entrapment hits, the combined estimate is FDP = E (1 + 1/r) / (T + E) = 2E / N,
+with a Wilson 95 % interval on E/N scaled by 2 (an approximate interval for the estimate, not for the true
+FDP). The paired estimate (Wen et al. 2025) additionally counts an entrapment precursor whose twin precursor
+(same pair, charge and number of oxidised methionines) is absent, or ranks better than its twin, as evidence of
+a false target; both estimates are upper bounds under the entrapment assumptions, the lower bound is E / N.
+"Targets at matched 1 % FDP" ranks all reported precursors by q-value (ties by PEP or CScore) and takes the
+largest prefix whose combined FDP is at most 1 %: a retrospective calibration on the entrapment labels, used
+here to compare the libraries descriptively at the same estimated FDP, not a prospective FDR control. Pooled
+rows count precursor–run observations. Arms with an FDP above 1.5 % are marked **!**.
+
+Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
+
+| arm | run | targets, q ≤ 0.01 | entrap. hits | combined FDP (95 % CI) | paired FDP | FDP / 1 % | targets, matched 1 % FDP |
+|:------------------------------|:---------|--------:|------:|:----------------------|--------:|------:|---------:|
+| **DIA-NN 2.0, its own predicted library** | 01 | 81,052 | 353 | 0.87 % (0.78–0.96) | 0.83 % | 0.87 | 82,953 |
+|  | 02 | 79,172 | 311 | 0.78 % (0.70–0.87) | 0.74 % | 0.78 | 81,707 |
+|  | 03 | 79,909 | 313 | 0.78 % (0.70–0.87) | 0.73 % | 0.78 | 82,421 |
+|  | 01–03 pooled | 240,133 | 977 | 0.81 % (0.76–0.86) | 0.77 % | 0.81 | 246,842 |
+| **DIA-NN 2.0, DIALibGen untuned** | 01 | 81,967 | 351 | 0.85 % (0.77–0.95) | 0.80 % | 0.85 | 83,536 |
+|  | 02 | 83,406 | 296 | 0.71 % (0.63–0.79) | 0.68 % | 0.71 | 86,382 |
+|  | 03 | 81,429 | 338 | 0.83 % (0.74–0.92) | 0.77 % | 0.83 | 83,401 |
+|  | 01–03 pooled | 246,802 | 985 | 0.80 % (0.75–0.85) | 0.75 % | 0.80 | 253,227 |
+| **DIA-NN 2.0, DIALibGen fine-tuned on run 01** | 01 | 86,243 | 388 | 0.90 % (0.81–0.99) | 0.85 % | 0.90 | 87,315 |
+|  | 02 | 86,845 | 325 | 0.75 % (0.67–0.83) | 0.71 % | 0.75 | 89,041 |
+|  | 03 | 85,825 | 345 | 0.80 % (0.72–0.89) | 0.76 % | 0.80 | 87,938 |
+|  | 01–03 pooled | 258,913 | 1,058 | 0.81 % (0.77–0.86) | 0.77 % | 0.81 | 264,335 |
+| **DIA-NN 1.7.12, library-free** | 01 | 33,312 | 177 | 1.06 % (0.91–1.22) | 0.98 % | 1.06 | 32,773 |
+|  | 02 | 37,922 | 209 | 1.10 % (0.96–1.25) | 1.06 % | 1.10 | 37,436 |
+|  | 03 | 34,359 | 175 | 1.01 % (0.87–1.17) | 0.97 % | 1.01 | 34,280 |
+|  | 01–03 pooled | 105,593 | 561 | 1.06 % (0.97–1.15) | 1.01 % | 1.06 | 104,480 |
+| **DIA-NN 1.7.12, DIALibGen fine-tuned on run 01** | 01 | 78,504 | 2,202 | 5.46 % (5.24–5.69) **!** | 5.30 % | 5.46 | 68,809 |
+|  | 02 | 78,837 | 1,978 | 4.90 % (4.69–5.11) **!** | 4.73 % | 4.90 | 70,722 |
+|  | 03 | 76,799 | 2,543 | 6.41 % (6.17–6.66) **!** | 6.30 % | 6.41 | 67,155 |
+|  | 01–03 pooled | 234,140 | 6,723 | 5.58 % (5.45–5.72) **!** | 5.44 % | 5.58 | 206,003 |
+
+![Entrapment results per arm and run. Top: combined FDP at nominal q ≤ 0.01 with its scaled Wilson 95 % interval (symbols: runs 01, 02, 03); dashed line nominal 1 %, dotted 1.5 %. Bottom: target precursors at a matched combined FDP of at most 1 % (bars left to right: runs 01, 02, 03).](fig/entrapment.png){width=100%}
+
+- **DIA-NN 2.0 stays within its 1 % with all three libraries tested.** Combined FDP 0.71–0.90 % for its own
+  predicted library and for DIALibGen's untuned and tuned libraries alike: in DIA-NN 2.0, DIALibGen's
+  libraries are consistent with 1 % control to the same degree as DIA-NN's own (similar estimates, not a proof
+  of equivalence).
+- **At a matched 1 % FDP the ranking of section 5 holds:** pooled over the runs, DIALibGen tuned identifies
+  264,335 targets, DIALibGen untuned 253,227 and DIA-NN's library 246,842 (+7.1 % and +2.6 % over DIA-NN's
+  library; precursor–run observations, the matched cut chosen on the pooled data). This is the fairer headline
+  than the counts at nominal q.
+- **DIA-NN 1.7.12 understates its error rate with a predicted library.** Library-free it is approximately
+  consistent with nominal control (combined 1.01–1.10 %, intervals including 1 %), but with DIALibGen's tuned
+  library its nominal 1 % corresponds to an estimated 4.9–6.4 % (even the lower bound is 2.4–3.2 %). This
+  reproduces the 5.2 % seen earlier for the untuned 0.11.1 library in this setup (2,047 entrapment hits among
+  78,405 at q ≤ 0.01 on run 01). The FDP of the set-B searches of the human proteome (the table above) was not
+  measured; this result is a strong indication that their nominal counts are too high. At a matched 1 % FDP
+  the tuned library still yields 206,003 targets against 104,480 library-free (2.0 ×), reached at q ≈ 0.003.
+- Peptide-level estimates (distinct modified sequences) give the same picture (pooled combined FDP 0.86–0.88 %
+  for the DIA-NN 2.0 arms, 1.09 % library-free, 6.0 % for 1.7.12 with the tuned library). Protein-group
+  estimates are not meaningful here: every FASTA entry is a single peptide.
+- Caveats: one dataset and one entrapment design (shuffled twins); the entrapment FASTA has no protein
+  context, so the searches differ from section 5 in search space (two sequences per target peptide) and the
+  identification counts are not comparable with those tables; the tuned libraries were trained on run 01, so
+  run 01 is in-sample for them (each run is searched and RT-aligned on its own); the matched cut uses the
+  entrapment labels of the same data.
+
 # 6. Limitations
 
-- **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 is slower than 0.11.2 and than DIA-NN 2.0
+- **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 (and 0.11.4 and 0.11.5, which keep its CPU path) is slower than 0.11.2 and than DIA-NN 2.0
   (section 3); it was faster only at 96 threads. DIA-NN on a GPU was not measured.
-- **GPU use** needs a source build with a CUDA-enabled ONNX Runtime and cuDNN (Appendix A, "Threads and
-  GPUs"); the release archives run on the CPU.
+- **GPU use**: since 0.12.1 the Linux packages predict on NVIDIA GPUs with the user's CUDA 12 runtime and cuDNN 9
+  (Appendix A, "Threads and GPUs"); the linux-arm64 GPU route has not been run on NVIDIA hardware; fine-tuning on
+  NVIDIA GPUs needs a source build with CUDA LibTorch. The Apple GPU is supported by the macOS release, for the
+  fragment model and training only.
 - **OpenSWATH PQP export** holds the whole library in memory: a whole human proteome with charges 1–4
   (about 70 M transitions) needs about 60 GB RAM.
 - **Identifications from DIALibGen's own search of the run (`-run`) are not yet validated**; use a DIA-NN
@@ -560,7 +687,7 @@ precursor counts: protein-group gains and quantitative accuracy were not assesse
 # 7. Availability
 
 - **Source and issues:** <https://github.com/okohlbacher/DIALibGen>
-- **Release 0.11.3:** <https://github.com/okohlbacher/DIALibGen/releases/tag/v0.11.3> (all releases: <https://github.com/okohlbacher/DIALibGen/releases>)
+- **Release 0.12.1:** <https://github.com/okohlbacher/DIALibGen/releases/tag/v0.12.1> (all releases: <https://github.com/okohlbacher/DIALibGen/releases>)
 - **Homebrew tap:** <https://github.com/okohlbacher/homebrew-dialibrarygenerator>
 - **Licence:** BSD-3-Clause. Bundled third-party components keep their own licences (listed in the
   repository's third-party notices).
@@ -571,8 +698,10 @@ precursor counts: protein-group gains and quantitative accuracy were not assesse
 - **This report's analysis scripts and data** (fragment-intensity comparison, the RT comparison, figures,
   per-precursor values) are in the `scripts/` and `data/` folders of the report bundle; there is no public
   archive yet, so request them from the author.
-- **Software used here:** DIALibGen 0.11.1 (release build) and 0.11.3 (built from source against OpenMS 3.5.0,
-  ONNX Runtime 1.30.0 and LibTorch 2.10; GPU build with CUDA 12.8 and cuDNN 9), the AlphaPeptDeep RT, MS2 and
+- **Software used here:** DIALibGen 0.11.1 (release build), 0.11.2 (server runtime rows), 0.11.3 (built from source against OpenMS 3.5.0,
+  ONNX Runtime 1.30.0 and LibTorch 2.10; GPU build with CUDA 12.8 and cuDNN 9), 0.11.4 (macOS release from
+  the Homebrew cask), 0.11.5 (GPU build as for 0.11.3) and 0.12.1 (Linux x64 release package with ONNX Runtime's
+  CUDA build; cuDNN 9 from NVIDIA), the AlphaPeptDeep RT, MS2 and
   CCS models bundled with the 0.11.1 release (ONNX files `peptdeep_{rt,ms2,ccs}_dynamic.onnx`; their checksums
   are embedded in every Parquet library), DIA-NN 2.0 (Academia, 28 January 2025) and DIA-NN 1.7.12
   (open-source Linux build).
@@ -588,29 +717,28 @@ precursor counts: protein-group gains and quantitative accuracy were not assesse
   `brew install --cask okohlbacher/dialibrarygenerator/dialibgen-cli` (CLI) and
   `brew install --cask okohlbacher/dialibrarygenerator/dialibgen` (desktop app).
 - **From source:** CMake, a C++23 compiler, OpenMS 3.5, Arrow/Parquet, ONNX Runtime and, for fine-tuning,
-  LibTorch; see `docs/building.md` in the repository. GPU use needs a source build (see "Threads and GPUs"
-  below).
+  LibTorch; see `docs/building.md` in the repository. The Linux release packages predict on NVIDIA GPUs since
+  0.12.1 (see "Threads and GPUs" below; training there needs a source build); the macOS release uses the Apple
+  GPU as it is.
 
 `DIALibGen --helphelp` lists every option; `docs/usage.md` and `docs/parameters.md` explain them.
 
 ## Commands used for the benchmark libraries
 
-These are the commands that produced the Astral libraries of section 5 and the fine-tuning times of section 3
-(DIALibGen 0.11.3, release models; DIA-NN 1.7.12, open-source Linux build). The libraries of section 4 were
-generated with the same settings but tuned on a different set of identifications (section 4). Only the paths
-are shortened.
+These are the commands of the Astral libraries of section 5 and the fine-tuning times of section 3, written for
+DIALibGen 0.12.1. The libraries and times were produced with DIALibGen 0.11.3 (release models; 0.11.4 generates
+the same library content on the CPU) and DIA-NN 1.7.12 (open-source Linux build); 0.11.3 needed every setting of
+the table below on the command line (`-generation:nce 25 -generation:precursor_mz 380 980 -generation:fragment_mz
+150 2000 -generation:precursor_charges 1 2 3 4` and the defaults), and the 0.12.1 command writes the same TSV,
+byte for byte (checked on the CPU with a 3,000-protein FASTA). The libraries of section 4 were generated with the same settings but tuned on
+a different set of identifications (section 4). Only the paths are shortened; `-threads 96` is what was timed
+(0.12.1 uses all physical cores without it).
 
 ```bash
-# 1. predict the library from the FASTA (122 s at 96 threads)
-DIALibGen -in UP000005640_9606.fasta -out lib.parquet \
-  -generation:instrument Astral -generation:nce 25 \
-  -generation:precursor_mz 380 980 -generation:fragment_mz 150 2000 \
-  -generation:precursor_charges 1 2 3 4 -generation:peptide_length 7 30 \
-  -generation:fixed_modifications 'Carbamidomethyl (C)' \
-  -generation:variable_modifications 'Oxidation (M)' \
-  -generation:max_variable_modifications 1 -generation:decoys none \
-  -generation:enzyme Trypsin/P -generation:missed_cleavages 1 \
-  -generation:n_terminal_methionine_excision true -threads 96
+# 1. predict the library from the FASTA (122 s at 96 threads, 0.11.3); astral.yaml
+#    supplies NCE 25, the m/z windows and charges 1-4
+DIALibGen -in UP000005640_9606.fasta -out lib.parquet -generation:instrument Astral \
+  -generation:variable_modifications 'Oxidation (M)' -threads 96
 
 # 2. first-pass DIA-NN search of run 01 (here: DIA-NN 1.7.12, no library)
 DIGEST="--cut K*,R* --missed-cleavages 1 --min-pep-len 7 --max-pep-len 30
@@ -626,13 +754,11 @@ diann --f LFQ_Astral_DIA_15min_50ng_Human_01.mzML \
 python3 scripts/prep_ids.py run01/report.tsv run01.report.parquet lib.parquet
 
 # 3. fine-tune the RT model on run 01, re-predict all 3.49 M precursors
-#    (181 s)
-DIALibGen -mode tune -in lib.parquet -ids run01.report.parquet \
-  -tune_heads rt -tune_out_models tuned-models -out tuned.parquet \
-  -out_report residuals.tsv -threads 96
+#    (181 s, 0.11.3; it also wrote -tune_out_models tuned-models -out_report residuals.tsv)
+DIALibGen -mode tune -in lib.parquet -ids run01.report.parquet -out tuned.parquet -threads 96
 
 # 4. write the DIA-NN TSV (16 s), then search each run N = 1, 2, 3 with it
-DIALibGen -mode convert -in tuned.parquet -out tuned.tsv -threads 96
+DIALibGen -in tuned.parquet -out tuned.tsv -threads 96
 mkdir -p runN/temp
 diann --f LFQ_Astral_DIA_15min_50ng_Human_0N.mzML --lib tuned.tsv \
   --fasta UP000005640_9606.fasta --reannotate $DIGEST --threads 96 \
@@ -642,10 +768,12 @@ diann --f LFQ_Astral_DIA_15min_50ng_Human_0N.mzML --lib tuned.tsv \
 - `tune` reads a DIA-NN `report.parquet` of **one** run. DIA-NN 2.x writes one directly
   (`--out report.parquet`). DIA-NN 1.7.12 writes only `report.tsv` and no precursor m/z, so the small script
   `prep_ids.py` (in this report's `scripts/`) converts it and computes the m/z.
-- `tune -tune_heads rt` because the Astral has no ion mobility; on timsTOF data the default also tunes CCS.
+- `tune` chooses what to tune from the report (`-tune_heads auto`): RT here, because the Astral has no ion
+  mobility; RT and CCS for a diaPASEF report with 1/K0. (0.11 tuned both by default and needed `-tune_heads rt`.)
 - The tuned library's RT is in run 01's minutes. DIA-NN fits its own RT map, so it can be used as is.
 - For DIA-NN 2.x, `-out tuned.tsv` or `-out_format diann2_parquet` work directly from `tune`; the separate
-  `convert` step is only needed for an existing Parquet library.
+  conversion is only needed for an existing Parquet library (a library as `-in`, without `-ids` or `-run`, is
+  converted; `-mode convert` says so explicitly).
 
 Library settings (the flags above; everything else at its default):
 
@@ -657,7 +785,7 @@ Library settings (the flags above; everything else at its default):
 | fragment m/z, fragment charge | 150–2000, 1–2 |
 | fixed / variable modifications | Carbamidomethyl (C) / Oxidation (M), at most 1 per peptide |
 | N-terminal Met excision | yes |
-| instrument model, NCE | `Astral` (AlphaPeptDeep's Lumos group), NCE 25 |
+| instrument model, NCE | `Astral` (AlphaPeptDeep's Lumos group), NCE 25 (0.12.1: with the windows and charges, from `astral.yaml`) |
 | fragments per precursor | 3–12 most intense b/y ions (relative intensity ≥ 1e-4), no neutral losses |
 | decoys | none (the search engine makes its own) |
 | result | 3,488,457 precursors, 40,849,390 fragment transitions; Parquet 460 MB, DIA-NN TSV 7.1 GB |
@@ -668,12 +796,21 @@ the recipe and the checksums of the FASTA and models.
 
 ## Threads and GPUs
 
-`-threads` follows the OpenMS default of 1; `-threads 0` uses one thread per physical core. CPU output does not
-depend on the thread count. Fine-tuning trains on `-machine:threads` CPU threads (default 16); the tuned weights
-depend on that number, so keep it fixed when you need identical models. GPU prediction uses the `-machine:`
-options: `-machine:gpu_devices 0 1` spreads the work over two GPUs, `-machine:require_gpu` turns any silent CPU
+Since 0.12, `-threads` defaults to one thread per physical core (0.11 followed the OpenMS default of 1; an INI's
+value is respected). CPU output does not depend on the thread count. Fine-tuning on the CPU trains on
+`-machine:train_threads` threads (0.11: `-machine:threads`, still accepted in 0.12; default 16 on Linux and
+Windows, 8 on macOS); the documentation states that the tuned weights may depend on that number, so keep it
+fixed when you need identical models. `-machine:device auto` (the default) picks the prediction route and names it
+in one `device:` line. On Apple silicon it trains on the GPU (Metal) and, from 50,000 precursors per CPU thread,
+predicts the fragments there (CoreML); such a library agrees with the CPU library to float rounding, not byte for
+byte. `-machine:device cpu` keeps everything on the CPU, `-machine:device coreml` predicts the fragments on the
+GPU at any size, and `DIALibGen -mode prepare` compiles their GPU shapes ahead of a first run. On Linux the 0.12.1
+packages include ONNX Runtime's CUDA build but not CUDA or cuDNN: with an NVIDIA GPU, the CUDA 12 runtime and
+cuDNN 9 installed, `auto` predicts on the GPU; without cuDNN only the fragment model runs there (with a
+`WARNING` naming the fix); without a GPU it runs on the CPU. The linux-arm64 GPU route has not been run on NVIDIA
+hardware. `-machine:gpu_devices 0 1` spreads the work over two GPUs, `-machine:require_gpu` turns any CPU
 fallback into an error, and, in a build with CUDA-enabled LibTorch, `-machine:device cuda:0` trains on the GPU
-(`-tune_predict_gpu` runs the re-prediction there as well). GPU prediction needs an ONNX Runtime with the CUDA provider and cuDNN 9 for CUDA 12. TensorFloat-32
+(the re-prediction follows `-machine:device`; 0.11's `-tune_predict_gpu` is deprecated). TensorFloat-32
 arithmetic is off by default (`-machine:tf32 false`), so a GPU library matches the CPU library to float rounding.
 
 # Appendix B. Commands and details of the accuracy comparison
@@ -683,14 +820,13 @@ UniMod:35,15.994915,M` in place of `--unimod35`). The scripts, including the coh
 evaluation (`eval_rt.py`: reference, calibration, statistics), are in `scripts/rt-comparison/`.
 
 ```bash
-# DIALibGen: generate as in Appendix A (0.11.1), then tune on the run-01 report of a
-# DIA-NN 1.7.12 search with that library (84,076 precursors; -machine:threads 64)
+# DIALibGen (run with 0.11.1, written for 0.12.1): generate as in Appendix A, then tune
+# on the run-01 report of a DIA-NN 1.7.12 search with that library (84,076 precursors)
 DIALibGen -mode tune -in predicted.parquet -ids run01.report.parquet \
-  -tune_heads rt -tune_out_models tuned-models -out tuned.parquet \
-  -threads 64 -machine:threads 64
-# the refined library of stage 5 (observed run-01 RT of the identified precursors)
-DIALibGen -mode refine -in predicted.parquet -ids run01.report.parquet \
-  -q_global 1 -q_protein 1 -out refined.parquet
+  -tune_out_models tuned-models -out tuned.parquet -threads 64 -machine:train_threads 64
+# the refined library of stage 5 (observed run-01 RT of the identified precursors;
+# 0.11 needed -q_global 1 -q_protein 1, the 0.12 defaults)
+DIALibGen -mode refine -in predicted.parquet -ids run01.report.parquet -out refined.parquet
 
 # DIA-NN 2.0: predicted library (D), and its lossless Parquet copy for reading RT
 diann --fasta F --fasta-search --predictor --gen-spec-lib $DIGEST --threads 64 \

@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `docs/report/DIALibGen-report-0.12.1.md` and `.pdf` replace the 0.11.3 report: command lines in
+  their 0.12.1 form, the H100 timing of 0.12.1 (one and two GPUs) with 0.11.3 as a control in the
+  same session, the laptop timings of 0.11.4 (CPU, CoreML with a cold and a warm cache, MPS and CPU
+  tuning), the entrapment check, and the unchanged quality and identification sections; also
+  attached to the 0.12.1 release.
+
 ## [0.12.1] — 2026-10-16
 
 The first release of the 0.12 line (the owner set the version; there is no

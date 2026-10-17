@@ -1033,6 +1033,17 @@ mod tests {
         let bin = dir.path().join("DIALibGen");
         std::fs::write(&bin, format!("#!/bin/sh\n{script}\n")).unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // A child forked by a parallel test while the script was open for writing holds that
+        // descriptor until it execs, and exec of the script fails with ETXTBSY meanwhile. Wait
+        // until one exec gets through: no new writer can appear after that, so the test's own
+        // exec cannot hit it.
+        for _ in 0..100 {
+            match std::process::Command::new(&bin).stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()).status() {
+                Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(std::time::Duration::from_millis(20)),
+                _ => break,
+            }
+        }
         (dir, Resolved { bin, source: "env", data: None, share: None })
     }
 

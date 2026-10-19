@@ -89,6 +89,35 @@ Acceptance: the report's intensity numbers, figure and limits come from this
 script, with the ion set, convention, tolerance and precursor count stated.
 The replicate ceiling is given when a second run exists.
 
+## Fragment charge 3 for 3+ and 4+ precursors (needs a retrained MS2 head)
+
+Measured on the timsTOF benchmark (PXD029836, raw diaPASEF spectra, all b/y
+ions at z 1-3): z=3 fragments carry 24 % of the observed intensity of 4+
+precursors (y3+ 17 %, b3+ 7 %) and 6 % of 3+, and doubly charged b ions 14 %
+of 3+. DIALibGen predicts no z=3 fragment; DIA-NN 2.0 neither.
+
+**No public model provides it** (checked 2026-10-19): AlphaPeptDeep's
+`pretrained_models.zip`, `_v2` and `_v3` (release tag `pre-trained-models`)
+have one MS2 model, `generic/ms2.pth`, with 8 output channels (b/y z1-2 and
+their modloss variants), the channels the shipped ONNX model has; peptdeep
+1.5.1 and alphaDIA 2.2.0 default to a maximum fragment charge of 2. The output
+layer is fixed by the checkpoint: peptdeep re-initialises it (random weights)
+when z=3 types are asked for, so a z=3 model must be trained. Outside the
+family, Prosit_2023_intensity_timsTOF (Zenodo 8211811, CC-BY-4.0 weights)
+predicts b/y z1-3, but it is a different network (GRU, length ≤ 30, only
+carbamidomethylation and oxidation), a second predictor rather than a drop-in.
+
+The smallest path: fine-tune `generic/ms2.pth` with
+`charged_frag_types` b/y z1-3 (only the last linear layer changes, 64 → 6 or
+→ 12 with modloss), instrument timsTOF, on public timsTOF spectra (PXD043844,
+ProteomeTools on timsTOF Pro, and diaPASEF transfer libraries extracted with
+z=3); export with OpenMS's `export_peptdeep_models_to_onnx.py` unchanged. In
+DIALibGen: take the channel count from the model's output shape, allow
+`max_fragment_charge` 3, pin the new model's hash, add the derived-weights
+notice. Acceptance: the C++ output matches peptdeep within 1e-5; the
+all-charge cosine of 3+/4+ precursors rises on a diaPASEF run the model did
+not see, with no loss of DIA-NN identifications.
+
 ## Done
 
 - Outputs that DIA-NN reads completely: the TSV carries DIA-NN's protein

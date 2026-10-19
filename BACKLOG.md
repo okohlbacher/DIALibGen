@@ -60,35 +60,6 @@ Why it is here rather than done:
   `tune` followed by `refine -no_filter` is not the reference; refine refuses
   observed RT with the filter off unless the RT head is tuned in the same call.
 
-## Fragment intensities: all-charge b/y from raw spectra, from now on
-
-Owner rule (2026-10-19): every fragment-intensity benchmark scores b **and**
-y ions at all fragment charges, observed in the raw MS2 spectra. The method is
-`scripts/eval/fragment_intensity_eval.py`, described in
-[docs/testing.md](docs/testing.md#fragment-intensity-accuracy-standard-method).
-A search engine's fragment export is no longer the observation; it is only a
-consistency check.
-
-**To do at the next report update:** replace the intensity section of
-`docs/report/` (0.12.1: "Fragment intensities", and the summary-table row
-"median cosine to observed y-ion intensities"). The current numbers come from
-DIA-NN 1.7.12's six singly charged y ions per precursor. A draft paragraph and
-table are in the evaluation notes outside the repository (project folder,
-`reports/astral-ms2-params/ASTRAL-MS2.md`, Appendix A).
-
-Measured on Astral run 01 (42,785 precursors, all b/y ions with z ≤ 2, unobserved
-ions counted as 0):
-
-| | DIALibGen | DIA-NN 2.0 | run 02 (replicate) |
-|:--|--:|--:|--:|
-| old score: singly charged y ions, 40,419 precursors (report 0.12.1) | 0.986 | 0.977 | |
-| raw-spectrum score | **0.941** | 0.839 | |
-| raw-spectrum score, 34,980 precursors identified in both runs | 0.953 | 0.855 | 0.974 |
-
-Acceptance: the report's intensity numbers, figure and limits come from this
-script, with the ion set, convention, tolerance and precursor count stated.
-The replicate ceiling is given when a second run exists.
-
 ## A linear RT scale for untuned libraries: measured, not adopted
 
 The timsTOF benchmark suggested that the stock RT model's raw output, being
@@ -152,6 +123,11 @@ all-charge cosine of 3+/4+ precursors rises on a diaPASEF run the model did
 not see, with no loss of DIA-NN identifications.
 
 ## Done
+
+- Fragment intensities scored on b and y ions at every fragment charge, from the
+  raw spectra (owner rule, 2026-10-19; `scripts/eval/fragment_intensity_eval.py`,
+  docs/testing.md): the report's intensity section and summary row use it (Astral:
+  DIALibGen 0.941, DIA-NN 2.0 0.839, replicate 0.974), and its timsTOF section.
 
 - Outputs that DIA-NN reads completely: the TSV carries DIA-NN's protein
   columns since 0.11.2; `-out_format diann2_parquet` writes DIA-NN 2.0's

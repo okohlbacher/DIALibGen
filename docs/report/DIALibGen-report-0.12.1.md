@@ -1,6 +1,6 @@
 ---
 title: "DIALibGen: predicted spectral libraries for DIA proteomics"
-date: "October 2026 — DIALibGen 0.12.1"
+date: "October 2026 — DIALibGen 0.12.1; the timsTOF section and the intensity method: main after 0.12.1 (version to be released)"
 papersize: a4
 geometry: margin=2.2cm
 fontsize: 11pt
@@ -30,7 +30,7 @@ Measured against DIA-NN 2.0's built-in predictor on one Orbitrap Astral dataset 
 | the same at 16 CPU threads | 683 s (0.11.3) | 458 s |
 | the same on 2 × H100 GPUs, 16 CPU threads | 48 s (0.12.1) | – (not measured) |
 | median \|ΔRT\| (min), 16,068 held-out precursors, LOWESS-calibrated; untuned → fine-tuned on the same training peptides (0.11.1) | 0.243 → **0.093** | 0.290 → 0.142 ¹ |
-| median cosine to observed y-ion intensities, 40,419 precursors, ions stored by both libraries (0.11.1) | **0.986** | 0.977 |
+| median cosine to observed b/y-ion intensities (z ≤ 2, raw MS2 spectra), 42,785 precursors (0.11.3) | **0.941** | 0.839 |
 | precursors passing DIA-NN 2.0's estimated 1 % FDR, run 01, untuned → fine-tuned library (0.11.1; the tuned libraries were trained on this run) | 89,232 → **96,156** | 88,130 → 90,843 |
 
 ¹ A second DIA-NN tune, trained on DIA-NN's own search results (more training precursors, validation proteins
@@ -44,9 +44,13 @@ server runtime rows above were measured with DIALibGen 0.11.3 on a non-public hu
 includes its own fragment selection and output format. The accuracy and identification rows use libraries
 made with 0.11.1 and 0.11.3 on the public human FASTA (3.49 M precursors); 0.11.4 generates the same CPU library
 content (checked for the generated Astral library and one CPU tune; tuned libraries depend on the training
-setup). DIALibGen also predicts and can tune CCS/ion mobility; this
-report evaluates only RT, fragment intensities and identification counts. The CPU timings for the two tools come from two identical machines (section 3). The accuracy tables
-use run 01 of the ProteoBench Astral DIA dataset (section 4); no other instrument was tested.
+setup). The CPU timings for the two tools come from two identical machines (section 3). The Astral accuracy
+tables use run 01 of the ProteoBench Astral DIA dataset (section 4).
+
+On timsTOF (diaPASEF, three public runs; section 6, main after 0.12.1) the two predictors are equal once tuned
+(DIALibGen 140.2 k, DIA-NN 2.0 140.0 k precursors per run at DIA-NN's 1 % FDR, confirmed by an entrapment check);
+untuned, DIALibGen finds 3.8 % fewer. Its tuned RT and 1/K0 are the more accurate (median |ΔRT| 0.51 against
+0.54 min, |Δ1/K0| 0.0087 against 0.0100), and on main its untuned 1/K0 is corrected to the accuracy of DIA-NN's.
 
 # 1. What DIALibGen is
 
@@ -181,8 +185,9 @@ DIALibGen -mode tune -in predicted.tsv -ids first_pass.parquet -out tuned.tsv
 Choose `-generation:instrument` for your instrument (the Astral results here use `Astral`, which selects
 AlphaPeptDeep's Lumos-group fragment model). Since 0.12.1 the instrument's file of defaults also sets the NCE,
 the m/z windows and the charges: for `Astral` NCE 25, precursor m/z 380–980, fragment m/z 150–2000 and charges
-1–4, the settings of this report's Astral libraries; for `timsTOF` charges 1–4 and m/z 350–1200 / 200–1800; other
-instruments use the generic defaults (350–1200 / 200–1800, charges 1–4). Match digestion,
+1–4, the settings of this report's Astral libraries; for `timsTOF` m/z 350–1200 / 200–1800, charges 1–4 in 0.12.1
+and 2–4 on main after 0.12.1, which also corrects the predicted 1/K0 (timsTOF section); other instruments use the
+generic defaults (350–1200 / 200–1800, charges 1–4). Match digestion,
 modifications, charges and m/z ranges to the experiment. Modifications are given by name (OpenMS or UniMod),
 one per residue; this report evaluates only carbamidomethylated cysteine and oxidised methionine, and
 accuracy for other instrument settings or modifications is not established here. A whole human proteome
@@ -218,9 +223,22 @@ that we could identify.
 Biognosys iRT peptides) and 20,431 matched entrapment sequences (md5 `3fb427c3514e897a2d53e3f28b25967e`). It is
 not public, so the runtime benchmark cannot be repeated independently; it serves only as a large input of
 human-like sequences (for scale: the public FASTA above gives a 3.49 M-precursor library in 121.7 s on the same
-node, section 3). No timsTOF run is used in this report.
+node, section 3).
 
-**Software versions.** Six DIALibGen versions produced the results; their libraries are the same where the table
+**timsTOF runs (the timsTOF section).** PXD029836 (Demichev et al., *Nature Communications* 13, 3944, 2022;
+PRIDE): the dia-PASEF benchmark of the DIA-NN authors. Three 200 ng injections of a human cell lysate digest
+(technical triplicate; acquisition numbers 1418, 1420 and 1422, here runs 01–03) on a timsTOF Pro 2: dia-PASEF
+with 32 windows of 26 Th (m/z 400–1201) in 16 window groups, 1/K0 0.60–1.60, collision energy 20–57 eV,
+104-min gradient (values read from each run's `analysis.tdf`). The FASTA is the human FASTA above. For an
+entrapment check, every protein was given a shuffled twin (each tryptic segment shuffled in place, keeping its
+C-terminal K/R; target-to-entrapment ratio r = 0.994).
+
+**A second timsTOF study (calibration and checks).** PXD041421 (PRIDE): 60-min dia-PASEF runs of a human cell
+line digest on two timsTOF Pro instruments (56 windows of 28 Th in 14 groups, 1/K0 0.70–1.30, collision energy
+26–46 eV). One run per instrument (files ending `_3197` and `_9898`) was used to fit DIALibGen's 1/K0
+correction and to check the collision-energy choice; it is not used for any other number.
+
+**Software versions.** Seven DIALibGen versions produced the results; their libraries are the same where the table
 says so. The command lines are written for 0.12.1, the release this report accompanies; of 0.12.1 only the
 server GPU runtime was measured.
 
@@ -231,8 +249,9 @@ server GPU runtime was measured.
 | DIALibGen 0.11.3 (source build) | server runtime (section 3); library set B: the DIA-NN 1.7.12 identifications and the entrapment check (section 5, Appendix A) | 0.11.4 generates the same CPU library content |
 | DIALibGen 0.11.4 (Homebrew cask) | laptop runs, CPU and Apple GPU (section 3) | CPU libraries equal the server's to float rounding; CoreML libraries differ slightly in fragment intensities |
 | DIALibGen 0.11.5 (source build, CUDA) | server GPU runtime, one H100 (section 3) | its GPU library is byte-identical to 0.11.3's |
-| DIALibGen 0.12.1 (release package, Linux x64) | server GPU runtime, one and two H100 (section 3); the command lines (section 1, Appendices A and B) | its GPU library equals 0.11.3's (Parquet table; only the recorded recipe differs); its Astral (Appendix A) and timsTOF (section 3) commands write the same TSV as 0.11's longer commands |
-| DIA-NN 2.0 (Academia, 28 Jan 2025) | predictor runtime; set A tuning, searches and RT reference | |
+| DIALibGen 0.12.1 (release package, Linux x64) | server GPU runtime, one and two H100 (section 3); the command lines (section 1, Appendices A and B); the 0.12.1 libraries of the timsTOF section | its GPU library equals 0.11.3's (Parquet table; only the recorded recipe differs); its Astral (Appendix A) and timsTOF (section 3) commands write the same TSV as 0.11's longer commands |
+| DIALibGen, main after 0.12.1 (source build, commit 79a7ec6; version to be released) | the timsTOF section: the new default library (charges 2–4, corrected 1/K0) and its tuned library | Astral and other instruments without ion mobility: the same library as 0.12.1 |
+| DIA-NN 2.0 (Academia, 28 Jan 2025) | predictor runtime; set A tuning, searches and RT reference; all timsTOF searches | |
 | DIA-NN 1.7.12 (open-source Linux build) | set B training identifications and searches; intensity reference | cannot predict libraries |
 
 
@@ -514,41 +533,80 @@ Reading the stages:
 
 ## Fragment intensities
 
-**Observed intensities.** DIA-NN 1.7.12 searched run 01 without a library. No predicted intensities enter
-this search, so it does not take the observed ions or their intensities from either library under test; it
-is not proven free of every bias (which precursors it finds and how it quantifies them are its own). It
-reported, with `--report-lib-info`, each quantified fragment's
-identity and raw quantity. For each of its 42,785 precursors at 1 % FDR it reports up to six y ions (median 6).
-This is the library-free search of section 5, repeated with the fragment export; it found the same 42,785
-precursors.
+*Updated after 0.12.1 (main, version to be released): b and y ions at every fragment charge, read from the raw
+spectra. The 0.12.1 report scored only the six singly charged y ions per precursor that a search engine exported;
+that score is given below for comparison.*
 
-**Comparison.** For each precursor, the observed fragment quantities were compared with each library's predicted
-intensities for the same ions (type, number, charge). Every observed ion matched by a library was checked
-against that library's m/z: all 411,854 ion matches (an ion matched by both libraries counts twice) agreed
-within 0.02 Th. Scores: cosine
-similarity, and the normalised spectral angle 1 − 2·arccos(cos)/π, which spreads out values near 1. The main
-analysis uses, per precursor, only the observed ions that both libraries store (each stores up to 12 of its
-own choice); requiring at least three such ions leaves 40,419 precursors, with a median of 5 shared ions.
-Fragment intensities are not changed by tuning, so this applies to tuned and untuned libraries alike.
+**Observed intensities.** The observed values are read from the raw MS2 spectra of run 01 with the project's
+standard method (`scripts/eval/fragment_intensity_eval.py`, described in the repository's `docs/testing.md`).
+The precursors are the 42,785 that a library-free DIA-NN 1.7.12 search identifies at 1 % FDR; no predicted
+intensities enter that search.
 
-Table: Predicted vs observed y-ion intensities, run 01
+- **Scans.** For each precursor, the MS2 scan nearest its apex in the 2-Th isolation window that holds it, plus
+  the scan on either side.
+- **Ions.** Every b and y ion without neutral loss, fragment charge 1 to the lower of 3 and the precursor charge,
+  m/z 150-2000.
+- **Intensity.** Each ion's intensity is the most intense centroid within 10 ppm, summed over the three scans.
 
-| library | precursors | median cosine (interquartile range) | cosine ≥ 0.9 | median spectral angle (IQR) | higher cosine than the other library |
-|:--------------|-----------:|:-------------------|---------:|:-------------------|:------------|
-| DIALibGen | 40,419 | **0.986** (0.955–0.996) | 88.4 % | **0.892** (0.807–0.941) | 69.1 % of precursors |
-| DIA-NN 2.0 predicted | 40,419 | 0.977 (0.942–0.991) | 86.3 % | 0.864 (0.782–0.916) | 30.9 % |
+This gives a median of 32 ions (z ≤ 2) per precursor, of which 16 are observed. On the six singly charged y ions
+DIA-NN quantifies itself, the extracted intensities agree with DIA-NN's fragment quantities (median cosine 0.998).
 
-![Agreement of predicted with observed y-ion intensities for 40,419 precursors of Astral run 01, as cumulative distributions: cosine similarity (left) and normalised spectral angle (right); a curve further right is better. Observed fragment quantities come from a library-free DIA-NN 1.7.12 search; each precursor is scored on at least three observed ions stored by both libraries (median five).](fig/intensity_ecdf.png){width=100%}
+**Comparison.** Both libraries are scored on the same ions: every theoretical b and y ion with z ≤ 2. An
+unobserved ion counts as 0, and an ion a library does not store is predicted as 0. The scores are cosine
+similarity and the normalised spectral angle 1 − 2·arccos(cos)/π. A second injection (run 02), extracted the same
+way and scored on the same ions, is the replicate ceiling.
 
-- DIALibGen's predicted intensities agree better with the observed ones, by a small margin that holds for most
-  precursors (median per-precursor difference +0.004 cosine).
-- Two variants give the same result: scoring each library on all observed ions it stores, at least three
-  (40,445 precursors have that many in both; 0.986 vs 0.977), and scoring on every observed ion with a missing
-  library ion counted as intensity 0 (42,344 precursors; 0.984 vs 0.977, spectral angle 0.887 vs 0.862).
-- By charge: 2+ (37,896 precursors) 0.986 vs 0.978, 3+ (2,177) 0.979 vs 0.973; 1+ and 4+ are too few to compare.
-- **Limits of this check.** Only y ions, at most six per precursor, were observed; b-ion predictions are not
-  tested. The precursors are those a library-free search finds, mostly doubly charged and abundant. DIALibGen
-  was run with the Astral setting (NCE 25); DIA-NN's predictor has no instrument setting.
+Table: Predicted vs observed b- and y-ion intensities (z ≤ 2), Astral run 01, raw spectra
+
+| predictor | precursors | median cosine (IQR) | cosine ≥ 0.9 | median spectral angle | higher cosine than the other library |
+|:--|--:|:--|--:|--:|:--|
+| DIALibGen | 42,785 | **0.941** (0.834-0.980) | 63.1 % | **0.779** | 95.9 % |
+| DIA-NN 2.0 predicted | 42,785 | 0.839 (0.703-0.914) | 30.6 % | 0.634 | 4.1 % |
+| *precursors identified in both runs* | | | | | |
+| DIALibGen | 34,980 | 0.953 (0.874-0.983) | 69.5 % | 0.803 | |
+| DIA-NN 2.0 predicted | 34,980 | 0.855 (0.743-0.920) | 33.8 % | 0.653 | |
+| run 02 observed (replicate ceiling) | 34,980 | 0.974 (0.930-0.991) | 83.2 % | 0.854 | |
+
+Table: Where the intensity is: doubly charged precursors (38,390), share of summed intensity by ion group
+
+| ion group | observable / observed per precursor | observed | DIALibGen | DIA-NN 2.0 | cosine within group, DIALibGen / DIA-NN ¹ |
+|:--|:--|--:|--:|--:|:--|
+| y, 1+ | 9.0 / 8.0 | 65.8 % | 73.5 % | 85.5 % | 0.965 / 0.940 |
+| b, 1+ | 8.6 / 5.4 | 23.6 % | 17.9 % | 8.3 % | 0.972 / 0.405 |
+| y, 2+ | 7.8 / 2.4 | 9.2 % | 8.6 % | 6.1 % | 0.914 / 0.880 |
+| b, 2+ | 7.4 / 0.8 | 1.4 % | 0.04 % | 0.05 % | – |
+
+¹ Precursors with at least three observed ions in the group. An ion the library does not store counts as 0, and
+a library that stores none of the group's observed ions scores 0 (y 2+: 18 % of precursors for DIALibGen, 17 % for
+DIA-NN), so the within-group cosine also reflects which ions each library keeps.
+
+![Agreement of predicted with observed b- and y-ion intensities (z ≤ 2, raw spectra) for the 42,785 precursors of Astral run 01, as cumulative distributions: cosine similarity (left) and normalised spectral angle (right); a curve further right is better. Dashed: run 02 as a predictor of run 01 (the replicate ceiling), on the 34,980 precursors identified in both runs.](fig/intensity_ecdf.png){width=100%}
+
+- **DIALibGen's predicted intensities agree better with the spectra, by a wide margin, once b ions and doubly
+  charged fragments are scored.** Median cosine 0.941 against 0.839; DIALibGen is higher for 96 % of precursors.
+- **Most of the difference is b ions.** They carry 24 % of a doubly charged precursor's fragment intensity.
+  DIALibGen predicts 18 % and stores them; DIA-NN 2.0 predicts 8 % and stores few, and puts more intensity than
+  observed on singly charged y ions (86 % against 66 %).
+- **The y-only score of the 0.12.1 report hid this.** On the six singly charged y ions per precursor that DIA-NN
+  1.7.12 quantifies, the two libraries score 0.986 and 0.977, and this extraction reproduces those numbers on
+  the same ions (0.986 / 0.978).
+- **The sensitivity analyses do not change the result:** only the ions either library stores, 0.956 against
+  0.858; only observed ions, 0.943 against 0.842; shared peaks removed, 0.957 against 0.869.
+- **By precursor charge:** 2+ 0.944 against 0.844, 3+ 0.920 against 0.785.
+- **The replicate ceiling.** A second injection agrees with run 01 at 0.974. With shared peaks removed,
+  DIALibGen reaches 0.966 against the replicate's 0.973, so most of the remaining gap is reproducible
+  interference rather than prediction error.
+- **Limits of this check.**
+  - *Precursors.* They are those a library-free search finds, mostly doubly charged and abundant.
+  - *Interference.* Peaks of unidentified co-eluting peptides cannot be flagged, so interference is
+    under-counted.
+  - *Ions not predicted.* Triply charged fragments (2.6 % of a 3+ precursor's observed intensity) and neutral
+    losses are predicted by neither library.
+  - *Settings.* DIALibGen was run with the Astral setting (NCE 25, the method's). Re-scored on this ion set, NCE
+    24-26 are equivalent (within 0.001), while NCE 28 loses 0.010. DIA-NN's predictor has no instrument or NCE
+    setting.
+- Fragment intensities are not changed by tuning, so this applies to tuned and untuned libraries alike. The
+  timsTOF section below repeats the check on diaPASEF data, with fragment charges up to 3.
 
 # 5. Identifications
 
@@ -664,7 +722,152 @@ Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
   run 01 is in-sample for them (each run is searched and RT-aligned on its own); the matched cut uses the
   entrapment labels of the same data.
 
-# 6. Limitations
+# 6. timsTOF (diaPASEF)
+
+*Main after 0.12.1, version to be released.* The Astral benchmark of sections 4 and 5, repeated on three public
+diaPASEF runs (PXD029836, section 2), with ion mobility and the charge default. Two DIALibGen versions are
+compared: 0.12.1 (release package) and main after 0.12.1, which changes the timsTOF defaults in three ways that
+came out of a first round of this benchmark:
+
+- **Charges 2–4** instead of 1–4. Charge 1 made the library 11.7 % larger (4.08 M against 3.65 M precursors) and
+  added 34–48 identified precursors per run (0.03 %); total identifications and protein groups were equal within
+  0.13 %. DIA-NN recommends the same for timsTOF.
+- **Corrected 1/K0.** The 1/K0 derived from the predicted CCS was low by a median 0.014. The conversion itself
+  matches AlphaPeptDeep's (within 5e-5); the offset comes from the CCS model. The timsTOF defaults now correct it
+  with one straight line per precursor charge, fitted on a second public study (PXD041421, two instruments).
+- **Per-charge collision energy (option).** Instrument files can set the NCE per precursor charge. The best NCE
+  turned out to follow the method's collision-energy ramp (below), so the timsTOF default stays NCE 30.
+
+**Libraries** (digest as in Appendix A, with the timsTOF windows m/z 350–1200 / 200–1800):
+
+- DIA-NN 2.0's predicted library, charges 2–4, as DIA-NN recommends for timsTOF.
+- DIALibGen 0.12.1 `-generation:instrument timsTOF` (its default: charges 1–4) and DIALibGen main after 0.12.1
+  with the same command (charges 2–4, corrected 1/K0). Apart from charge 1 and the 1/K0 column, the two
+  libraries are identical: retention times, CCS and fragments are unchanged.
+- All three tuned on run 01's report of their own first search: DIALibGen with `-mode tune`, which tunes RT and
+  CCS automatically on a diaPASEF report; DIA-NN with `--tune-rt --tune-im`, the proteins of DIALibGen's test
+  cohort removed from its training data.
+- Search flags are identical for every library, with mass accuracy fixed at 15 ppm; each run is searched on its
+  own, without match-between-runs.
+
+```bash
+# DIALibGen (main): timstof.yaml supplies charges 2-4, the m/z windows, NCE 30 and the 1/K0 correction
+DIALibGen -in human.fasta -out pred.parquet -generation:instrument timsTOF \
+  -generation:variable_modifications 'Oxidation (M)'
+DIALibGen -in pred.parquet -out pred.dn2.parquet -out_format diann2_parquet
+# every search: runN.d, LIB = pred.dn2.parquet, tuned.dn2.parquet or DIA-NN's library
+diann --f runN.d --lib LIB --fasta human.fasta --qvalue 0.01 --mass-acc 15 --mass-acc-ms1 15 \
+  --gen-spec-lib --rt-profiling --export-quant --reannotate --out runN/report.parquet
+# tuned on run 01 (RT and CCS, chosen automatically from the diaPASEF report)
+DIALibGen -mode tune -in pred.parquet -ids run1/report.parquet -out tuned.parquet
+```
+
+Table: DIA-NN 2.0 identifications on the timsTOF runs (precursors at `Q.Value` ≤ 0.01; protein groups at
+`PG.Q.Value` ≤ 0.01; each run searched on its own)
+
+| library | run 01 | run 02 | run 03 | mean | protein groups (01 / 02 / 03) |
+|:--------------------------------|-----:|-----:|-----:|-----:|:-----------------|
+| DIA-NN 2.0, predicted | 135,682 | 135,606 | 135,032 | 135,440 | 8,819 / 8,818 / 8,795 |
+| DIALibGen 0.12.1, not tuned | 129,466 | 130,502 | 129,566 | 129,845 | 8,727 / 8,719 / 8,711 |
+| DIALibGen (main), not tuned | 130,738 | 130,248 | 130,051 | 130,346 | 8,725 / 8,726 / 8,707 |
+| DIA-NN 2.0, fine-tuned on run 01 | 140,158 | 139,860 | 139,973 | 139,997 | 8,972 / 8,934 / 8,908 |
+| DIALibGen 0.12.1, fine-tuned on run 01 | 140,145 | 139,833 | 140,467 | 140,148 | 8,997 / 8,944 / 8,981 |
+| DIALibGen (main), fine-tuned on run 01 | 140,475 | 139,649 | 140,518 | 140,214 | 9,007 / 8,930 / 8,945 |
+
+![Whole-run identifications at DIA-NN 2.0's 1 % FDR on the three timsTOF runs (dots: runs; bar: mean); "new" is main after 0.12.1. Tuned libraries were trained on run 01.](fig/timstof_ids.png){width=100%}
+
+- **Tuned, the libraries are equal:** about 140.0–140.2 k precursors, 3.4–3.5 % above DIA-NN's predicted
+  library. DIALibGen's tuned libraries have the most protein groups.
+- **Untuned, DIALibGen still gives 3.8 % fewer precursors than DIA-NN's predicted library** (0.12.1: 4.1 %). The
+  1/K0 correction adds about 0.3 % (0.12.1 with charges 2–4: 129,952 per run). Library coverage is not the cause:
+  about 200 of DIA-NN's 135.7 k identifications are missing from DIALibGen's library. Two other suspects were
+  tested and ruled out:
+  - *The RT scale.* DIALibGen's untuned RT (the model's 0–1 output) is less linear in run time than DIA-NN's, and
+    DIA-NN sets a wider RT window with it (8.6–9.1 against 6.1–6.4 min). Mapping it onto a linear scale, with a
+    map fitted on six public runs of other studies, narrowed the window but lowered identifications here by
+    1.8 %; even a map fitted on run 01 itself lowered them by 0.5–0.7 %. The same map raised identifications on
+    the Astral runs (1.5–1.9 %) and on PXD041421 (0.6–1.2 %). It is not the default.
+  - *The collision energy.* See below.
+- **Entrapment check:** the searches were repeated with every human protein plus its shuffled twin (section 2).
+  DIA-NN 2.0's combined FDP at q ≤ 0.01 was 0.92–1.03 % per run with every library tested, and every 95 %
+  interval included 1 % (pooled: DIA-NN's predicted library 0.98 %, DIALibGen main untuned 0.96 % and tuned
+  1.02 %; 0.12.1 0.98 % both). At a matched 1 % FDP, tuned DIALibGen (main) gave 3.2 % more targets than DIA-NN's
+  predicted library (398.3 k against 386.0 k precursor–run observations), and untuned DIALibGen 3.9 % fewer. The
+  estimates are upper bounds under the entrapment assumptions, not a proof of control.
+
+Table: RT and ion-mobility error on run 01, 24,566 precursors of proteins held out from all tunes (observed:
+the mean apex of the two stock searches)
+
+| library, mapping | median \|ΔRT\| (min) | 95th pct (min) | median \|Δ1/K0\| | median Δ1/K0 (bias) |
+|:--------------------------------|------:|------:|------:|------:|
+| DIA-NN 2.0, predicted, RT LOWESS / 1/K0 as stored | 1.261 | 4.11 | 0.0102 | +0.0029 |
+| DIALibGen 0.12.1, predicted, RT LOWESS / 1/K0 as stored | 1.275 | 4.53 | 0.0154 | −0.0136 |
+| DIALibGen (main), predicted, RT LOWESS / 1/K0 as stored | 1.275 | 4.53 | **0.0104** | −0.0003 |
+| DIA-NN 2.0, tuned, RT LOWESS / 1/K0 as stored | 0.538 | 1.98 | 0.0100 | +0.0044 |
+| DIALibGen 0.12.1, tuned, as stored | 0.507 | 1.93 | 0.0088 | +0.0008 |
+| DIALibGen (main), tuned, as stored | **0.508** | 1.92 | **0.0087** | +0.0000 |
+
+![Median (solid) and 95th percentile (pale) of |ΔRT| (top, minutes) and |Δ1/K0| (bottom, ×1000). Left: run 01, proteins held out from all tunes. Right: runs 02 and 03 pooled, evaluation halves held out from the maps but not from the tuning.](fig/timstof_drt_dim.png){width=100%}
+
+- **RT:** DIALibGen's tuned RT, used as stored in run-01 minutes, is 6 % more accurate than DIA-NN's tuned RT
+  after a LOWESS map. Relative to the 104-min gradient (0.5 %) the error matches the Astral's.
+- **Ion mobility:**
+  - 0.12.1's untuned 1/K0 is systematically low: a median −0.014, larger between 1/K0 0.8 and 1.0 and at higher
+    charge, about 0 above 1.1.
+  - The correction on main removes the offset on these runs, which it was not fitted on: median |Δ1/K0| 0.0104
+    (DIA-NN 2.0 predicted: 0.0102), bias −0.0003. DIA-NN recalibrates ion mobility itself, so the effect on its
+    identifications is small (+0.1 to +0.5 % per run); a tool that uses the stored 1/K0 directly sees all of it.
+  - Tuning brings |Δ1/K0| to 0.0087, below DIA-NN's tuned library (0.0100 as stored, 0.0094 with a linear map).
+    A tuned CCS model is not corrected: it has learned the run's own 1/K0.
+
+**Fragment intensities** (raw diaPASEF spectra, the method of section 4 with fragment charges up to 3). For
+107,029 run-01 precursors:
+
+- extraction: b and y ions at fragment charges 1–3 from the raw frames at the apex (the window holding the
+  precursor, ±1 frame, ±0.02 1/K0, ±15 ppm);
+- scoring: every predictor on the same ions, unobserved ions counted as 0;
+- result: median cosine DIALibGen 0.863, DIA-NN 2.0 0.856, run-02 replicate 0.976 (unchanged on main: the
+  fragments are the same).
+- By precursor charge, DIALibGen against DIA-NN: 2+ 0.884 against 0.890, 3+ 0.789 against 0.749, 4+ 0.581 against
+  0.618.
+- Where predictions miss:
+  - DIA-NN under-predicts singly charged b ions of 2+ precursors (11 % of predicted intensity against 24 %
+    observed; DIALibGen 22 %);
+  - both under-predict doubly charged b ions of 3+ precursors (14 % observed);
+  - neither predicts z=3 fragments, which carry 24 % of the observed intensity of 4+ precursors. No public model
+    of DIALibGen's family has them; a model would have to be retrained.
+
+Table: Median cosine (all b/y ions, z ≤ 3, raw spectra) and DIA-NN 2.0 identifications by NCE, on the two
+diaPASEF methods (IDs relative to NCE 30, charges 2–4)
+
+| method (collision energy) | NCE 20 | NCE 25 | NCE 30 | best NCE per precursor charge |
+|:--|:--|:--|:--|:--|
+| PXD029836 (20–57 eV), run 01 | **0.884**, +2.2 % | 0.881, +1.0 % | 0.868 | 2+ 20, 3+ 20, 4+ 40 |
+| PXD041421 (26–46 eV), run 3197 | 0.875, +0.4 % | 0.881, +1.0 % | **0.888** | 30 for every charge |
+| PXD041421, run 9898 | 0.870, −1.7 % | 0.877, −0.7 % | **0.885** | 30 for every charge |
+
+- **The best collision energy depends on the method.** A lower NCE suits PXD029836's ramp (20 eV at the low end)
+  and costs on PXD041421's (26 eV), at every precursor charge; an NCE that depends on 1/K0 or m/z within a charge
+  was no better. The timsTOF default therefore stays NCE 30, and a method like PXD029836's can set its own in a
+  copy of `timstof.yaml` (`nce`, or `nce_by_charge` per precursor charge; see the repository's usage documentation).
+- For comparison only: DIA-NN's own fragment export (`--export-quant`, the searched library's ions) gives 0.925
+  against 0.929.
+
+**Runtime (indicative, shared node, 32 threads).** Generating the main library took 4 min 3 s (3.65 M
+precursors, 5.3 GB peak memory), tuning 18 min 8 s; 0.12.1 took 5 min 8 s and 17 min 58 s at a higher node
+load. The two versions run the same prediction code; only the number of precursors differs.
+
+**Astral unchanged.** For instruments without ion mobility, main writes the same library as 0.12.1: the Astral
+library of sections 4 and 5 is byte-identical (TSV), and a tune on the same run-01 report gives the same tuned
+library when built with the same toolchain. The identifications, RT and intensity results of sections 4 and 5
+therefore hold for main.
+
+**Limits.** One dataset and diaPASEF method for the identifications, three technical replicates, one tune per
+tool. Run 01 is in-sample for the tuned libraries; the error table uses only proteins held out from all tunes.
+DIALibGen main was a source build, 0.12.1 the release package; their tuned libraries can differ slightly through
+the training library's build (on Astral: median 0.004 min), not through the code.
+
+# 7. Limitations
 
 - **Speed at moderate thread counts.** At 16 threads DIALibGen 0.11.3 (and 0.11.4 and 0.11.5, which keep its CPU path) is slower than 0.11.2 and than DIA-NN 2.0
   (section 3); it was faster only at 96 threads. DIA-NN on a GPU was not measured.
@@ -677,14 +880,17 @@ Table: Entrapment FDP at nominal q ≤ 0.01, precursor level, per run and pooled
 - **Identifications from DIALibGen's own search of the run (`-run`) are not yet validated**; use a DIA-NN
   report (`-ids`).
 - **Scope of the comparisons.** Accuracy and identifications come from one Astral dataset (three technical
-  replicates, one 15-min gradient). Ion-mobility (CCS) prediction and tuning were not evaluated. Each timing is a
-  single run (three for one cell), and DIA-NN and DIALibGen 0.11.3 were timed on two identical nodes.
+  replicates, one 15-min gradient) and one timsTOF dataset (three technical replicates, one 104-min gradient);
+  a second timsTOF study was used only to calibrate the 1/K0 correction and to check the collision energy. Each
+  timing is a single run (three for one cell), and DIA-NN and DIALibGen 0.11.3 were timed on two identical nodes.
 - **OpenSWATH output** was not used in a search here; a calibrated, scored OpenSWATH search with a DIALibGen
   library has not been benchmarked.
-- Fragment-intensity agreement was measured on y ions only. DIALibGen predicts b/y ions without neutral losses
-  and does not fine-tune the fragment model.
+- **Fragment intensities.** DIALibGen predicts b/y ions at fragment charges 1 and 2 without neutral losses, and
+  does not fine-tune the fragment model. No public model of its family predicts triply charged fragments, which
+  carry about a quarter of the fragment intensity of 4+ precursors on timsTOF (timsTOF section). The best
+  collision-energy setting depends on the diaPASEF method's collision-energy ramp.
 
-# 7. Availability
+# 8. Availability
 
 - **Source and issues:** <https://github.com/okohlbacher/DIALibGen>
 - **Release 0.12.1:** <https://github.com/okohlbacher/DIALibGen/releases/tag/v0.12.1> (all releases: <https://github.com/okohlbacher/DIALibGen/releases>)

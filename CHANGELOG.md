@@ -37,6 +37,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The report (`docs/report/`, still named for 0.12.1): a timsTOF (diaPASEF)
+  section (PXD029836, three runs, DIA-NN 2.0: identifications, entrapment
+  check, RT and 1/K0 error, fragment intensities, the charge, 1/K0 and
+  collision-energy changes above), and the fragment-intensity section and
+  summary row on b and y ions at every fragment charge from the raw spectra
+  (Astral: 0.941 against DIA-NN 2.0's 0.839; the 0.12.1 report's y-only 0.986
+  against 0.977). The new numbers are marked "main after 0.12.1".
 - `docs/report/DIALibGen-report-0.12.1.md` and `.pdf` replace the 0.11.3 report: command lines in
   their 0.12.1 form, the H100 timing of 0.12.1 (one and two GPUs) with 0.11.3 as a control in the
   same session, the laptop timings of 0.11.4 (CPU, CoreML with a cold and a warm cache, MPS and CPU

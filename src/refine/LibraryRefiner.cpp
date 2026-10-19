@@ -253,8 +253,8 @@ namespace ODIA
     { throw std::runtime_error("reference has no IM column but -write_im is enabled"); }
 
     // The gate contract (review M8). A gate is enabled when its threshold is
-    // below 1. In report mode every enabled gate's column must exist; in
-    // empirical-library mode a missing column is a recorded bypass.
+    // below 1. With a DIA-NN report as -ids every enabled gate's column must
+    // exist; with -empirical_library a missing column is a recorded bypass.
     auto gate = [&](const char* name, double threshold, const std::shared_ptr<arrow::ChunkedArray>& c) -> bool
     {
       if (threshold >= 1.0) { return false; }

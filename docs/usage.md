@@ -16,7 +16,7 @@ closest name (`Unknown option '-instrument' (did you mean
 | Learn RT/CCS and predict the full library | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
 | Tune, then apply observed values, in one call | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
 | Change the format | `DIALibGen -in tuned.parquet -out tuned.tsv` |
-| Tune on a raw run, no external search (**experimental**) | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
+| Tune with `-run` instead of `-ids` (**experimental**) | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
 
 The output format follows the extension. Write `.tsv` for a file a search
 engine reads; DIA-NN 2 does not read DIALibGen's `.parquet`. Write `.parquet`

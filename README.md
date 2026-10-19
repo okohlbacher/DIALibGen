@@ -42,7 +42,7 @@ flowchart LR
 Blue boxes are the steps of the one DIALibGen executable; the rounded boxes are
 your files and the hexagon is the search engine that uses the result.
 Cylinders are what the steps produce. `identify` is not a mode of its own: it
-runs inside `refine` and `tune` when they are given the raw run
+runs inside `refine` and `tune` when they are given a run with `-run`
 (`-run run.mzML`), and its report is kept (`-out_ids`). Given an external
 search's report instead (`-ids report.parquet`), they skip it. `-run` is
 **experimental** ([below](#built-in-identification-experimental)); `-ids` with
@@ -109,7 +109,7 @@ mode in depth; the [parameter reference](docs/parameters.md) lists all options.
 | Write observed values into a library | `refine` | `DIALibGen -mode refine -in predicted.tsv -ids report.parquet -out refined.tsv` |
 | Retrain RT/CCS on a run, re-predict the whole library | `tune` | `DIALibGen -mode tune -in predicted.tsv -ids report.parquet -out tuned.tsv` |
 | Tune, then write observed values, in one call | `refine` with `-tune` | `DIALibGen -mode refine -tune -no_filter -in predicted.tsv -ids report.parquet -out adapted.tsv` |
-| Tune on a raw run, no external search (experimental) | `tune` with `-run` | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
+| Tune with `-run` instead of `-ids` (experimental) | `tune` with `-run` | `DIALibGen -mode tune -in predicted.tsv -run run.mzML -out tuned.tsv` |
 
 Existing output files are never overwritten. Options that belong to a different
 mode are rejected when changed from their defaults.

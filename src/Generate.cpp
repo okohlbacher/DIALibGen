@@ -306,7 +306,8 @@ namespace
                        const std::string& ccs_model, double nce,
                        const std::string& instrument, bool irt_rescale,
                        bool recompute_decoy_mz, const std::string& ion_mobility,
-                       const std::string& irt_standards)
+                       const std::string& irt_standards,
+                       const std::string& mobility_correction)
   {
     return json{
       {"schema_version", kSchemaVersion},
@@ -325,6 +326,7 @@ namespace
       {"free_cysteine_rt_correction", p.free_cysteine_rt_correction},
       {"derive_ion_mobility", p.derive_ion_mobility},
       {"predict_ion_mobility", ion_mobility},
+      {"mobility_correction", mobility_correction},
       {"min_relative_intensity", p.min_relative_intensity},
       {"reserved_doubly_charged", p.reserved_doubly_charged},
       {"decoys", decoys},
@@ -341,7 +343,7 @@ namespace
 {
   json generationDefaults()
   {
-    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto", "");
+    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto", "", "auto");
     j.erase("schema_version");
     j.erase("irt_standards");   // the top-level -irt_standards
     j["nce"] = -1.0; // TOPP sentinel: use the instrument default.
@@ -354,17 +356,19 @@ namespace
               std::string& rt_model, std::string& ms2_model, std::string& ccs_model,
               double& nce, std::string& instrument, bool& irt_rescale,
               bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of,
-              std::string& ion_mobility, std::string& irt_standards)
+              std::string& ion_mobility, std::string& irt_standards,
+              std::string& mobility_correction)
   {
     if (!j.is_object()) { throw std::runtime_error("config must be a JSON object"); }
     const json ref = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                      nce, instrument, irt_rescale,
-                                     recompute_decoy_mz, ion_mobility, irt_standards);
+                                     recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction);
     for (const auto& [k, v] : j.items())
     {
       // Recorded for the reader, not settings.
       if (k == "nce_source" || k == "instrument_named" || k == "model_instrument" || k == "precursor_mz_source" || k == "fragment_mz_source" ||
-          k == "precursor_charges_source" || k == "instrument_defaults") { continue; }
+          k == "precursor_charges_source" || k == "instrument_defaults" ||
+          k == "mobility_correction_applied") { continue; }
       if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
       (void)v;
     }
@@ -472,6 +476,13 @@ namespace
       nce = j["nce"]; nce_was_set = true;
     }
     if (j.contains("irt_rescale")) { irt_rescale = j["irt_rescale"]; }
+    if (j.contains("mobility_correction"))
+    {
+      const json& v = j["mobility_correction"];
+      if (!v.is_string() || (v != "auto" && v != "off"))
+      { throw std::runtime_error("mobility_correction must be auto or off"); }
+      mobility_correction = v.get<std::string>();
+    }
     if (j.contains("irt_standards"))
     {
       if (!j["irt_standards"].is_string()) { throw std::runtime_error("irt_standards must be a path (\"\" = the bundled table)"); }
@@ -592,6 +603,9 @@ void DIALibGen::registerGenerationOptions_()
                                                   "instrument with ion mobility (timsTOF); true: always; false: never, "
                                                   "the library then carries neither"},
     {"derive_ion_mobility", "<true/false>", "Also write 1/K0, derived from the predicted CCS (when CCS is predicted)"},
+    {"mobility_correction", "<auto/off>", "auto: correct the derived 1/K0 with the instrument file's mobility_correction "
+                                          "(timsTOF; only for the CCS model it was fitted for); off: the plain Mason-Schamp "
+                                          "1/K0 of the predicted CCS"},
     {"irt_rescale", "<true/false>", "Rescale RT to iRT with the standards of -irt_standards; false: RT is the "
                                     "model's raw 0..1 scale (DIA-NN fits its own RT map)"},
     {"free_cysteine_rt_correction", "<true/false>", "Add the measured RT offset of unmodified cysteines (nothing to do "
@@ -633,6 +647,7 @@ void DIALibGen::registerGenerationOptions_()
   }
   setValidStrings_("generation:decoys", {"none", "mutate", "pseudo_reverse", "reverse", "shuffle"});
   setValidStrings_("generation:predict_ion_mobility", {"auto", "true", "false"});
+  setValidStrings_("generation:mobility_correction", {"auto", "off"});
   setMinInt_("generation:max_fragment_charge", 1);
   setMaxInt_("generation:max_fragment_charge", 2);
   setMinInt_("generation:precursor_charges", 1);
@@ -674,6 +689,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::string nce_source = "config";
     std::string ion_mobility = "auto";   // -generation:predict_ion_mobility, resolved below
     std::string irt_standards;           // "" = the bundled table
+    std::string mobility_correction = "auto";   // -generation:mobility_correction, resolved below
     // Where the m/z windows came from: the recipe, the command line or INI,
     // else the instrument's method (or DigestParams' generic default).
     std::string precursor_mz_source = "default", fragment_mz_source = "default", charges_source = "default";
@@ -688,7 +704,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       {
         const json recipe = json::parse(in, nullptr, true, true);
         apply_(recipe, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
-               recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards);
+               recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction);
         instrument_in_config = recipe.contains("instrument");
         if (recipe.contains("precursor_mz")) { precursor_mz_source = "config"; }
         if (recipe.contains("fragment_mz")) { fragment_mz_source = "config"; }
@@ -727,7 +743,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (automatic_nce) { overrides.erase("nce"); }
       else if (overrides.contains("nce")) { nce_source = "TOPP"; }
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
-             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards);
+             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction);
       if (automatic_nce) { nce_was_set = false; }
     }
     catch (const std::exception& e)
@@ -916,9 +932,52 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (m.path->empty()) { *m.path = findModel(m.file, models_dir); }
     }
 
+    // The instrument's 1/K0 correction (timstof.yaml, mobility_correction):
+    // for the CCS model it was fitted for, so a tuned CCS model (trained on a
+    // run's own 1/K0) is never corrected twice.
+    ODIA::MobilityCorrection mobility;
+    std::string mobility_note;
+    if (mobility_correction == "auto" && p.predict_ion_mobility && p.derive_ion_mobility && instrument_file &&
+        instrument_file->mobility_correction)
+    {
+      std::error_code exists_ec;
+      if (!ccs_model.empty() && fs::exists(ccs_model, exists_ec))
+      {
+        try
+        {
+          if (ODIA::DIANNLibraryFile::hashFile(ccs_model) == instrument_file->mobility_correction->ccs_model_fnv1a64)
+          { mobility = instrument_file->mobility_correction->correction; }
+          else { mobility_note = "the CCS model is not the one " + instrument_file->path.filename().string() +
+                                 "'s mobility_correction was fitted for (a tuned model needs none)"; }
+        }
+        catch (const std::exception& e) { writeLogError_(e.what()); return INPUT_FILE_NOT_FOUND; }
+      }
+    }
+    if (mobility.active)
+    {
+      std::ostringstream m;
+      m << std::defaultfloat << "1/K0 corrected with " << instrument_file->path.filename().string()
+        << "'s mobility_correction (intercept + slope x the Mason-Schamp 1/K0 of the predicted CCS:";
+      for (const auto& [z, l] : mobility.by_charge) { m << " " << z << "+ " << l.intercept << " + " << l.slope << "x;"; }
+      m << " other charges " << mobility.other.intercept << " + " << mobility.other.slope
+        << "x); -generation:mobility_correction off for the uncorrected value";
+      writeLogInfo_(m.str());
+    }
+    else if (!mobility_note.empty()) { writeLogInfo_("1/K0 not corrected: " + mobility_note); }
+
     const auto recipe = [&]() {
       json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
-                                 recompute_decoy_mz, ion_mobility, irt_standards);
+                                 recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction);
+      // The 1/K0 correction applied, with the file it came from.
+      if (mobility.active)
+      {
+        json lines = json::object();
+        for (const auto& [z, l] : mobility.by_charge) { lines[std::to_string(z)] = {l.intercept, l.slope}; }
+        lines["other"] = {mobility.other.intercept, mobility.other.slope};
+        eff["mobility_correction_applied"] = {{"file", instrument_file->path.filename().string()},
+                                              {"intercept_slope", lines}};
+      }
+      else { eff["mobility_correction_applied"] = nullptr; }
       // The instrument as named, so that a replay resolves it through the same
       // instrument file (a custom instrument keeps its ion mobility); the MS2
       // model's slot is recorded beside it.
@@ -1039,7 +1098,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       p, ODIA::DIANNLibraryFile::hashFile(rt_model),
       ODIA::DIANNLibraryFile::hashFile(ms2_model),
       p.predict_ion_mobility ? ODIA::DIANNLibraryFile::hashFile(ccs_model) : std::string("none"), nce, instrument,
-      irt_rescale);
+      irt_rescale, mobility);
     fp.decoy_method = decoys;
     fingerprint_phase.end();
     const auto finishFingerprint = [&]() {
@@ -1238,10 +1297,11 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
           std::vector<std::uint16_t> lengths;
           bool ccs_on_cpu = false;
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-                library, ccs_model, route.lstm_gpu, cpu_threads, p.derive_ion_mobility, lstm_gpu, &lengths, &ccs_on_cpu); miss)
+                library, ccs_model, route.lstm_gpu, cpu_threads, p.derive_ion_mobility, lstm_gpu, &lengths, &ccs_on_cpu,
+                mobility); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
           guard = std::make_unique<ODIA::LibraryGenerator::CcsBatchGuard>(ccs_model, p.derive_ion_mobility,
-                                                                           std::move(lengths), ccs_on_cpu);
+                                                                           std::move(lengths), ccs_on_cpu, mobility);
         };
         // The CPU phases on a thread of their own (after the sink: waited for
         // before the sink goes; their log lines follow once they are done).
@@ -1320,7 +1380,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         if (p.predict_ion_mobility)
         {
           if (const auto miss = ODIA::LibraryGenerator::predictCollisionCrossSections(
-                library, ccs_model, route.lstm_gpu, threads, p.derive_ion_mobility, lstm_gpu); miss)
+                library, ccs_model, route.lstm_gpu, threads, p.derive_ion_mobility, lstm_gpu, nullptr, nullptr,
+                mobility); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted CCS"); }
         }
       }
@@ -1328,7 +1389,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       const auto method = ODIA::parseDecoyMethod(decoys);
       const auto made = ODIA::LibraryGenerator::appendDecoys(library, method, &skipped,
                                                              p.min_fragments,
-                                                             recompute_decoy_mz);
+                                                             recompute_decoy_mz, mobility);
       writeLogInfo_("decoys: " + std::to_string(made) + " (" + decoys + "), " +
                     std::to_string(skipped) + " skipped");
     }

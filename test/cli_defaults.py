@@ -245,6 +245,13 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
             ('name: X\nmodel_instrument: QE\nprecursor_mz: [900, 400]\n', 'mine.yaml: precursor_mz: needs min < max'),
             ('name: X\nmodel_instrument: QE\nion_mobility: maybe\n', 'mine.yaml: ion_mobility: must be true or false'),
             ('model_instrument: QE\n', 'mine.yaml: name: missing'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  intercept: 0.02\n  slope: 0.99\n', 'mine.yaml: mobility_correction.ccs_model_fnv1a64: missing'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: C26EB20995B991F5\n  intercept: 0.02\n  slope: 0.99\n', 'mine.yaml: mobility_correction.ccs_model_fnv1a64: must be 16 lowercase hex digits'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  slope: 0.99\n', 'mine.yaml: mobility_correction: needs intercept and slope'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  intercept: 0.02\n  slope: 3\n', 'mine.yaml: mobility_correction.slope: must be between'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  intercept: 0.02\n  slope: 0.99\n  by_charge:\n    2.5: {intercept: 0, slope: 1}\n', 'mine.yaml: mobility_correction.by_charge: charges must be whole numbers'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  intercept: 0.02\n  slope: 0.99\n  by_charge:\n    2: {intercept: 0}\n', 'mine.yaml: mobility_correction.by_charge.2.slope: must be a number'),
+            ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  intercept: 0.02\n  slope: 0.99\n  offset: 1\n', 'mine.yaml: mobility_correction.offset: unknown key'),
             ('[1, 2]\n', 'mine.yaml: must be a mapping'),
             ('name: [unclosed\n', 'mine.yaml: not valid YAML')):
         single.write_text(body)

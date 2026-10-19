@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #pragma once
+#include <odia/Library.h>
 #include <array>
 #include <filesystem>
 #include <map>
@@ -25,6 +26,15 @@ namespace ODIA::instruments
     std::optional<bool> ion_mobility;
   };
 
+  /// An instrument file's mobility_correction: the straight lines that map
+  /// the 1/K0 derived from the CCS model's prediction onto the instrument's,
+  /// for the CCS model they were fitted for.
+  struct MobilityCorrectionSpec
+  {
+    std::string ccs_model_fnv1a64;    ///< DIANNLibraryFile::hashFile of that CCS model
+    MobilityCorrection correction;    ///< active
+  };
+
   /// One instrument's file.
   struct InstrumentFile
   {
@@ -37,6 +47,7 @@ namespace ODIA::instruments
     std::optional<double> nce;
     std::optional<Window> precursor_mz, fragment_mz;
     std::optional<std::vector<int>> precursor_charges;
+    std::optional<MobilityCorrectionSpec> mobility_correction;
 
     /// Whether @p instrument is this file's name or one of its aliases (case,
     /// ' ', '-' and '_' ignored; a leading "Orbitrap" and a trailing model

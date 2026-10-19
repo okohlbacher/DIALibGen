@@ -58,6 +58,7 @@ const OVERLAY: Record<string, Overlay> = {
   // them as command-line options instead, so this is never a form field.
   tuning: { description: 'Training settings; managed by the fine-tuning controls.', hidden: true },
   instrument_named: { description: 'Recorded instrument spelling before alias resolution.', hidden: true },
+  mobility_correction_applied: { description: 'Recorded 1/K0 correction (instrument file and lines).', hidden: true },
   enzyme: {
     group: 'core',
     description:
@@ -137,6 +138,13 @@ const OVERLAY: Record<string, Overlay> = {
     group: 'core',
     description: 'Emit 1/K0 alongside CCS. Off costs a diaPASEF consumer the entire mobility dimension.'
   },
+  mobility_correction: {
+    description:
+      'auto: correct the derived 1/K0 with the instrument file’s calibrated lines (timsTOF), for the stock CCS ' +
+      'model only; off: the plain Mason-Schamp 1/K0 of the predicted CCS.',
+    choices: ['auto', 'off']
+  },
+
 
   fragment_mz: {
     group: 'advanced',

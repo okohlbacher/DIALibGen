@@ -72,6 +72,7 @@ The schema lists all modes. Without `-mode`, a FASTA generates and a library con
 | `-generation:reserved_doubly_charged` | int | `0` | 0: |  | Fragment slots reserved for doubly charged ions; 0 ranks all fragments by predicted intensity |
 | `-generation:predict_ion_mobility` | string | `auto` | auto,true,false |  | Predict CCS (and 1/K0, see derive_ion_mobility). auto: only for an instrument with ion mobility (timsTOF); true: always; false: never, the library then carries neither |
 | `-generation:derive_ion_mobility` | string | `true` | true,false |  | Also write 1/K0, derived from the predicted CCS (when CCS is predicted) |
+| `-generation:mobility_correction` | string | `auto` | auto,off |  | auto: correct the derived 1/K0 with the instrument file's mobility_correction (timsTOF; only for the CCS model it was fitted for); off: the plain Mason-Schamp 1/K0 of the predicted CCS |
 | `-generation:irt_rescale` | bool | `false` |  |  | Rescale RT to iRT with the standards of -irt_standards; false: RT is the model's raw 0..1 scale (DIA-NN fits its own RT map) |
 | `-generation:free_cysteine_rt_correction` | string | `true` | true,false |  | Add the measured RT offset of unmodified cysteines (nothing to do when cysteines are alkylated) |
 | `-generation:decoys` | string | `none` | none,mutate,pseudo_reverse,reverse,shuffle |  | Decoys in the library: none (DIA-NN makes its own), mutate, pseudo_reverse, reverse, shuffle |

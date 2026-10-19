@@ -110,6 +110,21 @@ def main(binary, fasta, model_dir, workdir):
     im = np.array(d["IM"], dtype=float)
     check(np.isfinite(im).all() and 0.4 < im.min() and im.max() < 2.0,
           f"IM is 1/K0, not a copy of CCS ({im.min():.3f}..{im.max():.3f})")
+    # timstof.yaml's mobility_correction: 1/K0 = intercept + slope x the
+    # Mason-Schamp 1/K0 of the predicted CCS, per charge; CCS itself unchanged.
+    tims_cfg = json.loads(pq.read_schema("tims.parquet").metadata[b"odia.config_json"])
+    applied = tims_cfg.get("mobility_correction_applied") or {}
+    check(applied.get("file") == "timstof.yaml" and "2" in applied.get("intercept_slope", {}),
+          "a timsTOF library records the 1/K0 correction it applied")
+    run("tims-off.parquet", {"instrument": "timsTOF", "mobility_correction": "off"})
+    off = pq.read_table("tims-off.parquet").to_pydict()
+    check(json.loads(pq.read_schema("tims-off.parquet").metadata[b"odia.config_json"])["mobility_correction_applied"] is None
+          and np.allclose(np.array(off["CCS"], dtype=float), ccs), "-generation:mobility_correction off keeps the CCS and records no correction")
+    lines = applied.get("intercept_slope", {})
+    z = np.array(d["Precursor.Charge"])
+    expect = np.array([lines.get(str(q), lines.get("other", [0, 1]))[0] + lines.get(str(q), lines.get("other", [0, 1]))[1] * v
+                       for q, v in zip(z, np.array(off["IM"], dtype=float))])
+    check(np.allclose(im, expect, atol=2e-6), "the corrected 1/K0 is the instrument file's line applied to the uncorrected one")
 
     pmz = np.array(d["Precursor.Mz"], dtype=float)
     lo, hi = cfg["precursor_mz"]

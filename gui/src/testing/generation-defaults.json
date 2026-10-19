@@ -29,6 +29,8 @@
   "max_variable_modifications": 1,
   "min_relative_intensity": 0.0001,
   "missed_cleavages": 1,
+  "mobility_correction": "auto",
+  "mobility_correction_applied": null,
   "model_instrument": "QE",
   "ms2_model": "",
   "n_terminal_methionine_excision": true,

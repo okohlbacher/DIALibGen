@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -80,6 +81,33 @@ namespace ODIA
     const double mu = m_ion * DRIFT_GAS_MASS / (m_ion + DRIFT_GAS_MASS);
     return ccs * std::sqrt(mu * DRIFT_GAS_TEMPERATURE_K) / (18509.0 * charge);
   }
+
+  /// An instrument's straight-line correction of the 1/K0 that mobilityFromCCS
+  /// derives from a PREDICTED CCS: 1/K0 = intercept + slope * derived, per
+  /// precursor charge where given, else the general line. It is a calibration
+  /// of one CCS model against one kind of instrument (timstof.yaml,
+  /// mobility_correction, with its sources), not physics: the stock model's
+  /// derived 1/K0 is low on diaPASEF by a median 0.014, more at low mobility
+  /// and high charge. Inactive (the identity) unless set.
+  struct MobilityCorrection
+  {
+    struct Line
+    {
+      double intercept = 0.0;
+      double slope = 1.0;
+    };
+    bool active = false;
+    Line other;                       ///< charges without a line of their own
+    std::map<int, Line> by_charge;
+
+    double apply(double one_over_k0, int charge) const
+    {
+      if (!active || std::isnan(one_over_k0)) { return one_over_k0; }
+      const auto it = by_charge.find(charge);
+      const Line& l = it == by_charge.end() ? other : it->second;
+      return l.intercept + l.slope * one_over_k0;
+    }
+  };
 
   /// The inverse, for a library that carries 1/K0 but no CCS.
   inline double ccsFromMobility(double one_over_k0, double mz, int charge)

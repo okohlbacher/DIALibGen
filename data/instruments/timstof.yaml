@@ -15,6 +15,20 @@
 #   nce 30: the section 3 recipe and upstream's timsTOF default; 40 scored better on
 #     one diaPASEF method (src/predict/PeptDeepEncoder.cpp, defaultNce) but is not
 #     a default: one ramp was measured.
+#   mobility_correction: the 1/K0 derived from the stock CCS model (Mason-Schamp,
+#     N2, 305 K; the same constants as alphabase's ccs_to_mobility_bruker within
+#     5e-5) is low on diaPASEF, by a median 0.014 on the timsTOF benchmark
+#     (PXD029836), more at low mobility and high charge. These lines were fitted
+#     by least squares (residuals beyond 4 robust SD trimmed, both runs weighted
+#     equally) to the observed 1/K0 of the precursors DIA-NN 2.0 identified at
+#     1 % FDR in two public timsTOF Pro diaPASEF runs from two instruments
+#     (PXD041421, files ..._3197.d and ..._9898.d; 192,043 precursors) searched
+#     with DIALibGen 0.12.1's timsTOF library. On PXD029836 (not used for the
+#     fit) they take the median |d1/K0| of run 01's held-out proteins from 0.0154
+#     to 0.0104 and the median bias from -0.0137 to -0.0002, and DIA-NN 2.0
+#     identifies 0.5 % and 0.2 % more precursors (runs 01, 02). They belong to the
+#     shipped CCS model (ccs_model_fnv1a64): a tuned CCS model is not corrected.
+#     Fit: scripts/eval/fit_mobility_correction.py.
 name: timsTOF
 aliases: [timsTOF Pro, timsTOF Pro 2, timsTOF SCP, timsTOF HT, timsTOF Ultra, timsTOF Ultra 2, timsTOF Flex]
 model_instrument: timsTOF
@@ -23,3 +37,11 @@ nce: 30
 precursor_mz: [350, 1200]
 fragment_mz: [200, 1800]
 precursor_charges: [2, 3, 4]
+mobility_correction:
+  ccs_model_fnv1a64: c26eb20995b991f5
+  intercept: 0.0237      # charges without a line of their own (fitted on 2+ to 4+ together)
+  slope: 0.9894
+  by_charge:
+    2: {intercept: 0.0370, slope: 0.9757}
+    3: {intercept: -0.0248, slope: 1.0440}
+    4: {intercept: -0.0349, slope: 1.0561}

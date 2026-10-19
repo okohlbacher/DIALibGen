@@ -1580,7 +1580,7 @@ namespace ODIA
   std::size_t LibraryGenerator::predictCollisionCrossSections(
     Library& library, const std::string& ccs_model_path, bool prefer_gpu,
     unsigned sessions, bool derive_mobility, const GpuOptions& gpu,
-    std::vector<std::uint16_t>* lengths, bool* on_cpu)
+    std::vector<std::uint16_t>* lengths, bool* on_cpu, const MobilityCorrection& correction)
   {
     trace::Scope ccs_phase("ccs", 0);
     auto& p = library.precursors();
@@ -1654,8 +1654,8 @@ namespace ODIA
         // diaPASEF consumer needs to use the mobility dimension at all.
         if (derive_mobility)
         {
-          p.im[i] = static_cast<float>(
-            mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]));
+          p.im[i] = static_cast<float>(correction.apply(
+            mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]), p.charge[i]));
         }
       }
     };
@@ -1730,9 +1730,10 @@ namespace ODIA
   }
 
   LibraryGenerator::CcsBatchGuard::CcsBatchGuard(std::string ccs_model_path, bool derive_mobility,
-                                                 std::vector<std::uint16_t> lengths, bool on_cpu)
+                                                 std::vector<std::uint16_t> lengths, bool on_cpu,
+                                                 MobilityCorrection correction)
     : model_(std::move(ccs_model_path)), derive_mobility_(derive_mobility), lengths_(std::move(lengths)),
-      on_cpu_(on_cpu)
+      on_cpu_(on_cpu), correction_(std::move(correction))
   {
     if (!on_cpu_) { return; }
     alone_.assign(lengths_.size(), 0);
@@ -1773,7 +1774,8 @@ namespace ODIA
         const auto ccs = predictor_->predictCCS(std::vector<AASequence>(rows, peptide), std::vector<int>(rows, charge));
         p.ccs[i] = ccs.front();
         if (derive_mobility_ && !std::isnan(p.ccs[i]))
-        { p.im[i] = static_cast<float>(mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i])); }
+        { p.im[i] = static_cast<float>(correction_.apply(mobilityFromCCS(p.ccs[i], fromFixed(p.mz[i]), p.charge[i]),
+                                                           p.charge[i])); }
         ++redone;
       }
     }
@@ -1784,7 +1786,8 @@ namespace ODIA
   std::size_t LibraryGenerator::appendDecoys(Library& library, DecoyMethod method,
                                              std::size_t* skipped_out,
                                              std::size_t min_fragments,
-                                             bool recompute_decoy_mz)
+                                             bool recompute_decoy_mz,
+                                             const MobilityCorrection& correction)
   {
     if (method == DecoyMethod::None) { return 0; }
     trace::Scope decoy_phase("decoys", 0);
@@ -2079,11 +2082,14 @@ namespace ODIA
       float new_im = p.im[i];
       if (recompute_decoy_mz && std::isfinite(p.im[i]))
       {
-        const double ccs_i =
-          (i < p.ccs.size() && std::isfinite(p.ccs[i]))
-            ? static_cast<double>(p.ccs[i])
-            : ccsFromMobility(p.im[i], fromFixed(p.mz[i]), p.charge[i]);
-        const double k0 = mobilityFromCCS(ccs_i, new_mz, p.charge[i]);
+        const bool has_ccs = i < p.ccs.size() && std::isfinite(p.ccs[i]);
+        const double ccs_i = has_ccs ? static_cast<double>(p.ccs[i])
+                                     : ccsFromMobility(p.im[i], fromFixed(p.mz[i]), p.charge[i]);
+        // A target whose 1/K0 was derived from its CCS through the
+        // instrument's correction gets a decoy 1/K0 through the same one; one
+        // inverted from its 1/K0 already carries it.
+        const double derived = mobilityFromCCS(ccs_i, new_mz, p.charge[i]);
+        const double k0 = has_ccs ? correction.apply(derived, p.charge[i]) : derived;
         // Only on a finite, positive result: a decoy silently losing its
         // mobility would be distinguishable by a missing value, which is the
         // same FDR leak the CCS copy below exists to avoid.
@@ -2127,7 +2133,8 @@ namespace ODIA
                                                   const std::string& ccs_model,
                                                   double nce,
                                                   const std::string& instrument,
-                                                  bool irt_rescale)
+                                                  bool irt_rescale,
+                                                  const MobilityCorrection& mobility)
   {
     std::ostringstream ps;
     ps.imbue(std::locale::classic());          // a cache key must not follow the locale
@@ -2187,6 +2194,13 @@ namespace ODIA
        // raw library and an iRT library of identical content fingerprinted the
        // same. A consumer that reads the wrong one extracts from nowhere.
        << ";rtdomain=" << (irt_rescale ? "irt" : "raw");
+    // The instrument's 1/K0 correction changes every 1/K0; absent when none
+    // was applied (the 0.12.1 key).
+    if (mobility.active && p.predict_ion_mobility && p.derive_ion_mobility)
+    {
+      ps << ";imcal=" << exact(mobility.other.intercept) << "," << exact(mobility.other.slope);
+      for (const auto& [z, l] : mobility.by_charge) { ps << "|" << z << ":" << exact(l.intercept) << "," << exact(l.slope); }
+    }
     return ps.str();
   }
 }

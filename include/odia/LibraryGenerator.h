@@ -217,7 +217,8 @@ namespace ODIA
                                          const std::string& ms2_model,
                                          const std::string& ccs_model,
                                          double nce, const std::string& instrument,
-                                         bool irt_rescale);
+                                         bool irt_rescale,
+                                         const MobilityCorrection& mobility = {});
 
     /// Fill in predicted retention times, replacing the placeholders.
     ///
@@ -374,7 +375,8 @@ namespace ODIA
                                                     bool derive_mobility = true,
                                                     const GpuOptions& gpu = {},
                                                     std::vector<std::uint16_t>* lengths = nullptr,
-                                                    bool* on_cpu = nullptr);
+                                                    bool* on_cpu = nullptr,
+                                                    const MobilityCorrection& correction = {});
 
     /// Precursors per predictCCS call in predictCollisionCrossSections:
     /// 200,000, or ODIA_CCS_BLOCK (tests). The CCS of a row can depend on the
@@ -402,7 +404,7 @@ namespace ODIA
       ///        library order (predictCollisionCrossSections' @p lengths).
       /// @param on_cpu whether CCS ran on the CPU.
       CcsBatchGuard(std::string ccs_model_path, bool derive_mobility, std::vector<std::uint16_t> lengths,
-                    bool on_cpu);
+                    bool on_cpu, MobilityCorrection correction = {});
       ~CcsBatchGuard();
       /// Settles the CCS of kept precursors kept[from .. to): their old-order
       /// calls must be complete (from and to multiples of ccsBlock(), or to the
@@ -416,6 +418,7 @@ namespace ODIA
       std::vector<std::uint16_t> lengths_;
       std::vector<std::uint8_t> alone_;   ///< per precursor: alone in its new-order batch
       bool on_cpu_;
+      MobilityCorrection correction_;
       std::unique_ptr<PeptDeepPredictor> predictor_;
     };
 
@@ -434,10 +437,13 @@ namespace ODIA
     ///        1/K0 from its collision cross-section at that new mass so it stays
     ///        a consistent ion in the two-dimensional diaPASEF window. Off by
     ///        default pending its first measured arm.
+    /// @param correction the correction the targets' derived 1/K0 went through;
+    ///        a recomputed decoy 1/K0 gets the same one.
     static std::size_t appendDecoys(Library& library, DecoyMethod method,
                                     std::size_t* skipped_out = nullptr,
                                     std::size_t min_fragments = 0,
-                                    bool recompute_decoy_mz = false);
+                                    bool recompute_decoy_mz = false,
+                                    const MobilityCorrection& correction = {});
   };
 
 } // namespace ODIA

@@ -123,6 +123,57 @@ namespace ODIA::instruments
       return out;
     }
 
+    /// A finite number in [lo, hi].
+    double bounded(const fs::path& file, const YAML::Node& n, const std::string& key, double lo, double hi)
+    {
+      double v = 0;
+      if (!n || !n.IsScalar() || !YAML::convert<double>::decode(n, v) || !std::isfinite(v))
+      { fail(file, key, "must be a number"); }
+      if (v < lo || v > hi) { fail(file, key, "must be between " + std::to_string(lo) + " and " + std::to_string(hi)); }
+      return v;
+    }
+
+    MobilityCorrection::Line line(const fs::path& file, const YAML::Node& n, const std::string& where)
+    {
+      if (!n.IsMap()) { fail(file, where, "must be a mapping with intercept and slope"); }
+      onlyKeys(file, n, {"intercept", "slope"}, where + ".");
+      MobilityCorrection::Line l;
+      l.intercept = bounded(file, n["intercept"], where + ".intercept", -0.5, 0.5);
+      l.slope = bounded(file, n["slope"], where + ".slope", 0.5, 2.0);
+      return l;
+    }
+
+    MobilityCorrectionSpec mobilityCorrection(const fs::path& file, const YAML::Node& n)
+    {
+      const std::string where = "mobility_correction";
+      if (!n.IsMap()) { fail(file, where, "must be a mapping (ccs_model_fnv1a64, intercept, slope, by_charge)"); }
+      onlyKeys(file, n, {"ccs_model_fnv1a64", "intercept", "slope", "by_charge"}, where + ".");
+      MobilityCorrectionSpec m;
+      if (!n["ccs_model_fnv1a64"]) { fail(file, where + ".ccs_model_fnv1a64", "missing (the CCS model the lines were fitted for)"); }
+      m.ccs_model_fnv1a64 = text(file, n["ccs_model_fnv1a64"], where + ".ccs_model_fnv1a64");
+      if (m.ccs_model_fnv1a64.size() != 16 || m.ccs_model_fnv1a64.find_first_not_of("0123456789abcdef") != std::string::npos)
+      { fail(file, where + ".ccs_model_fnv1a64", "must be 16 lowercase hex digits"); }
+      if (!n["intercept"] || !n["slope"]) { fail(file, where, "needs intercept and slope (the line for charges without one of their own)"); }
+      m.correction.other.intercept = bounded(file, n["intercept"], where + ".intercept", -0.5, 0.5);
+      m.correction.other.slope = bounded(file, n["slope"], where + ".slope", 0.5, 2.0);
+      if (const auto by = n["by_charge"])
+      {
+        if (!by.IsMap()) { fail(file, where + ".by_charge", "must map charges to {intercept, slope}"); }
+        for (const auto& item : by)
+        {
+          int z = 0;
+          double d = 0;
+          if (!item.first.IsScalar() || !YAML::convert<double>::decode(item.first, d) || d != std::floor(d) ||
+              !YAML::convert<int>::decode(item.first, z) || z < 1 || z > 8)
+          { fail(file, where + ".by_charge", "charges must be whole numbers from 1 to 8"); }
+          const std::string at = where + ".by_charge." + std::to_string(z);
+          if (!m.correction.by_charge.emplace(z, line(file, item.second, at)).second) { fail(file, at, "given twice"); }
+        }
+      }
+      m.correction.active = true;
+      return m;
+    }
+
     std::string modelSlot(const fs::path& file, const YAML::Node& n, const std::string& key)
     {
       const std::string named = text(file, n, key);
@@ -153,7 +204,7 @@ namespace ODIA::instruments
   {
     const YAML::Node root = load(file);
     onlyKeys(file, root, {"name", "aliases", "model_instrument", "ion_mobility", "nce", "precursor_mz", "fragment_mz",
-                          "precursor_charges"});
+                          "precursor_charges", "mobility_correction"});
     InstrumentFile f;
     f.path = file;
     f.hash = DIANNLibraryFile::hashFile(file.string());
@@ -171,6 +222,7 @@ namespace ODIA::instruments
     if (const auto n = root["precursor_mz"]) { f.precursor_mz = window(file, n, "precursor_mz"); }
     if (const auto n = root["fragment_mz"]) { f.fragment_mz = window(file, n, "fragment_mz"); }
     if (const auto n = root["precursor_charges"]) { f.precursor_charges = charges(file, n, "precursor_charges"); }
+    if (const auto n = root["mobility_correction"]) { f.mobility_correction = mobilityCorrection(file, n); }
     return f;
   }
 

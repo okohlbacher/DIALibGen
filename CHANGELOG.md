@@ -13,6 +13,17 @@ This project follows [Semantic Versioning](https://semver.org/).
   identified precursors per run (0.03 %); DIA-NN recommends a minimum charge of
   2 on timsTOF. `-generation:precursor_charges 1 2 3 4` restores 0.12.1's
   library.
+- `timstof.yaml`: the 1/K0 derived from the predicted CCS is corrected
+  (`mobility_correction`: one straight line per precursor charge, fitted on
+  two public timsTOF Pro runs, PXD041421). The stock CCS model's 1/K0 was low
+  by a median 0.014 on the timsTOF benchmark (PXD029836); with the correction
+  the median |Δ1/K0| of held-out proteins falls from 0.0154 to 0.0104 (DIA-NN
+  2.0's prediction: 0.0102) and DIA-NN 2.0 identifies 0.2-0.5 % more
+  precursors. The Mason-Schamp conversion itself was checked against
+  AlphaPeptDeep's (alphabase `ccs_to_mobility_bruker`, within 5e-5) and is
+  unchanged; CCS is unchanged. A tuned CCS model is not corrected (the lines
+  belong to the stock model, by its hash). `-generation:mobility_correction
+  off` writes 0.12.1's 1/K0; the recipe records `mobility_correction_applied`.
 
 ### Changed
 

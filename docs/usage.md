@@ -111,7 +111,7 @@ Linux packages beside the models; a source tree has them in `data/instruments/`)
 |---|---|---|
 | `default.yaml` | the default instrument (`QE`) and every other one | precursor m/z 350-1200, fragment m/z 200-1800, charges 1-4; per MS2 model slot the NCE (Lumos 25, others 30) and ion mobility (timsTOF only) |
 | `astral.yaml` | Astral, Orbitrap Astral, Astral Zoom (MS2 model: Lumos) | precursor m/z 380-980, fragment m/z 150-2000, charges 1-4, NCE 25, no ion mobility |
-| `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 2-4 (since 0.13; 0.12.1 had 1-4: `-generation:precursor_charges 1 2 3 4`), precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility |
+| `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 2-4 (since 0.13; 0.12.1 had 1-4: `-generation:precursor_charges 1 2 3 4`), precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility with a 1/K0 correction (since 0.13; see [Ion mobility](#ion-mobility)) |
 
 Each value carries its source in a comment. Precedence, per value: an
 explicit option (command line, INI, `-config` JSON) > the instrument's file >
@@ -146,6 +146,12 @@ nce: 27                           # > 0, <= 100
 precursor_mz: [400, 1000]         # [min, max]
 fragment_mz: [200, 1800]
 precursor_charges: [2, 3, 4]      # 1-8, no repeats
+mobility_correction:              # ion-mobility instruments: see "Ion mobility" below
+  ccs_model_fnv1a64: c26eb20995b991f5   # the CCS model the lines were fitted for
+  intercept: 0.0237               # 1/K0 = intercept + slope x derived 1/K0, for charges
+  slope: 0.9894                   #   without a line of their own
+  by_charge:
+    2: {intercept: 0.0370, slope: 0.9757}
 ```
 
 `default.yaml` has `instrument`, `precursor_mz`, `fragment_mz`,
@@ -229,6 +235,22 @@ one line:
 Astral has no ion mobility: CCS and 1/K0 not predicted (-generation:predict_ion_mobility true to predict them)
 ```
 
+**1/K0 correction.** The 1/K0 that Mason-Schamp gives for the stock CCS
+model's prediction (N2, 305 K; the constants of AlphaPeptDeep's own
+conversion, alphabase `ccs_to_mobility_bruker`, within 5e-5) is low on
+diaPASEF: by a median 0.014 1/K0 on the timsTOF benchmark (PXD029836), more
+at low mobility and higher charge. `timstof.yaml` therefore carries a
+`mobility_correction`: straight lines, per precursor charge, from the derived
+to the observed 1/K0, fitted on two public timsTOF Pro runs of another study
+(PXD041421, two instruments). On PXD029836, which the fit did not see, the
+median |Δ1/K0| of held-out proteins falls from 0.0154 to 0.0104 and the bias
+from −0.0137 to −0.0002 (DIA-NN 2.0's own prediction: 0.0102). The CCS column
+is unchanged; only 1/K0 is corrected. The lines belong to the CCS model they
+were fitted for (`ccs_model_fnv1a64`): a tuned CCS model, which learned the
+run's own 1/K0, is not corrected, and the log says so.
+`-generation:mobility_correction off` writes the uncorrected value (0.12.1's).
+The recipe records `mobility_correction_applied` (the file and the lines).
+
 `-generation:predict_ion_mobility` overrides the instrument: `auto` (default)
 decides by it, `true` always predicts CCS, `false` never does. With CCS
 predicted, `-generation:derive_ion_mobility` (default `true`) adds 1/K0;
@@ -236,7 +258,8 @@ without CCS it has no effect. Until 0.11.5 every library carried both. Apart
 from these two columns and the recorded recipe (`predict_ion_mobility` in the
 config, `im=none` in the fingerprint), an Orbitrap library is the one 0.11.5
 writes, and a timsTOF library differs in the recorded
-recipe and, since 0.13, in its default charges (2-4, timstof.yaml). DIA-NN
+recipe and, since 0.13, in its default charges (2-4) and its corrected 1/K0
+(both from timstof.yaml). DIA-NN
 1.7.12 and 2.0 load such a TSV or DIA-NN 2.0 Parquet library (2.0 reports its
 1/K0 as 0). `-tune_heads auto` (the default), `ccs` or `both` on such a
 library with a diaPASEF report trains on the run's observed 1/K0 and then adds

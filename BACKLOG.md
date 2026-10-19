@@ -5,16 +5,18 @@ is here rather than done.
 
 ## One-step mode: generate, tune and refine in one invocation
 
+**The owner's next feature candidate** (asked to add it, 2026-10-19).
+
 Adapting a library to a run takes at least two invocations: `generate`, then
 `tune`, `refine`, or `refine -tune`, which already tunes before it writes
-observed values. The user has to know which of about ninety options matter. Most users want one thing: *a library for this
-FASTA that fits this run*.
+observed values. Most users want one thing: *a library for this FASTA that
+fits this run*.
 
 Proposed command:
 
 ```bash
 DIALibGen -mode auto -in proteins.fasta -ids first_pass_report.parquet \
-  -out adapted.tsv -instrument timsTOF
+  -out adapted.tsv -generation:instrument timsTOF
 ```
 
 What it would do, in order, with one provenance record covering all stages:
@@ -27,26 +29,25 @@ What it would do, in order, with one provenance record covering all stages:
    the full library. After step 2 the whole library is in the run's RT units,
    which is the only combination in which that write-in is unit-safe.
 
-Simplified parameters. A small top-level set maps onto the existing namespaced
-options; everything else keeps its default and stays reachable through the
-namespaced options, INI or JSON.
+Already in 0.12.1, so not part of this item: instrument defaults from YAML
+files (`-generation:instrument` sets NCE, m/z windows, charges and ion
+mobility), `-tune_heads auto` (CCS only when the report has 1/K0), mode
+inference without `-mode` (a FASTA generates, a library converts), `-threads`
+defaulting to the physical cores, and a 23-option `--help`. Still missing:
 
-| Simple option | Maps to | Default |
+| Proposed | Maps to | Default |
 |---|---|---|
-| `-instrument NAME` | `-generation:instrument` and its NCE default | `QE` |
-| `-nce N` | `-generation:nce` | instrument default |
-| `-charges 2 3 4` | `-generation:precursor_charges` | as `generate` |
-| `-missed_cleavages N` | `-generation:missed_cleavages` | `1` |
-| `-variable_mods ...` | `-generation:variable_modifications` | none |
+| `-mode auto`, or inferring it from a FASTA `-in` with `-ids` (today refused) | `generate`, then `tune` or `refine -tune` | |
 | `-observed none\|rt\|rt+im` | refinement write-in flags with `-no_filter` | `none` |
 | `-effort fast\|default\|thorough` | `train:epochs`, `stop:*`, `cohort:*` presets | `default` |
-| `-keep_models DIR` | `-tune_out_models` | temporary |
+
+`-tune_out_models` keeps the models as in `tune`; without it they are temporary.
 
 Why it is here rather than done:
 
-- The report has to come from a first-pass search. DIALibGen does not run a
-  search engine, and the report's precursors must match the library's digest
-  and modification settings. The mode needs a compatibility check that fails
+- The report has to come from a first-pass search (or `-run`, experimental),
+  and the report's precursors must match the library's digest and
+  modification settings. The mode needs a compatibility check that fails
   early with a useful message instead of training on a handful of matches.
 - The default for `-observed` needs evidence. The 0.10.1 benchmark found no
   reliable benefit from observed-value write-in, so the proposal defaults to
@@ -58,18 +59,6 @@ Why it is here rather than done:
   byte-identical, Parquet identical apart from provenance metadata. A separate
   `tune` followed by `refine -no_filter` is not the reference; refine refuses
   observed RT with the filter off unless the RT head is tuned in the same call.
-
-## `-run` on Windows: Evidence depends on -threads in the ninth digit
-
-On the Windows CI runner (MSVC, Intel OpenMP) the identification report's
-`Evidence` (the discriminant score) differs between `-threads 1` and `4` by
-about 1e-9 relative on every row; every other column, the q-values and the
-refined library's rows are the same. Linux and macOS write the same bytes at
-any thread count. Not yet located: the classifier's folds run serially inside
-each fold, so the suspects are the extraction's feature values (OpenSWATH on
-MSVC) or per-thread floating-point state (denormal flags) of the OpenMP
-workers. `identify_e2e` checks Evidence on Windows within 1e-6 relative until
-this is found.
 
 ## Done
 
@@ -84,6 +73,25 @@ this is found.
 - OpenSWATH export: `-out library.pqp` and `-out_format openswath_tsv`,
   written by OpenMS (0.11.3).
 - Persistent worker pool (0.11.3; item 1 below).
+- GPU timing on the H100 (item 4 below): `generate` of the whole proteome in
+  77.7 s on one H100 and 48.3 s on two (0.12.1, report section 3); the Linux
+  packages ship ONNX Runtime's CUDA build but not CUDA or cuDNN (0.12.1).
+- Four-arm performance comparison (laptop CPU, laptop with the Apple GPU,
+  server CPU, server with one and two H100): the 0.12.1 report
+  (`docs/report/`, section 3). Energy was not measured.
+
+## Accepted trade-offs (owner decisions)
+
+- `-run` on Windows: the identification report's `Evidence` differs between
+  `-threads 1` and `4` in about the ninth digit (MSVC, Intel OpenMP; Linux and
+  macOS write the same bytes); q-values and the refined library are the same,
+  so IDs are unaffected. Accepted by the owner 2026-10-19. Evidence:
+  `identify_e2e` checks Evidence on Windows within 1e-6 relative (commit 14e74ba).
+- Linux packages are about 760-800 MB because they ship ONNX Runtime's CUDA
+  build (0.12.1). Accepted by the owner 2026-10-19.
+- CoreML (Apple GPU) libraries equal the CPU's to float rounding (intensities
+  within 1e-4, RT and CCS identical), not byte for byte. Accepted by the owner
+  2026-10-19.
 
 ## `generate` is several times slower than DIA-NN's predictor
 
@@ -110,6 +118,11 @@ Why it is here rather than done: where the 18 minutes go (digest, the three
 models, writing) has not been measured.
 
 ## Benchmark the ONNX predictors on a GPU (H100)
+
+Status 0.12.1: the whole-proteome timing, tune on CUDA and the GPU-versus-CPU
+differences are measured (Done above, report sections 3 and 4). Still open:
+per-model throughput settings (batch size, sessions, CUDA streams, fp16) and
+the prediction step of `-run` on the GPU.
 
 Every timing so far is CPU-only. On an H100 node, `generate` with the MS2 model
 on CUDA took 6:10-6:27 wall for the whole proteome, about 2.7 x the 96-thread
@@ -152,7 +165,7 @@ the pruned MS2 model, streamed writing during MS2, and the small items
    search-decoy prediction, and a larger prefilter block than 8,192 pairs. The
    prediction step is about 1,464 s of the timsTOF `-run`; an estimated -500 s.
    Acceptance: `ids.parquet` identical on a reduced cell and on one full run.
-   **Done on perf/run-speed** (with B2 decoy tokens and IonLadder, and B3:
+   **Done in 0.11.3** (perf/run-speed, with B2 decoy tokens and IonLadder, and B3:
    the searched pairs keep the prefilter's assays): the full timsTOF run
    1:26:29 -> 1:16:16, the prefilter 1,427 -> 1,028 s, mostly 0.11.2's
    predictor; report table identical (design document, "The prediction port
@@ -165,45 +178,10 @@ the pruned MS2 model, streamed writing during MS2, and the small items
    (9,100 vs 6,386 CPU-s at 8 threads). First profile ONNX Runtime per operation
    (MS2 transformer layers, RT/CCS LSTMs). Anything that changes outputs
    (reduced precision; int8 was rejected) needs an owner decision.
-4. **GPU re-benchmark** once 0.11.2's host-side changes are in (target: well
-   under 100 s per whole proteome on one H100), and decide on bundling
-   cuDNN 9 for CUDA 12 with a GPU package (about 1.5 GB of NVIDIA libraries,
-   licence notices, no GPU runner in CI).
+4. **GPU re-benchmark** (done in 0.12.1: 77.7 s per whole proteome on one
+   H100). cuDNN 9 is not bundled; the Linux packages ship ONNX Runtime's CUDA
+   build, and CUDA 12 and cuDNN 9 come from the system.
 5. **Reuse predictions across runs** (`-run` predicts the same library for every run).
 6. **Hardware cache counters** (`perf`) once IBMI allows them, to plot cache
    misses per phase. The 2026-10-11 analysis inferred cache behaviour from
    placement and batch-size experiments instead.
-
-## Final performance comparison: four platform arms
-
-The final performance report compares the same workloads on four arms:
-
-| Arm | Machine | Compute used |
-|---|---|---|
-| Laptop CPU | MacBook Pro, Apple M4 Max (12 performance + 4 efficiency cores, 128 GB) | CPU only |
-| Laptop CPU + GPU | same MacBook Pro, 40-core Apple GPU | CPU plus GPU (ONNX Runtime CoreML execution provider for prediction; LibTorch MPS for fine-tuning) |
-| Server CPU | IBMI H100 node (2 x AMD EPYC 9654, 192 cores) | CPU only |
-| Server CPU + GPU | same node, NVIDIA H100 (one and two GPUs) | CPU plus CUDA, cuDNN 9 for CUDA 12 |
-
-Workloads: whole-proteome `generate`, `tune` of the RT (and CCS) model on one
-run's identifications, and `refine`; the prediction step of `-run` once it is
-on main. Compare each arm against DIA-NN 2.0 on the same machine (its predictor
-is CPU-only) and report wall time, CPU time, peak memory, energy where the
-platform reports it (macOS powermetrics, nvidia-smi power draw), and output
-equivalence against the server-CPU library (byte- or content-identical on CPU;
-per-column differences for GPU paths, TF32 off by default).
-
-Rules as for the 2026-10-11 analysis: every DIALibGen run traced, at least
-4 threads, one run per configuration plus a stated noise measurement for the
-headline numbers, quiet machines (load recorded), the same FASTA, settings and
-binaries per release.
-
-Open work before this can run:
-- **Apple GPU path.** DIALibGen has no CoreML/MPS execution path yet. ONNX
-  Runtime's CoreML provider must support the PeptDeep graphs (check operator
-  coverage; fall back loudly per model); LibTorch MPS for training. Equivalence
-  against the CPU output must be measured.
-- **A signed macOS build with the speed changes,** which 0.11.2 provides for the
-  CPU arm.
-- **Server arm:** spock or data. Both need cuDNN 9 for CUDA 12; see
-  HANDOFF-cuDNN-GPU-nodes.md. Timing must avoid other users' load.

@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-library-') as directory:
             assert ma[key] == mb[key], key
     ca, cb = json.loads(ma[b'odia.config_json']), json.loads(mb[b'odia.config_json'])
     differ = {k for k in set(ca) | set(cb) if ca.get(k) != cb.get(k)}
-    assert differ <= {'nce_source', 'precursor_mz_source', 'fragment_mz_source', 'precursor_charges_source'}, differ
+    assert differ <= {'nce_source', 'nce_by_charge_source', 'precursor_mz_source', 'fragment_mz_source', 'precursor_charges_source'}, differ
     assert cb['instrument_defaults']['instrument'] == 'astral.yaml'
 
     # -threads: all physical cores unless the command line or the INI says otherwise.

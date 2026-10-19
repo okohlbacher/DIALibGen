@@ -89,6 +89,39 @@ Acceptance: the report's intensity numbers, figure and limits come from this
 script, with the ion set, convention, tolerance and precursor count stated.
 The replicate ceiling is given when a second run exists.
 
+## A linear RT scale for untuned libraries: measured, not adopted
+
+The timsTOF benchmark suggested that the stock RT model's raw output, being
+less linear in run time than DIA-NN's iRT (straight-line map 2.83 against
+1.81 min), was why DIA-NN 2.0 found 4.1 % fewer precursors with DIALibGen's
+untuned library on timsTOF. The raw output saturates for late peptides: on
+every run checked, raw 0.85-0.88 spans the last fifth of the gradient.
+
+Measured (2026-10-19): a fixed monotone map (26 knots) fitted on six public
+DIA runs of other studies (PXD016662, PXD022589 ×2, PXD029738, PXD047184,
+PXD047901; DIA-NN 2.0 with untuned DIALibGen libraries), applied to the
+untuned library before the search. It makes the RT more linear everywhere
+(straight-line error on PXD029836 2.94 → 2.60 min, on Astral 0.372 → 0.321 min)
+and changes DIA-NN 2.0's precursors at 1 % FDR by:
+
+| data (runs) | 0.12.1 raw RT | linear map | change |
+|:--|--:|--:|--:|
+| Astral, ProteoBench (01 / 02 / 03) | 89,232 / 90,362 / 89,318 | 90,889 / 91,718 / 90,669 | +1.9 / +1.5 / +1.5 % |
+| timsTOF Pro, PXD041421 (3197 / 9898) | 83,296 / 109,045 | 84,317 / 109,692 | +1.2 / +0.6 % |
+| timsTOF Pro 2, PXD029836, charges 2-4 (01 / 02) | 130,064 / 129,908 | 127,723 / 127,527 | −1.8 / −1.8 % |
+
+A map fitted on PXD029836 run 01 itself (the best possible straight
+line for that gradient) also lost identifications there (−0.5 / −0.7 %), with
+DIA-NN's RT window narrowed from 8.9 to 7.6 min. The non-linear RT scale is
+therefore not why that benchmark trails DIA-NN untuned, and the map was not
+made the default: it changes every library for a mean gain of about 0.2 % per dataset
+over these datasets and loses on the one it was meant for. Candidate, if the
+owner wants it: an opt-in `-generation:rt_scale linear` (the implementation,
+the table and the fitting script are kept in the project's evaluation notes,
+`release-validation/timstof-improvements/`). The remaining untuned timsTOF gap
+is open; candidates are fragment intensities (the collision energy, below and
+`timstof.yaml`) and the z=3 fragments.
+
 ## Fragment charge 3 for 3+ and 4+ precursors (needs a retrained MS2 head)
 
 Measured on the timsTOF benchmark (PXD029836, raw diaPASEF spectra, all b/y

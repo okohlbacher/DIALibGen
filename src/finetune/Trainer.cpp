@@ -633,9 +633,10 @@ namespace ODIA::tune
     // TorchScript fork), but ATen sizes the pool to the hardware threads when
     // something first asks for it. ATen accepts the size once per process and
     // only before inter-op work started -- the CCS head runs in the same
-    // process as the RT head. Intra-op threads (-machine:threads) are what
-    // the training loop uses; their count fixes ATen's reduction order and
-    // with it the tuned weights, so it is recorded in the provenance.
+    // process as the RT head. Intra-op threads (-machine:train_threads) are
+    // what the training loop uses; on Linux their count changes the tuned
+    // weights (oneDNN's convolutions; not with DLR_NO_MKLDNN=1), on macOS
+    // (no oneDNN) it does not. It is recorded in the provenance.
     static std::once_flag interop_once;
     std::call_once(interop_once, [] { try { at::set_num_interop_threads(1); } catch (const c10::Error&) {} });
     if (dev.is_cpu()) { torch::set_num_threads(std::max(1, p.threads)); }

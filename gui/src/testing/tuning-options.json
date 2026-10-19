@@ -179,7 +179,7 @@
     "name": "machine:train_threads",
     "kind": "int",
     "value": 0,
-    "description": "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend on the count, which is recorded; 16 on a Mac reproduces a Linux model",
+    "description": "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). On Linux the tuned weights depend on the count (recorded); on macOS they do not",
     "min": 0.0
   },
   {

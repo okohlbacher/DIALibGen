@@ -380,7 +380,7 @@ deprecated). On one H100, tuning the RT head on an Astral
 run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
 took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
-CPU training.
+CPU training, and two CUDA runs need not agree bit for bit either.
 
 `-machine:train_threads` (deprecated name: `-machine:threads`) is the number of
 CPU threads LibTorch trains with. Each
@@ -388,18 +388,20 @@ training step is a chain of small operations, so the count stops paying
 early: for the RT head on an Astral run (77,029 sequences) on a 2 x 96-core
 EPYC 9654, an epoch took 11.3 s at 4 threads, 6.7 s at 8, 4.4 s at 16, 3.7 s
 at 32 and 3.5 s at 64, for 380, 450, 600, 990 and 1,850 CPU-seconds of
-training over 8 epochs. The tuned weights depend on the thread count (it
-fixes the order of LibTorch's reductions): they are reproducible with the
-same build at the same count, which `.tune.json` and the tuned ONNX metadata
-record as `threads`. The default (`0`) is a fixed number per platform, not
+training over 8 epochs. On Linux the tuned weights depend on the thread
+count: 4, 16 and 32 threads gave slightly different models (tuned RT a median
+of 0.01-0.02 min apart, at most 0.26 min), and the same count gave the same model
+bit for bit. On a Mac the count does not change the model (4, 8 and 16
+threads gave identical weights). `.tune.json` and the tuned ONNX metadata
+record the count as `threads`. The default (`0`) is a fixed number per platform, not
 derived from `-threads` or the machine: **16 on Linux and Windows, 8 on
 macOS**. On an M4 Max (12 performance and 4 efficiency cores) every operator
 forks LibTorch's 16-thread OpenMP team and the join waits for the efficiency
 cores' share: 12.4 s per epoch at 16 threads against 8.1 s at 8 (and 4), with
-2,299 s of system time in an 847-s tune. A Mac reproduces a Linux or Windows
-model with `-machine:train_threads 16`, and the other way round with `8`. Up
-to 0.11.2 the default was 4: tuned models made with default settings differ
-from 0.11.2's, and `-machine:train_threads 4` reproduces them. On Apple silicon
+2,299 s of system time in an 847-s tune. A Mac and a Linux machine do not
+train identical models at any count; Windows has not been measured. Up to
+0.11.2 the default was 4: on Linux, tuned models made with default settings
+differ from 0.11.2's, and `-machine:train_threads 4` reproduces them. On Apple silicon
 the default device is the GPU anyway (`-machine:device auto` = `mps`, below),
 where the count does not apply.
 
@@ -727,7 +729,8 @@ it does so before anything is predicted.
   training on MPS against 55 s on 16 CPU threads. MPS training is not
   bit-identical to CPU training (the provenance says so under
   `reproducibility`); the tuned weights differed by an L2 norm of 0.001 of a
-  total change of 8.62 in that run. The re-prediction after tuning runs on
+  total change of 8.62 in that run. Two MPS runs on the same Mac differ from
+  each other as well (tuned RT a median of 0.004 min apart, at most 0.37 min). The re-prediction after tuning runs on
   the CPU on a Mac (CoreML has no LSTM operator for RT and CCS).
 
 ## Messages and diagnostics
@@ -900,7 +903,8 @@ sidecar. A forced termination (including GUI Cancel) may also leave a hidden
 that abandoned directory can be removed. Atomic replacement prevents readers
 from seeing partial writes; it does not promise durability after a power loss.
 
-The training seed is reproducible within the same build and device setup;
+The training seed is reproducible within the same build and device setup
+(on Linux, also the same `-machine:train_threads`; not on a GPU);
 numeric results can differ across platforms, runtimes and CUDA kernels. The
 wall-clock training budget is checked at epoch boundaries and includes report
 loading and validation; final evaluation and export can exceed that budget.

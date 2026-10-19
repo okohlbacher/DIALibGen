@@ -347,8 +347,8 @@ void DIALibGen::registerRefinementOptions_()
                           "included), ane (CPU and Neural Engine), cpu (checks)", false, advanced_("machine:coreml_units"));
     setValidStrings_("machine:coreml_units", {"gpu", "all", "ane", "cpu"});
     registerIntOption_("machine:train_threads", "<n>", 0,
-                       "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend "
-                       "on the count, which is recorded; 16 on a Mac reproduces a Linux model", false,
+                       "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). On Linux the tuned weights "
+                       "depend on the count (recorded); on macOS they do not", false,
                        advanced_("machine:train_threads"));
     registerIntOption_("machine:threads", "<n>", 0, deprecated("-machine:train_threads"), false, advanced_("machine:threads"));
     registerStringOption_("machine:cores", "<which>", "all",

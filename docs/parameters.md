@@ -101,7 +101,7 @@ The schema lists all modes. Without `-mode`, a FASTA generates and a library con
 | `-stop:select` | string | `calibrated_sd` | calibrated_sd,rmse |  | Selection metric on the validation cohort |
 | `-machine:device` | string | `auto` |  | yes | Auto: the GPU when one is usable and pays off (NVIDIA: CUDA, RT and CCS with cuDNN 9; Apple: CoreML for MS2 of large libraries, MPS for fine-tuning), else the CPU; cpu: CPU only (the reference); also cuda[:N], coreml, mps |
 | `-machine:coreml_units` | string | `gpu` | gpu,all,ane,cpu |  | CoreML compute units: gpu (CPU and GPU, fastest), all (Core ML's choice, Neural Engine included), ane (CPU and Neural Engine), cpu (checks) |
-| `-machine:train_threads` | int | `0` | 0: |  | CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). The tuned weights depend on the count, which is recorded; 16 on a Mac reproduces a Linux model |
+| `-machine:train_threads` | int | `0` | 0: |  | CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). On Linux the tuned weights depend on the count (recorded); on macOS they do not |
 | `-machine:cores` | string | `all` | all,performance |  | MacOS: which cores -threads 0 counts: all, or performance (saves energy, not time). Does not change the output |
 | `-machine:no_cudnn` | bool | `false` |  |  | CUDA fine-tuning without cuDNN (when only its loader shim is installed, as in pytorch.org's libtorch zips); slower |
 | `-machine:seed` | int | `20260803` | 0: |  | Seed of the training subsample and batch order |

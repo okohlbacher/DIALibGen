@@ -124,9 +124,11 @@ namespace ODIA::tune
   /// and Windows; 8 on macOS, where every operator forks LibTorch's OpenMP
   /// team and 16 threads were measured 1.53x slower per epoch than 8 on an
   /// M4 Max (12 performance + 4 efficiency cores, 2,299 s of system time in
-  /// a 847-s tune). The tuned weights depend on the count (ATen's reduction
-  /// order), which the provenance records; -machine:threads 16 on a Mac
-  /// reproduces a Linux or Windows model.
+  /// a 847-s tune). On Linux the tuned weights depend on the count (oneDNN's
+  /// convolution kernels: with DLR_NO_MKLDNN=1, 4 and 16 threads agree bit for
+  /// bit), which the provenance records; the macOS build has no oneDNN and
+  /// trains the same weights at any count. No count makes a Mac reproduce a
+  /// Linux model.
   int defaultTrainingThreads();
 
   const char* headName(HeadKind h);

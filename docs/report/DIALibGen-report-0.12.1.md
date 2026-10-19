@@ -138,8 +138,8 @@ precursors missed in the first run stay missed, and the error-rate estimate refe
    intensities, precursor keys and m/z are unchanged.
 8. Record the recipe (cohorts, settings, seed, thread count) in the Parquet output or the `.refine.json`
    sidecar of a TSV, and in the tuned ONNX files, which are kept only with `-tune_out_models`. CPU training uses
-   `-machine:threads` (16 on Linux and Windows, 8 on macOS); the documentation states that the tuned weights
-   may differ between thread counts (on our Mac, 8 and 16 gave identical weights). Training on a GPU (CUDA in
+   `-machine:train_threads` (16 on Linux and Windows, 8 on macOS); on Linux the tuned weights depend on that
+   number, on macOS they do not (4, 8 and 16 threads gave identical weights). Training on a GPU (CUDA in
    a source build, or Metal on Apple silicon) is not bit-identical to the CPU.
 
 On data without ion mobility (Astral, Orbitrap), pass `-tune_heads rt`: the default `both` needs observed
@@ -379,7 +379,7 @@ case, against 0.607 min for the pretrained model. That metric is the tune's inte
 \|ΔRT\| of section 4. On the laptop CPU, training is the slow part (578 of 639 s on 8 threads, the macOS
 default since 0.11.4; 0.11.3 trained on 16 threads in 768 s, with 2,299 s of system time against 501 s now),
 and training on the Apple GPU, the default on Apple silicon, brings it to 40 s. On this Mac, 8 and 16 training
-threads gave identical tuned weights (the documentation states that they may differ). Training is not
+threads gave identical tuned weights; on Linux the count changes them slightly ("Threads and GPUs"). Training is not
 bit-identical across platforms: the laptop CPU's tuned RTs differ from the server's by a median of 0.022 min
 (maximum 0.53), the GPU-trained ones from the laptop CPU's by 0.016 min (maximum 0.55). Part of the
 0.11.3-to-0.11.4 differences on the laptop may be conditions: some 0.11.3 runs started at a higher load.
@@ -799,8 +799,9 @@ the recipe and the checksums of the FASTA and models.
 Since 0.12, `-threads` defaults to one thread per physical core (0.11 followed the OpenMS default of 1; an INI's
 value is respected). CPU output does not depend on the thread count. Fine-tuning on the CPU trains on
 `-machine:train_threads` threads (0.11: `-machine:threads`, still accepted in 0.12; default 16 on Linux and
-Windows, 8 on macOS); the documentation states that the tuned weights may depend on that number, so keep it
-fixed when you need identical models. `-machine:device auto` (the default) picks the prediction route and names it
+Windows, 8 on macOS); on Linux the tuned weights depend on that number (4, 16 and 32 threads: tuned RT a median
+of 0.01-0.02 min apart), so keep it fixed when you need identical models; on macOS they do not. Training on a GPU
+(CUDA, Metal) differs from the CPU and need not repeat bit for bit. `-machine:device auto` (the default) picks the prediction route and names it
 in one `device:` line. On Apple silicon it trains on the GPU (Metal) and, from 50,000 precursors per CPU thread,
 predicts the fragments there (CoreML); such a library agrees with the CPU library to float rounding, not byte for
 byte. `-machine:device cpu` keeps everything on the CPU, `-machine:device coreml` predicts the fragments on the

@@ -12,6 +12,10 @@ This project follows [Semantic Versioning](https://semver.org/).
   same session, the laptop timings of 0.11.4 (CPU, CoreML with a cold and a warm cache, MPS and CPU
   tuning), the entrapment check, and the unchanged quality and identification sections; also
   attached to the 0.12.1 release.
+- Docs and `--helphelp` on training threads, corrected from measurements: on
+  Linux the tuned weights depend on `-machine:train_threads`, on macOS they do
+  not, and no count makes a Mac reproduce a Linux model (the docs said 16 did);
+  two MPS (Apple GPU) tunes differ from each other.
 
 ## [0.12.1] — 2026-10-16
 

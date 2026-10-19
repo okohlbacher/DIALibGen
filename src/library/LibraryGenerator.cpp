@@ -2228,7 +2228,7 @@ namespace ODIA
     if (!nce_by_charge.empty())
     {
       ps << ";ncebycharge=";
-      for (const auto& [z, v] : nce_by_charge) { ps << z << ":" << v << "."; }
+      for (const auto& [z, v] : nce_by_charge) { ps << z << ":" << exact(v) << "."; }
     }
     ps
        << ";inst=" << instrument

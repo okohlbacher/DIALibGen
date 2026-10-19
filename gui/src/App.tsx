@@ -14,7 +14,7 @@ const record = (v: unknown): v is Values => !!v && typeof v === 'object' && !Arr
 const SAVED_VERSION = 2
 const SAVED_VERSIONS = [1, SAVED_VERSION]
 // Blank in the form = the tool decides; the key is then left out of the config it is sent.
-const AUTO_KEYS = ['nce', 'precursor_mz', 'fragment_mz', 'precursor_charges']
+const AUTO_KEYS = ['nce', 'nce_by_charge', 'precursor_mz', 'fragment_mz', 'precursor_charges']
 const autoBlanks = (): Values => Object.fromEntries(AUTO_KEYS.map((key) => [key, null]))
 // Deprecated in 0.12 (removed in 0.13). Skipped by name, not by the INI's advanced
 // flag: most training options are advanced now and must still be offered.

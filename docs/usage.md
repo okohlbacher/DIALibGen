@@ -272,7 +272,12 @@ is unchanged; only 1/K0 is corrected. The lines belong to the CCS model they
 were fitted for (`ccs_model_fnv1a64`): a tuned CCS model, which learned the
 run's own 1/K0, is not corrected, and the log says so.
 `-generation:mobility_correction off` writes the uncorrected value (0.12.1's).
-The recipe records `mobility_correction_applied` (the file and the lines).
+The recipe records `mobility_correction_applied` (the file and the lines) for
+the reader; on replay the lines come from the instrument's file again, so a
+library made with `-instrument_file` replays with the same file
+(`-config recipe.json -instrument_file mine.yaml`). A recipe written before
+0.13 (it has `nce_source` but no `mobility_correction`) replays without the
+correction, as it was made.
 
 `-generation:predict_ion_mobility` overrides the instrument: `auto` (default)
 decides by it, `true` always predicts CCS, `false` never does. With CCS

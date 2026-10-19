@@ -737,6 +737,14 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         apply_(recipe, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
                recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction, nce_by_charge);
         if (nce_by_charge) { nce_by_charge_source = "config"; }
+        // A recipe written before 0.13 (it records nce_source, but has no
+        // mobility_correction) replays with the 1/K0 it was made with.
+        if (recipe.contains("nce_source") && !recipe.contains("mobility_correction"))
+        {
+          mobility_correction = "off";
+          writeLogInfo_("the recipe predates the 1/K0 correction (no mobility_correction): replayed without it "
+                        "(-generation:mobility_correction auto to apply it)");
+        }
         instrument_in_config = recipe.contains("instrument");
         if (recipe.contains("precursor_mz")) { precursor_mz_source = "config"; }
         if (recipe.contains("fragment_mz")) { fragment_mz_source = "config"; }
@@ -777,6 +785,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
              irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction, nce_by_charge);
       if (automatic_nce) { nce_was_set = false; }
+      // An explicit -generation:nce is one NCE for every charge, also over a
+      // recipe's nce_by_charge.
+      if (nce_source == "TOPP") { nce_by_charge = std::map<int, double>{}; nce_by_charge_source = "TOPP"; }
     }
     catch (const std::exception& e)
     { writeLogError_(std::string("generation: ") + e.what()); return ILLEGAL_PARAMETERS; }

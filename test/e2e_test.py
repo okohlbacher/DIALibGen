@@ -142,7 +142,7 @@ def main(binary, fasta, model_dir, workdir):
     check(any(v[0] == 3 for v in mixed.values()) and
           all(same(v, (at20 if v[0] == 3 else at30)[k]) for k, v in mixed.items()),
           "nce_by_charge: 3+ spectra are the NCE 20 library's, the other charges the NCE 30 library's")
-    check("ncebycharge=3:20.000." in pq.read_schema("bycharge.parquet").metadata[b"odia.params"].decode(),
+    check("ncebycharge=3:20." in pq.read_schema("bycharge.parquet").metadata[b"odia.params"].decode(),
           "the per-charge NCE is in the cache fingerprint")
 
     pmz = np.array(d["Precursor.Mz"], dtype=float)

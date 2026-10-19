@@ -293,6 +293,18 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     replay.write_text(json.dumps({'instrument': 'timsTOF', 'nce_by_charge': {'2': 22, '3': 24}}))
     effective, log = config('-config', replay)
     assert effective['nce_by_charge'] == {'2': 22.0, '3': 24.0} and 'by precursor charge: 2+ 22 3+ 24; other charges 30' in log, (effective, log)
+    # an explicit -generation:nce is one NCE for every charge, over a recipe's map too
+    replay.write_text(json.dumps({'instrument': 'timsTOF', 'nce': 30, 'nce_by_charge': {'3': 20}}))
+    effective, _ = config('-config', replay, '-generation:nce', 28)
+    assert effective['nce'] == 28 and effective['nce_by_charge'] is None and effective['nce_by_charge_source'] == 'TOPP', effective
+    # a recipe written before 0.13 (nce_source, no mobility_correction) replays without the 1/K0 correction
+    replay.write_text(json.dumps({'instrument': 'timsTOF', 'nce': 30.0, 'nce_source': 'instrument-default:timsTOF',
+                                  'precursor_charges': [1, 2, 3, 4]}))
+    effective, log = config('-config', replay)
+    assert effective['mobility_correction'] == 'off' and 'predates the 1/K0 correction' in log, (effective, log)
+    replay.write_text(json.dumps({'instrument': 'timsTOF'}))
+    effective, _ = config('-config', replay)
+    assert effective['mobility_correction'] == 'auto', effective
     for bad, message in (({'nce_by_charge': {'x': 30}}, "nce_by_charge: 'x' is not a charge"),
                          ({'nce_by_charge': {'9': 30}}, "nce_by_charge: '9' is not a charge"),
                          ({'nce_by_charge': {'2': 300}}, 'nce_by_charge: the NCE of charge 2 must be'),

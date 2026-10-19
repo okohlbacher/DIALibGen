@@ -36,14 +36,20 @@ T = T[np.isfinite(T.obs) & np.isfinite(T.pred) & (T.obs > 0)]
 
 
 def fit_line(d):
+    if len(d) < 3:
+        raise SystemExit(f"too few training precursors for a line: {len(d)}")
     keep = np.ones(len(d), bool)
-    w = d.run.map(1.0 / d.run.value_counts()).values
     for _ in range(3):
+        # every run weighs the same among the precursors kept
+        kept_runs = d.run[keep]
+        w = d.run.map(1.0 / kept_runs.value_counts()).fillna(0).values
         W = np.sqrt(w[keep])
         A = np.column_stack([np.ones(keep.sum()), d.pred.values[keep]]) * W[:, None]
         a, b = np.linalg.lstsq(A, d.obs.values[keep] * W, rcond=None)[0]
         res = d.obs.values - a - b * d.pred.values
         sd = 1.4826 * np.median(np.abs(res[keep] - np.median(res[keep])))
+        if not sd > 0:
+            break   # an exact fit: nothing to trim
         keep = np.abs(res) <= 4 * sd
     return float(a), float(b), int(keep.sum())
 

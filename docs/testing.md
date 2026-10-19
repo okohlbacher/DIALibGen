@@ -140,6 +140,109 @@ Tests on synthetic reports prove software contracts; they do not establish
 improved proteomics performance. The qualified
 [benchmark results](benchmark.md) remain the scientific evidence.
 
+## Fragment-intensity accuracy (standard method)
+
+From October 2026 every fragment-intensity number in reports, benchmarks
+and release notes is measured with this method. It covers b **and** y ions at
+every fragment charge, read from the raw MS2 spectra. Any other observation
+source must be labelled as an exception.
+
+The earlier method scored predictions against a search engine's fragment
+export. DIA-NN 1.7.12's `--report-lib-info` gives six singly charged y ions
+per precursor, chosen by ordinal rather than intensity, so that method could
+not see b ions or doubly charged fragments.
+
+The method has two steps, both in `scripts/eval/fragment_intensity_eval.py`
+(numpy and pyarrow only):
+
+```bash
+# observed intensities of one run: identified precursors (DIA-NN report, Q.Value <= 0.01) + the run's mzML
+python3 scripts/eval/fragment_intensity_eval.py extract \
+  --report report.tsv --mzml run.mzML --out run.ions.parquet          # --ppm 10 --apex-halfwidth 1
+# score one or more libraries (the first is the paired reference); a second run's extraction as the noise ceiling
+python3 scripts/eval/fragment_intensity_eval.py score --ions run.ions.parquet \
+  --library DIALibGen=lib.parquet --library DIANN=other.parquet \
+  --replicate run02=run02.ions.parquet --out-prefix result
+```
+
+There are two extraction modes. Both write the same per-ion Parquet, so
+`score` treats them alike:
+
+| mode | input | apex | m/z match | default tolerance |
+|:--|:--|:--|:--|:--|
+| `fragment_intensity_eval.py extract` | mzML (Orbitrap, Astral; centroided) | the scan nearest the apex in the isolation window, ±1 scan | most intense centroid per scan, summed | 10 ppm |
+| `tims_extract.py` | Bruker `.d` (diaPASEF), DIA-NN 2.x report with `IM` | the frame nearest the apex in the diaPASEF window holding the precursor's m/z and apex 1/K0, ±1 frame; scans within ±0.02 1/K0 | all raw TOF peaks within the tolerance, summed | 15 ppm |
+
+```bash
+python3 scripts/eval/tims_extract.py --report report.parquet --d run.d \
+  --timsdata /path/to/libtimsdata.so --out run.ions.parquet           # --ppm 15 --im-halfwidth 0.02 --workers 16
+```
+
+`tims_extract.py` reads the `.d` through Bruker's timsdata library
+(`libtimsdata.so` or `timsdata.dll`). That library comes from Bruker's TDF SDK,
+and DIA-NN ships a copy in its installation directory. It is not part of this
+repository and is loaded only when `--timsdata` names it; a missing library
+stops with a message saying so. In the timsTOF mode the shared flag also
+requires the other precursor's apex 1/K0 within 2 × the 1/K0 half-width.
+
+**Extraction (mzML mode).** For each identified precursor:
+
+- **Scans.** It takes the MS2 scan nearest the report's apex RT, among the
+  scans whose isolation window contains the precursor m/z, plus one scan on
+  either side in the same window.
+- **Ions.** It considers every b and y ion with ordinal 1 to n−1, no neutral
+  loss, and fragment charge 1 to min(3, precursor charge), inside the scan
+  range.
+- **Intensity.** Each ion's intensity is the most intense centroid within
+  **10 ppm**, summed over those scans. 10 ppm suits Astral and Orbitrap data;
+  use 20 ppm for TOF analysers and say so.
+- **Unobserved ions** are kept with intensity 0.
+- **Ambiguous ions,** where two theoretical ions of the precursor lie within
+  2 × the tolerance of each other, are flagged and never scored.
+- **Shared ions** are flagged when the matched peak is also a b or y ion
+  (z ≤ 3) of another identified precursor whose elution range covers a used
+  scan in the same window. Narrow-window DIA is chimeric, so the shared flag
+  is the interference check.
+
+**Scoring.** Every predictor is scored on the same precursors and the same
+ions:
+
+- **Precursors:** those that every predictor contains and that have at least
+  three observed ions in the ion set.
+- **Ion sets:**
+  - `union`: the ions any of the given libraries stores.
+  - `theo2`: every theoretical ion, z ≤ min(2, precursor z).
+  - `theo3`: every theoretical ion, z ≤ min(3, precursor z).
+- **Conventions:** `zero` counts unobserved ions as 0; `excluded` keeps only
+  observed ions. Either way, an ion a library does not store is predicted 0. A
+  predictor with no intensity on any scored ion gets cosine 0, never a dropped
+  precursor, so a library missing a whole ion group (for example charge-3
+  fragments) is scored as a miss on that group, not hidden.
+- **Variants:** `all` and `unshared` (shared ions removed).
+
+**Outputs:**
+
+- the median cosine and spectral angle, with paired differences against the
+  first library;
+- a breakdown by ion type × fragment charge × precursor charge: theoretical
+  and observed ions per precursor, share of observed and of predicted
+  intensity, and cosine within the group;
+- per-precursor scores.
+
+**Report** `theo2`/`zero` as the headline figure, with `union`, `excluded`
+and `unshared` as sensitivity rows. Add the replicate ceiling (run 2 scored
+as a predictor of run 1 on the same ions) whenever a second run of the same
+sample exists.
+
+`test/check_fragment_intensity_eval.py` (ctest
+`fragment_intensity_eval`) checks the method on a synthetic run: apex choice,
+scan summing, the ppm cut, both conventions, the shared flag, the zero score
+for a predictor with nothing on a group, and all three library layouts
+(DIALibGen Parquet, DIA-NN Parquet and TSV). For `tims_extract.py` it checks
+only the import and the refusals, because CI has no Bruker library. On one
+diaPASEF run (300 precursors) the repository version gives the same
+intensities, for all 17,771 ions, as the copy the timsTOF benchmark used.
+
 ## macOS startup
 
 Older signed CLI archives showed very different first-launch times: 335 s for

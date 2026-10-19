@@ -212,6 +212,15 @@ if(ODIA_PYTHON)
            COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1 ${ODIA_PYTHON}
                    ${CMAKE_CURRENT_SOURCE_DIR}/compare_encoders.py
                    $<TARGET_FILE:odia_encode_dump>)
+
+  # The project's fragment-intensity benchmark (docs/testing.md), on a synthetic run
+  # whose answer is known: apex choice, scan summing, the ppm cut, both scoring
+  # conventions, the shared-peak flag and the three library layouts. Skips (77)
+  # without numpy or pyarrow.
+  add_test(NAME fragment_intensity_eval
+           COMMAND ${CMAKE_COMMAND} -E env PYTHONDONTWRITEBYTECODE=1 ${ODIA_PYTHON}
+                   ${CMAKE_CURRENT_SOURCE_DIR}/check_fragment_intensity_eval.py)
+  set_tests_properties(fragment_intensity_eval PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 # --------------------------------------------------------------- tier 3

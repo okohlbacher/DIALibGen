@@ -573,7 +573,7 @@ void DIALibGen::registerGenerationOptions_()
     {"precursor_mz", "<min max>", "Precursor m/z window; match it to the acquisition method. Default: the "
                                   "instrument's (Astral 380-980), else 350-1200"},
     {"fragment_mz", "<min max>", "Fragment m/z window. Default: the instrument's (Astral 150-2000), else 200-1800"},
-    {"precursor_charges", "<z>", "Precursor charges. Default: the instrument's (1-4 for every shipped instrument)"},
+    {"precursor_charges", "<z>", "Precursor charges. Default: the instrument's (timsTOF 2-4), else 1-4"},
     {"fixed_modifications", "<names>", "OpenMS names, e.g. 'Carbamidomethyl (C)'; give the option without a value for none"},
     {"variable_modifications", "<names>", "OpenMS names, e.g. 'Oxidation (M)'; at most "
                                           "-generation:max_variable_modifications (1) per peptide"},

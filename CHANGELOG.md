@@ -5,6 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed defaults
+
+- `timstof.yaml`: a timsTOF library without explicit charges has charges 2-4
+  (0.12.1: 1-4). On the timsTOF benchmark (PXD029836, three diaPASEF runs,
+  DIA-NN 2.0) charge 1 made the library 11.7 % larger and added 34-48
+  identified precursors per run (0.03 %); DIA-NN recommends a minimum charge of
+  2 on timsTOF. `-generation:precursor_charges 1 2 3 4` restores 0.12.1's
+  library.
+
 ### Changed
 
 - `docs/report/DIALibGen-report-0.12.1.md` and `.pdf` replace the 0.11.3 report: command lines in

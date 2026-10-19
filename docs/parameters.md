@@ -58,7 +58,7 @@ The schema lists all modes. Without `-mode`, a FASTA generates and a library con
 | `-generation:nce` | double | `-1.0` | -1.0:100.0 | yes | Collision energy; -1 = the instrument's (Lumos and Astral 25, others 30) |
 | `-generation:precursor_mz` | double list | (empty) |  | yes | Precursor m/z window; match it to the acquisition method. Default: the instrument's (Astral 380-980), else 350-1200 |
 | `-generation:fragment_mz` | double list | (empty) |  | yes | Fragment m/z window. Default: the instrument's (Astral 150-2000), else 200-1800 |
-| `-generation:precursor_charges` | int list | `1, 2, 3, 4` | 1:8 | yes | Precursor charges. Default: the instrument's (1-4 for every shipped instrument) |
+| `-generation:precursor_charges` | int list | `1, 2, 3, 4` | 1:8 | yes | Precursor charges. Default: the instrument's (timsTOF 2-4), else 1-4 |
 | `-generation:fixed_modifications` | string list | `Carbamidomethyl (C)` |  | yes | OpenMS names, e.g. 'Carbamidomethyl (C)'; give the option without a value for none |
 | `-generation:variable_modifications` | string list | (empty) |  | yes | OpenMS names, e.g. 'Oxidation (M)'; at most -generation:max_variable_modifications (1) per peptide |
 | `-generation:enzyme` | string | `Trypsin/P` |  | yes | Protease; Trypsin/P also cuts before P |

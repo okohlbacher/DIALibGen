@@ -84,7 +84,7 @@ const OVERLAY: Record<string, Overlay> = {
     group: 'core',
     auto: true,
     description:
-      'Unique charge states from 1 to 8. Match these to the acquisition method. Leave blank for the instrument’s (1-4 for every shipped instrument).'
+      'Unique charge states from 1 to 8. Match these to the acquisition method. Leave blank for the instrument’s (timsTOF 2-4, otherwise 1-4).'
   },
   precursor_mz: {
     group: 'core',

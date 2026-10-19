@@ -45,6 +45,7 @@ namespace ODIA::instruments
     std::string model_instrument;     ///< the MS2 model's slot: QE, Lumos, timsTOF, SciexTOF, ThermoTOF
     std::optional<bool> ion_mobility;
     std::optional<double> nce;
+    std::optional<std::map<int, double>> nce_by_charge;   ///< precursor charge -> NCE, over nce
     std::optional<Window> precursor_mz, fragment_mz;
     std::optional<std::vector<int>> precursor_charges;
     std::optional<MobilityCorrectionSpec> mobility_correction;

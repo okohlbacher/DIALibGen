@@ -1221,18 +1221,19 @@ namespace ODIA
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, const std::string& ms2_model_path, const DigestParams& params,
     float nce, const std::string& instrument, bool prefer_gpu, unsigned sessions,
-    const GpuOptions& gpu, Ms2Sink* sink)
+    const GpuOptions& gpu, Ms2Sink* sink, const std::map<int, float>& nce_by_charge)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
     if (library.precursorCount() == 0) { return 0; }
     const auto predictor = openMs2Predictor(ms2_model_path, prefer_gpu, sessions, gpu);
-    return predictFragmentIntensities(library, *predictor, params, nce, instrument, sessions, sink);
+    return predictFragmentIntensities(library, *predictor, params, nce, instrument, sessions, sink, nce_by_charge);
   }
 
   std::size_t LibraryGenerator::predictFragmentIntensities(
     Library& library, PeptDeepPredictor& predictor, const DigestParams& params,
-    float nce, const std::string& instrument, unsigned sessions, Ms2Sink* sink)
+    float nce, const std::string& instrument, unsigned sessions, Ms2Sink* sink,
+    const std::map<int, float>& nce_by_charge)
   {
     if (params.max_fragment_charge < 1 || params.max_fragment_charge > 2)
     { throw std::invalid_argument("max_fragment_charge must be between 1 and 2"); }
@@ -1437,7 +1438,40 @@ namespace ODIA
       std::vector<PeptDeepPredictor::Failure> failures;
       trace::Scope predict_step("predict", 2);
       predict_step.fields().rows = static_cast<std::int64_t>(current.last - current.base);
-      current.spectra = predictor.predictMS2(current.peptides, current.charges, nce, instrument, &failures);
+      // One call per collision energy in the block: precursors of a charge
+      // with an NCE of its own (nce_by_charge) form a call of their own. Their
+      // sequences are moved out and back, not copied.
+      std::map<float, std::vector<std::size_t>> by_nce;
+      for (std::size_t k = 0; k < current.charges.size(); ++k)
+      {
+        const auto it = nce_by_charge.find(current.charges[k]);
+        by_nce[it == nce_by_charge.end() ? nce : it->second].push_back(k);
+      }
+      if (by_nce.size() <= 1)
+      {
+        current.spectra = predictor.predictMS2(current.peptides, current.charges,
+                                               by_nce.empty() ? nce : by_nce.begin()->first, instrument, &failures);
+      }
+      else
+      {
+        current.spectra.assign(current.peptides.size(), PeptDeepPredictor::Spectrum{});
+        for (auto& [value, rows] : by_nce)
+        {
+          std::vector<AASequence> peptides(rows.size());
+          std::vector<int> charges(rows.size());
+          for (std::size_t r = 0; r < rows.size(); ++r)
+          {
+            peptides[r] = std::move(current.peptides[rows[r]]);
+            charges[r] = current.charges[rows[r]];
+          }
+          auto spectra = predictor.predictMS2(peptides, charges, value, instrument, &failures);
+          for (std::size_t r = 0; r < rows.size(); ++r)
+          {
+            current.peptides[rows[r]] = std::move(peptides[r]);
+            current.spectra[rows[r]] = std::move(spectra[r]);
+          }
+        }
+      }
       predict_step.end();
       host.get();
       previous = std::move(current);
@@ -2134,7 +2168,8 @@ namespace ODIA
                                                   double nce,
                                                   const std::string& instrument,
                                                   bool irt_rescale,
-                                                  const MobilityCorrection& mobility)
+                                                  const MobilityCorrection& mobility,
+                                                  const std::map<int, float>& nce_by_charge)
   {
     std::ostringstream ps;
     ps.imbue(std::locale::classic());          // a cache key must not follow the locale
@@ -2187,7 +2222,15 @@ namespace ODIA
        << ";rt=" << rt_model
        << ";frgmodel=" << ms2_model
        << ";ccsmodel=" << ccs_model
-       << ";nce=" << nce
+       << ";nce=" << nce;
+    // The per-charge NCE (an instrument file's nce_by_charge); absent for one
+    // NCE, the 0.12.1 key.
+    if (!nce_by_charge.empty())
+    {
+      ps << ";ncebycharge=";
+      for (const auto& [z, v] : nce_by_charge) { ps << z << ":" << v << "."; }
+    }
+    ps
        << ";inst=" << instrument
        // The RT column's DOMAIN, not just its values: raw 0..1 model output and
        // iRT are different scales of the same numbers, and without this token a

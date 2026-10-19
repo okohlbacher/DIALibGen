@@ -25,6 +25,16 @@ This project follows [Semantic Versioning](https://semver.org/).
   belong to the stock model, by its hash). `-generation:mobility_correction
   off` writes 0.12.1's 1/K0; the recipe records `mobility_correction_applied`.
 
+### Added
+
+- Instrument files take `nce_by_charge` (precursor charge → NCE, over the
+  file's `nce`), and a `-config` JSON `"nce_by_charge"`; the recipe records it
+  and its source, the fingerprint the energies. A sweep on two public diaPASEF
+  methods (PXD041421, PXD029836; all-charge b/y cosine from the raw spectra and
+  DIA-NN 2.0 identifications) found the best NCE following each method's
+  collision-energy ramp (30 on one, 20 on the other, for every charge), so
+  `timstof.yaml` keeps NCE 30 and sets none ([usage](docs/usage.md#instrument-defaults)).
+
 ### Changed
 
 - `docs/report/DIALibGen-report-0.12.1.md` and `.pdf` replace the 0.11.3 report: command lines in

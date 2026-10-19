@@ -307,8 +307,15 @@ namespace
                        const std::string& instrument, bool irt_rescale,
                        bool recompute_decoy_mz, const std::string& ion_mobility,
                        const std::string& irt_standards,
-                       const std::string& mobility_correction)
+                       const std::string& mobility_correction,
+                       const std::map<int, double>& nce_by_charge)
   {
+    json by_charge = nullptr;
+    if (!nce_by_charge.empty())
+    {
+      by_charge = json::object();
+      for (const auto& [z, v] : nce_by_charge) { by_charge[std::to_string(z)] = v; }
+    }
     return json{
       {"schema_version", kSchemaVersion},
       {"enzyme", p.enzyme},
@@ -331,7 +338,7 @@ namespace
       {"reserved_doubly_charged", p.reserved_doubly_charged},
       {"decoys", decoys},
       {"rt_model", rt_model}, {"ms2_model", ms2_model}, {"ccs_model", ccs_model},
-      {"instrument", instrument}, {"nce", nce},
+      {"instrument", instrument}, {"nce", nce}, {"nce_by_charge", by_charge},
       {"irt_rescale", irt_rescale},
       {"irt_standards", irt_standards},
       {"recompute_decoy_mz", recompute_decoy_mz}};
@@ -343,8 +350,9 @@ namespace
 {
   json generationDefaults()
   {
-    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto", "", "auto");
+    json j = effectiveConfig(ODIA::DigestParams{}, "none", "", "", "", 30, "QE", false, false, "auto", "", "auto", {});
     j.erase("schema_version");
+    j.erase("nce_by_charge");   // the instrument's, or a -config JSON's: not a TOPP option
     j.erase("irt_standards");   // the top-level -irt_standards
     j["nce"] = -1.0; // TOPP sentinel: use the instrument default.
     // Empty: the instrument's windows, else DigestParams' (resolved in generate_).
@@ -357,18 +365,18 @@ namespace
               double& nce, std::string& instrument, bool& irt_rescale,
               bool& recompute_decoy_mz, bool& nce_was_set, std::string& instrument_alias_of,
               std::string& ion_mobility, std::string& irt_standards,
-              std::string& mobility_correction)
+              std::string& mobility_correction, std::optional<std::map<int, double>>& nce_by_charge)
   {
     if (!j.is_object()) { throw std::runtime_error("config must be a JSON object"); }
     const json ref = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model,
                                      nce, instrument, irt_rescale,
-                                     recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction);
+                                     recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction, {});
     for (const auto& [k, v] : j.items())
     {
       // Recorded for the reader, not settings.
       if (k == "nce_source" || k == "instrument_named" || k == "model_instrument" || k == "precursor_mz_source" || k == "fragment_mz_source" ||
           k == "precursor_charges_source" || k == "instrument_defaults" ||
-          k == "mobility_correction_applied") { continue; }
+          k == "mobility_correction_applied" || k == "nce_by_charge_source") { continue; }
       if (!ref.contains(k)) { throw std::runtime_error("unknown config key: " + k); }
       (void)v;
     }
@@ -474,6 +482,27 @@ namespace
       if (!j["nce"].is_number() || j["nce"] <= 0 || j["nce"] > 100)
       { throw std::runtime_error("nce must be greater than 0 and at most 100"); }
       nce = j["nce"]; nce_was_set = true;
+    }
+    if (j.contains("nce_by_charge"))
+    {
+      // null: one NCE for every charge; an object: "charge": NCE over nce.
+      const json& v = j["nce_by_charge"];
+      std::map<int, double> by;
+      if (!v.is_null())
+      {
+        if (!v.is_object()) { throw std::runtime_error("nce_by_charge must be null or an object of \"charge\": NCE"); }
+        for (const auto& [key, value] : v.items())
+        {
+          std::size_t used = 0;
+          int z = 0;
+          try { z = std::stoi(key, &used); } catch (const std::exception&) { used = 0; }
+          if (used != key.size() || z < 1 || z > 8) { throw std::runtime_error("nce_by_charge: '" + key + "' is not a charge from 1 to 8"); }
+          if (!value.is_number() || value.get<double>() <= 0 || value.get<double>() > 100)
+          { throw std::runtime_error("nce_by_charge: the NCE of charge " + key + " must be greater than 0 and at most 100"); }
+          by[z] = value.get<double>();
+        }
+      }
+      nce_by_charge = by;
     }
     if (j.contains("irt_rescale")) { irt_rescale = j["irt_rescale"]; }
     if (j.contains("mobility_correction"))
@@ -690,6 +719,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     std::string ion_mobility = "auto";   // -generation:predict_ion_mobility, resolved below
     std::string irt_standards;           // "" = the bundled table
     std::string mobility_correction = "auto";   // -generation:mobility_correction, resolved below
+    std::optional<std::map<int, double>> nce_by_charge;   // set by a -config JSON; else the instrument's (below)
+    std::string nce_by_charge_source = "none";
     // Where the m/z windows came from: the recipe, the command line or INI,
     // else the instrument's method (or DigestParams' generic default).
     std::string precursor_mz_source = "default", fragment_mz_source = "default", charges_source = "default";
@@ -704,7 +735,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       {
         const json recipe = json::parse(in, nullptr, true, true);
         apply_(recipe, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
-               recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction);
+               recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction, nce_by_charge);
+        if (nce_by_charge) { nce_by_charge_source = "config"; }
         instrument_in_config = recipe.contains("instrument");
         if (recipe.contains("precursor_mz")) { precursor_mz_source = "config"; }
         if (recipe.contains("fragment_mz")) { fragment_mz_source = "config"; }
@@ -743,7 +775,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (automatic_nce) { overrides.erase("nce"); }
       else if (overrides.contains("nce")) { nce_source = "TOPP"; }
       apply_(overrides, p, decoys, rt_model, ms2_model, ccs_model, nce, instrument,
-             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction);
+             irt_rescale, recompute_decoy_mz, nce_was_set, instrument_alias_of, ion_mobility, irt_standards, mobility_correction, nce_by_charge);
       if (automatic_nce) { nce_was_set = false; }
     }
     catch (const std::exception& e)
@@ -815,6 +847,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
             : slot != generic.models.end() && slot->second.nce ? *slot->second.nce
             : ODIA::PeptDeepEncoder::defaultNce(model);
         nce_source = label;
+        // The instrument's per-charge NCE goes with its NCE: an explicit
+        // -generation:nce (one value) or a -config nce_by_charge replaces it.
+        if (!nce_by_charge && instrument_file && instrument_file->nce_by_charge)
+        {
+          nce_by_charge = *instrument_file->nce_by_charge;
+          nce_by_charge_source = label;
+        }
       }
       ion_mobility_default = instrument_file && instrument_file->ion_mobility ? *instrument_file->ion_mobility
                            : slot != generic.models.end() && slot->second.ion_mobility ? *slot->second.ion_mobility
@@ -867,8 +906,25 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     {
       std::ostringstream m;
       m << "NCE not set; using " << named << "'s default, " << nce;
+      if (nce_by_charge && !nce_by_charge->empty())
+      {
+        m << std::defaultfloat << " (by precursor charge:";
+        for (const auto& [z, v] : *nce_by_charge) { m << " " << z << "+ " << v; }
+        m << "; other charges " << nce << ")";
+      }
       writeLogInfo_(m.str());
     }
+    else if (nce_by_charge && !nce_by_charge->empty())
+    {
+      std::ostringstream m;
+      m << std::defaultfloat << "NCE by precursor charge (" << nce_by_charge_source << "):";
+      for (const auto& [z, v] : *nce_by_charge) { m << " " << z << "+ " << v; }
+      m << "; other charges " << nce;
+      writeLogInfo_(m.str());
+    }
+    const std::map<int, double> nce_charge = nce_by_charge ? *nce_by_charge : std::map<int, double>{};
+    std::map<int, float> nce_charge_f;
+    for (const auto& [z, v] : nce_charge) { nce_charge_f[z] = static_cast<float>(v); }
     // CCS and 1/K0 only where the instrument can use them, unless the
     // caller says otherwise. One line either way: the columns' absence (or
     // presence) is otherwise a surprise in the consumer.
@@ -967,7 +1023,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
 
     const auto recipe = [&]() {
       json eff = effectiveConfig(p, decoys, rt_model, ms2_model, ccs_model, nce, instrument, irt_rescale,
-                                 recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction);
+                                 recompute_decoy_mz, ion_mobility, irt_standards, mobility_correction,
+                                 nce_charge);
+      eff["nce_by_charge_source"] = nce_by_charge_source;
       // The 1/K0 correction applied, with the file it came from.
       if (mobility.active)
       {
@@ -1098,7 +1156,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       p, ODIA::DIANNLibraryFile::hashFile(rt_model),
       ODIA::DIANNLibraryFile::hashFile(ms2_model),
       p.predict_ion_mobility ? ODIA::DIANNLibraryFile::hashFile(ccs_model) : std::string("none"), nce, instrument,
-      irt_rescale, mobility);
+      irt_rescale, mobility, nce_charge_f);
     fp.decoy_method = decoys;
     fingerprint_phase.end();
     const auto finishFingerprint = [&]() {
@@ -1344,7 +1402,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         try
         {
           if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-                library, *ms2, p, static_cast<float>(nce), instrument, threads, sink.get()); miss)
+                library, *ms2, p, static_cast<float>(nce), instrument, threads, sink.get(), nce_charge_f); miss)
           { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
         }
         catch (...)
@@ -1371,7 +1429,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
         if (overlap) { rtPhase(logInfo); }
         if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
-              library, *ms2, p, static_cast<float>(nce), instrument, threads); miss)
+              library, *ms2, p, static_cast<float>(nce), instrument, threads, nullptr, nce_charge_f); miss)
         { throw std::runtime_error(std::to_string(miss) + " precursors have no predicted MS2 spectrum"); }
         ms2.reset();
         writeLogInfo_("after fragment selection: " + std::to_string(library.precursorCount()) + " precursors");

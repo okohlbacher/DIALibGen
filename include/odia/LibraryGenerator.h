@@ -7,6 +7,7 @@
 #include <odia/PeptDeepPredictor.h>
 
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -218,7 +219,8 @@ namespace ODIA
                                          const std::string& ccs_model,
                                          double nce, const std::string& instrument,
                                          bool irt_rescale,
-                                         const MobilityCorrection& mobility = {});
+                                         const MobilityCorrection& mobility = {},
+                                         const std::map<int, float>& nce_by_charge = {});
 
     /// Fill in predicted retention times, replacing the placeholders.
     ///
@@ -291,7 +293,8 @@ namespace ODIA
                                                   bool prefer_gpu = true,
                                                   unsigned sessions = 0,
                                                   const GpuOptions& gpu = {},
-                                                  Ms2Sink* sink = nullptr);
+                                                  Ms2Sink* sink = nullptr,
+                                                  const std::map<int, float>& nce_by_charge = {});
 
     /// The MS2 predictor, opened ahead of predictFragmentIntensities so that
     /// the caller knows its provider before the phases that precede MS2
@@ -319,10 +322,15 @@ namespace ODIA
     static bool predictsIonMobility(const std::string& request, const std::string& canonical_instrument);
 
     /// predictFragmentIntensities with a predictor from openMs2Predictor.
+    /// @param nce_by_charge the collision energy of precursors of a charge, where
+    ///        it differs from @p nce (an instrument file's nce_by_charge); a block
+    ///        whose precursors all have one NCE is predicted in one call, as
+    ///        without it.
     static std::size_t predictFragmentIntensities(Library& library, PeptDeepPredictor& predictor,
                                                   const DigestParams& params, float nce,
                                                   const std::string& instrument, unsigned sessions,
-                                                  Ms2Sink* sink = nullptr);
+                                                  Ms2Sink* sink = nullptr,
+                                                  const std::map<int, float>& nce_by_charge = {});
 
     /// The line mapping the RT model's raw output onto the iRT scale.
     struct IrtCalibration

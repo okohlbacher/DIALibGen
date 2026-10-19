@@ -126,6 +126,25 @@ def main(binary, fasta, model_dir, workdir):
                        for q, v in zip(z, np.array(off["IM"], dtype=float))])
     check(np.allclose(im, expect, atol=2e-6), "the corrected 1/K0 is the instrument file's line applied to the uncorrected one")
 
+    # nce_by_charge: precursors of a listed charge are predicted at its NCE,
+    # the rest at the instrument's -- each the library one NCE would give.
+    with open("bycharge.yaml", "w") as f:
+        f.write("name: By Charge\nmodel_instrument: timsTOF\nion_mobility: false\nnce: 30\nprecursor_charges: [2, 3, 4]\nnce_by_charge: {3: 20}\n")
+    run("bycharge.parquet", None, ["-instrument_file", "bycharge.yaml"])
+    run("nce20.parquet", {"instrument": "timsTOF", "nce": 20, "predict_ion_mobility": "false"})
+    run("nce30.parquet", {"instrument": "timsTOF", "nce": 30, "predict_ion_mobility": "false"})
+    def spectra(name):
+        t = pq.read_table(name).to_pydict()
+        return {i: (z, list(m), list(r)) for i, z, m, r in zip(t["Precursor.Id"], t["Precursor.Charge"], t["Product.Mz"],
+                                                               t["Relative.Intensity"])}
+    mixed, at20, at30 = spectra("bycharge.parquet"), spectra("nce20.parquet"), spectra("nce30.parquet")
+    same = lambda a, b: a[1] == b[1] and np.allclose(a[2], b[2])
+    check(any(v[0] == 3 for v in mixed.values()) and
+          all(same(v, (at20 if v[0] == 3 else at30)[k]) for k, v in mixed.items()),
+          "nce_by_charge: 3+ spectra are the NCE 20 library's, the other charges the NCE 30 library's")
+    check("ncebycharge=3:20.000." in pq.read_schema("bycharge.parquet").metadata[b"odia.params"].decode(),
+          "the per-charge NCE is in the cache fingerprint")
+
     pmz = np.array(d["Precursor.Mz"], dtype=float)
     lo, hi = cfg["precursor_mz"]
     check(lo <= pmz.min() and pmz.max() <= hi,

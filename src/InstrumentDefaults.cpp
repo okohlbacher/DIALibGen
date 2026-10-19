@@ -174,6 +174,24 @@ namespace ODIA::instruments
       return m;
     }
 
+    std::map<int, double> nceByCharge(const fs::path& file, const YAML::Node& n)
+    {
+      const std::string where = "nce_by_charge";
+      if (!n.IsMap() || n.size() == 0) { fail(file, where, "must map precursor charges to collision energies"); }
+      std::map<int, double> out;
+      for (const auto& item : n)
+      {
+        int z = 0;
+        double d = 0;
+        if (!item.first.IsScalar() || !YAML::convert<double>::decode(item.first, d) || d != std::floor(d) ||
+            !YAML::convert<int>::decode(item.first, z) || z < 1 || z > 8)
+        { fail(file, where, "charges must be whole numbers from 1 to 8"); }
+        if (!out.emplace(z, number(file, item.second, where + "." + std::to_string(z), 0, 100)).second)
+        { fail(file, where + "." + std::to_string(z), "given twice"); }
+      }
+      return out;
+    }
+
     std::string modelSlot(const fs::path& file, const YAML::Node& n, const std::string& key)
     {
       const std::string named = text(file, n, key);
@@ -204,7 +222,7 @@ namespace ODIA::instruments
   {
     const YAML::Node root = load(file);
     onlyKeys(file, root, {"name", "aliases", "model_instrument", "ion_mobility", "nce", "precursor_mz", "fragment_mz",
-                          "precursor_charges", "mobility_correction"});
+                          "precursor_charges", "mobility_correction", "nce_by_charge"});
     InstrumentFile f;
     f.path = file;
     f.hash = DIANNLibraryFile::hashFile(file.string());
@@ -219,6 +237,7 @@ namespace ODIA::instruments
     }
     if (const auto n = root["ion_mobility"]) { f.ion_mobility = boolean(file, n, "ion_mobility"); }
     if (const auto n = root["nce"]) { f.nce = number(file, n, "nce", 0, 100); }
+    if (const auto n = root["nce_by_charge"]) { f.nce_by_charge = nceByCharge(file, n); }
     if (const auto n = root["precursor_mz"]) { f.precursor_mz = window(file, n, "precursor_mz"); }
     if (const auto n = root["fragment_mz"]) { f.fragment_mz = window(file, n, "fragment_mz"); }
     if (const auto n = root["precursor_charges"]) { f.precursor_charges = charges(file, n, "precursor_charges"); }

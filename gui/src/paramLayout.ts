@@ -58,6 +58,7 @@ const OVERLAY: Record<string, Overlay> = {
   // them as command-line options instead, so this is never a form field.
   tuning: { description: 'Training settings; managed by the fine-tuning controls.', hidden: true },
   instrument_named: { description: 'Recorded instrument spelling before alias resolution.', hidden: true },
+  nce_by_charge_source: { description: 'Recorded source of the per-charge collision energies.', hidden: true },
   mobility_correction_applied: { description: 'Recorded 1/K0 correction (instrument file and lines).', hidden: true },
   enzyme: {
     group: 'core',
@@ -144,7 +145,11 @@ const OVERLAY: Record<string, Overlay> = {
       'model only; off: the plain Mason-Schamp 1/K0 of the predicted CCS.',
     choices: ['auto', 'off']
   },
-
+  nce_by_charge: {
+    description:
+      'Collision energy per precursor charge, over the NCE (from the instrument file, or a config file). ' +
+      'Empty: one NCE for every charge.'
+  },
 
   fragment_mz: {
     group: 'advanced',

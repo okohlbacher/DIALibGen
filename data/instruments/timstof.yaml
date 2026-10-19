@@ -12,9 +12,18 @@
 #     section 3 and the digest of both diaPASEF benchmarks (DIA-NN --min-pr-mz 350
 #     --max-pr-mz 1200 --min-fr-mz 200 --max-fr-mz 1800); their identified
 #     precursors span m/z 400-1200 (benchmark/audits/audit4.md).
-#   nce 30: the section 3 recipe and upstream's timsTOF default; 40 scored better on
-#     one diaPASEF method (src/predict/PeptDeepEncoder.cpp, defaultNce) but is not
-#     a default: one ramp was measured.
+#   nce 30: the section 3 recipe and upstream's timsTOF default, confirmed on two
+#     public diaPASEF methods (all b/y ions at z 1-3 from the raw spectra, scripts/eval/
+#     fragment_intensity_eval.py; DIA-NN 2.0 precursors at 1 % FDR, charges 2-4):
+#       PXD041421 (CE 26-46 eV): 30 is best for every precursor charge (median
+#         cosine 0.888 / 0.885 on the two runs; 25: 0.881 / 0.877; 20: 0.875 / 0.870);
+#         IDs at 25 +1.0 % / -0.7 %, at 20 +0.4 % / -1.7 %;
+#       PXD029836 (CE 20-57 eV): 20 is best (0.884 against 0.868; 4+ precursors 40),
+#         IDs at 25 +1.0 %, at 20 +2.2 %.
+#     The best NCE follows the method's collision-energy ramp, so no single value or
+#     per-charge set (nce_by_charge) improves both; 30 is kept. For a method like
+#     PXD029836's, a copy of this file with nce 20 or nce_by_charge (e.g. {4: 40})
+#     can be given with -instrument_file.
 #   mobility_correction: the 1/K0 derived from the stock CCS model (Mason-Schamp,
 #     N2, 305 K; the same constants as alphabase's ccs_to_mobility_bruker within
 #     5e-5) is low on diaPASEF, by a median 0.014 on the timsTOF benchmark

@@ -143,6 +143,7 @@ aliases: [E480, Orbitrap Exploris 480]  # a leading "Orbitrap" and a trailing mo
 model_instrument: QE              # required: the MS2 model's slot (QE, Lumos, timsTOF, SciexTOF, ThermoTOF)
 ion_mobility: false               # what -generation:predict_ion_mobility auto does
 nce: 27                           # > 0, <= 100
+nce_by_charge: {4: 32}            # NCE of some precursor charges, over nce (since 0.13)
 precursor_mz: [400, 1000]         # [min, max]
 fragment_mz: [200, 1800]
 precursor_charges: [2, 3, 4]      # 1-8, no repeats
@@ -153,6 +154,28 @@ mobility_correction:              # ion-mobility instruments: see "Ion mobility"
   by_charge:
     2: {intercept: 0.0370, slope: 0.9757}
 ```
+
+`nce_by_charge` goes with the file's `nce`: the precursors of a listed charge
+are predicted at its NCE, the others at `nce`. An explicit
+`-generation:nce` (one value for every charge) replaces both. A `-config`
+JSON may set `"nce_by_charge": {"2": 25, "4": 35}` itself, or `null` for one
+NCE; the recipe records the resolved map and `nce_by_charge_source`, so a
+library replays with the same energies.
+
+**Collision energy on diaPASEF.** The best NCE for the timsTOF slot depends on
+the method's collision-energy ramp, so `timstof.yaml` keeps 30. Median cosine
+of all b/y ions at fragment charges 1-3 from the raw spectra, and DIA-NN 2.0
+precursors at 1 % FDR (charges 2-4), against NCE 30:
+
+| method | NCE 20 | NCE 25 | NCE 30 | best per charge |
+|:--|--:|--:|--:|:--|
+| PXD041421 (CE 26-46 eV), run 3197 | 0.875, +0.4 % IDs | 0.881, +1.0 % | **0.888** | 30 for 2+, 3+, 4+ |
+| PXD041421, run 9898 | 0.870, −1.7 % | 0.877, −0.7 % | **0.885** | 30 for 2+, 3+, 4+ |
+| PXD029836 (CE 20-57 eV), run 01 | **0.884**, +2.2 % | 0.881, +1.0 % | 0.868 | 20 for 2+ and 3+, 40 for 4+ |
+
+For a method with a ramp like PXD029836's, copy `timstof.yaml`, set
+`nce: 20` (or add `nce_by_charge: {4: 40}`) and pass it with
+`-instrument_file`.
 
 `default.yaml` has `instrument`, `precursor_mz`, `fragment_mz`,
 `precursor_charges` (all required) and `models` (per MS2 model slot: `nce`,

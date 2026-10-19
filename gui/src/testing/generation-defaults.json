@@ -35,6 +35,8 @@
   "ms2_model": "",
   "n_terminal_methionine_excision": true,
   "nce": 30.0,
+  "nce_by_charge": null,
+  "nce_by_charge_source": "none",
   "nce_source": "instrument-default:QE",
   "peptide_length": [
     7,

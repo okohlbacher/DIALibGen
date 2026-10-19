@@ -245,6 +245,9 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
             ('name: X\nmodel_instrument: QE\nprecursor_mz: [900, 400]\n', 'mine.yaml: precursor_mz: needs min < max'),
             ('name: X\nmodel_instrument: QE\nion_mobility: maybe\n', 'mine.yaml: ion_mobility: must be true or false'),
             ('model_instrument: QE\n', 'mine.yaml: name: missing'),
+            ('name: X\nmodel_instrument: QE\nnce_by_charge: {2.5: 30}\n', 'mine.yaml: nce_by_charge: charges must be whole numbers'),
+            ('name: X\nmodel_instrument: QE\nnce_by_charge: {3: 0}\n', 'mine.yaml: nce_by_charge.3: must be greater than 0'),
+            ('name: X\nmodel_instrument: QE\nnce_by_charge: [30, 35]\n', 'mine.yaml: nce_by_charge: must map precursor charges'),
             ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  intercept: 0.02\n  slope: 0.99\n', 'mine.yaml: mobility_correction.ccs_model_fnv1a64: missing'),
             ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: C26EB20995B991F5\n  intercept: 0.02\n  slope: 0.99\n', 'mine.yaml: mobility_correction.ccs_model_fnv1a64: must be 16 lowercase hex digits'),
             ('name: X\nmodel_instrument: timsTOF\nmobility_correction:\n  ccs_model_fnv1a64: c26eb20995b991f5\n  slope: 0.99\n', 'mine.yaml: mobility_correction: needs intercept and slope'),
@@ -274,6 +277,29 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
     replay.write_text(json.dumps(effective))
     _, log = config('-config', replay, '-instrument_file', custom)
     assert 'has ion mobility' in log, log
+    # nce_by_charge: the instrument's per-charge NCE goes with its NCE; -generation:nce (one value) replaces both;
+    # a recipe replays it (null = one NCE); a -config JSON may set it.
+    by_charge = root / 'bycharge.yaml'
+    by_charge.write_text('name: Per Charge\nmodel_instrument: timsTOF\nnce: 30\nnce_by_charge: {3: 25, 4: 40}\n')
+    effective, log = config('-instrument_file', by_charge)
+    assert effective['nce_by_charge'] == {'3': 25.0, '4': 40.0} and effective['nce_by_charge_source'] == 'instrument-default:Per Charge', effective
+    assert 'by precursor charge: 3+ 25 4+ 40; other charges 30' in log, log
+    effective, _ = config('-instrument_file', by_charge, '-generation:nce', 28)
+    assert effective['nce'] == 28 and effective['nce_by_charge'] is None, effective
+    replay = root / 'replay-bycharge.json'
+    replay.write_text(json.dumps(config('-instrument_file', by_charge)[0]))
+    effective, _ = config('-config', replay, '-instrument_file', by_charge)
+    assert effective['nce_by_charge'] == {'3': 25.0, '4': 40.0} and effective['nce_by_charge_source'] == 'config', effective
+    replay.write_text(json.dumps({'instrument': 'timsTOF', 'nce_by_charge': {'2': 22, '3': 24}}))
+    effective, log = config('-config', replay)
+    assert effective['nce_by_charge'] == {'2': 22.0, '3': 24.0} and 'by precursor charge: 2+ 22 3+ 24; other charges 30' in log, (effective, log)
+    for bad, message in (({'nce_by_charge': {'x': 30}}, "nce_by_charge: 'x' is not a charge"),
+                         ({'nce_by_charge': {'9': 30}}, "nce_by_charge: '9' is not a charge"),
+                         ({'nce_by_charge': {'2': 300}}, 'nce_by_charge: the NCE of charge 2 must be'),
+                         ({'nce_by_charge': [30]}, 'nce_by_charge must be null or an object')):
+        replay.write_text(json.dumps(bad))
+        _, log = run('-config', replay, '-write_config', fresh(), ok=False)
+        assert message in log, (bad, log)
     # "Orbitrap Exploris 480" names a file called "Exploris 480"; "Exploris" alone does not.
     (user / 'twin.yaml').unlink()
     effective, _ = config('-generation:instrument', 'Orbitrap Exploris 480', env=env)

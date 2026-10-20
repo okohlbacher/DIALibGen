@@ -1,0 +1,27 @@
+# SCIEX TripleTOF and ZenoTOF, SWATH / Zeno SWATH (docs/usage.md#instrument-defaults).
+# Sources (reports/instrument-datasets/DATASETS.md in the project folder; public PRIDE runs):
+#   model slot Lumos, nce 27: the shipped MS2 checkpoint has no trained SciexTOF weights. An NCE x slot sweep
+#     (scripts/eval/fragment_intensity_eval.py: every b/y ion at fragment charge 1-3 from the raw MS2 spectra at the
+#     apex, unobserved = 0; DIA-NN 2.0 precursors at 1 % FDR) on four runs of four studies: TripleTOF 5600 PXD064815,
+#     TripleTOF 6600 PXD014690, ZenoTOF 7600 PXD045472 and PXD076276 (deposited as profile, centroided). Mean of the
+#     run medians: SciexTOF 30 (default.yaml's) 0.739, Lumos 27 0.816, Lumos 28 0.816, QE 30 0.793. The optimum
+#     differs by instrument (TripleTOF Lumos 28-30, ZenoTOF Lumos 24-25); 27 is within 0.017 of each run's best.
+#     DIA-NN 2.0 at Lumos 27 against SciexTOF 30: 28,449 / 23,111 precursors (PXD064815; Lumos 28 26,960),
+#     19,550 / 16,101 (PXD045472; Lumos 25 18,353), 33,467 / 27,908 (PXD076276).
+#     SCIEX instruments use rolling collision energy; this NCE is a model input, not a method setting.
+#   precursor m/z 350-1250: the union of the SWATH isolation ranges of seven studies (TripleTOF 5600 350-1250 and
+#     399.5-1145.8; TripleTOF 6600 399.5-1249.7 and 399.5-1200.5; ZenoTOF 7600 399.5-1249.7 and 399.5-750.5; ZenoTOF
+#     8600 399.5-900.5).
+#   fragment m/z 200-1800 (= default.yaml): MS2 scan ranges 100-2000 (three studies), 100-1500 (two), 50-2000,
+#     140-1750 (two).
+#   charges 2-4: the owner's decision of 2026-10-20; charge 1 is 0.0-0.8 % of the identified precursors of three
+#     SCIEX runs searched with 1-4.
+# Bare "SciexTOF" keeps default.yaml (the model slot itself).
+name: TripleTOF
+aliases: [TripleTOF 5600, TripleTOF 6600, TripleTOF 5600+, TripleTOF 6600+, ZenoTOF, ZenoTOF 7600, ZenoTOF 7600+, ZenoTOF 8600]
+model_instrument: Lumos
+ion_mobility: false
+nce: 27
+precursor_mz: [350, 1250]
+fragment_mz: [200, 1800]
+precursor_charges: [2, 3, 4]

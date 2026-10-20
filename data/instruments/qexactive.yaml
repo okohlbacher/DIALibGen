@@ -1,0 +1,23 @@
+# Thermo Q Exactive HF / HF-X, DIA (docs/usage.md#instrument-defaults).
+# Sources (reports/instrument-datasets/DATASETS.md in the project folder; public PRIDE runs):
+#   nce 27: an NCE x model-slot sweep scored with the standard all-charge fragment-intensity method
+#     (scripts/eval/fragment_intensity_eval.py: every b/y ion at fragment charge 1-3 from the raw MS2 spectra at the
+#     apex, unobserved ions = 0; DIA-NN 2.0 precursors at 1 % FDR) on four runs of three studies: PXD022589 (QE HF-X,
+#     method NCE 25 and 27.5), PXD028735 (HF-X, NCE 27), PXD052871 (QE HF, NCE 28). QE 27 is best on every run; median
+#     cosine QE 27 against QE 30 (default.yaml's): 0.466/0.369 and 0.799/0.789 (PXD022589), 0.747/0.688 (PXD028735),
+#     0.927/0.918 (PXD052871); Lumos at any NCE scores lower. DIA-NN 2.0 on PXD022589 (57 min): 78,063 precursors at
+#     QE 27 against 76,687 at QE 30 (+1.8 %).
+#   precursor m/z 350-1200 (= default.yaml): the DIA isolation ranges of 3 of 4 studies end at 975-1005
+#     (350-975, 396-1005, 399.5-1000.5); one method reaches 1650 with 559 m/z wide top windows; on that run 3.0 % of
+#     the identified precursors lie above 1050 and 0.9 % above 1200.
+#   fragment m/z 200-1800 (= default.yaml): MS2 first mass 84-400, last 2005-6000, by method.
+#   charges 1-4 (= default.yaml): charge 1 is 4.5-6.3 % of the identified precursors.
+# Bare "QE" keeps default.yaml (the model slot itself), like "Lumos".
+name: Q Exactive HF-X
+aliases: [QE HF-X, QEHFX, Q Exactive HF, QE HF, QEHF]
+model_instrument: QE
+ion_mobility: false
+nce: 27
+precursor_mz: [350, 1200]
+fragment_mz: [200, 1800]
+precursor_charges: [1, 2, 3, 4]

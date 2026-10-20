@@ -213,6 +213,38 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
         assert effective['nce'] == 25 and effective['model_instrument'] == 'Lumos' and effective['instrument'] == name, name
         assert effective['instrument_defaults']['instrument'] == 'astral.yaml', name
         assert 'instrument defaults: astral.yaml (Astral) over default.yaml' in log, log
+    # The Orbitrap and SCIEX files (values sourced in each file's comments): every alias, as the PSI-MS/PRIDE
+    # spellings carry them, resolves to its file; the model slot names themselves keep default.yaml.
+    shipped = {
+        'exploris.yaml': (('Exploris 480', 'Orbitrap Exploris 480', 'exploris480'),
+                          dict(model_instrument='QE', nce=30, precursor_mz=[360.0, 1040.0], fragment_mz=[200.0, 1800.0],
+                               precursor_charges=[1, 2, 3, 4])),
+        'qexactive.yaml': (('Q Exactive HF-X', 'Q Exactive HF', 'QE HF-X', 'QE HF', 'QEHFX'),
+                           dict(model_instrument='QE', nce=27, precursor_mz=[350.0, 1200.0], fragment_mz=[200.0, 1800.0],
+                                precursor_charges=[1, 2, 3, 4])),
+        'tribrid.yaml': (('Fusion Lumos', 'Orbitrap Fusion Lumos', 'Eclipse', 'Orbitrap Eclipse', 'Orbitrap Tribrid'),
+                         dict(model_instrument='Lumos', nce=30, precursor_mz=[350.0, 1200.0], fragment_mz=[200.0, 2000.0],
+                              precursor_charges=[1, 2, 3, 4])),
+        'sciextof.yaml': (('TripleTOF', 'TripleTOF 6600', 'TripleTOF 5600+', 'ZenoTOF', 'ZenoTOF 7600', 'ZenoTOF 8600'),
+                          dict(model_instrument='Lumos', nce=27, precursor_mz=[350.0, 1250.0], fragment_mz=[200.0, 1800.0],
+                               precursor_charges=[2, 3, 4])),
+    }
+    for file, (names, values) in shipped.items():
+        for name in names:
+            effective, log = config('-generation:instrument', name)
+            assert effective['instrument_defaults']['instrument'] == file, (name, effective['instrument_defaults'])
+            for key, value in values.items():
+                assert effective[key] == value, (name, key, effective[key], value)
+            assert effective['instrument'] == name and effective['nce_source'].startswith('instrument-default:'), name
+    for name, slot, nce in (('QE', 'QE', 30), ('Lumos', 'Lumos', 25), ('SciexTOF', 'SciexTOF', 30),
+                            ('Exploris', 'QE', 30), ('Exploris 240', 'QE', 30)):
+        effective, _ = config('-generation:instrument', name)
+        assert effective['instrument_defaults']['instrument'] is None, (name, effective['instrument_defaults'])
+        assert effective['model_instrument'] == slot and effective['nce'] == nce, (name, effective)
+    # an explicit option still wins over the new files
+    effective, _ = config('-generation:instrument', 'Eclipse', '-generation:nce', 25, '-generation:precursor_mz', 400, 1000)
+    assert effective['nce'] == 25 and effective['nce_source'] == 'TOPP' and effective['precursor_mz'] == [400.0, 1000.0]
+    assert effective['fragment_mz'] == [200.0, 2000.0], effective
     effective, log = config('-generation:instrument', 'timsTOF Pro 2')
     assert effective['precursor_charges'] == [2, 3, 4] and effective['model_instrument'] == 'timsTOF'
     assert 'has ion mobility: CCS and 1/K0 predicted' in log, log

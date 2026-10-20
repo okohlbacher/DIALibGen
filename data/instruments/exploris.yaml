@@ -1,0 +1,22 @@
+# Thermo Orbitrap Exploris 480, DIA (docs/usage.md#instrument-defaults).
+# Sources (reports/instrument-datasets/DATASETS.md in the project folder; public PRIDE runs):
+#   nce 30 (= default.yaml's QE slot): an NCE x model-slot sweep scored with the standard all-charge fragment-intensity
+#     method (scripts/eval/fragment_intensity_eval.py: every b/y ion at fragment charge 1-3 from the raw MS2 spectra at
+#     the apex, unobserved ions = 0; DIA-NN 2.0 precursors at 1 % FDR). On PXD016662 (21 min, method NCE 27, no FAIMS)
+#     the optimum is flat: median cosine QE 30 0.886, QE 28 0.885, Lumos 30 0.885, QE 27 0.880; DIA-NN 2.0 identifies
+#     41,170 precursors at QE 30 against 39,129 at QE 27. A FAIMS run with two CVs (PXD052871, NCE 32) scores QE 27
+#     higher (0.589 against 0.534), but its extraction mixes the CVs; the default is kept.
+#   precursor m/z 360-1040: the union of the DIA isolation ranges of two studies (PXD016662 360.5-1032.8; PXD052871,
+#     two labs, 399.5-1014.5 and 400-1000), rounded out to 10.
+#   fragment m/z 200-1800 (= default.yaml): MS2 scan ranges 361-1033 (one method), 150-1800, 200-3080.
+#   charges 1-4 (= default.yaml): charge 1 is 2.3 % of the identified precursors.
+# The Exploris 240 (and a bare "Exploris") keep default.yaml: the one public 240 method found (PXD047901,
+# 500-740 m/z) is too narrow to set windows, and its single run is no basis for another NCE.
+name: Exploris 480
+aliases: [Orbitrap Exploris 480]
+model_instrument: QE
+ion_mobility: false
+nce: 30
+precursor_mz: [360, 1040]
+fragment_mz: [200, 1800]
+precursor_charges: [1, 2, 3, 4]

@@ -1,0 +1,21 @@
+# Thermo Orbitrap Fusion Lumos and Eclipse (Tribrid), DIA (docs/usage.md#instrument-defaults).
+# Sources (reports/instrument-datasets/DATASETS.md in the project folder; public PRIDE runs):
+#   model slot Lumos, nce 30: an NCE x slot sweep (scripts/eval/fragment_intensity_eval.py: every b/y ion at fragment
+#     charge 1-3 from the raw MS2 spectra at the apex, unobserved = 0; DIA-NN 2.0 precursors at 1 % FDR) on four runs
+#     of four studies: Fusion Lumos PXD029738 (method NCE 32) and PXD022996 (30), Eclipse PXD047184 (30) and PXD074545
+#     (stepped 25/27.5/30). Mean of the run medians: Lumos 25 (default.yaml's) 0.787, Lumos 30 0.859, QE 27 0.864
+#     (the best; within 0.005 of Lumos 30). DIA-NN 2.0 decides between the two: Lumos 30 identifies 47,462 and
+#     24,077 precursors on PXD029738 and PXD047184, QE 27 47,157 and 23,431, Lumos 25 43,975 and 22,437.
+#   precursor m/z 350-1200: covers the isolation ranges of 3 of 4 studies (350-1200, 400-1000, 361-1039.5); one
+#     method reaches 1650 with a 517 m/z wide top window.
+#   fragment m/z 200-2000: the MS2 scan range of 3 of 4 studies (200-1200 in one).
+#   charges 1-4 (= default.yaml): charge 1 is 0.3-3.3 % of the identified precursors.
+# Bare "Lumos" keeps default.yaml (the model slot, NCE 25; Astral has its own file).
+name: Fusion Lumos
+aliases: [Orbitrap Fusion Lumos, Eclipse, Orbitrap Eclipse, Fusion, Orbitrap Fusion, Tribrid]
+model_instrument: Lumos
+ion_mobility: false
+nce: 30
+precursor_mz: [350, 1200]
+fragment_mz: [200, 2000]
+precursor_charges: [1, 2, 3, 4]

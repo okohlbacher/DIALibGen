@@ -608,8 +608,10 @@ void DIALibGen::registerGenerationOptions_()
     {"instrument", "<name>", "Instrument of the run: Astral, Exploris, Lumos, QE, timsTOF, or a vendor name such as "
                              "'Orbitrap Astral' or 'timsTOF Pro'. Its defaults (instrument files, see --helphelp "
                              "-instrument_file) set the NCE, ion mobility (timsTOF) and m/z windows and charges "
-                             "(Astral, timsTOF). Default: default.yaml's (QE)"},
-    {"nce", "<number>", "Collision energy; -1 = the instrument's (Lumos and Astral 25, others 30)"},
+                             "(Astral, timsTOF, Exploris 480, Q Exactive HF/HF-X, Fusion Lumos/Eclipse, "
+                             "TripleTOF/ZenoTOF). Default: default.yaml's (QE)"},
+    {"nce", "<number>", "Collision energy; -1 = the instrument's (its file's: Astral 25, Q Exactive HF-X and "
+                        "TripleTOF/ZenoTOF 27, Fusion Lumos/Eclipse 30; else Lumos 25, others 30)"},
     {"precursor_mz", "<min max>", "Precursor m/z window; match it to the acquisition method. Default: the "
                                   "instrument's (Astral 380-980), else 350-1200"},
     {"fragment_mz", "<min max>", "Fragment m/z window. Default: the instrument's (Astral 150-2000), else 200-1800"},
@@ -993,13 +995,16 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // (its own constants name four instruments). Measured against Lumos at
     // the same NCE (median spectral cosine per precursor, synthetic
     // peptides): ThermoTOF 0.993 -- effectively Lumos -- but SciexTOF only
-    // 0.914, with a tenth of the precursors below 0.64.
+    // 0.914, with a tenth of the precursors below 0.64. On SCIEX data (four
+    // public TripleTOF and ZenoTOF runs, all-charge b/y cosine from the raw
+    // spectra) the SciexTOF slot scores 0.74 against Lumos 27's 0.82, which is
+    // why sciextof.yaml maps the TripleTOF and ZenoTOF names to Lumos.
     if (instrument == "ThermoTOF")
     { warn_("ThermoTOF has no trained MS2 weights; its spectra are effectively Lumos's. Use "
             "-generation:instrument Lumos to say so."); }
     if (instrument == "SciexTOF")
-    { warn_("SciexTOF (TripleTOF, ZenoTOF) has no trained MS2 weights; its spectra are NOT those of Lumos and "
-            "are not validated on SCIEX data. Use -generation:instrument Lumos for the uncorrected baseline."); }
+    { warn_("SciexTOF has no trained MS2 weights; its spectra are NOT those of Lumos and match SCIEX data less "
+            "well. -generation:instrument TripleTOF or ZenoTOF uses sciextof.yaml (Lumos, NCE 27)."); }
 
     const std::string models_dir = getParam_().getValue("models").toString();
     struct { const char* name; const char* file; std::string* path; } models[] = {

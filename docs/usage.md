@@ -89,14 +89,18 @@ JSON keys and invalid values are errors.
 The default instrument is `QE` (default.yaml's `instrument`). Choose the
 instrument used for acquisition; accepted aliases include `Astral`/`Orbitrap
 Astral` (Lumos), `Exploris` (QE), `timsTOF Pro` (timsTOF), and `ZenoTOF`
-(SciexTOF). Without `-generation:instrument` the log says so: `no
+(sciextof.yaml: Lumos). Without `-generation:instrument` the log says so: `no
 -generation:instrument: QE assumed, so CCS and 1/K0 are not predicted`.
 `SciexTOF` and `ThermoTOF` have no trained weights in the shipped MS2 model and
 print a warning: `ThermoTOF` predicts what `Lumos` predicts (median spectral
 cosine 0.993 at the same NCE), `SciexTOF` does not (0.914, a tenth of
-precursors below 0.64), and neither has been validated on SCIEX data. Omitting
-NCE uses the instrument's default: 25 for Astral, Lumos and its aliases, 30
-otherwise. The native option `-generation:nce -1` means automatic, and
+precursors below 0.64). On SCIEX data `SciexTOF` matches the observed fragments
+less well than `Lumos` (all-charge cosine 0.74 against 0.82 at NCE 27 on four
+public TripleTOF and ZenoTOF runs), so the TripleTOF and ZenoTOF names use
+`sciextof.yaml` (Lumos, NCE 27). Omitting NCE uses the instrument's default:
+its file's (Astral 25, Q Exactive HF/HF-X 27, Fusion Lumos/Eclipse 30,
+TripleTOF/ZenoTOF 27, Exploris 480 and timsTOF 30), else 25 for `Lumos` and
+its aliases, 30 otherwise. The native option `-generation:nce -1` means automatic, and
 generated INI files preserve that automatic setting. The effective JSON config
 records the resolved NCE and its source; reusing that numeric value fixes NCE
 until it is changed or the native option is set back to -1.
@@ -113,6 +117,10 @@ Linux packages beside the models; a source tree has them in `data/instruments/`)
 | `default.yaml` | the default instrument (`QE`) and every other one | precursor m/z 350-1200, fragment m/z 200-1800, charges 1-4; per MS2 model slot the NCE (Lumos 25, others 30) and ion mobility (timsTOF only) |
 | `astral.yaml` | Astral, Orbitrap Astral, Astral Zoom (MS2 model: Lumos) | precursor m/z 380-980, fragment m/z 150-2000, charges 1-4, NCE 25, no ion mobility |
 | `timstof.yaml` | timsTOF and its Pro, SCP, HT, Ultra and Flex models | charges 2-4 (since 0.13; 0.12.1 had 1-4: `-generation:precursor_charges 1 2 3 4`), precursor m/z 350-1200, fragment m/z 200-1800, NCE 30, ion mobility with a 1/K0 correction (since 0.13; see [Ion mobility](#ion-mobility)) |
+| `exploris.yaml` | Exploris 480, Orbitrap Exploris 480 (MS2 model: QE) | precursor m/z 360-1040, fragment m/z 200-1800, charges 1-4, NCE 30 |
+| `qexactive.yaml` | Q Exactive HF, HF-X (QE HF, QE HF-X; MS2 model: QE) | precursor m/z 350-1200, fragment m/z 200-1800, charges 1-4, NCE 27 |
+| `tribrid.yaml` | Fusion Lumos, Fusion, Eclipse (Orbitrap Tribrids; MS2 model: Lumos) | precursor m/z 350-1200, fragment m/z 200-2000, charges 1-4, NCE 30 |
+| `sciextof.yaml` | TripleTOF 5600/6600(+), ZenoTOF 7600(+)/8600 (MS2 model: Lumos) | precursor m/z 350-1250, fragment m/z 200-1800, charges 2-4, NCE 27 |
 
 Each value carries its source in a comment. Precedence, per value: an
 explicit option (command line, INI, `-config` JSON) > the instrument's file >
@@ -180,8 +188,20 @@ For a method with a ramp like PXD029836's, copy `timstof.yaml`, set
 
 `default.yaml` has `instrument`, `precursor_mz`, `fragment_mz`,
 `precursor_charges` (all required) and `models` (per MS2 model slot: `nce`,
-`ion_mobility`). An instrument without a file of its own (Lumos, Exploris, QE
-HF-X, ...) uses `default.yaml` with its model slot's NCE and ion mobility.
+`ion_mobility`). An instrument without a file of its own (the model slots
+`QE`, `Lumos`, `SciexTOF` themselves, Exploris 240, Q Exactive and QE Plus,
+Velos, Elite, ...) uses `default.yaml` with its model slot's NCE and ion
+mobility.
+
+The Orbitrap and SCIEX files (new after 0.13.0) were set from public PRIDE runs:
+their DIA isolation and MS2 scan ranges, and an NCE x model-slot sweep scored
+with the [all-charge fragment-intensity method](testing.md) plus DIA-NN 2.0
+identifications at the chosen and the previous value. Each file names its
+datasets and numbers in comments; in short: Exploris 480 keeps QE 30 (flat
+optimum, +5.2 % IDs over QE 27 on one run); Q Exactive HF/HF-X QE 27 (best on
+all four runs, +1.8 % IDs); the Tribrids Lumos 30 (median cosine 0.86 against
+0.79 at Lumos 25, +7-8 % IDs); TripleTOF/ZenoTOF Lumos 27 (0.82 against
+SciexTOF's 0.74).
 
 To add an instrument, or to change a shipped one, put a file in a directory of
 your own; the first directory that has a file of a given name wins, so a user's

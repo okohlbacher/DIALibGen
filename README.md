@@ -275,10 +275,14 @@ stripped; if your instrument's full name is refused, use the value in the
 
 | Your instrument | Pass | Model label | Default NCE | Note |
 |---|---|---|---|---|
-| Thermo Q Exactive, Plus, HF, HF-X; Orbitrap Exploris | `QE` | QE | 30 | The default. |
+| Thermo Q Exactive HF, HF-X | `Q Exactive HF-X` or `QE HF` | QE | 27 | `qexactive.yaml`; NCE from a sweep on public runs. |
+| Thermo Orbitrap Exploris 480 | `Exploris 480` | QE | 30 | `exploris.yaml`. |
+| Thermo Q Exactive, Plus; Exploris 240 | `QE` | QE | 30 | The default. |
 | Bruker timsTOF Pro, Pro 2, SCP, HT, Ultra, flex | `timsTOF` | timsTOF | 30 | |
-| Thermo Orbitrap Astral; Tribrids (Fusion, Lumos, Eclipse); Velos, Elite | `Astral` or `Lumos` | Lumos | 25 | The model's reference label; AlphaPeptDeep groups the Astral here. |
-| SCIEX ZenoTOF, TripleTOF | `ZenoTOF` or `SciexTOF` | SciexTOF | 30 | Accepted with a warning; see below. |
+| Thermo Orbitrap Astral | `Astral` | Lumos | 25 | `astral.yaml`; AlphaPeptDeep groups the Astral with Lumos. |
+| Thermo Tribrids (Fusion, Fusion Lumos, Eclipse) | `Fusion Lumos` or `Eclipse` | Lumos | 30 | `tribrid.yaml`; NCE from a sweep on public runs. |
+| Thermo Velos, Elite | `Lumos` | Lumos | 25 | The model's reference label. |
+| SCIEX TripleTOF, ZenoTOF | `TripleTOF` or `ZenoTOF` | Lumos | 27 | `sciextof.yaml`: the SciexTOF label fits SCIEX spectra less well (see below). |
 | ThermoTOF | `ThermoTOF` | ThermoTOF | 30 | Accepted with a warning; predictions are close to `Lumos`. |
 
 NCE here is an input of the fragment model, not an instrument setting.
@@ -290,12 +294,14 @@ observed fragments than the default 30, with little effect on identifications.
 The effective configuration records the NCE that was used and whether it came
 from you or from the instrument default.
 
-The warning printed for `SciexTOF` says that predictions will be close to
-`Lumos`. They are not: at equal NCE the predicted spectra differ from `Lumos`
-about as much as the `timsTOF` label's do (median spectral cosine 0.85, against
-0.99 for `ThermoTOF`). The label's weights in the shipped model look untrained,
-and which of `SciexTOF` and `Lumos` fits SCIEX data better has not been
-measured. If fragment agreement matters, generate both and compare.
+The `SciexTOF` label's weights in the shipped model look untrained: at equal
+NCE its predicted spectra differ from `Lumos` about as much as the `timsTOF`
+label's do (median spectral cosine 0.85, against 0.99 for `ThermoTOF`). On
+four public TripleTOF and ZenoTOF runs `Lumos` fits the observed fragments
+better (median all-charge cosine 0.82 at NCE 27 against 0.74 for `SciexTOF`
+30), so `-generation:instrument TripleTOF` or `ZenoTOF` uses `Lumos` at NCE
+27 (`sciextof.yaml`); the bare `SciexTOF` label is still accepted, with a
+warning.
 
 1/K0 is derived from predicted CCS for every instrument unless
 `-generation:derive_ion_mobility false` is set.

@@ -322,7 +322,7 @@ jobs:
           # Require data at the path resolved relative to the installed executable.
           test -s "$PWD/stage/share/DIALibGen/irt_standards.tsv" \
             || { echo "::error::the iRT standards are not in the install tree"; exit 1; }
-          for f in default.yaml astral.yaml timstof.yaml; do
+          for f in default.yaml astral.yaml timstof.yaml exploris.yaml qexactive.yaml tribrid.yaml sciextof.yaml; do
             test -s "$PWD/stage/share/DIALibGen/instruments/$f" \
               || { echo "::error::the instrument defaults ($f) are not in the install tree"; exit 1; }
           done

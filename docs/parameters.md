@@ -54,8 +54,8 @@ The schema lists all modes. Without `-mode`, a FASTA generates and a library con
 | `-no_progress` | bool | `false` |  |  | Disables progress logging to command line |
 | `-force` | bool | `false` |  |  | Overrides tool-specific checks |
 | `-test` | bool | `false` |  |  | Enables the test mode (needed for internal use only) |
-| `-generation:instrument` | string | `QE` |  | yes | Instrument of the run: Astral, Exploris, Lumos, QE, timsTOF, or a vendor name such as 'Orbitrap Astral' or 'timsTOF Pro'. Its defaults (instrument files, see --helphelp -instrument_file) set the NCE, ion mobility (timsTOF) and m/z windows and charges (Astral, timsTOF). Default: default.yaml's (QE) |
-| `-generation:nce` | double | `-1.0` | -1.0:100.0 | yes | Collision energy; -1 = the instrument's (Lumos and Astral 25, others 30) |
+| `-generation:instrument` | string | `QE` |  | yes | Instrument of the run: Astral, Exploris, Lumos, QE, timsTOF, or a vendor name such as 'Orbitrap Astral' or 'timsTOF Pro'. Its defaults (instrument files, see --helphelp -instrument_file) set the NCE, ion mobility (timsTOF) and m/z windows and charges (Astral, timsTOF, Exploris 480, Q Exactive HF/HF-X, Fusion Lumos/Eclipse, TripleTOF/ZenoTOF). Default: default.yaml's (QE) |
+| `-generation:nce` | double | `-1.0` | -1.0:100.0 | yes | Collision energy; -1 = the instrument's (its file's: Astral 25, Q Exactive HF-X and TripleTOF/ZenoTOF 27, Fusion Lumos/Eclipse 30; else Lumos 25, others 30) |
 | `-generation:precursor_mz` | double list | (empty) |  | yes | Precursor m/z window; match it to the acquisition method. Default: the instrument's (Astral 380-980), else 350-1200 |
 | `-generation:fragment_mz` | double list | (empty) |  | yes | Fragment m/z window. Default: the instrument's (Astral 150-2000), else 200-1800 |
 | `-generation:precursor_charges` | int list | `1, 2, 3, 4` | 1:8 | yes | Precursor charges. Default: the instrument's (timsTOF 2-4), else 1-4 |

@@ -29,8 +29,10 @@ This project follows [Semantic Versioning](https://semver.org/).
   (96 threads: 151 s against 180 s; 16 threads: 690 s against 464 s), one and
   two H100 (79 and 49 s), the Astral library and its RT tune on the server CPU
   and on two H100, and the laptop, each with 0.12.1 (or 0.11.4) as a control.
-  The backlog's speed item now says what is left: 1.5 x DIA-NN's time at 16
-  threads.
+  On the laptop the CoreML route took 344 s (0.12.1 405 s, 0.11.4 392 s in the
+  same session); predicting RT and CCS before the GPU phase instead of during
+  it (`ODIA_OVERLAP=0`) took 297 s, in 0.11.4 as well. The backlog's speed
+  item now says what is left: 1.5 x DIA-NN's time at 16 threads.
 
 ### Fixed
 

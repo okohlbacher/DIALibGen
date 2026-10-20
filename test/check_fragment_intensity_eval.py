@@ -72,6 +72,18 @@ def mzml(path):
     rts = [60.0, 66.0, 72.0]                  # seconds: 1.0, 1.1, 1.2 min
     L += ['<spectrum id="scan=1" index="0" defaultArrayLength="1">',
           '<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="1" />', "</spectrum>"]
+    # an empty MS2 spectrum, zlib-"compressed" as SCIEX mzML write it: no zlib stream at all, not a broken one
+    L += ['<spectrum id="scan=99" index="0" defaultArrayLength="0">',
+          '<cvParam cvRef="MS" accession="MS:1000511" name="ms level" value="2" />',
+          '<cvParam cvRef="MS" accession="MS:1000016" name="scan start time" value="61" unitAccession="UO:0000010" unitName="second" unitCvRef="UO" />',
+          '<cvParam cvRef="MS" accession="MS:1000827" name="isolation window target m/z" value="1500" />',
+          '<cvParam cvRef="MS" accession="MS:1000828" name="isolation window lower offset" value="10" />',
+          '<cvParam cvRef="MS" accession="MS:1000829" name="isolation window upper offset" value="10" />']
+    for acc in ("MS:1000514", "MS:1000515"):
+        L += ['<binaryDataArray encodedLength="0">', f'<cvParam cvRef="MS" accession="{acc}" name="array" />',
+              '<cvParam cvRef="MS" accession="MS:1000523" name="64-bit float" />',
+              '<cvParam cvRef="MS" accession="MS:1000574" name="zlib compression" />', "<binary></binary>", "</binaryDataArray>"]
+    L += ["</spectrum>"]
     for i, rt in enumerate(rts):
         mz, it = spectrum(i)
         L += [f'<spectrum id="scan={i + 2}" index="{i + 1}" defaultArrayLength="{len(mz)}">',

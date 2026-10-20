@@ -175,7 +175,7 @@ def read_ms2(path):
                 continue
             if s.startswith("<binary>"):
                 raw = base64.b64decode(s[8:s.index("</binary>")])
-                if arr_zlib:
+                if arr_zlib and raw:          # an empty array (encodedLength="0", SCIEX mzML) has no zlib stream
                     raw = zlib.decompress(raw)
                 v = np.frombuffer(raw, dtype=np.float64 if arr_bits == 64 else np.float32)
                 if arr_kind in ("mz", "int"):

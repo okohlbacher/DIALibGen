@@ -297,8 +297,8 @@ from you or from the instrument default.
 The `SciexTOF` label's weights in the shipped model look untrained: at equal
 NCE its predicted spectra differ from `Lumos` about as much as the `timsTOF`
 label's do (median spectral cosine 0.85, against 0.99 for `ThermoTOF`). On
-four public TripleTOF and ZenoTOF runs `Lumos` fits the observed fragments
-better (median all-charge cosine 0.82 at NCE 27 against 0.74 for `SciexTOF`
+five public TripleTOF and ZenoTOF runs `Lumos` fits the observed fragments
+better (median all-charge cosine 0.83 at NCE 27 against 0.74 for `SciexTOF`
 30), so `-generation:instrument TripleTOF` or `ZenoTOF` uses `Lumos` at NCE
 27 (`sciextof.yaml`); the bare `SciexTOF` label is still accepted, with a
 warning.

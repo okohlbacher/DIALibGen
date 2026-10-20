@@ -995,9 +995,9 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // (its own constants name four instruments). Measured against Lumos at
     // the same NCE (median spectral cosine per precursor, synthetic
     // peptides): ThermoTOF 0.993 -- effectively Lumos -- but SciexTOF only
-    // 0.914, with a tenth of the precursors below 0.64. On SCIEX data (four
+    // 0.914, with a tenth of the precursors below 0.64. On SCIEX data (five
     // public TripleTOF and ZenoTOF runs, all-charge b/y cosine from the raw
-    // spectra) the SciexTOF slot scores 0.74 against Lumos 27's 0.82, which is
+    // spectra) the SciexTOF slot scores 0.74 against Lumos 27's 0.83, which is
     // why sciextof.yaml maps the TripleTOF and ZenoTOF names to Lumos.
     if (instrument == "ThermoTOF")
     { warn_("ThermoTOF has no trained MS2 weights; its spectra are effectively Lumos's. Use "

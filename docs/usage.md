@@ -95,7 +95,7 @@ Astral` (Lumos), `Exploris` (QE), `timsTOF Pro` (timsTOF), and `ZenoTOF`
 print a warning: `ThermoTOF` predicts what `Lumos` predicts (median spectral
 cosine 0.993 at the same NCE), `SciexTOF` does not (0.914, a tenth of
 precursors below 0.64). On SCIEX data `SciexTOF` matches the observed fragments
-less well than `Lumos` (all-charge cosine 0.74 against 0.82 at NCE 27 on four
+less well than `Lumos` (all-charge cosine 0.74 against 0.83 at NCE 27 on five
 public TripleTOF and ZenoTOF runs), so the TripleTOF and ZenoTOF names use
 `sciextof.yaml` (Lumos, NCE 27). Omitting NCE uses the instrument's default:
 its file's (Astral 25, Q Exactive HF/HF-X 27, Fusion Lumos/Eclipse 30,
@@ -200,7 +200,7 @@ identifications at the chosen and the previous value. Each file names its
 datasets and numbers in comments; in short: Exploris 480 keeps QE 30 (flat
 optimum, +5.2 % IDs over QE 27 on one run); Q Exactive HF/HF-X QE 27 (best on
 all four runs, +1.8 % IDs); the Tribrids Lumos 30 (median cosine 0.86 against
-0.79 at Lumos 25, +7-8 % IDs); TripleTOF/ZenoTOF Lumos 27 (0.82 against
+0.79 at Lumos 25, +7-8 % IDs); TripleTOF/ZenoTOF Lumos 27 (0.83 against
 SciexTOF's 0.74).
 
 To add an instrument, or to change a shipped one, put a file in a directory of

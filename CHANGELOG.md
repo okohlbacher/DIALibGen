@@ -3,7 +3,35 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.13.0] — 2026-10-20
+
+The option cleanup announced in 0.12: the deprecated names are gone and a
+setting that cannot have an effect is an error. timsTOF libraries change
+(charges 2-4, corrected 1/K0); libraries of every other instrument are
+unchanged. See [migration](docs/usage.md#migration).
+
+### Breaking
+
+- **Removed options** (deprecated in 0.12): `-tune_models` (use `-models`),
+  `-machine:threads` (use `-machine:train_threads`), `-tune_predict_gpu`
+  (re-prediction follows `-machine:device`), `-search:passes` (1 was its only
+  value) and `-search:allow_bootstrap` (use `ODIA_SEARCH_ALLOW_BOOTSTRAP=1`).
+  On the command line or in an INI, each is refused with one line that names
+  its replacement, e.g. `Error: -tune_models was removed in 0.13: use -models`
+  (exit code 6). INIs written by 0.12's `-write_ini` do not contain them; a
+  full INI written by 0.11 contains all five: rename or delete those lines.
+  JSON recipes are unaffected (no key was renamed). The CTD (`-write_ctd`) no
+  longer lists them.
+- **Settings without an effect are refused** (0.12 printed a `WARNING`):
+  `-generation:recompute_decoy_mz true` with `-generation:decoys none`,
+  `-generation:max_variable_modifications` without variable modifications,
+  `-generation:derive_ion_mobility false` when CCS is not predicted, the
+  `-intensity_*` options and `-allow_mixed_intensity` without
+  `-write_intensity`, and the `-im_*` options without `-write_im`. The message
+  says what to add or remove. `-irt_standards` without `irt_rescale` and
+  `-machine:coreml_units` off CoreML still only warn.
+- **timsTOF defaults** (below): charges 2-4, and the 1/K0 correction on by
+  default.
 
 ### Changed defaults
 
@@ -37,22 +65,33 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- The report (`docs/report/`, still named for 0.12.1): a timsTOF (diaPASEF)
-  section (PXD029836, three runs, DIA-NN 2.0: identifications, entrapment
-  check, RT and 1/K0 error, fragment intensities, the charge, 1/K0 and
-  collision-energy changes above), and the fragment-intensity section and
-  summary row on b and y ions at every fragment charge from the raw spectra
-  (Astral: 0.941 against DIA-NN 2.0's 0.839; the 0.12.1 report's y-only 0.986
-  against 0.977). The new numbers are marked "main after 0.12.1".
-- `docs/report/DIALibGen-report-0.12.1.md` and `.pdf` replace the 0.11.3 report: command lines in
-  their 0.12.1 form, the H100 timing of 0.12.1 (one and two GPUs) with 0.11.3 as a control in the
-  same session, the laptop timings of 0.11.4 (CPU, CoreML with a cold and a warm cache, MPS and CPU
-  tuning), the entrapment check, and the unchanged quality and identification sections; also
-  attached to the 0.12.1 release.
+- Search messages that pointed at `search:allow_bootstrap` name
+  `ODIA_SEARCH_ALLOW_BOOTSTRAP=1`; the search's provenance keeps its
+  `passes` and `allow_bootstrap` fields.
 - Docs and `--helphelp` on training threads, corrected from measurements: on
   Linux the tuned weights depend on `-machine:train_threads`, on macOS they do
   not, and no count makes a Mac reproduce a Linux model (the docs said 16 did);
   two MPS (Apple GPU) tunes differ from each other.
+- Docs name the two refinement routes by their options, `-ids` (a DIA-NN
+  report) and `-run` (the built-in identification, experimental).
+- The report ([PDF](https://github.com/okohlbacher/DIALibGen/releases/download/v0.13.0/DIALibGen-report-0.13.0.pdf),
+  sources `docs/report/DIALibGen-report-0.13.0.md`): a timsTOF (diaPASEF)
+  section (PXD029836, three runs, DIA-NN 2.0: identifications, entrapment
+  check, RT and 1/K0 error, fragment intensities, and the charge, 1/K0 and
+  collision-energy changes above); fragment intensities scored on b and y
+  ions at every fragment charge from the raw spectra (Astral: 0.941 against
+  DIA-NN 2.0's 0.839; the 0.12.1 report's y-only score was 0.986 against
+  0.977), with the scoring script `scripts/eval/fragment_intensity_eval.py`
+  and its method in [testing](docs/testing.md); the one- and two-H100 timing
+  of 0.12.1.
+
+### Fixed (build and tests)
+
+- macOS release builds retry `stapler staple` with backoff and staple the app
+  inside the disk image when Tauri's own staple failed (a notarization that
+  was accepted no longer costs a rerun of the job).
+- GUI tests wait out a transient "Text file busy" before running their fake
+  CLI (seen on Ubuntu 24.04).
 
 ## [0.12.1] — 2026-10-16
 

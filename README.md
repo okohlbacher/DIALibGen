@@ -59,7 +59,7 @@ library can also be searched as it is.
 | `refine` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | Library filtered to identified precursors, with observed RT and optional mobility/intensities |
 | `tune` | Library, and one DIA run (`-run`, experimental) or that run's identification report (`-ids`) | RT/CCS models adapted to that run, then predictions for the complete input library |
 
-Version **0.12.1** incorporates library refinement and model training from
+Version **0.13.0** incorporates library refinement and model training from
 DIALibRefine. See [migration and usage](docs/usage.md),
 [parameter reference](docs/parameters.md), [changes](CHANGELOG.md) and the
 [backlog](BACKLOG.md).

@@ -92,9 +92,10 @@ unchanged. See [migration](docs/usage.md#migration).
 
 ### Fixed (build and tests)
 
-- macOS release builds retry `stapler staple` with backoff and staple the app
-  inside the disk image when Tauri's own staple failed (a notarization that
-  was accepted no longer costs a rerun of the job).
+- macOS release builds retry `stapler staple` and `stapler validate` with
+  backoff and staple the app inside the disk image when Tauri's own staple
+  failed (a notarization that was accepted no longer costs a rerun of the job
+  when Apple's ticket service drops the connection).
 - GUI tests wait out a transient "Text file busy" before running their fake
   CLI (seen on Ubuntu 24.04).
 

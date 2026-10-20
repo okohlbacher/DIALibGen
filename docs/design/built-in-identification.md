@@ -62,7 +62,7 @@ builds on all five platforms without patches.
   predicted` needs, a library whose RT has no range) is checked before the
   run is read; a failure after the search keeps the report and says how to
   reuse it. The MS2 model comes from where `-tune` finds its models
-  (`-tune_models`, allowed with `-run` in `refine` for this, then
+  (`-models`, allowed with `-run` in `refine` for this, then
   `$DIALIBGEN_MODEL_DIR`, then the bundled models).
 - The provenance sidecar gains `inputs.run` and a `search` block: settings,
   calibration, candidate counts, targets and decoys at each gate, resources.

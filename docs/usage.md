@@ -1011,7 +1011,7 @@ From 0.12 to 0.13:
 
 | 0.12 | 0.13 |
 |---|---|
-| `-tune_models`, `-machine:threads`, `-tune_predict_gpu`, `-search:passes`, `-search:allow_bootstrap` accepted with a `WARNING` | removed: `-models`, `-machine:train_threads`, nothing (re-prediction follows `-machine:device`), nothing, `ODIA_SEARCH_ALLOW_BOOTSTRAP=1` |
+| `-tune_models`, `-machine:threads`, `-tune_predict_gpu`, `-search:passes`, `-search:allow_bootstrap` accepted (with a `WARNING`; `-search:passes 1` silently) | removed: `-models`, `-machine:train_threads`, nothing (re-prediction follows `-machine:device`), nothing, `ODIA_SEARCH_ALLOW_BOOTSTRAP=1` |
 | a setting without an effect: a `WARNING` | refused (`-irt_standards` and `-machine:coreml_units` still only warn) |
 | timsTOF charges 1-4 | 2-4 (`-generation:precursor_charges 1 2 3 4` for 0.12.1's) |
 | timsTOF 1/K0 from the stock CCS model as is | corrected per charge (`-generation:mobility_correction off` for 0.12.1's) |
@@ -1022,7 +1022,10 @@ in 0.13: use -models` or `Error: old.ini: machine:threads was removed in 0.13:
 use -machine:train_threads`. An INI written by `-write_ini` of 0.12 has none of
 them; a full INI written by 0.11 has all five: rename or delete those lines
 (TOPP refuses an INI with an unknown name, so they cannot be skipped
-silently). JSON recipes are unchanged: their keys were never renamed.
+silently). The check covers the INI's tool and `common` sections and TOPP's
+JSON parameter files. JSON recipes (`-config`) keep their keys (none was
+renamed); a recipe that sets one of the combinations without an effect is
+refused like the options.
 
 From 0.11 to 0.12 (0.12.1 is the first release of this line):
 

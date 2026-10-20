@@ -122,6 +122,18 @@ describe('inertBecause', () => {
     expect(inertBecause('recompute_decoy_mz', { decoys: 'none' })).toMatch(/no effect/i)
     expect(inertBecause('recompute_decoy_mz', { decoys: 'reverse' })).toBeNull()
   })
+
+  it('disables 1/K0 derivation without CCS, and refinement settings of a replacement that is off', () => {
+    expect(inertBecause('derive_ion_mobility', { predict_ion_mobility: 'false' })).toMatch(/no effect/i)
+    expect(inertBecause('derive_ion_mobility', { predict_ion_mobility: 'auto' })).toBeNull()
+    for (const name of ['intensity_min_fragments', 'intensity_norm', 'allow_mixed_intensity']) {
+      expect(inertBecause(name, { write_intensity: false })).toMatch(/no effect/i)
+      expect(inertBecause(name, { write_intensity: true })).toBeNull()
+    }
+    expect(inertBecause('im_ramp_top', { write_im: false })).toMatch(/no effect/i)
+    expect(inertBecause('im_ramp_top', { write_im: true })).toBeNull()
+    expect(inertBecause('im_ramp_top', {})).toBeNull()
+  })
 })
 
 // Values can also arrive from a JSON/settings file, so browser input constraints

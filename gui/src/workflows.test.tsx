@@ -110,6 +110,7 @@ describe('desktop refinement and fine-tuning', () => {
 
   it('keeps refinement float defaults editable as decimals', async () => {
     await setup(); await mode('refine')
+    await userEvent.click(screen.getByLabelText('write im')); await userEvent.click(screen.getByLabelText('write intensity'))
     await userEvent.click(screen.getByRole('button', { name: /Advanced/ }))
     for (const label of ['im ramp top', 'min match fraction', 'intensity min correlation', 'intensity mz tol ppm']) {
       const field = screen.getByLabelText(label) as HTMLInputElement
@@ -118,6 +119,19 @@ describe('desktop refinement and fine-tuning', () => {
     }
     fillRefinement(); await userEvent.click(button('Refine library'))
     expect(bridge.runs[0]).toMatchObject({ config: { im_ramp_top: 0.25, min_match_fraction: 0.25 } })
+  })
+
+  it('sends settings without an effect at their defaults (the tool refuses them since 0.13)', async () => {
+    await setup(); await mode('refine')
+    await userEvent.click(screen.getByLabelText('write intensity'))
+    await userEvent.click(screen.getByRole('button', { name: /Advanced/ }))
+    fireEvent.change(screen.getByLabelText('intensity min fragments'), { target: { value: '5' } })
+    await userEvent.click(screen.getByLabelText('write intensity'))
+    expect((screen.getByLabelText('intensity min fragments') as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByLabelText('im ramp top') as HTMLInputElement).disabled).toBe(true)
+    fillRefinement(); await userEvent.click(button('Refine library'))
+    const config = (bridge.runs[0] as { config: Record<string, unknown> }).config
+    expect(config).toEqual(refinementDefaults)
   })
 
   it('rejects fractional, empty and out-of-range training integers and nonpositive learning rates', async () => {

@@ -276,6 +276,16 @@ export function inertBecause(name: string, values: Record<string, unknown>): str
   if (name === 'irt_standards' && values.irt_rescale === false) {
     return 'No effect: irt rescale is off.'
   }
+  if (name === 'derive_ion_mobility' && values.predict_ion_mobility === 'false') {
+    return 'No effect: CCS is not predicted.'
+  }
+  // Refinement: settings of a replacement that is off (the tool refuses them).
+  if ((name.startsWith('intensity_') || name === 'allow_mixed_intensity') && values.write_intensity === false) {
+    return 'No effect: write intensity is off.'
+  }
+  if (name.startsWith('im_') && values.write_im === false) {
+    return 'No effect: write im is off.'
+  }
   return null
 }
 

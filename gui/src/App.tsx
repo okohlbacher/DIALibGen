@@ -43,6 +43,19 @@ function toolConfig(v: Values): Values {
   return config
 }
 
+// What a run sends: a setting that has no effect (a disabled field) goes out at the tool's
+// default, since 0.13 refuses such a setting otherwise. The saved settings keep the value,
+// for when the field is live again.
+function runConfig(v: Values, defaults: Values | null | undefined): Values {
+  const config = toolConfig(v)
+  for (const key of Object.keys(config)) {
+    if (!inertBecause(key, v)) continue
+    if (defaults && key in defaults) config[key] = defaults[key]
+    else delete config[key]
+  }
+  return config
+}
+
 // auto decides CCS from the report at run time, so both stock models must be present.
 const headsFor = (tuneHeads: unknown): ModelHead[] => tuneHeads === 'rt' ? ['rt'] : tuneHeads === 'ccs' ? ['ccs'] : ['rt', 'ccs']
 
@@ -244,7 +257,7 @@ export default function App(): JSX.Element {
       if (launchRef.current !== launch) return
       if (launch.cancelled) { setRunning(false); setOutcome({ ok: false, text: 'Cancelled before launch.' }); return }
       const result = await window.dialibgen.run({ mode, in: mode === 'generate' ? fasta : library, out, ...(outFormat ? { outFormat } : {}),
-        config: toolConfig(values), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
+        config: runConfig(values, defaults), modelDir: mode === 'generate' || usesTuning ? modelDir || models?.dir || null : null, threads,
         ...(mode !== 'generate' ? { ids, ...(outReport ? { outReport } : {}) } : {}),
         ...(usesTuning ? { tuning: activeTuning, ...(tuneOutModels ? { tuneOutModels } : {}), ...(mode === 'refine' ? { tune: true } : {}) } : {}) })
       if (launchRef.current !== launch) return

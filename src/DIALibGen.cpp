@@ -17,8 +17,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
+#include <set>
 namespace fs = std::filesystem;
 
 std::string DIALibGen::help_mode_;
@@ -542,31 +544,64 @@ namespace
   }
 
   /// The removed names (DIALibGen::removedOptions) that @p argv or the INI
-  /// gives, one message each.
+  /// (TOPP XML or JSON) gives: one message per name.
   std::vector<std::string> removedIn(int argc, const char** argv, const std::string& ini, const std::string& instance)
   {
     std::vector<std::string> lines;
+    std::set<std::string> reported;
+    const auto report = [&](const DIALibGen::Removed& r, const std::string& where)
+    {
+      if (!reported.insert(r.old_name).second) { return; }
+      lines.push_back(where + " was removed in 0.13: " + r.use);
+    };
     const auto& removed = DIALibGen::removedOptions();
     for (int i = 1; i < argc; ++i)
     {
       for (const auto& r : removed)
       {
-        if (argv[i] == "-" + std::string(r.old_name))
-        { lines.push_back("-" + std::string(r.old_name) + " was removed in 0.13: " + r.use); }
+        const std::string name = r.old_name;
+        if (argv[i] == "-" + name || argv[i] == "--" + name) { report(r, "-" + name); }
       }
     }
-    // A JSON parameter file is TOPP's to read; a broken INI TOPP reports itself.
-    if (ini.empty() || lower(ini).ends_with(".json")) { return lines; }
+    if (ini.empty()) { return lines; }
+    // A name at the end of a parameter path: "machine:threads" in
+    // "DIALibGen:1:machine:threads", never in "...:train_threads".
+    const auto names = [&](const std::string& path, const std::string& name)
+    { return path == name || path.ends_with(":" + name); };
+    if (lower(ini).ends_with(".json"))
+    {
+      std::ifstream in(ini);
+      nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+      if (j.is_discarded()) { return lines; }   // TOPP reports the broken file itself
+      std::vector<std::string> paths;
+      const std::function<void(const nlohmann::json&, const std::string&)> walk =
+        [&](const nlohmann::json& node, const std::string& prefix)
+      {
+        if (!node.is_object()) { return; }
+        for (auto it = node.begin(); it != node.end(); ++it)
+        {
+          const std::string path = prefix.empty() ? it.key() : prefix + ":" + it.key();
+          paths.push_back(path);
+          walk(it.value(), path);
+        }
+      };
+      walk(j, "");
+      for (const auto& r : removed)
+      {
+        if (std::any_of(paths.begin(), paths.end(), [&](const std::string& path) { return names(path, r.old_name); }))
+        { report(r, ini + ": " + r.old_name); }
+      }
+      return lines;
+    }
     OpenMS::Param parameters;
     try { OpenMS::ParamXMLFile().load(ini, parameters); }
-    catch (...) { return lines; }
+    catch (...) { return lines; }   // TOPP reports the broken INI itself
     for (const auto& r : removed)
     {
-      for (const std::string& key : {"DIALibGen:" + instance + ":" + r.old_name, "common:DIALibGen:" + std::string(r.old_name)})
+      for (const std::string& key : {"DIALibGen:" + instance + ":" + r.old_name, "common:DIALibGen:" + std::string(r.old_name),
+                                     "common:" + std::string(r.old_name)})
       {
-        if (!parameters.exists(key)) { continue; }
-        lines.push_back(ini + ": " + r.old_name + " was removed in 0.13: " + r.use);
-        break;
+        if (parameters.exists(key)) { report(r, ini + ": " + r.old_name); break; }
       }
     }
     return lines;

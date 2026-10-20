@@ -108,9 +108,13 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
                           (('-tune_predict_gpu',), '-tune_predict_gpu was removed in 0.13: re-prediction follows -machine:device'),
                           (('-search:passes', 1), '-search:passes was removed in 0.13: 1 was its only value, so delete it'),
                           (('-search:allow_bootstrap',), '-search:allow_bootstrap was removed in 0.13: set ODIA_SEARCH_ALLOW_BOOTSTRAP=1')):
-        r, log = run('-mode', 'tune', *args, '-write_config', fresh(), ok=False)
-        assert r.returncode == 6 and 'Error: ' + message in log, (args, log)
+        out = fresh()
+        r, log = run('-mode', 'tune', *args, '-write_config', out, ok=False)
+        assert r.returncode == 6 and 'Error: ' + message in log and not out.exists(), (args, log)
         assert len(log.strip().splitlines()) == 1, log
+    # Two dashes, and a name given twice: still one line.
+    r, log = run('--tune_models', models, '-tune_models', models, ok=False)
+    assert r.returncode == 6 and log.strip() == 'Error: -tune_models was removed in 0.13: use -models', log
     tuned, _ = config('-mode', 'tune', '-models', models, '-machine:train_threads', 3)
     assert tuned['tuning']['machine:train_threads'] == 3, tuned['tuning']
 
@@ -161,6 +165,25 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-cli-') as directory:
         assert f'Error: {old_training}: machine:threads was removed in 0.13: use -machine:train_threads' in log, log
         assert f'Error: {old_training}: search:passes was removed in 0.13: 1 was its only value' in log, log
         assert len(log.strip().splitlines()) == 2 and 'Unknown (or deprecated) Parameter' not in log, log
+    # The common section, a non-default instance, a TOPP JSON parameter file; the command line and the INI
+    # naming the same option give one line.
+    common = root / 'common.ini'
+    common.write_text(old.read_text().replace('</PARAMETERS>', '<NODE name="common" description=""><ITEM name="tune_models" '
+                                              'value="/m" type="string" description="" /></NODE></PARAMETERS>'))
+    for args in (('-write_config', fresh()), ('-write_ini', fresh('.ini'))):
+        r, log = run('-ini', common, *args, ok=False)
+        assert r.returncode == 6 and f'Error: {common}: tune_models was removed in 0.13: use -models' in log, log
+    second = root / 'instance2.ini'
+    second.write_text(old_training.read_text().replace('<NODE name="1"', '<NODE name="2"'))
+    r, log = run('-ini', second, '-instance', 2, '-write_config', fresh(), ok=False)
+    assert r.returncode == 6 and f'{second}: machine:threads was removed' in log, log
+    for body in ({'tune_models': '/m'}, {'DIALibGen': {'1': {'machine': {'threads': 2}}}}):
+        topp_json = root / f'params-{next(counter)}.json'
+        topp_json.write_text(json.dumps(body))
+        r, log = run('-ini', topp_json, '-write_config', fresh(), ok=False)
+        assert r.returncode == 6 and f'Error: {topp_json}: ' in log and 'was removed in 0.13' in log, (body, log)
+    r, log = run('-ini', old_training, '-machine:threads', 2, '-write_config', fresh(), ok=False)
+    assert log.count('machine:threads was removed') == 1, log
     upgraded = root / 'upgraded.ini'
     run('-write_ini', upgraded, '-ini', old)
     text = upgraded.read_text()

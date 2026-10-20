@@ -19,17 +19,22 @@ unchanged. See [migration](docs/usage.md#migration).
   On the command line or in an INI, each is refused with one line that names
   its replacement, e.g. `Error: -tune_models was removed in 0.13: use -models`
   (exit code 6). INIs written by 0.12's `-write_ini` do not contain them; a
-  full INI written by 0.11 contains all five: rename or delete those lines.
-  JSON recipes are unaffected (no key was renamed). The CTD (`-write_ctd`) no
-  longer lists them.
+  full INI written by 0.11 contains all five: rename or delete those lines
+  (the check covers the tool's and the `common` section, and TOPP JSON
+  parameter files). JSON recipes keep their keys (none was renamed). The CTD
+  (`-write_ctd`) no longer lists them.
 - **Settings without an effect are refused** (0.12 printed a `WARNING`):
   `-generation:recompute_decoy_mz true` with `-generation:decoys none`,
   `-generation:max_variable_modifications` without variable modifications,
   `-generation:derive_ion_mobility false` when CCS is not predicted, the
   `-intensity_*` options and `-allow_mixed_intensity` without
   `-write_intensity`, and the `-im_*` options without `-write_im`. The message
-  says what to add or remove. `-irt_standards` without `irt_rescale` and
-  `-machine:coreml_units` off CoreML still only warn.
+  says what to add or remove; a `-config` recipe that sets such a combination
+  is refused the same way. `-irt_standards` without `irt_rescale` and
+  `-machine:coreml_units` off CoreML still only warn. The desktop app disables
+  these fields (now also the refinement intensity and 1/K0 settings while
+  their replacement is off, and `derive_ion_mobility` when CCS is off) and
+  sends them at their defaults.
 - **timsTOF defaults** (below): charges 2-4, and the 1/K0 correction on by
   default.
 

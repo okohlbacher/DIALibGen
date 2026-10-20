@@ -16,9 +16,10 @@ const SAVED_VERSIONS = [1, SAVED_VERSION]
 // Blank in the form = the tool decides; the key is then left out of the config it is sent.
 const AUTO_KEYS = ['nce', 'nce_by_charge', 'precursor_mz', 'fragment_mz', 'precursor_charges']
 const autoBlanks = (): Values => Object.fromEntries(AUTO_KEYS.map((key) => [key, null]))
-// Deprecated in 0.12 (removed in 0.13). Skipped by name, not by the INI's advanced
-// flag: most training options are advanced now and must still be offered.
-const DEPRECATED_TUNING = ['tune_models', 'machine:threads', 'tune_predict_gpu', 'search:passes', 'search:allow_bootstrap']
+// Removed in 0.13 (deprecated in 0.12): settings saved by an older GUI may still carry
+// them, and the 0.13 tool refuses them. Dropped by name, not by the INI's advanced flag:
+// most training options are advanced and must still be offered.
+const REMOVED_TUNING = ['tune_models', 'machine:threads', 'tune_predict_gpu', 'search:passes', 'search:allow_bootstrap']
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 const pick = (v: Values, keep: (key: string) => boolean): Values => Object.fromEntries(Object.entries(v).filter(([key]) => keep(key)))
 
@@ -59,7 +60,7 @@ function migrateTuning(tuning: Values): Values {
   const out = { ...tuning }
   if ('machine:threads' in out && !('machine:train_threads' in out)) out['machine:train_threads'] = out['machine:threads']
   if (out.tune_heads === 'both') out.tune_heads = 'auto'
-  return pick(out, (key) => !DEPRECATED_TUNING.includes(key))
+  return pick(out, (key) => !REMOVED_TUNING.includes(key))
 }
 
 export default function App(): JSX.Element {
@@ -144,7 +145,7 @@ export default function App(): JSX.Element {
       // A tune (or refine -tune) recipe carries its training settings as
       // "tuning": they become the fine-tuning form's values.
       if (record(payload.tuning)) {
-        const imported = pick(payload.tuning, (key) => !DEPRECATED_TUNING.includes(key))   // values as written
+        const imported = pick(payload.tuning, (key) => !REMOVED_TUNING.includes(key))   // values as written
         setTuning((old) => ({ ...old, ...imported }))
         if (fallbackMode === 'refine') setTune(true)
       }

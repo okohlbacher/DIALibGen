@@ -97,7 +97,7 @@ namespace ODIA::search
     /// search:calibration_min_coverage bounds: that is the share of the FOUND
     /// seeds the stock outlier removal must keep.
     double coverage = std::numeric_limits<double>::quiet_NaN();
-    bool bootstrap = false;      ///< search:allow_bootstrap was USED (calibration had failed)
+    bool bootstrap = false;      ///< ODIA_SEARCH_ALLOW_BOOTSTRAP=1 was USED (calibration had failed)
     /// Anything else for the provenance, as a JSON object; may be empty.
     std::string provenance_json;
   };
@@ -206,10 +206,10 @@ namespace ODIA::search
     /// thresholds search:calibration_min_rsq / _min_coverage; size the
     /// extraction windows (search:rt_window, mz_ppm, im_window; 0 = from the
     /// calibration). A failed calibration throws SearchAbort unless
-    /// search:allow_bootstrap. On a diaPASEF run (unless search:im_window -1)
+    /// ODIA_SEARCH_ALLOW_BOOTSTRAP=1. On a diaPASEF run (unless search:im_window -1)
     /// each seed of the RT calibration is measured in 1/K0 at its apex
     /// (mobilityApex) and a robust line maps library to run 1/K0; its failure
-    /// throws SearchAbort, whatever search:allow_bootstrap says.
+    /// throws SearchAbort, whatever ODIA_SEARCH_ALLOW_BOOTSTRAP says.
     virtual Calibration calibrate(const Library& library, const SearchSet& set, RunData& run);
     /// Extract every precursor of @p set in chunks (AssayBuilder::chunks with
     /// search:chunk, search:batch_size) and append one row per reported peak

@@ -31,11 +31,11 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-training-contract-') as direc
     def run(name, report, *options, head='rt', error=None, training=False):
         path, output, kept = root / f'{name}.parquet', root / f'{name}.tsv', root / f'{name}-models'
         pq.write_table(report, path)
-        controls = {'-filter:rt_max_minutes': 30, '-machine:threads': 2, '-train:epochs': 1,
+        controls = {'-filter:rt_max_minutes': 30, '-machine:train_threads': 2, '-train:epochs': 1,
                     '-train:warmup': 0, '-stop:min_epochs': 0, '-train:lr': '1e-300'}
         controls.update(zip(options[::2], options[1::2]))
         command = [binary, '-mode', 'tune', '-in', str(library), '-ids', str(path), '-out', str(output),
-                   '-tune_models', str(models), '-tune_out_models', str(kept), '-tune_heads', head,
+                   '-models', str(models), '-tune_out_models', str(kept), '-tune_heads', head,
                    *(str(value) for pair in controls.items() for value in pair)]
         result = subprocess.run(command, capture_output=True, text=True, timeout=180)
         log = result.stdout + result.stderr

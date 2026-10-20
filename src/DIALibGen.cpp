@@ -131,14 +131,14 @@ namespace
   }
 }
 
-const std::vector<DIALibGen::Deprecated>& DIALibGen::deprecatedOptions()
+const std::vector<DIALibGen::Removed>& DIALibGen::removedOptions()
 {
-  static const std::vector<Deprecated> table = {
-    {"tune_models", "models", "-models"},
-    {"machine:threads", "machine:train_threads", "-machine:train_threads"},
-    {"tune_predict_gpu", "", "-machine:device (re-prediction follows it)"},
-    {"search:passes", "", "nothing (1 is its only value)"},
-    {"search:allow_bootstrap", "", "ODIA_SEARCH_ALLOW_BOOTSTRAP=1"}};
+  static const std::vector<Removed> table = {
+    {"tune_models", "use -models"},
+    {"machine:threads", "use -machine:train_threads"},
+    {"tune_predict_gpu", "re-prediction follows -machine:device"},
+    {"search:passes", "1 was its only value, so delete it"},
+    {"search:allow_bootstrap", "set ODIA_SEARCH_ALLOW_BOOTSTRAP=1 instead"}};
   return table;
 }
 
@@ -211,20 +211,9 @@ bool DIALibGen::given_(const std::string& name) const
 std::string DIALibGen::modelDirectory_() const
 {
   std::string models = getParam_().getValue("models").toString();
-  if (models.empty())
-  {
-    if (const auto it = aliased_.find("models"); it != aliased_.end()) { models = it->second.toString(); }
-  }
   if (models.empty()) { if (const char* e = std::getenv("DIALIBGEN_MODEL_DIR"); e && *e) { models = e; } }
   if (models.empty()) { models = bundledModelDir(); }
   return models;
-}
-
-int DIALibGen::trainThreads_() const
-{
-  if (const auto it = aliased_.find("machine:train_threads"); it != aliased_.end())
-  { return static_cast<int>(it->second); }
-  return static_cast<int>(getParam_().getValue("machine:train_threads"));
 }
 
 std::vector<std::pair<std::string, std::string>> DIALibGen::unknownOptions(int argc, const char** argv)
@@ -295,26 +284,6 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
   const bool old_ini = !ini.empty() && olderThan012(ini_version);
   old_ini_ = old_ini;
 
-  // Deprecated names (0.12, removed in 0.13): the replacement wins when both
-  // are given, and they must then agree.
-  for (const auto& d : deprecatedOptions())
-  {
-    if (!given_(d.old_name)) { continue; }
-    if (*d.new_name != '\0')
-    {
-      if (given_(d.new_name) && parameters.getValue(d.old_name) != parameters.getValue(d.new_name))
-      {
-        writeLogError_("-" + std::string(d.old_name) + " (deprecated) and -" + d.new_name + " disagree (" +
-                       parameters.getValue(d.old_name).toString() + " against " +
-                       parameters.getValue(d.new_name).toString() + "); give only -" + d.new_name);
-        return ILLEGAL_PARAMETERS;
-      }
-      if (!given_(d.new_name)) { aliased_[d.new_name] = parameters.getValue(d.old_name); }
-    }
-    if (std::string(d.old_name) == "search:passes") { continue; }   // its only value: nothing to say
-    warn_("-" + std::string(d.old_name) + " is deprecated (0.12, removed in 0.13): use " + d.use);
-  }
-
   // Inspect the raw paths before TOPP's file getters can probe them.
   const std::string write_config = parameters.getValue("write_config").toString();
   const bool with_run = !parameters.getValue("run").toString().empty();
@@ -368,8 +337,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     const bool generation = option.starts_with("generation:") || option == "irt_standards" || option == "instrument_file";
     bool wrong_mode = generating ? refinement : generation;
     if (mode == "convert") { wrong_mode = refinement || generation || option == "config" || option == "write_config"; }
-    // -tune_models also names where -run finds the MS2 model (search:intensities predicted).
-    if (mode == "refine" && training && !getFlag_("tune") && !(option == "tune_models" && with_run)) { wrong_mode = true; }
+    if (mode == "refine" && training && !getFlag_("tune")) { wrong_mode = true; }
     if (mode == "tune" && refinement && !training && !search && option != "ids" && option != "out_report" &&
         option != "run" && option != "out_ids" && option != "no_filter" && option != "no_write_rt") { wrong_mode = true; }
     const bool needs_run = !wrong_mode && (search || option == "out_ids") && !with_run;
@@ -420,8 +388,8 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::main_(int argc, const char** argv)
     }
   }
 
-  // Settings without an effect on this run: a WARNING now, an error from 0.13
-  // (machine:* never: an INI written on a Mac must run on Linux).
+  // A setting without an effect on this run is refused (Generate.cpp,
+  // Refine.cpp); machine:* only warns: an INI written on a Mac must run on Linux.
   if (const std::string units = getStringOption_("machine:coreml_units"); units != "gpu" && mode != "convert")
   {
 #ifdef __APPLE__
@@ -557,12 +525,9 @@ namespace
     catch (...) { return false; }   // TOPP reports the broken INI itself
   }
 
-  /// -write_ini writes TOPP's registered defaults: -threads 1, and every
-  /// deprecated name. The written file gets 0 (all cores, the real default
-  /// since 0.12) unless an -ini it was merged from set the count, and the
-  /// deprecated names go, their non-default values moved onto the
-  /// replacement, so that the file still loads once they are removed (an
-  /// unknown INI parameter is fatal).
+  /// -write_ini writes TOPP's registered defaults, -threads 1 among them. The
+  /// written file gets 0 (all cores, the real default since 0.12) unless an
+  /// -ini it was merged from set the count.
   void finishWrittenIni(const std::string& path, const std::string& merged_from, const std::string& instance)
   {
     OpenMS::Param parameters;
@@ -573,37 +538,38 @@ namespace
       parameters.setValue(base + "threads", 0, "Number of threads; 0 = all physical cores (the default when the "
                           "command line and the INI do not set it)");
     }
-    // At its default: "" (a directory), 0 (a count), false (a flag).
-    const auto unset = [](const std::string& key, const OpenMS::ParamValue& v) {
-      const std::string s = v.toString();
-      if (key.ends_with("tune_models") || key.ends_with(":models")) { return s.empty(); }
-      if (key.ends_with("tune_predict_gpu") || key.ends_with("allow_bootstrap")) { return s == "false"; }
-      return s == "0" || s.empty();
-    };
-    for (const auto& d : DIALibGen::deprecatedOptions())
-    {
-      const std::string old_key = base + d.old_name, new_key = base + d.new_name;
-      if (!parameters.exists(old_key)) { continue; }
-      if (*d.new_name != '\0' && parameters.exists(new_key) && !unset(old_key, parameters.getValue(old_key)) &&
-          !unset(new_key, parameters.getValue(new_key)) && parameters.getValue(old_key) != parameters.getValue(new_key))
-      {
-        throw std::runtime_error(std::string(d.old_name) + " (deprecated) and " + d.new_name + " disagree (" +
-                                 parameters.getValue(old_key).toString() + " against " +
-                                 parameters.getValue(new_key).toString() + "); keep only " + d.new_name);
-      }
-      if (!unset(old_key, parameters.getValue(old_key)))
-      {
-        if (*d.new_name != '\0' && parameters.exists(new_key) && unset(new_key, parameters.getValue(new_key)))
-        { parameters.setValue(new_key, parameters.getValue(old_key), parameters.getDescription(new_key)); }
-        else if (*d.new_name == '\0' && std::string(d.old_name) != "search:passes")
-        {
-          std::cerr << "DIALibGen: " << d.old_name << " " << parameters.getValue(old_key).toString()
-                    << " is deprecated and not written; use " << d.use << std::endl;
-        }
-      }
-      parameters.remove(old_key);
-    }
     OpenMS::ParamXMLFile().store(path, parameters);
+  }
+
+  /// The removed names (DIALibGen::removedOptions) that @p argv or the INI
+  /// gives, one message each.
+  std::vector<std::string> removedIn(int argc, const char** argv, const std::string& ini, const std::string& instance)
+  {
+    std::vector<std::string> lines;
+    const auto& removed = DIALibGen::removedOptions();
+    for (int i = 1; i < argc; ++i)
+    {
+      for (const auto& r : removed)
+      {
+        if (argv[i] == "-" + std::string(r.old_name))
+        { lines.push_back("-" + std::string(r.old_name) + " was removed in 0.13: " + r.use); }
+      }
+    }
+    // A JSON parameter file is TOPP's to read; a broken INI TOPP reports itself.
+    if (ini.empty() || lower(ini).ends_with(".json")) { return lines; }
+    OpenMS::Param parameters;
+    try { OpenMS::ParamXMLFile().load(ini, parameters); }
+    catch (...) { return lines; }
+    for (const auto& r : removed)
+    {
+      for (const std::string& key : {"DIALibGen:" + instance + ":" + r.old_name, "common:DIALibGen:" + std::string(r.old_name)})
+      {
+        if (!parameters.exists(key)) { continue; }
+        lines.push_back(ini + ": " + r.old_name + " was removed in 0.13: " + r.use);
+        break;
+      }
+    }
+    return lines;
   }
 
   class ToolHandlerRegistration
@@ -673,6 +639,20 @@ int main(int argc, const char** argv)
   const bool want_descriptor =
     !help && (descriptor == DescriptorRequest::Ctd || descriptor == DescriptorRequest::CwlOrJson);
 
+  // A name removed in 0.13, on the command line or in the INI: one line
+  // naming the replacement (TOPP would only call an INI's name unknown).
+  if (!help && argc > 1)
+  {
+    const std::string ini = valueOf(argc, argv, "-ini");
+    const std::string instance = normalInstance(valueOf(argc, argv, "-instance").empty() ? "1" : valueOf(argc, argv, "-instance"));
+    std::vector<std::string> removed = removedIn(argc, argv, ini, instance);
+    if (!removed.empty())
+    {
+      for (const auto& line : removed) { std::cerr << "Error: " << line << std::endl; }
+      return OpenMS::TOPPBase::ILLEGAL_PARAMETERS;
+    }
+  }
+
   // An unknown option: one line, not the whole help that TOPP prints after it.
   if (!help && argc > 1)
   {
@@ -736,7 +716,7 @@ int main(int argc, const char** argv)
     try { if (!written.empty()) { finishWrittenIni(written, ini, instance); } }
     catch (const std::exception& e)
     {
-      // No half-finished INI: it would carry -threads 1 and the deprecated names.
+      // No half-finished INI: it would carry -threads 1.
       std::error_code ec;
       fs::remove(written, ec);
       std::cerr << "Error: -write_ini " << written << ": " << e.what() << std::endl;

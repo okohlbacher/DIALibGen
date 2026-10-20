@@ -33,14 +33,15 @@ RT/CCS fine-tuning controls and optional model export.
 Non-default settings belonging to a different mode are rejected. A complete
 default INI remains usable, but generation settings do not configure refinement
 or tuning, and refinement flags do not configure generation. A setting that has
-no effect in the run (`-irt_standards` without `-generation:irt_rescale true`,
-`-generation:recompute_decoy_mz true` with `-generation:decoys none`,
-`-generation:max_variable_modifications` without variable modifications,
-`-generation:derive_ion_mobility false` without CCS, the `-intensity_*` options
-or `-allow_mixed_intensity` without `-write_intensity`, the `-im_*` options
-without `-write_im`, `-machine:coreml_units` off CoreML) prints a `WARNING`
-that names it; from 0.13 these are refused (`-irt_standards` and `machine:*`
-only ever warn: an INI written on a Mac must still run on Linux).
+no effect in the run is refused with one line that names it and what it needs
+(0.12 accepted it with a `WARNING`): `-generation:recompute_decoy_mz true` with
+`-generation:decoys none`, `-generation:max_variable_modifications` without
+variable modifications, `-generation:derive_ion_mobility false` without CCS,
+the `-intensity_*` options or `-allow_mixed_intensity` without
+`-write_intensity`, and the `-im_*` options without `-write_im`. Two only
+warn: `-irt_standards` without `-generation:irt_rescale true` (alone it is
+harmless) and `-machine:coreml_units` off CoreML (an INI written on a Mac must
+still run on Linux).
 
 ## Generation settings
 
@@ -401,8 +402,7 @@ validation and test cohorts, in practice several hundred identified precursors;
 smaller reports are refused.
 
 The bundled models are the default starting point. `-models DIR` selects
-another model directory (for generate, tune and `-run`; `-tune_models` is its
-deprecated name). `-tune_heads auto`, the default, tunes RT and adds CCS when
+another model directory (for generate, tune and `-run`). `-tune_heads auto`, the default, tunes RT and adds CCS when
 the report has the ion mobility for it: the same data selection and cohort
 check as training decide, before any epoch. A report without 1/K0 (Astral,
 Exploris) tunes RT only, with one line saying so; one with too few usable 1/K0
@@ -426,14 +426,13 @@ cpu` trains on the CPU; see [Apple GPU](#apple-gpu)). Source builds can
 request `-machine:device cuda:0` when linked to a compatible CUDA LibTorch
 installation (see [building](building.md#cpu-and-cuda)). The re-prediction
 follows `-machine:device` as generation does: CUDA when `auto` finds a usable
-GPU with cuDNN 9 (or `cuda` forces it), else the CPU (`-tune_predict_gpu` is
-deprecated). On one H100, tuning the RT head on an Astral
+GPU with cuDNN 9 (or `cuda` forces it), else the CPU. On one H100, tuning the RT head on an Astral
 run (77,029 sequences, 59 epochs) and re-predicting a 3.5 M-precursor library
 took 62 s, against 12.5 min on 64 CPU threads, with the same held-out accuracy
 (TEST calibrated SD 0.350 min either way). CUDA training is not bit-identical to
 CPU training, and two CUDA runs need not agree bit for bit either.
 
-`-machine:train_threads` (deprecated name: `-machine:threads`) is the number of
+`-machine:train_threads` is the number of
 CPU threads LibTorch trains with. Each
 training step is a chain of small operations, so the count stops paying
 early: for the RT head on an Astral run (77,029 sequences) on a 2 x 96-core
@@ -1008,6 +1007,23 @@ explicit commands.
 
 ## Migration
 
+From 0.12 to 0.13:
+
+| 0.12 | 0.13 |
+|---|---|
+| `-tune_models`, `-machine:threads`, `-tune_predict_gpu`, `-search:passes`, `-search:allow_bootstrap` accepted with a `WARNING` | removed: `-models`, `-machine:train_threads`, nothing (re-prediction follows `-machine:device`), nothing, `ODIA_SEARCH_ALLOW_BOOTSTRAP=1` |
+| a setting without an effect: a `WARNING` | refused (`-irt_standards` and `-machine:coreml_units` still only warn) |
+| timsTOF charges 1-4 | 2-4 (`-generation:precursor_charges 1 2 3 4` for 0.12.1's) |
+| timsTOF 1/K0 from the stock CCS model as is | corrected per charge (`-generation:mobility_correction off` for 0.12.1's) |
+
+A removed name on the command line or in an INI is refused with one line per
+name that says what replaces it, for example `Error: -tune_models was removed
+in 0.13: use -models` or `Error: old.ini: machine:threads was removed in 0.13:
+use -machine:train_threads`. An INI written by `-write_ini` of 0.12 has none of
+them; a full INI written by 0.11 has all five: rename or delete those lines
+(TOPP refuses an INI with an unknown name, so they cannot be skipped
+silently). JSON recipes are unchanged: their keys were never renamed.
+
 From 0.11 to 0.12 (0.12.1 is the first release of this line):
 
 | 0.11 | 0.12 |
@@ -1022,14 +1038,11 @@ From 0.11 to 0.12 (0.12.1 is the first release of this line):
 | unknown option: the error and the whole help | one line with the closest name |
 | `convert` to Parquet drops the recipe | keeps the fingerprint and the recipe |
 
-Deprecated in 0.12, removed in 0.13 (accepted with a `WARNING`; giving the old
-and the new name with different values is an error; `-write_ini` writes only
-the new names, and moves an old INI's values onto them): `-tune_models` (use
-`-models`), `-machine:threads` (`-machine:train_threads`), `-tune_predict_gpu`
-(re-prediction follows `-machine:device`), `-search:passes` (1 is its only
-value) and `-search:allow_bootstrap` (`ODIA_SEARCH_ALLOW_BOOTSTRAP=1`).
+0.12 deprecated `-tune_models`, `-machine:threads`, `-tune_predict_gpu`,
+`-search:passes` and `-search:allow_bootstrap`; 0.13 removed them (above).
 
-An INI written by 0.11 loads in every mode: its values apply as given, and
+An INI written by 0.11, once the five removed names are deleted from it, loads
+in every mode: its values apply as given, and
 because `-write_ini` wrote every default, it keeps the 0.11 defaults it lists
 (`-tune_heads both`, the 0.01 gates, the 350-1200 window, `-threads 1`); the log
 names them in one line, and deleting those lines gives the 0.12 defaults. The

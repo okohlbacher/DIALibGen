@@ -57,7 +57,7 @@ assert json.loads((out / "refined.tsv.refine.json").read_text(encoding='utf-8'))
 for head in ("rt", "ccs"):
     models = out / head
     result = run(f"tune-{head}", ["-mode", "tune", *common, "-out", out / f"tuned-{head}.tsv", "-tune_heads", head, "-tune_out_models", models,
-        "-filter:rt_max_minutes", "30", "-train:epochs", "20", "-train:warmup", "2", "-stop:min_epochs", "20", "-machine:threads", "2", "-machine:device", "cpu"])
+        "-filter:rt_max_minutes", "30", "-train:epochs", "20", "-train:warmup", "2", "-stop:min_epochs", "20", "-machine:train_threads", "2", "-machine:device", "cpu"])
     model = models / f"peptdeep_{head}_dynamic.onnx"
     provenance = json.loads(Path(str(model) + ".tune.json").read_text(encoding='utf-8'))
     course = provenance["course"]

@@ -197,7 +197,6 @@ void DIALibGen::registerRefinementOptions_()
     // Shorthands: every option's advanced flag comes from advanced_ (the
     // visible list in DIALibGen.cpp), so registration order is help order.
     const auto flag = [this](const char* name, const std::string& text) { registerFlag_(name, text, advanced_(name)); };
-    const auto deprecated = [](const char* use) { return std::string("Deprecated (0.12, removed in 0.13): use ") + use; };
     registerInputFile_("ids", "<file>", "", "Refine, tune: the DIA-NN report.parquet of one run (or, with "
                        "-empirical_library, a pre-filtered library)", false, advanced_("ids"));
     setValidFormats_("ids", {"parquet"}, false);
@@ -284,8 +283,6 @@ void DIALibGen::registerRefinementOptions_()
     flag("allow_mixed_intensity", "Refine: permit -write_intensity with -no_filter, which leaves observed and predicted "
                                   "intensities in one library (recorded)");
 
-    registerStringOption_("tune_models", "<dir>", "", deprecated("-models"), false, advanced_("tune_models"));
-    flag("tune_predict_gpu", deprecated("-machine:device (re-prediction follows it)"));
     registerIntOption_("tune_predict_sessions", "<n>", 0, "Tune: ONNX Runtime sessions for the re-prediction; 0 = "
                        "-threads", false, advanced_("tune_predict_sessions"));
     flag("tune_keep_free_cysteine_offset", "Tune: keep the free-cysteine RT offset when re-predicting with the tuned RT "
@@ -350,7 +347,6 @@ void DIALibGen::registerRefinementOptions_()
                        "CPU threads for fine-tuning (0: 16 on Linux and Windows, 8 on macOS). On Linux the tuned weights "
                        "depend on the count (recorded); on macOS they do not", false,
                        advanced_("machine:train_threads"));
-    registerIntOption_("machine:threads", "<n>", 0, deprecated("-machine:train_threads"), false, advanced_("machine:threads"));
     registerStringOption_("machine:cores", "<which>", "all",
                           "MacOS: which cores -threads 0 counts: all, or performance (saves energy, not time). Does not "
                           "change the output", false, advanced_("machine:cores"));
@@ -414,8 +410,6 @@ void DIALibGen::registerRefinementOptions_()
     setMinFloat_("search:nce", -1.0); setMaxFloat_("search:nce", 100.0);
     registerIntOption_("search:seed", "<n>", 42, "Salt of the candidate draw: changes which pairs are searched, not how",
                        false, advanced_("search:seed"));
-    registerIntOption_("search:passes", "<n>", 1, deprecated("nothing (1 is its only value)"), false, advanced_("search:passes"));
-    setMinInt_("search:passes", 1); setMaxInt_("search:passes", 1);
     registerDoubleOption_("search:rt_window", "<s>", 0.0, "Full RT extraction window, seconds (0 = from the calibration)",
                           false, advanced_("search:rt_window"));
     setMinFloat_("search:rt_window", 0.0);
@@ -438,7 +432,6 @@ void DIALibGen::registerRefinementOptions_()
                           "run that the RT outlier removal must keep", false, advanced_("search:calibration_min_coverage"));
     for (const char* name : {"search:calibration_min_rsq", "search:calibration_min_coverage"})
     { setMinFloat_(name, 0.0); setMaxFloat_(name, 1.0); }
-    flag("search:allow_bootstrap", deprecated("ODIA_SEARCH_ALLOW_BOOTSTRAP=1"));
     registerStringOption_("search:readoptions", "<mode>", "auto", "How the run is held: normal = in memory, cache = "
                           "per-window cache files, auto = cache for runs above 3 GB", false, advanced_("search:readoptions"));
     setValidStrings_("search:readoptions", {"auto", "normal", "cache"});
@@ -475,7 +468,6 @@ void DIALibGen::registerRefinementOptions_()
     for (const char* name : {"min_fragments", "intensity_min_fragments", "tune_predict_sessions", "cohort:train_size",
                             "train:warmup", "stop:min_epochs", "stop:patience", "machine:seed"}) { setMinInt_(name, 0); }
     for (const char* name : {"train:epochs", "train:batch_size", "stop:eval_every"}) { setMinInt_(name, 1); }
-    setMinInt_("machine:threads", 0);
     setMinInt_("machine:train_threads", 0);
     // Flat refinement options follow the existing effective-config schema;
     // training options have their own prefixes and are recognized in main_.
@@ -510,7 +502,6 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     }
     s.nce = getDoubleOption_("search:nce");
     s.seed = static_cast<std::uint64_t>(count("search:seed"));
-    s.passes = getIntOption_("search:passes");   // deprecated: 1, its only value
     s.rt_window = getDoubleOption_("search:rt_window");
     s.mz_ppm = getDoubleOption_("search:mz_ppm");
     s.im_window = getDoubleOption_("search:im_window");
@@ -520,9 +511,8 @@ ODIA::search::SearchParams DIALibGen::searchParams_()
     s.chunk = count("search:chunk");
     s.calibration_min_rsq = getDoubleOption_("search:calibration_min_rsq");
     s.calibration_min_coverage = getDoubleOption_("search:calibration_min_coverage");
-    // ODIA_SEARCH_ALLOW_BOOTSTRAP=1, or the deprecated -search:allow_bootstrap.
+    // A linear RT map when the calibration fails: validation only, by environment.
     if (const char* e = std::getenv("ODIA_SEARCH_ALLOW_BOOTSTRAP"); e != nullptr && std::string(e) == "1") { s.allow_bootstrap = true; }
-    s.allow_bootstrap = s.allow_bootstrap || getFlag_("search:allow_bootstrap");
     s.readoptions = ODIA::search::parseReadMode(getStringOption_("search:readoptions"));
     s.cache_dir = getStringOption_("search:cache_dir");
     s.ms1_in_memory = ODIA::search::parseMs1InMemory(getStringOption_("search:ms1_in_memory"));
@@ -555,9 +545,8 @@ namespace
 
 OpenMS::ParamValue DIALibGen::trainingSetting_(const std::string& name) const
 {
-  // The command line, a deprecated name's value, the INI, the recipe, the default.
+  // The command line, the INI, the recipe, the default.
   if (argv_supplied_.count(name)) { return getParam_().getValue(name); }
-  if (const auto alias = aliased_.find(name); alias != aliased_.end()) { return alias->second; }
   if (supplied_.count(name) || !tuning_recipe_.contains(name)) { return getParam_().getValue(name); }
   const json& v = tuning_recipe_.at(name);
   const auto& info = findEntry_(name);
@@ -696,13 +685,14 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
       }
     }
 
-    // Settings without an effect on this refinement: a WARNING in 0.12,
-    // refused from 0.13. Only values other than the default count.
+    // Settings without an effect on this refinement are refused (a WARNING in
+    // 0.12). Only values other than the default count.
     if (!tune_only)
     {
       const ODIA::RefineParams d;
-      const auto inert = [this](const char* option, const char* needs)
-      { warn_(std::string("-") + option + " has no effect without -" + needs + "; remove it (refused from 0.13)"); };
+      std::string inert_option, inert_needs;
+      const auto inert = [&](const char* option, const char* needs)
+      { if (inert_option.empty()) { inert_option = option; inert_needs = needs; } };
       if (!p.write_intensity)
       {
         if (p.intensity_min_correlation != d.intensity_min_correlation) { inert("intensity_min_correlation", "write_intensity"); }
@@ -720,6 +710,12 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         if (p.im_min_charge != d.im_min_charge) { inert("im_min_charge", "write_im"); }
         if (p.im_ramp_top != d.im_ramp_top) { inert("im_ramp_top", "write_im"); }
         if (p.im_ramp_margin != d.im_ramp_margin) { inert("im_ramp_margin", "write_im"); }
+      }
+      if (!inert_option.empty())
+      {
+        writeLogError_("-" + inert_option + " has no effect without -" + inert_needs + ": add -" + inert_needs +
+                       " or remove -" + inert_option);
+        return ILLEGAL_PARAMETERS;
       }
     }
 
@@ -1186,15 +1182,12 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
         const bool free_cys = setting("tune_keep_free_cysteine_offset").toString() == "true";
         // Re-prediction follows -machine:device as generate does: CUDA when
         // auto finds a usable GPU (RT and CCS need cuDNN), the CPU otherwise
-        // (CoreML has no LSTM; mps is the training device). The deprecated
-        // -tune_predict_gpu still forces the GPU.
+        // (CoreML has no LSTM; mps is the training device).
         std::vector<std::string> device_warnings;
         const ODIA::GpuOptions gpu_options = gpuOptions_(&device_warnings);
-        bool gpu = getFlag_("tune_predict_gpu");
+        bool gpu = false;
         {
           const std::string device = setting("machine:device").toString();
-          if (gpu && device == "cpu")
-          { throw std::runtime_error("-tune_predict_gpu (deprecated) contradicts -machine:device cpu; drop -tune_predict_gpu"); }
           // -machine:require_gpu asks the re-prediction for the GPU where there
           // is a CUDA route at all (a Mac has none for RT and CCS: there it is
           // the training device's matter, MPS).
@@ -1204,7 +1197,7 @@ DIALibGen::ExitCodes DIALibGen::refine_(bool tune_only)
                                                                   require, caps, library.precursorCount(),
                                                                   static_cast<std::size_t>(-1), want_ccs);
           if (!route.error.empty()) { throw std::runtime_error(route.error); }
-          gpu = gpu || require || (route.lstm_gpu && !route.lstm_coreml);
+          gpu = require || (route.lstm_gpu && !route.lstm_coreml);
           writeLogInfo_(std::string("re-prediction on the ") + (gpu ? "GPU (CUDA)" : "CPU"));
         }
         // 0 follows -threads, the run's CPU budget; 0.11.2 lifted the cap of

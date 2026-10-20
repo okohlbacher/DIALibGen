@@ -962,20 +962,32 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       if (p.predict_ion_mobility && !p.derive_ion_mobility)
       { writeLogInfo_("1/K0 not derived from CCS (-generation:derive_ion_mobility false)"); }
     }
-    // Settings without an effect here: a WARNING in 0.12, refused from 0.13
-    // (-irt_standards only ever warns: alone it is harmless).
+    // Settings without an effect here are refused (a WARNING in 0.12);
+    // -irt_standards only warns: alone it is harmless.
     {
       const ODIA::DigestParams defaults;
-      const auto inert = [this](const std::string& option, const std::string& because)
-      { warn_(option + " has no effect " + because + "; remove it (refused from 0.13)"); };
+      const auto inert = [this](const std::string& option, const std::string& because, const std::string& fix)
+      { writeLogError_(option + " has no effect " + because + ": " + fix); };
       if (!irt_standards.empty() && !irt_rescale)
       { warn_("-irt_standards has no effect without -generation:irt_rescale true"); }
       if (recompute_decoy_mz && decoys == "none")
-      { inert("-generation:recompute_decoy_mz true", "with -generation:decoys none"); }
+      {
+        inert("-generation:recompute_decoy_mz true", "with -generation:decoys none",
+              "add -generation:decoys or remove -generation:recompute_decoy_mz");
+        return ILLEGAL_PARAMETERS;
+      }
       if (p.max_variable_modifications != defaults.max_variable_modifications && p.variable_modifications.empty())
-      { inert("-generation:max_variable_modifications", "without -generation:variable_modifications"); }
+      {
+        inert("-generation:max_variable_modifications", "without -generation:variable_modifications",
+              "add -generation:variable_modifications or remove -generation:max_variable_modifications");
+        return ILLEGAL_PARAMETERS;
+      }
       if (!p.predict_ion_mobility && !p.derive_ion_mobility)
-      { inert("-generation:derive_ion_mobility false", "when CCS is not predicted"); }
+      {
+        inert("-generation:derive_ion_mobility false", "when CCS is not predicted",
+              "remove it, or predict CCS (-generation:predict_ion_mobility true, or an ion-mobility instrument)");
+        return ILLEGAL_PARAMETERS;
+      }
     }
     // Neither instrument has trained weights in the shipped MS2 checkpoint
     // (its own constants name four instruments). Measured against Lumos at

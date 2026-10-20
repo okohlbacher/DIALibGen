@@ -92,9 +92,9 @@ with tempfile.TemporaryDirectory() as directory:
     # machine options stay refused there.
     config('-mode', 'generate', '-machine:require_gpu', '-machine:tf32', 'true',
            '-machine:gpu_sessions', 2, '-machine:gpu_devices', 0, 1)
-    result = run('-mode', 'generate', '-machine:threads', 2, '-write_config', root / 'invalid.json', ok=False)
+    result = run('-mode', 'generate', '-machine:train_threads', 2, '-write_config', root / 'invalid.json', ok=False)
     assert 'has no effect' in result.stdout + result.stderr
-    for args in (('-train:epochs', 999), ('-tune_heads', 'rt'), ('-machine:threads', 2), ('-filter:q_value', 0.5),
+    for args in (('-train:epochs', 999), ('-tune_heads', 'rt'), ('-machine:train_threads', 2), ('-filter:q_value', 0.5),
                  ('-machine:require_gpu',), ('-machine:tf32', 'true'), ('-machine:gpu_sessions', 2)):
         result = run('-mode', 'refine', *args, '-write_config', root / 'invalid.json', ok=False)
         assert 'enable -tune' in result.stdout + result.stderr

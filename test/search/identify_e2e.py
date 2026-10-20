@@ -394,7 +394,7 @@ try:
         # A library with no 1/K0 at all (no IM, no CCS) on a diaPASEF run is
         # refused once the run is read, before anything is searched, with a
         # message that names search:im_window -1 -- not by an RT calibration
-        # that fails for want of seeds and points at search:allow_bootstrap.
+        # that fails for want of seeds and points at ODIA_SEARCH_ALLOW_BOOTSTRAP.
         d = root / 'im-no-library-im'
         d.mkdir()
         with open(pasef / 'library.tsv') as f:
@@ -610,8 +610,8 @@ try:
             if not all(math.isnan(x['IM']) if x['IM'] is not None else True for x in r):
                 fail('IM must be empty for a run without ion mobility')
     else:
-        common = ('-tune_heads', 'rt', '-tune_models', models, '-train:epochs', 20, '-train:warmup', 2,
-                  '-stop:min_epochs', 20, '-stop:patience', 100, '-machine:device', 'cpu', '-machine:threads', 2,
+        common = ('-tune_heads', 'rt', '-models', models, '-train:epochs', 20, '-train:warmup', 2,
+                  '-stop:min_epochs', 20, '-stop:patience', 100, '-machine:device', 'cpu', '-machine:train_threads', 2,
                   '-machine:seed', 20260803)
         for name, command in (('tune', ('-mode', 'tune')), ('refine-tune', ('-mode', 'refine', '-tune', '-no_filter'))):
             out, ids, prov, log = search(name, *common, threads=4, command=command)

@@ -109,14 +109,12 @@ if "type" in ctd_p and "type" not in ini_p:
     # output file to <TOOL><TYPE>.ctd.
     die("CTD carries a synthetic 'type' parameter the INI does not have")
 
-# -write_ini leaves out the deprecated names (0.12, removed in 0.13) so that
-# its INI still loads once they are gone; the CTD keeps them for one release.
-deprecated = {"tune_models", "tune_predict_gpu", "machine:threads", "search:passes", "search:allow_bootstrap"}
+# The names removed in 0.13 are in neither.
 missing = sorted(set(ini_p) - set(ctd_p))
-extra = sorted(set(ctd_p) - set(ini_p) - deprecated)
+extra = sorted(set(ctd_p) - set(ini_p))
 for name in ("tune_models", "tune_predict_gpu"):   # the top-level ones (harvest reads that level)
-    if name not in ctd_p:
-        die("CTD lost the deprecated parameter %r" % name)
+    if name in ctd_p:
+        die("CTD still has the removed parameter %r" % name)
 if missing or extra:
     die("CTD/INI parameter sets differ; missing from CTD: %r, extra: %r" % (missing, extra))
 

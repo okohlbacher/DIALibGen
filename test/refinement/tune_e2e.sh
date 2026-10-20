@@ -36,7 +36,7 @@ with open(sys.argv[2], "w", newline="") as target:
     writer = csv.DictWriter(target, fields, delimiter="\t"); writer.writeheader(); writer.writerows(rows)
 PY_ENCODING
 if "$BIN" -mode tune -in "$TMP/unencodable.tsv" -ids "$TMP/report.parquet" -out "$TMP/not-written.tsv" \
-   -tune_models "$MODELS" -tune_out_models "$TMP/encoding-models" \
+   -models "$MODELS" -tune_out_models "$TMP/encoding-models" \
    > "$TMP/encoding.log" 2>&1; then fail "unencodable library was accepted"; fi
 grep -q 'tuning cannot encode library precursor' "$TMP/encoding.log" || { cat "$TMP/encoding.log"; fail "wrong library encoding error"; }
 if find "$TMP/encoding-models" -type f 2>/dev/null | grep -q .; then fail "trained before library encoding validation"; fi
@@ -226,10 +226,10 @@ PYEOF2
 # Pure tuning must preserve every precursor and fragment, including the library
 # precursors absent from the report. RT-only adaptation must preserve mobility.
 "$BIN" -mode tune -in "$TMP/library.tsv" -ids "$TMP/report.parquet" -out "$TMP/pure-tuned.tsv" \
-   -tune_heads rt -tune_models "$MODELS" -tune_out_models "$TMP/pure-models" \
+   -tune_heads rt -models "$MODELS" -tune_out_models "$TMP/pure-models" \
    -filter:rt_max_minutes 30 \
    -train:epochs 20 -train:warmup 2 -stop:min_epochs 20 -stop:patience 100 \
-   -machine:device cpu -machine:threads 2 -machine:seed 20260803 \
+   -machine:device cpu -machine:train_threads 2 -machine:seed 20260803 \
    > "$TMP/pure.log" 2>&1 || { cat "$TMP/pure.log" >&2; fail "pure tuning exited non-zero"; }
 "$PY" - "$TMP/library.tsv" "$TMP/pure-tuned.tsv" "$TMP/report.parquet" <<'PYEOF3' || exit 1
 import csv, json, math, sys

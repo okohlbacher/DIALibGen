@@ -1,6 +1,6 @@
 # Parameter reference
 
-Generated from DIALibGen 0.12.1 with `scripts/update-parameters.py`. Do not edit this table by hand.
+Generated from DIALibGen 0.13.0 with `scripts/update-parameters.py`. Do not edit this table by hand.
 
 The schema lists all modes. Without `-mode`, a FASTA generates and a library converts; refinement and training options apply to their respective modes. `--help` shows the options marked in the column *--help* (`--help -mode <mode>` one mode's), `--helphelp` all of them. Generation booleans take `true`/`false`; list items are separate arguments. `-threads` defaults to all physical cores unless the command line or the INI sets it. See [usage](usage.md).
 
@@ -139,14 +139,14 @@ The schema lists all modes. Without `-mode`, a FASTA generates and a library con
 | `-search:batch_size` | int | `100` | 1: |  | Memory: precursors per extraction batch within one isolation window (the report does not depend on it) |
 | `-search:chunk` | int | `20000` | 2: |  | Memory: precursors per extraction call (pairs stay together); bounds extraction memory, not the calibration's |
 
-## Deprecated options
+## Removed options
 
-Accepted with a WARNING in 0.12 and removed in 0.13; `-write_ini` does not write them.
+Deprecated in 0.12 and removed in 0.13. A command line or an INI that still gives one is refused with a line naming the replacement.
 
 | Option | Replacement |
 |---|---|
-| `-tune_models` | -models |
-| `-tune_predict_gpu` | -machine:device (re-prediction follows it) |
-| `-machine:threads` | -machine:train_threads |
-| `-search:passes` | nothing (1 is its only value) |
-| `-search:allow_bootstrap` | ODIA_SEARCH_ALLOW_BOOTSTRAP=1 |
+| `-tune_models` | `-models` |
+| `-machine:threads` | `-machine:train_threads` |
+| `-tune_predict_gpu` | nothing: re-prediction follows `-machine:device` |
+| `-search:passes` | nothing (1 was its only value) |
+| `-search:allow_bootstrap` | the environment variable `ODIA_SEARCH_ALLOW_BOOTSTRAP=1` |

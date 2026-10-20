@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(DIALibGenConsumer LANGUAGES CXX)
 
-find_package(DIALibGen 0.12 CONFIG REQUIRED)
+find_package(DIALibGen 0.13 CONFIG REQUIRED)
 add_executable(dialibgen_consumer main.cpp)
 target_link_libraries(dialibgen_consumer PRIVATE DIALibGen::odia_library)
 foreach(part IN ITEMS refine tune)

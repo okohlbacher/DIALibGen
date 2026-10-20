@@ -1955,7 +1955,7 @@ namespace ODIA::search
         }
         throw SearchAbort("search: RT calibration failed: " + failure + " (" + std::to_string(cal.seeds) + " seed assays, " +
                           std::to_string(picked_kit) + " of them iRT/CiRT kit precursors, " + std::to_string(cal.points) +
-                          " points kept); nothing is searched on a guessed RT scale unless search:allow_bootstrap is set" + im_note);
+                          " points kept); nothing is searched on a guessed RT scale unless ODIA_SEARCH_ALLOW_BOOTSTRAP=1 is set" + im_note);
       }
       // The test hook: the library RT range laid linearly over the run, and a
       // window as wide as the run unless search:rt_window says otherwise.
@@ -1963,7 +1963,7 @@ namespace ODIA::search
       {
         // The ion-mobility calibration measures the RT calibration's seeds at
         // their apex; a guessed RT map has none.
-        throw SearchAbort("search: RT calibration failed: " + failure + "; search:allow_bootstrap cannot stand in for it on an "
+        throw SearchAbort("search: RT calibration failed: " + failure + "; ODIA_SEARCH_ALLOW_BOOTSTRAP=1 cannot stand in for it on an "
                           "ion-mobility run, whose 1/K0 calibration measures the RT calibration's seeds (search:im_window -1 "
                           "searches without ion mobility)");
       }

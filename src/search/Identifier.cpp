@@ -524,7 +524,7 @@ namespace ODIA::search
            " ppm, 1/K0 " + (calibration.im_window > 0 ? std::to_string(calibration.im_window) : std::string("off")) +
            (calibration.bootstrap ? " (BOOTSTRAP)" : "") + " (" +
            seconds(timing["calibrate"].get<double>()) + ")");
-      if (calibration.bootstrap) { warning("the RT calibration FAILED and search:allow_bootstrap replaced it with a linear map"); }
+      if (calibration.bootstrap) { warning("the RT calibration FAILED and ODIA_SEARCH_ALLOW_BOOTSTRAP=1 replaced it with a linear map"); }
 
       t = Clock::now();
       trace::Scope extraction_phase("extraction", 0);

@@ -73,14 +73,14 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     empty = root / 'no-models'
     empty.mkdir()
     log = refused('needs peptdeep_ms2_dynamic.onnx: none in', '-mode', 'refine', '-in', library, '-run', mzml,
-                  '-out', fresh(), '-tune_models', empty)
+                  '-out', fresh(), '-models', empty)
     assert 'search run' not in log, log
-    log = run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-tune_models', empty,
+    log = run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-models', empty,
               '-search:intensities', 'library', ok=False)
     assert 'search run: reading ' + str(mzml) in log, log
-    # -tune_models without -run (and without -tune) stays a training option.
-    refused('-tune_models has no effect in -mode refine', '-mode', 'refine', '-in', library, '-ids', ids, '-out', fresh(),
-            '-tune_models', empty)
+    # -models without -run (and without -tune) has no effect in refine.
+    refused('-models has no effect in -mode refine', '-mode', 'refine', '-in', library, '-ids', ids, '-out', fresh(),
+            '-models', empty)
     refused("unknown instrument 'Orbitrap9000'", '-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(),
             '-search:instrument', 'Orbitrap9000')
     run('-mode', 'refine', '-in', library, '-run', mzml, '-out', fresh(), '-search:intensities', 'guessed', ok=False)
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     both = ['-tune_heads', 'both']
     for mode, extra in (('tune', both), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter', *both])):
         log = refused_tune('needs observed 1/K0 values, and search:im_window -1', '-mode', mode, *extra, '-in', library,
-                           '-run', mzml, '-out', fresh(), '-tune_models', models, '-search:im_window', -1)
+                           '-run', mzml, '-out', fresh(), '-models', models, '-search:im_window', -1)
         assert 'search run' not in log and 'search candidates' not in log, log
     # -tune_heads auto (the default) settles on its heads after the search: RT
     # only when the run has no usable 1/K0, so search:im_window -1 is no refusal.
@@ -128,13 +128,13 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     # Refused BEFORE the search, not after it: a head without its stock model ...
     for mode, extra in (('tune', both), ('tune', ['-tune_heads', 'ccs']), ('refine', ['-tune', '-no_filter', *both])):
         log = refused_tune('no peptdeep_ccs_dynamic.onnx in', '-mode', mode, *extra, '-in', library, '-run', mzml,
-                           '-out', fresh(), '-tune_models', models)
+                           '-out', fresh(), '-models', models)
         assert 'search run' not in log and 'search candidates' not in log, log
     # ... a training recipe that cannot run, and absent models.
     refused_tune('train:warmup must be in [0, train:epochs]', '-mode', 'tune', '-tune_heads', 'rt', '-in', library,
-                 '-run', mzml, '-out', fresh(), '-tune_models', models, '-train:epochs', 3)
+                 '-run', mzml, '-out', fresh(), '-models', models, '-train:epochs', 3)
     refused_tune('no peptdeep_rt_dynamic.onnx in', '-mode', 'tune', '-tune_heads', 'rt', '-in', library,
-                 '-run', mzml, '-out', fresh(), '-tune_models', root)
+                 '-run', mzml, '-out', fresh(), '-models', root)
     # A library without protein groups.
     nopg = root / 'library-nopg.tsv'
     with library.open() as source, nopg.open('w', newline='') as output:
@@ -151,7 +151,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     log = run('-mode', 'refine', '-in', nopg, '-run', mzml, '-out', fresh(), ok=False)
     assert 'has a Protein.Group' not in log and 'search run: reading ' in log, log
     refused_tune('has a Protein.Group', '-mode', 'tune', '-tune_heads', 'rt', '-in', nopg, '-run', mzml, '-out', fresh(),
-                 '-tune_models', models)
+                 '-models', models)
 
     # A directory as the run (a Bruker .d above all) is refused with a message,
     # not a crash in TOPP's file-type probe.
@@ -231,7 +231,7 @@ with tempfile.TemporaryDirectory(prefix='dialibgen-identify-cli-') as directory:
     # reads it (the run comes first: its isolation windows decide which
     # candidates can be searched). This "run" is not one, so the search fails
     # -- and leaves neither -out_ids nor -out behind.
-    tuning = ['-tune_heads', 'rt', '-tune_models', models]
+    tuning = ['-tune_heads', 'rt', '-models', models]
     for mode, extra in (('tune', tuning), ('refine', ['-tune', '-no_filter'] + tuning), ('refine', [])):
         out = fresh()
         report = root / f'report-{next(counter)}.parquet'

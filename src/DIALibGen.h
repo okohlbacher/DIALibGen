@@ -25,9 +25,12 @@ public:
   /// token is an option when it starts with '-' and a letter, or '--' and a
   /// letter), each with the closest known name or "" when nothing is close.
   static std::vector<std::pair<std::string, std::string>> unknownOptions(int argc, const char** argv);
-  /// Deprecated option names (0.12, removed in 0.13) and what replaces each.
-  struct Deprecated { const char* old_name; const char* new_name; const char* use; };
-  static const std::vector<Deprecated>& deprecatedOptions();
+  /// Option names removed in 0.13 (deprecated in 0.12) and what replaces
+  /// each: a command line or an INI that still gives one is refused with a
+  /// line naming the replacement (TOPP alone would reject an INI's unknown
+  /// name without saying what it became).
+  struct Removed { const char* old_name; const char* use; };
+  static const std::vector<Removed>& removedOptions();
 protected:
   void registerOptionsAndFlags_() override;
   void registerGenerationOptions_();
@@ -53,13 +56,9 @@ protected:
   /// Given on the command line, or in the INI with a value other than the
   /// registered default (a -write_ini file lists every option).
   bool given_(const std::string& name) const;
-  /// The directory of the stock models: -models (or the deprecated
-  /// -tune_models), else $DIALIBGEN_MODEL_DIR, else the bundled models.
+  /// The directory of the stock models: -models, else $DIALIBGEN_MODEL_DIR,
+  /// else the bundled models.
   std::string modelDirectory_() const;
-  /// -machine:train_threads, or the deprecated -machine:threads.
-  int trainThreads_() const;
-  /// Values of deprecated options, resolved onto their replacement in main_.
-  std::map<std::string, OpenMS::ParamValue> aliased_;
   std::set<std::string> supplied_;        ///< on the command line or in the INI
   std::set<std::string> argv_supplied_;   ///< on the command line
   std::set<std::string> refinement_options_;

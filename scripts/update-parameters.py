@@ -17,15 +17,15 @@ with tempfile.TemporaryDirectory(prefix="dialibgen-parameters-") as directory:
     if result.returncode:
         raise SystemExit(result.stderr.strip() or f"Schema export failed: {result.returncode}")
     root = ET.parse(ini).getroot()
-    # -write_ini leaves the deprecated names out (an INI must load once they
-    # are removed); --helphelp still lists them.
-    helphelp = subprocess.run([str(args.binary.resolve()), "--helphelp"], capture_output=True, text=True)
-    deprecated = []
-    for line in (helphelp.stdout + helphelp.stderr).splitlines():
-        marker = "Deprecated (0.12, removed in 0.13): use "
-        if line.strip().startswith("-") and marker in line:
-            replacement = line[line.index(marker) + len(marker):].split(" (default:")[0]
-            deprecated.append("| `" + line.split()[0] + "` | " + replacement.replace("|", "\\|") + " |")
+
+# Removed in 0.13 (deprecated in 0.12): DIALibGen refuses them by name, on the
+# command line and in an INI (src/DIALibGen.cpp, removedOptions).
+REMOVED = (("-tune_models", "`-models`"), ("-machine:threads", "`-machine:train_threads`"),
+           ("-tune_predict_gpu", "nothing: re-prediction follows `-machine:device`"),
+           ("-search:passes", "nothing (1 was its only value)"),
+           ("-search:allow_bootstrap", "the environment variable `ODIA_SEARCH_ALLOW_BOOTSTRAP=1`"))
+removed = ["| `" + old + "` | " + new + " |" for old, new in REMOVED]
+
 
 def cell(value):
     return str(value).replace("|", "\\|").replace("\n", " ")
@@ -64,9 +64,9 @@ text = ("# Parameter reference\n\nGenerated from DIALibGen " + label +
         "See [usage](usage.md).\n\n"
         "| Option | Type | Default | Constraints | --help | Description |\n"
         "|---|---|---|---|---|---|\n" + "\n".join(rows(instance)) + "\n" +
-        ("\n## Deprecated options\n\nAccepted with a WARNING in 0.12 and removed in 0.13; `-write_ini` "
-         "does not write them.\n\n| Option | Replacement |\n|---|---|\n" + "\n".join(deprecated) + "\n"
-         if deprecated else ""))
+        "\n## Removed options\n\nDeprecated in 0.12 and removed in 0.13. A command line or an INI that "
+        "still gives one is refused with a line naming the replacement.\n\n"
+        "| Option | Replacement |\n|---|---|\n" + "\n".join(removed) + "\n")
 target = Path(__file__).resolve().parents[1] / "docs" / "parameters.md"
 if args.check:
     if not target.exists() or target.read_text() != text:

@@ -368,13 +368,14 @@ pub struct TuningOption {
     choices: Option<Vec<String>>,
 }
 
-/// Deprecated in 0.12 and removed in 0.13. Skipped by name, never by the INI's
-/// `advanced` flag: most training options are advanced now and must still be offered.
-const DEPRECATED_OPTIONS: [&str; 5] =
+/// Removed in 0.13 (deprecated in 0.12): an older binary's INI may still list them.
+/// Skipped by name, never by the INI's `advanced` flag: most training options are
+/// advanced and must still be offered.
+const REMOVED_OPTIONS: [&str; 5] =
     ["tune_models", "machine:threads", "tune_predict_gpu", "search:passes", "search:allow_bootstrap"];
 
 fn training_key(name: &str) -> bool {
-    !DEPRECATED_OPTIONS.contains(&name)
+    !REMOVED_OPTIONS.contains(&name)
         && (matches!(name, "tune_heads" | "tune_predict_sessions" | "tune_keep_free_cysteine_offset")
             || ["filter:", "cohort:", "train:", "stop:", "machine:"].iter().any(|prefix| name.starts_with(prefix)))
 }
@@ -908,7 +909,7 @@ mod tests {
         assert_eq!(option("machine:device").value, "auto");
         assert_eq!(option("machine:train_threads").min, Some(0.0));
         assert!(option("filter:rt_max_minutes").description.contains("run's latest observed RT"));
-        // Deprecated names are skipped by name even if an older binary still writes them.
+        // Removed names are skipped by name even if an older binary still writes them.
         let legacy = String::from_utf8(TOPP_INI.to_vec()).unwrap().replace(
             "<ITEM name=\"seed\" value=\"20260803\"",
             "<ITEM name=\"threads\" value=\"4\" type=\"int\" description=\"old\"/><ITEM name=\"seed\" value=\"20260803\"").replace(
@@ -917,7 +918,7 @@ mod tests {
         assert_ne!(legacy.as_bytes(), TOPP_INI);
         let names: Vec<_> = parse_tuning_options(legacy.as_bytes()).unwrap().into_iter().map(|option| option.name).collect();
         assert_eq!(names.len(), 32);
-        for name in DEPRECATED_OPTIONS { assert!(!names.iter().any(|n| n == name), "{name}"); }
+        for name in REMOVED_OPTIONS { assert!(!names.iter().any(|n| n == name), "{name}"); }
         assert!(tuning_argv(&options, &obj(r#"{"tune_predict_gpu":true}"#)).is_err());
         assert!(tuning_argv(&options, &obj(r#"{"machine:threads":4}"#)).is_err());
         let minimal = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><PARAMETERS><NODE name=\"DIALibGen\"><NODE name=\"1\"><NODE name=\"train\"><ITEM name=\"epochs\" type=\"int\" value=\"100\" description=\"caf\xe9 &amp; &lt;epochs&gt;\"/></NODE></NODE></NODE></PARAMETERS>";

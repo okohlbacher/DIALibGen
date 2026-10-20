@@ -3,6 +3,30 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed defaults
+
+- Instrument files for the Orbitrap and SCIEX instruments that had none
+  (`data/instruments/`; values and their public PRIDE sources in each file):
+  `exploris.yaml` (Exploris 480: QE model, NCE 30, precursor m/z 360-1040),
+  `qexactive.yaml` (Q Exactive HF/HF-X: QE, NCE 27, was 30), `tribrid.yaml`
+  (Fusion Lumos, Fusion, Eclipse: Lumos model, NCE 30, was 25, fragment m/z
+  200-2000) and `sciextof.yaml` (TripleTOF, ZenoTOF: Lumos model instead of the
+  untrained SciexTOF label, NCE 27, precursor m/z 350-1250, charges 2-4). The
+  NCE and model slot come from a sweep scored with the all-charge
+  fragment-intensity method on 2-5 runs per family and DIA-NN 2.0
+  identifications; the windows from the runs' DIA methods. The bare model-slot
+  names (`QE`, `Lumos`, `SciexTOF`), Exploris 240 and Q Exactive/QE Plus keep
+  `default.yaml`. `-generation:nce` and the window options override them as
+  before.
+
+### Fixed
+
+- `scripts/eval/fragment_intensity_eval.py` read an empty binary array
+  (`encodedLength="0"`, as SCIEX mzML have) as a broken zlib stream and
+  stopped; it is an empty spectrum.
+
 ## [0.13.0] — 2026-10-20
 
 The option cleanup announced in 0.12: the deprecated names are gone and a
@@ -39,20 +63,6 @@ unchanged. See [migration](docs/usage.md#migration).
   default.
 
 ### Changed defaults
-
-- Instrument files for the Orbitrap and SCIEX instruments that had none
-  (`data/instruments/`; values and their public PRIDE sources in each file):
-  `exploris.yaml` (Exploris 480: QE model, NCE 30, precursor m/z 360-1040),
-  `qexactive.yaml` (Q Exactive HF/HF-X: QE, NCE 27, was 30), `tribrid.yaml`
-  (Fusion Lumos, Fusion, Eclipse: Lumos model, NCE 30, was 25, fragment m/z
-  200-2000) and `sciextof.yaml` (TripleTOF, ZenoTOF: Lumos model instead of the
-  untrained SciexTOF label, NCE 27, precursor m/z 350-1250, charges 2-4). The
-  NCE and model slot come from a sweep scored with the all-charge
-  fragment-intensity method on 2-4 runs per family and DIA-NN 2.0
-  identifications; the windows from the runs' DIA methods. The bare model-slot
-  names (`QE`, `Lumos`, `SciexTOF`), Exploris 240 and Q Exactive/QE Plus keep
-  `default.yaml`. `-generation:nce` and the window options override them as
-  before.
 
 - `timstof.yaml`: a timsTOF library without explicit charges has charges 2-4
   (0.12.1: 1-4). On the timsTOF benchmark (PXD029836, three diaPASEF runs,
@@ -112,12 +122,6 @@ unchanged. See [migration](docs/usage.md#migration).
   when Apple's ticket service drops the connection).
 - GUI tests wait out a transient "Text file busy" before running their fake
   CLI (seen on Ubuntu 24.04).
-
-### Fixed
-
-- `scripts/eval/fragment_intensity_eval.py` read an empty binary array
-  (`encodedLength="0"`, as SCIEX mzML have) as a broken zlib stream and
-  stopped; it is an empty spectrum.
 
 
 ## [0.12.1] — 2026-10-16

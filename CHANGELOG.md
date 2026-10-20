@@ -21,6 +21,17 @@ This project follows [Semantic Versioning](https://semver.org/).
   `default.yaml`. `-generation:nce` and the window options override them as
   before.
 
+### Changed
+
+- The report's runtime section (`docs/report/DIALibGen-report-0.13.0.*`; the
+  PDF on the 0.13.0 release is replaced) is measured with the 0.13.0 release
+  packages: whole proteome on one server in one session with DIA-NN 2.0
+  (96 threads: 151 s against 180 s; 16 threads: 690 s against 464 s), one and
+  two H100 (79 and 49 s), the Astral library and its RT tune on the server CPU
+  and on two H100, and the laptop, each with 0.12.1 (or 0.11.4) as a control.
+  The backlog's speed item now says what is left: 1.5 x DIA-NN's time at 16
+  threads.
+
 ### Fixed
 
 - `scripts/eval/fragment_intensity_eval.py` read an empty binary array

@@ -98,29 +98,29 @@ Why it is here rather than done:
   within 1e-4, RT and CCS identical), not byte for byte. Accepted by the owner
   2026-10-19.
 
-## `generate` is several times slower than DIA-NN's predictor
+## `generate` needs 1.5 x DIA-NN's CPU time at low thread counts
 
-The same whole-proteome FASTA and digest (20,431 proteins and as many shuffled
-entrapment twins; 2.65 M peptides, 5.75 M precursors at charge 2-4, 69 M
-transitions), on one 192-core node with 96 threads each:
+Measured again for 0.13.0 (report section 3): the same whole-proteome FASTA
+and digest (5,808,438 precursors at charges 2-4; DIALibGen keeps 12 fragments
+per precursor), both tools one after the other on one quiet 2 x 96-core node
+(kim, 20 October 2026), DIALibGen 0.13.0 from the release package:
 
-| Tool | Wall | CPU | Peak memory | Output |
-|---|---|---|---|---|
-| DIALibGen 0.10.1 `generate`, timsTOF, NCE 30 | 18 min 26 s | 3 h 47 min | 14.5 GB | TSV |
-| DIA-NN 2.0 `--predictor --gen-spec-lib` | 2 min 43 s | | | `.speclib` |
+| threads | DIALibGen 0.13.0 | DIA-NN 2.0 predictor | DIALibGen CPU / DIA-NN CPU |
+|---|---|---|---|
+| 96 | 151 s | 180 s | 12,924 / 11,448 s |
+| 16 | 690 s | 464 s | 10,937 / 6,619 s |
 
-About 7 x. Not yet a fair measurement: the two builds started together and
-shared the node for DIA-NN's 2.7 minutes, DIALibGen wrote a 69 M-row TSV while
-DIA-NN wrote its binary library, and the models differ (AlphaPeptDeep RT, MS2
-and CCS against DIA-NN's own). The same predictor is also `-run`'s largest step
-after extraction (1,464 s for 5.14 M targets and their decoys at 16 threads),
-so it counts against the 60-minute resource gate as well.
+The "several times slower" of 0.10.1 (18 min 26 s against 2 min 43 s) is
+gone: at 96 threads DIALibGen is now the faster tool. At 16 threads it still
+takes 1.5 x DIA-NN's wall time and 1.65 x its CPU time.
+The two do not do identical work (different models, fragment selection and
+output format), so this is an end-to-end comparison.
 
-Why it matters: `generate` is the first thing every user runs, and its cost
-grows with every variable modification, charge state and missed cleavage.
-
-Why it is here rather than done: where the 18 minutes go (digest, the three
-models, writing) has not been measured.
+Why it is here rather than done: the remaining gap is CPU cost per
+prediction (item 3 of the follow-ups below: profile ONNX Runtime per
+operation for the MS2 transformer and the RT/CCS LSTMs); anything that
+changes outputs (reduced precision) needs an owner decision. On a GPU the
+question does not arise (49 s on two H100).
 
 ## Benchmark the ONNX predictors on a GPU (H100)
 
@@ -179,8 +179,9 @@ the pruned MS2 model, streamed writing during MS2, and the small items
    `-run`: the extraction straggler window (one window ends each timsTOF call
    alone), the calibration's OpenSWATH call (270 s on 1.8 cores), and the serial
    hashing and loading (about 100 s).
-3. **CPU cost per prediction**, the remaining ~1.3x gap to DIA-NN at 8-16 threads
-   (9,100 vs 6,386 CPU-s at 8 threads). First profile ONNX Runtime per operation
+3. **CPU cost per prediction**, the remaining gap to DIA-NN at 8-16 threads
+   (0.11.2 at 8 threads: 9,100 vs 6,386 CPU-s; 0.13.0 at 16 threads: 10,937 vs
+   6,619 CPU-s, 1.65 x). First profile ONNX Runtime per operation
    (MS2 transformer layers, RT/CCS LSTMs). Anything that changes outputs
    (reduced precision; int8 was rejected) needs an owner decision.
 4. **GPU re-benchmark** (done in 0.12.1: 77.7 s per whole proteome on one

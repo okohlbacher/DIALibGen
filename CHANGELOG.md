@@ -18,7 +18,7 @@ other instrument are byte-identical to 0.13.0's.
   all cores before the GPU phase, instead of on half the cores while the GPU
   predicts MS2 (0.11.4-0.13.0). The GPU phase's host side (Core ML's
   threads, the encoding workers) lost more than the overlap gained: whole
-  human library on an M4 Max, cache warm, 0.13.0, one quiet session:
+  human library on an idle M4 Max, cache warm, 0.13.0, one session:
   343.9 s overlapped against 297.1 s in order (the GPU's chunks 1,186 s
   summed against 865 s; 0.11.4: 392.3 s against 292.2 s). `ODIA_OVERLAP=1`
   restores the overlap (`ODIA_OVERLAP_RESERVE` as before); `ODIA_OVERLAP=0`
@@ -42,16 +42,18 @@ other instrument are byte-identical to 0.13.0's.
 
 ### Changed
 
-- The report's runtime section (`docs/report/DIALibGen-report-0.13.0.*`; the
-  PDF on the 0.13.0 release is replaced) is measured with the 0.13.0 release
+- The report (`docs/report/DIALibGen-report-0.13.1.*`, renamed from 0.13.0;
+  the PDF is attached to the 0.13.1 release, and the 0.13.0 release's PDF was
+  replaced on 20 October) has a runtime section measured with the 0.13.0 release
   packages: whole proteome on one server in one session with DIA-NN 2.0
   (96 threads: 151 s against 180 s; 16 threads: 690 s against 464 s), one and
   two H100 (79 and 49 s), the Astral library and its RT tune on the server CPU
   and on two H100, and the laptop, each with 0.12.1 (or 0.11.4) as a control.
   On the laptop the CoreML route took 344 s (0.12.1 405 s, 0.11.4 392 s in the
   same session); predicting RT and CCS before the GPU phase instead of during
-  it (`ODIA_OVERLAP=0`) took 297 s, in 0.11.4 as well. The backlog's speed
-  item now says what is left: 1.5 x DIA-NN's time at 16 threads.
+  it (`ODIA_OVERLAP=0`, 0.13.1's default) took 297 s, in 0.11.4 as well. It
+  also mentions the new instrument files. The backlog's speed item now says
+  what is left: 1.5 x DIA-NN's time at 16 threads.
 
 ### Fixed
 

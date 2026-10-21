@@ -11,6 +11,8 @@ example/proteins.fasta, intensities within 1.3e-6 and no fragment set
 differs. RT and CCS stay on the CPU (CoreML has no LSTM operator) and must
 be bit-identical. Two CoreML runs, with 1 and 4 concurrent batches, must
 write the same bytes, and -machine:require_gpu must refuse the RT fallback.
+RT and CCS run before MS2 by default and, with ODIA_OVERLAP=1, on a thread of
+their own while the GPU predicts MS2: the same bytes either way.
 """
 import csv
 import os
@@ -24,9 +26,15 @@ shutil.rmtree(work, ignore_errors=True)
 work.mkdir(parents=True)
 
 
-def generate(name, *args):
+OVERLAP_LINE = "while the GPU predicts MS2"
+
+
+def generate(name, *args, overlap=None):
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = ""
+    env.pop("ODIA_OVERLAP", None)
+    if overlap is not None:
+        env["ODIA_OVERLAP"] = overlap
     out = work / name
     result = subprocess.run([tool, "-in", fasta, "-out", str(out), "-threads", "4",
                              "-generation:predict_ion_mobility", "true", *args],
@@ -47,6 +55,12 @@ if "[MS2] provider CoreML" not in log:
     print("MS2 does not run on CoreML; skipped:", reason[0] if reason else "no CoreML provider line")
     sys.exit(77)
 assert "WARNING: RT: " in log and "LSTM" in log, "the RT fallback (no LSTM in CoreML) was not reported"
+assert OVERLAP_LINE not in log, "RT and CCS overlapped MS2 on CoreML without ODIA_OVERLAP=1"
+overlapped, result = generate("coreml_overlap.tsv", "-machine:device", "coreml", "-machine:gpu_sessions", "4",
+                              overlap="1")
+assert result.returncode == 0, result.stdout + result.stderr
+assert OVERLAP_LINE in result.stdout + result.stderr, "ODIA_OVERLAP=1 did not overlap RT and CCS with MS2"
+assert overlapped.read_bytes() == coreml4.read_bytes(), "ODIA_OVERLAP=1 wrote a different library"
 coreml1, result = generate("coreml_c1.tsv", "-machine:device", "coreml", "-machine:gpu_sessions", "1")
 assert result.returncode == 0, result.stdout + result.stderr
 assert coreml1.read_bytes() == coreml4.read_bytes(), "1 and 4 concurrent CoreML batches wrote different libraries"
@@ -73,4 +87,4 @@ for x, y in zip(a, b):
             assert abs(float(x[key]) - float(y[key])) <= tolerance[key], (key, x, y)
         elif key not in tolerance:
             assert x[key] == y[key], (key, x, y)
-print(f"{len(a)} transitions: CoreML equals CPU within float rounding; concurrent 1 == 4")
+print(f"{len(a)} transitions: CoreML equals CPU within float rounding; concurrent 1 == 4; overlap == in order")

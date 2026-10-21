@@ -3,10 +3,27 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.13.1] — 2026-10-21
+
+A patch release: generation on Apple silicon is faster by default, and the
+Orbitrap and SCIEX instruments that had no instrument file get one. Libraries
+of these instruments change (NCE, model slot, m/z windows); libraries of every
+other instrument are byte-identical to 0.13.0's.
 
 ### Changed defaults
 
+- **Apple GPU: RT and CCS before MS2, not during it.** When MS2 runs on
+  CoreML (the default route on Apple silicon for a large library), the RT
+  phase (with the iRT calibration) and the CCS phase now run on the CPU on
+  all cores before the GPU phase, instead of on half the cores while the GPU
+  predicts MS2 (0.11.4-0.13.0). The GPU phase's host side (Core ML's
+  threads, the encoding workers) lost more than the overlap gained: whole
+  human library on an M4 Max, cache warm, 0.13.0, one quiet session:
+  343.9 s overlapped against 297.1 s in order (the GPU's chunks 1,186 s
+  summed against 865 s; 0.11.4: 392.3 s against 292.2 s). `ODIA_OVERLAP=1`
+  restores the overlap (`ODIA_OVERLAP_RESERVE` as before); `ODIA_OVERLAP=0`
+  keeps the phases in order on CUDA without cuDNN too, the one route that
+  still overlaps by default. The library is the same either way.
 - Instrument files for the Orbitrap and SCIEX instruments that had none
   (`data/instruments/`; values and their public PRIDE sources in each file):
   `exploris.yaml` (Exploris 480: QE model, NCE 30, precursor m/z 360-1040),
@@ -19,7 +36,9 @@ This project follows [Semantic Versioning](https://semver.org/).
   identifications; the windows from the runs' DIA methods. The bare model-slot
   names (`QE`, `Lumos`, `SciexTOF`), Exploris 240 and Q Exactive/QE Plus keep
   `default.yaml`. `-generation:nce` and the window options override them as
-  before.
+  before. DIA-NN 2.0 precursors at 1 % FDR with the new values against the
+  previous ones: Tribrids +7-8 %, TripleTOF/ZenoTOF +20-23 %, Q Exactive
+  HF/HF-X +1.8 % (details in each file).
 
 ### Changed
 

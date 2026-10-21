@@ -307,12 +307,16 @@ namespace ODIA
 
     /// Whether generate predicts RT and CCS on a thread of their own while
     /// MS2 runs on @p ms2: only where RT and CCS then run on the CPU, which is
+    /// on CUDA when they are routed to the CPU (@p lstm_on_cpu: no cuDNN) and
     /// under CoreML (no LSTM operator, so their predictors take the CPU path)
-    /// and on CUDA when they are routed to the CPU (@p lstm_on_cpu: no
-    /// cuDNN). With all three models on CUDA, overlapping them made them
-    /// contend for the GPU (0.11.4, one H100: 89.2 s against 79.5 s in order);
-    /// with MS2 on the CPU there is nothing to overlap.
-    static bool overlapsCpuPhases(PeptDeepPredictor::Provider ms2, bool lstm_on_cpu = false);
+    /// when asked for (@p coreml_overlap: ODIA_OVERLAP=1). On CoreML the
+    /// overlap slowed the GPU's host side (0.13.0, whole human library on an
+    /// M4 Max: 343.9 s against 297.1 s in order). With all three models on
+    /// CUDA, overlapping them made them contend for the GPU (0.11.4, one
+    /// H100: 89.2 s against 79.5 s in order); with MS2 on the CPU there is
+    /// nothing to overlap.
+    static bool overlapsCpuPhases(PeptDeepPredictor::Provider ms2, bool lstm_on_cpu = false,
+                                  bool coreml_overlap = false);
 
     /// Whether generate predicts CCS (and 1/K0) for -generation:predict_ion_mobility
     /// @p request ("auto", "true" or "false") on @p canonical_instrument: auto

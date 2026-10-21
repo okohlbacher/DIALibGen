@@ -533,7 +533,7 @@ that works on the machine and says which, in one line, before predicting:
 |---|---|---|
 | Linux/Windows, ONNX Runtime with CUDA, NVIDIA GPU visible, cuDNN 9 found | CUDA | CUDA |
 | the same without cuDNN 9 (a `WARNING` with the fix) | CUDA | CPU, while MS2 runs |
-| Mac (Apple silicon), library of at least 50,000 precursors per CPU thread | Apple GPU (CoreML) | CPU, while MS2 runs |
+| Mac (Apple silicon), library of at least 50,000 precursors per CPU thread | Apple GPU (CoreML) | CPU, before MS2 |
 | anything else (no GPU, a CPU-only ONNX Runtime, a small library on a Mac) | CPU | CPU |
 
 ```text
@@ -732,21 +732,21 @@ What runs where, and why:
   before 14.4 ONNX Runtime skips Core ML's optimisation hints and says so
   in the log (`ConfigureOptimizationHints`), which does not stop the model
   from running, and the probe decides the rest.
-- **RT and CCS on the CPU, while the GPU predicts MS2.** CoreML has no LSTM
+- **RT and CCS on the CPU, before the GPU predicts MS2.** CoreML has no LSTM
   operator, and these models are LSTMs: ONNX Runtime would keep the LSTM
   nodes on the CPU and hand the rest to CoreML, which is slower than the
-  plain CPU path. Since MS2 does not depend on them, the RT phase (with the
-  iRT calibration) and the CCS phase run on a thread of their own while the
-  GPU predicts MS2, and the streaming writer waits for both. The GPU phase
-  has a host side of its own (Core ML's threads, the encoding workers) and
-  slows down when every core is busy, so the overlapped CPU phases run on
-  half the cores (`ODIA_OVERLAP_RESERVE` sets how many they leave free).
-  Measured on the Astral library on an M4 Max, untimed and under a
-  changing background load: phases in order 238 s; overlapped on all 16
-  cores 232 s (the GPU phase stretched from 153 to 229 s); on 12 cores
-  208 s; on 8 cores 189 s. The CPU calls are the same calls whatever the
-  session count, so the library is the same; `ODIA_OVERLAP=0` runs the
-  phases in order. On CUDA all three models run on the GPU, and the phases
+  plain CPU path. They run on the CPU on all cores, then MS2 on the GPU
+  (CoreML compiles or loads its shapes in the background meanwhile). From
+  0.11.4 to 0.13.0 the RT phase (with the iRT calibration) and the CCS phase
+  ran on a thread of their own while the GPU predicted MS2, on half the
+  cores; `ODIA_OVERLAP=1` still does (`ODIA_OVERLAP_RESERVE` sets how many
+  cores they leave free). The GPU phase has a host side of its own (Core
+  ML's threads, the encoding workers) and slows down when the cores are
+  busy: on a quiet M4 Max (whole human library, cache warm, 0.13.0) the
+  overlap took 343.9 s and the phases in order 297.1 s, the GPU's chunks
+  1,186 s summed against 865 s; 0.11.4 measured the same (392.3 s against
+  292.2 s). The CPU calls are the same calls whatever the order and session
+  count, so the library is the same either way. On CUDA all three models run on the GPU, and the phases
   stay in order: overlapped there (0.11.4), they contended for the GPU and
   a whole-proteome run took 89.2 s instead of 79.5 s on one H100. Running
   the LSTMs on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`

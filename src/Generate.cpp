@@ -1207,15 +1207,19 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
     // The other layouts are written in one pass, from the final library.
     const bool stream = (stream_env == nullptr || std::string_view(stream_env) != "0") &&
                         (parquet || format == ODIA::LibraryFormat::DIANNTSV);
-    // When MS2 runs on CoreML, RT and CCS run on the CPU meanwhile, on a
-    // thread of their own: MS2 does not need them, the writer waits for
-    // both, and the CPU's RT and CCS calls are the same calls as before, so
-    // the library is the same. On a whole human library on an M4 Max they
-    // took 77 s of 16 idle cores before 236 s of GPU time. On CUDA they run
-    // on the GPU and stay in order (LibraryGenerator::overlapsCpuPhases).
-    // ODIA_OVERLAP=0 keeps the phases in order, for comparison.
+    // Where RT and CCS run on the CPU while MS2 runs on a GPU, they can run
+    // meanwhile, on a thread of their own: MS2 does not need them, the
+    // writer waits for both, and the CPU's RT and CCS calls are the same
+    // calls as before, so the library is the same. That is the default on
+    // CUDA without cuDNN; on CoreML only with ODIA_OVERLAP=1, since the
+    // GPU's host side then lost more than the overlap gained (0.13.0, whole
+    // human library on an M4 Max: 343.9 s against 297.1 s in order). With
+    // RT and CCS on the GPU they stay in order
+    // (LibraryGenerator::overlapsCpuPhases). ODIA_OVERLAP=0 keeps the phases
+    // in order everywhere, for comparison.
     const char* overlap_env = std::getenv("ODIA_OVERLAP");
     const bool overlap_wanted = overlap_env == nullptr || std::string_view(overlap_env) != "0";
+    const bool coreml_overlap = overlap_env != nullptr && std::string_view(overlap_env) == "1";
     std::unique_ptr<ODIA::DIANNLibraryFile::StreamWriter> writer;
     // What a failing phase on the CPU thread reports: the message and the
     // exit code the phase returned when it ran on the main thread.
@@ -1328,7 +1332,7 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       std::unique_ptr<ODIA::PeptDeepPredictor> ms2;
       if (stream) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
       const bool overlap = overlap_wanted && ms2 &&
-                           ODIA::LibraryGenerator::overlapsCpuPhases(ms2->provider(), !route.lstm_gpu);
+                           ODIA::LibraryGenerator::overlapsCpuPhases(ms2->provider(), !route.lstm_gpu, coreml_overlap);
       // While the GPU predicts MS2, its host side (Core ML's own threads,
       // the encoding workers) needs cores: with all 16 CPU sessions busy on
       // CCS, the Astral MS2 phase on an M4 Max took 229 s instead of 153 s

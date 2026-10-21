@@ -150,12 +150,13 @@ add_test(NAME library_subset_outlives_parent COMMAND odia_library_subset)
 add_test(NAME digest_methionine_excision
          COMMAND odia_digest "${CMAKE_CURRENT_BINARY_DIR}/digest.fasta")
 
-# generate overlaps RT and CCS with MS2 only where they run on the CPU (CoreML).
-# 0.11.4 overlapped them with CUDA too, where all three models then contended
-# for the GPU (one H100: 89.2 s against 79.5 s in order).
+# generate overlaps RT and CCS with MS2 only where they run on the CPU: on CUDA
+# without cuDNN, and on CoreML only with ODIA_OVERLAP=1 (from 0.13.1; it slowed
+# the GPU's host side). 0.11.4 overlapped them with CUDA too, where all three
+# models then contended for the GPU (one H100: 89.2 s against 79.5 s in order).
 add_test(NAME generate_overlap_only_cpu_phases COMMAND odia_overlap_decision)
 set_tests_properties(generate_overlap_only_cpu_phases PROPERTIES PASS_REGULAR_EXPRESSION
-  "CPU -> in order\nCUDA -> in order\nCoreML -> overlap\nCUDA, RT and CCS on the CPU -> overlap\nCPU, RT and CCS on the CPU -> in order")
+  "CPU -> in order\nCUDA -> in order\nCoreML -> in order\nCoreML, ODIA_OVERLAP=1 -> overlap\nCUDA, ODIA_OVERLAP=1 -> in order\nCUDA, RT and CCS on the CPU -> overlap\nCPU, RT and CCS on the CPU -> in order")
 
 # The prediction route of -machine:device: auto puts MS2 on CoreML only for a
 # library large enough to pay for the shapes, on CUDA when there is a GPU,
@@ -420,8 +421,9 @@ endif()
 # On a Mac whose ONNX Runtime has the CoreML provider: the MS2 model on the
 # Apple GPU (-machine:device coreml) gives the CPU's library to float rounding,
 # RT and CCS stay bit-identical (they run on the CPU: CoreML has no LSTM), 1
-# and 4 concurrent batches write the same bytes, and -machine:require_gpu
-# refuses the RT fallback. Skips (77) elsewhere.
+# and 4 concurrent batches write the same bytes, -machine:require_gpu
+# refuses the RT fallback, and RT and CCS overlap MS2 only with ODIA_OVERLAP=1
+# (the same bytes). Skips (77) elsewhere.
 if(TARGET DIALibGen AND ODIA_PYTHON AND EXISTS "${ODIA_RT_MODEL_PATH}")
   add_test(NAME coreml_matches_cpu
            COMMAND ${ODIA_PYTHON} "${CMAKE_CURRENT_SOURCE_DIR}/coreml_matches_cpu.py" $<TARGET_FILE:DIALibGen>

@@ -5,6 +5,8 @@
 // them with any GPU: on CUDA, where RT and CCS run on the GPU too, the three
 // models then contended for it and a whole-proteome run was 9-12 % slower.
 // On CUDA without cuDNN, RT and CCS run on the CPU and overlap MS2 again.
+// On CoreML they overlap only when asked for (ODIA_OVERLAP=1; from 0.13.1):
+// the overlap slowed the GPU's host side more than it gained.
 
 #include <odia/LibraryGenerator.h>
 
@@ -17,6 +19,8 @@ int main()
   std::cout << "CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CPU)) << "\n"
             << "CUDA -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CUDA)) << "\n"
             << "CoreML -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CoreML)) << "\n"
+            << "CoreML, ODIA_OVERLAP=1 -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CoreML, true, true)) << "\n"
+            << "CUDA, ODIA_OVERLAP=1 -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CUDA, false, true)) << "\n"
             << "CUDA, RT and CCS on the CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CUDA, true)) << "\n"
             << "CPU, RT and CCS on the CPU -> " << say(ODIA::LibraryGenerator::overlapsCpuPhases(P::CPU, true)) << "\n";
   return 0;

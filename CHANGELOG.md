@@ -20,7 +20,11 @@ other instrument are byte-identical to 0.13.0's.
   threads, the encoding workers) lost more than the overlap gained: whole
   human library on an idle M4 Max, cache warm, 0.13.0, one session:
   343.9 s overlapped against 297.1 s in order (the GPU's chunks 1,186 s
-  summed against 865 s; 0.11.4: 392.3 s against 292.2 s). `ODIA_OVERLAP=1`
+  summed against 865 s; 0.11.4: 392.3 s against 292.2 s). On a busier day
+  (21 October, background applications active) 0.13.1 took 372.0 s against
+  0.13.0's 388.6 s in one session (chunks 1,058 s against 1,458 s, 0.6 GiB
+  less peak memory); the Astral library, whose CPU phase is short (no CCS),
+  is not measurably affected (137.4 s against 139.9 s). `ODIA_OVERLAP=1`
   restores the overlap (`ODIA_OVERLAP_RESERVE` as before); `ODIA_OVERLAP=0`
   keeps the phases in order on CUDA without cuDNN too, the one route that
   still overlaps by default. The library is the same either way.

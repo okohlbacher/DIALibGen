@@ -742,11 +742,11 @@ What runs where, and why:
   cores; `ODIA_OVERLAP=1` still does (`ODIA_OVERLAP_RESERVE` sets how many
   cores they leave free). The GPU phase has a host side of its own (Core
   ML's threads, the encoding workers) and slows down when the cores are
-  busy: on a quiet M4 Max (whole human library, cache warm, 0.13.0) the
+  busy: on an idle M4 Max (whole human library, cache warm, 0.13.0) the
   overlap took 343.9 s and the phases in order 297.1 s, the GPU's chunks
   1,186 s summed against 865 s; 0.11.4 measured the same (392.3 s against
   292.2 s). The CPU calls are the same calls whatever the order and session
-  count, so the library is the same either way. On CUDA all three models run on the GPU, and the phases
+  count, so the library is the same either way. On CUDA with cuDNN all three models run on the GPU, and the phases
   stay in order: overlapped there (0.11.4), they contended for the GPU and
   a whole-proteome run took 89.2 s instead of 79.5 s on one H100. Running
   the LSTMs on CoreML was tried and rejected (`scripts/coreml_unroll_lstm.py`

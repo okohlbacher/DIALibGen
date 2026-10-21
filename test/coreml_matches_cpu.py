@@ -33,6 +33,7 @@ def generate(name, *args, overlap=None):
     env = dict(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = ""
     env.pop("ODIA_OVERLAP", None)
+    env.pop("ODIA_STREAM", None)  # the overlap needs the streaming writer
     if overlap is not None:
         env["ODIA_OVERLAP"] = overlap
     out = work / name

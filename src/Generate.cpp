@@ -1457,8 +1457,13 @@ OpenMS::TOPPBase::ExitCodes DIALibGen::generate_()
       }
       else
       {
-        // Overlap chosen but no streaming writer: RT has not run yet.
-        if (overlap) { rtPhase(logInfo); }
+        // Overlap chosen but no streaming writer: RT has not run yet, and
+        // runs on all of -threads, as without the overlap.
+        if (overlap)
+        {
+          cpu_threads = threads;
+          rtPhase(logInfo);
+        }
         if (!ms2) { ms2 = ODIA::LibraryGenerator::openMs2Predictor(ms2_model, route.ms2_gpu, threads, ms2_gpu); }
         if (const auto miss = ODIA::LibraryGenerator::predictFragmentIntensities(
               library, *ms2, p, static_cast<float>(nce), instrument, threads, nullptr, nce_charge_f); miss)

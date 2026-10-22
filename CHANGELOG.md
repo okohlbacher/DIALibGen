@@ -13,6 +13,18 @@ This project follows [Semantic Versioning](https://semver.org/).
   CoreML and on CUDA without cuDNN). `ODIA_OVERLAP=0` is now the default.
   The library is the same either way.
 
+### Changed
+
+- Release builds: macOS retries the stapled-ticket check of the app as well
+  (`stapler validate`, five attempts with backoff, as for the disk image; a
+  CloudKit `-1005` failed a 0.13.1 dry run there). The Linux desktop builds
+  keep the Ubuntu source archives of the AppImage's corresponding sources
+  between runs (GitHub cache keyed on the installed source packages; a cached
+  archive is used only when it matches the SHA-256 in the descriptor fetched
+  from Launchpad, so the published sources are the same bytes), and that step
+  may take 150 minutes instead of 90: on 21 October 2026 slow Launchpad
+  downloads stopped it four times.
+
 ## [0.13.1] — 2026-10-21
 
 A patch release: generation on Apple silicon is faster by default, and the

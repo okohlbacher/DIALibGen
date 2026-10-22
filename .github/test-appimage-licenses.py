@@ -184,6 +184,47 @@ class AttributionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'no authoritative source'):
                 collector.ubuntu_sources('example', '1:2.3-4ubuntu6', self.root / 'wrong-version')
 
+    def test_source_cache_serves_only_verified_members(self):
+        source = b'original upstream source archive'
+        checksum = hashlib.sha256(source).hexdigest()
+        descriptor = (f'Source: example\nVersion: 1:2.3-4ubuntu5\nChecksums-Sha256:\n'
+                      f' {checksum} {len(source)} example.orig.tar.xz\n').encode()
+        entry = {'source_package_name': 'example', 'source_package_version': '1:2.3-4ubuntu5',
+                 'self_link': 'https://api.launchpad.net/publication/1'}
+        urls = ['https://launchpad.net/example.dsc', 'https://launchpad.net/example.orig.tar.xz']
+        served = []
+        def urlopen(request, **_kwargs):
+            url = request.full_url if hasattr(request, 'full_url') else request
+            served.append(url)
+            return io.BytesIO({urls[0]: descriptor, urls[1]: source}[url])
+        def collect(name, cache):
+            collector.digest.cache_clear()
+            with patch.object(collector, 'get_json', side_effect=[{'entries': [entry]}, urls]), \
+                 patch.object(collector.urllib.request, 'urlopen', side_effect=urlopen):
+                return collector.ubuntu_sources('example', '1:2.3-4ubuntu5', self.root / name, cache)
+        first = collector.SourceCache(self.root / 'cache')
+        downloaded = collect('first', first)
+        self.assertEqual((first.hits, first.stored), (0, 1))
+        self.assertTrue((self.root / 'cache/.new').exists())
+        (self.root / 'cache/.new').unlink()
+        served.clear()
+        second = collector.SourceCache(self.root / 'cache')
+        reused = collect('second', second)
+        self.assertEqual(served, [urls[0]], 'the descriptor is always fetched, the member came from the cache')
+        self.assertEqual(reused, downloaded)
+        self.assertEqual((self.root / 'second/example.orig.tar.xz').read_bytes(), source)
+        self.assertFalse((self.root / 'cache/.new').exists())
+        (self.root / 'cache' / checksum).write_bytes(b'tampered cache entry')
+        served.clear()
+        third = collector.SourceCache(self.root / 'cache')
+        collect('third', third)
+        self.assertEqual(served, urls, 'a cached member that fails its checksum is downloaded again')
+        self.assertEqual((self.root / 'third/example.orig.tar.xz').read_bytes(), source)
+        self.assertEqual((self.root / 'cache' / checksum).read_bytes(), source)
+        (self.root / 'cache/stale').write_bytes(b'unused member')
+        third.prune()
+        self.assertEqual(sorted(path.name for path in (self.root / 'cache').iterdir()), ['.new', checksum])
+
     def test_clearsigned_descriptor_retains_exact_version(self):
         text = ('-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\n'
                 'Source: sample\nVersion: 1:2-3\n\n-----BEGIN PGP SIGNATURE-----\nsignature\n')

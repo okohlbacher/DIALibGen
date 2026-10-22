@@ -800,12 +800,42 @@ jobs:
               || { echo "::error::missing desktop $ext installer"; exit 1; }
           done
 
-      - name: Bundle and verify AppImage notices and corresponding sources
+      # The Ubuntu source members of the AppImage's corresponding sources, kept between runs:
+      # Launchpad's librarian serves uncached files at 250-450 KB/s at times, and on 21 October 2026
+      # this step hit its timeout four times. The key names the installed source packages; the
+      # collector takes a member from the cache only when it hashes to the checksum in the freshly
+      # fetched descriptor, so the published sources are the bytes a download gives.
+      - name: Key the AppImage source cache
+        id: appimage-sources
         if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
-        timeout-minutes: 90
         shell: bash
         run: |
           set -euo pipefail
+          packages=$(dpkg-query -W -f='${source:Package}=${source:Version}\n' | sort -u | sha256sum | cut -c1-16)
+          echo "key=appimage-sources-v1-${{ matrix.name }}-$packages" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the AppImage source cache
+        if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .appimage-source-cache
+          key: ${{ steps.appimage-sources.outputs.key }}
+          restore-keys: |
+            ${{ steps.appimage-sources.outputs.key }}-
+            appimage-sources-v1-${{ matrix.name }}-
+
+      - name: Bundle and verify AppImage notices and corresponding sources
+        if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+        # 0.13.0 spent 43-67 minutes downloading Ubuntu sources here; the cache above makes that
+        # minutes, this bound covers a run that has to download them all.
+        timeout-minutes: 150
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_CACHE="$PWD/.appimage-source-cache"
+          mkdir -p "$SOURCE_CACHE"
+          rm -f "$SOURCE_CACHE/.new"
+          echo "AppImage source cache: $(find "$SOURCE_CACHE" -type f | wc -l) members, $(du -sh "$SOURCE_CACHE" | cut -f1)"
           unset LD_LIBRARY_PATH
           PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v micromamba | paste -sd: -)
           export PATH
@@ -863,12 +893,23 @@ jobs:
             --gui-binary gui/src-tauri/target/release/dialibgen-gui \
             --deb "dist-bundles/DIALibGen-gui-${{ matrix.name }}.deb" \
             --providers corresponding-sources/appimage-helper-providers.json \
-            --sources corresponding-sources \
+            --sources corresponding-sources --source-cache "$SOURCE_CACHE" \
             --source-asset "DIALibGen-sources-${{ matrix.name }}.json"
           # Exercise the unchanged private CLI in the verified final AppImage payload.
           "$MAMBA_ROOT_PREFIX/envs/dialibgen/bin/python" .github/release-smoke.py \
             "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
             --bare --output smoke-appimage
+
+      # Also after a failure or timeout: what was downloaded is kept for the rerun. Only a run that
+      # downloaded something (.new) saves, under a key of its own (cache entries are immutable).
+      - name: Save the AppImage source cache
+        if: >-
+          !cancelled() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+          && hashFiles('.appimage-source-cache/.new') != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .appimage-source-cache
+          key: ${{ steps.appimage-sources.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Install and open the Linux desktop packages
         if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
@@ -967,11 +1008,18 @@ jobs:
           apps=(gui/src-tauri/target/release/bundle/macos/*.app)
           [ "${#apps[@]}" -gt 0 ] \
             || { echo "::error::no .app bundle to validate"; exit 1; }
-          xcrun stapler validate "${apps[0]}" || {
-            echo "::error::the .app carries no notarization ticket -- Tauri's staple failed silently"
-            echo "::error::re-run this job; the ticket is usually just not propagated yet"
-            exit 1
-          }
+          # The same CloudKit lookup as above (-1005 failed a 0.13.1 dry run here): retry it the same
+          # way; a ticket that is really missing fails all five attempts.
+          for i in 1 2 3 4 5; do
+            xcrun stapler validate "${apps[0]}" && break
+            if [ "$i" -eq 5 ]; then
+              echo "::error::the .app carries no notarization ticket -- Tauri's staple failed silently"
+              echo "::error::re-run this job; the ticket is usually just not propagated yet"
+              exit 1
+            fi
+            echo "stapler validate of the .app failed (attempt $i of 5); retrying in $((15 << (i - 1))) s"
+            sleep $((15 << (i - 1)))
+          done
 
       - name: Package corresponding sources
         if: steps.pkg.outputs.package == 'true'

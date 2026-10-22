@@ -72,6 +72,47 @@ def fetch(url, destination, expected=None):
     return {'url': url, 'file': destination.name, 'sha256': actual}
 
 
+class SourceCache:
+    """Verified Ubuntu source members kept between CI runs (actions/cache).
+
+    Content-addressed by SHA-256. A member is taken from here only when the
+    freshly fetched descriptor names that checksum and the cached bytes hash to
+    it, so the published sources are the same bytes as a download. Descriptors
+    (.dsc) are always fetched from Launchpad: they carry the checksums.
+    """
+
+    def __init__(self, root):
+        self.root = root
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.used = set()
+        self.hits = self.stored = 0
+
+    def fetch(self, url, destination, expected):
+        entry = self.root / expected
+        if entry.is_file() and digest(entry) == expected:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(entry, destination)
+            self.used.add(entry.name)
+            self.hits += 1
+            return {'url': url, 'file': destination.name, 'sha256': expected}
+        record = fetch(url, destination, expected)
+        partial = self.root / (expected + '.partial')
+        shutil.copyfile(destination, partial)
+        partial.replace(entry)
+        # Tells the workflow that this run added members worth saving, even if the
+        # step is stopped before it finishes.
+        (self.root / '.new').touch()
+        self.used.add(entry.name)
+        self.stored += 1
+        return record
+
+    def prune(self):
+        """Drop members no package of this (complete) run used."""
+        for path in self.root.iterdir():
+            if path.is_file() and path.name != '.new' and path.name not in self.used:
+                path.unlink()
+
+
 def get_json(url):
     with urllib.request.urlopen(url, timeout=60) as response:
         return json.load(response)
@@ -86,7 +127,7 @@ def dsc_fields(text):
     return Parser().parsestr(text)
 
 
-def ubuntu_sources(name, version, directory):
+def ubuntu_sources(name, version, directory, cache=None):
     """Launchpad retains exact superseded Ubuntu sources absent from live apt indices."""
     directory.mkdir(parents=True, exist_ok=True)
     query = urllib.parse.urlencode({'ws.op': 'getPublishedSources', 'source_name': name,
@@ -120,7 +161,8 @@ def ubuntu_sources(name, version, directory):
                     raise RuntimeError('unsafe source descriptor entry')
                 if filename not in by_name:
                     raise RuntimeError(f'missing corresponding source member {filename}')
-                records.append(fetch(by_name[filename], directory / filename, checksum))
+                get = cache.fetch if cache else fetch
+                records.append(get(by_name[filename], directory / filename, checksum))
                 if (directory / filename).stat().st_size != int(size):
                     raise RuntimeError(f'source size mismatch: {filename}')
             return {'publication': entry['self_link'], 'files': records,
@@ -345,6 +387,8 @@ def main():
     parser.add_argument('--sources', type=Path, required=True)
     parser.add_argument('--source-asset', required=True)
     parser.add_argument('--providers', type=Path)
+    parser.add_argument('--source-cache', type=Path,
+                        help='directory of verified source members kept between runs (CI cache)')
     parser.add_argument('--prepare-notices', action='store_true',
                         help='stage exact payload notices in GUI resources for rebundling; do not collect sources')
     args = parser.parse_args()
@@ -428,6 +472,7 @@ def main():
     # exact installed collection once; it is small and avoids fragile parsing.
     shutil.copytree('/usr/share/common-licenses', output / 'common-licenses', dirs_exist_ok=True)
     source_cache = {}
+    member_cache = SourceCache(args.source_cache.resolve()) if args.source_cache else None
     for name in sorted(used_packages):
         package = packages[name]
         target = output / 'packages' / name
@@ -438,7 +483,8 @@ def main():
         shutil.copy2(copyright_file, target / 'copyright')
         key = package['source'] + '=' + package['source_version']
         if key not in source_cache:
-            source_cache[key] = ubuntu_sources(package['source'], package['source_version'], output / 'sources' / key)
+            source_cache[key] = ubuntu_sources(package['source'], package['source_version'], output / 'sources' / key,
+                                               member_cache)
         inventory['packages'].append({**package, 'copyright': str((target / 'copyright').relative_to(output)),
                                       'copyright_sha256': digest(target / 'copyright'),
                                       'bundled_copyright_paths': bundled_notices[f'packages/{name}/copyright'],
@@ -474,6 +520,9 @@ def main():
         'The GUI build and AppImage commands are in the DIALibGen release source .github/workflows/ci.yml.\n')
     inventory['complete'] = True
     report.write_text(json.dumps(inventory, indent=2) + '\n')
+    if member_cache:
+        member_cache.prune()
+        print(f'source cache: {member_cache.hits} members reused, {member_cache.stored} downloaded')
     print(f'AppImage attribution: {len(records)} payload files/links, {len(used_packages)} Ubuntu packages, '
           f'{len(source_cache)} exact source packages; SHA256 {inventory["sha256"]}')
 

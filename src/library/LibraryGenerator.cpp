@@ -31,7 +31,9 @@
 #include <sstream>
 #include <thread>
 #include <fstream>
+#include <functional>
 #include <future>
+#include <iterator>
 #include <string_view>
 #include <cmath>
 #include <cstdlib>
@@ -808,12 +810,31 @@ namespace ODIA
       wait_step.end();
       trace::Scope resize_step("resize", 1);
       resize_step.fields().rows = static_cast<std::int64_t>(transitions - transition_total);
-      p.mz.resize(precursors); p.irt.resize(precursors); p.im.resize(precursors); p.ccs.resize(precursors);
-      p.charge.resize(precursors); p.decoy.resize(precursors);
-      p.modified_sequence.resize(precursors); p.protein_group.resize(precursors);
-      p.transition_begin.resize(precursors); p.transition_count.resize(precursors);
-      t.product_mz.resize(transitions); t.library_intensity.resize(transitions); t.type.resize(transitions);
-      t.ordinal.resize(transitions); t.charge.resize(transitions); t.loss.resize(transitions);
+      // One array per task. Growing them is mostly first-touch page faults
+      // in the memory reserve() set aside -- 0.46 s on one thread over a
+      // whole proteome, on the path every wave waits on. Only within that
+      // reserve: an array that must reallocate holds its old and new copy
+      // while it is copied, and then they grow one at a time, as before, so
+      // the peak stays that of the largest array (modifications can exceed
+      // the estimate the reserve was made from).
+      const std::function<void()> grow[] = {
+        [&] { p.mz.resize(precursors); }, [&] { p.irt.resize(precursors); },
+        [&] { p.im.resize(precursors); }, [&] { p.ccs.resize(precursors); },
+        [&] { p.charge.resize(precursors); p.decoy.resize(precursors); },
+        [&] { p.modified_sequence.resize(precursors); }, [&] { p.protein_group.resize(precursors); },
+        [&] { p.transition_begin.resize(precursors); }, [&] { p.transition_count.resize(precursors); },
+        [&] { t.product_mz.resize(transitions); }, [&] { t.library_intensity.resize(transitions); },
+        [&] { t.type.resize(transitions); t.ordinal.resize(transitions); },
+        [&] { t.charge.resize(transitions); t.loss.resize(transitions); }};
+      const bool reserved =
+        p.mz.capacity() >= precursors && p.irt.capacity() >= precursors && p.im.capacity() >= precursors &&
+        p.ccs.capacity() >= precursors && p.charge.capacity() >= precursors && p.decoy.capacity() >= precursors &&
+        p.modified_sequence.capacity() >= precursors && p.protein_group.capacity() >= precursors &&
+        p.transition_begin.capacity() >= precursors && p.transition_count.capacity() >= precursors &&
+        t.product_mz.capacity() >= transitions && t.library_intensity.capacity() >= transitions &&
+        t.type.capacity() >= transitions && t.ordinal.capacity() >= transitions &&
+        t.charge.capacity() >= transitions && t.loss.capacity() >= transitions;
+      parallel::forEach(std::size(grow), reserved ? threads : 1u, [&](std::size_t k) { grow[k](); });
       resize_step.end();
 
       // The string handles, serially and in order, beside everything else;

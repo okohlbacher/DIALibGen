@@ -287,6 +287,7 @@ namespace ODIA
     struct EnumeratedForm
     {
       std::string sequence;
+      std::uint64_t sequence_hash = 0;   ///< StringArena::hashOf(sequence), for the serial interning
       std::uint64_t variable_mods = 0;   ///< bit k: carries requested variable modification k
       std::uint64_t fixed_mods = 0;      ///< bit k: carries protein-terminal fixed modification k
       std::vector<EnumeratedPrecursor> precursors;
@@ -300,6 +301,7 @@ namespace ODIA
       std::size_t dropped_precursor_mz = 0;
       std::size_t dropped_too_few_fragments = 0;
       std::size_t precursors = 0;          ///< over all forms
+      std::uint64_t protein_hash = 0;      ///< StringArena::hashOf of the protein group
       std::vector<EnumeratedForm> forms;
       std::vector<Fragment> fragments;     ///< every precursor's, one after the other
     };
@@ -720,6 +722,7 @@ namespace ODIA
         const auto& form = forms[index];
         EnumeratedForm& f = out.forms.emplace_back();
         f.sequence = form.toString();
+        f.sequence_hash = StringArena::hashOf(f.sequence);
         if (!requested_variable.empty()) { f.variable_mods = variableBits(form) | merged[index]; }
         f.fixed_mods = form_fixed[index];
         for (int z : params.charges)
@@ -769,6 +772,8 @@ namespace ODIA
         {
           items[k] = EnumeratedPeptide{};   // the wave before last, freed in parallel
           enumerateOne(ordered[first + k]->first, items[k]);
+          // Hashed here, in parallel: the interning below is serial.
+          if (items[k].parsed) { items[k].protein_hash = StringArena::hashOf(ordered[first + k]->second); }
         }
       });
       wave_step.end();
@@ -823,10 +828,10 @@ namespace ODIA
         {
           const auto& peptide = (*wave_items)[k];
           if (!peptide.parsed) { continue; }
-          const std::uint32_t protein_handle = strings.intern(ordered[wave_first + k]->second);
+          const std::uint32_t protein_handle = strings.intern(ordered[wave_first + k]->second, peptide.protein_hash);
           for (const auto& form : peptide.forms)
           {
-            const std::uint32_t sequence_handle = strings.intern(form.sequence);
+            const std::uint32_t sequence_handle = strings.intern(form.sequence, form.sequence_hash);
             for (std::size_t q = 0; q < form.precursors.size(); ++q, ++i)
             {
               p.modified_sequence[i] = sequence_handle;

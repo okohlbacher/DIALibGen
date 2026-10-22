@@ -17,8 +17,11 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Release builds: macOS retries the stapled-ticket check of the app as well
-  (`stapler validate`, five attempts with backoff, as for the disk image; a
-  CloudKit `-1005` failed a 0.13.1 dry run there). The Linux desktop builds
+  as the disk image's (`stapler validate`), each for about 16 minutes (8
+  attempts, 15 s doubling to at most 240 s apart; before: the disk image only,
+  5 attempts over about 4 minutes): Apple's ticket service (CloudKit `-1005`,
+  `-1001`) failed a 0.13.1 dry run there, and on 22 October 2026 stayed
+  unreachable from the Intel runner for over 4 minutes at a time. The Linux desktop builds
   keep the Ubuntu source archives of the AppImage's corresponding sources
   between runs (GitHub cache keyed on the installed source packages, one
   entry per platform and ref; a rerun of a tag or branch reuses what an

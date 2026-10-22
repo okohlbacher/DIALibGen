@@ -1004,8 +1004,21 @@ jobs:
           set -euo pipefail
           DMG="dist-bundles/DIALibGen-gui-${{ matrix.name }}.dmg"
           spctl --assess --type open --context context:primary-signature -vv "$DMG"
-          # CloudKit lookups drop connections now and then (-1005): retry before failing.
-          for i in 1 2 3 4 5; do xcrun stapler validate "$DMG" && break; [ "$i" -lt 5 ] || exit 1; sleep $((15 << (i - 1))); done
+          # CloudKit lookups drop connections now and then (-1005, -1001), on 22 October 2026 for
+          # several minutes at a time on the Intel runner: retry for about 16 minutes (8 attempts,
+          # 15 s doubling to at most 240 s apart) before failing. A missing ticket fails every attempt.
+          validate() {
+            local i wait
+            for i in 1 2 3 4 5 6 7 8; do
+              xcrun stapler validate "$1" && return 0
+              [ "$i" -lt 8 ] || return 1
+              wait=$((15 << (i - 1))); [ "$wait" -le 240 ] || wait=240
+              echo "stapler validate of $2 failed (attempt $i of 8); retrying in $wait s"
+              sleep "$wait"
+            done
+          }
+          validate "$DMG" "the disk image" \
+            || { echo "::error::the disk image's notarization ticket did not validate in 8 attempts"; exit 1; }
           codesign --verify --strict --verbose=2 stage/bin/DIALibGen
 
           # Validate the app's own stapled ticket, which must survive extraction from the DMG.
@@ -1014,18 +1027,11 @@ jobs:
           apps=(gui/src-tauri/target/release/bundle/macos/*.app)
           [ "${#apps[@]}" -gt 0 ] \
             || { echo "::error::no .app bundle to validate"; exit 1; }
-          # The same CloudKit lookup as above (-1005 failed a 0.13.1 dry run here): retry it the same
-          # way; a ticket that is really missing fails all five attempts.
-          for i in 1 2 3 4 5; do
-            xcrun stapler validate "${apps[0]}" && break
-            if [ "$i" -eq 5 ]; then
-              echo "::error::the .app's notarization ticket did not validate in 5 attempts: Tauri's staple failed silently, or Apple's ticket service stayed unreachable"
-              echo "::error::re-run this job; the ticket is usually just not propagated yet"
-              exit 1
-            fi
-            echo "stapler validate of the .app failed (attempt $i of 5); retrying in $((15 << (i - 1))) s"
-            sleep $((15 << (i - 1)))
-          done
+          validate "${apps[0]}" "the .app" || {
+            echo "::error::the .app's notarization ticket did not validate in 8 attempts: Tauri's staple failed silently, or Apple's ticket service stayed unreachable"
+            echo "::error::re-run this job; the ticket is usually just not propagated yet"
+            exit 1
+          }
 
       - name: Package corresponding sources
         if: steps.pkg.outputs.package == 'true'

@@ -3,6 +3,7 @@
 
 #include <unordered_map>
 #include <odia/Library.h>
+#include "Parallel.h"
 
 #include <algorithm>
 #include <cassert>
@@ -10,6 +11,8 @@
 #include <stdexcept>
 #include <utility>
 #include <cstring>
+#include <functional>
+#include <iterator>
 #include <numeric>
 
 namespace ODIA
@@ -271,19 +274,33 @@ namespace ODIA
     t.loss.reserve(transitions);
   }
 
-  void Library::shrinkToFit()
+  void Library::shrinkToFit(unsigned threads)
   {
+    // Each array with slack is copied into a fitting one. Arrays are copied
+    // concurrently only as far as the copies in flight together are no
+    // larger than the largest array -- what one-at-a-time copying holds at
+    // its worst -- so peak memory is the same as copying them in turn.
+    struct Task { std::size_t bytes; std::function<void()> shrink; };
+    std::vector<Task> tasks;
+    const auto add = [&](auto& v) {
+      if (v.capacity() == v.size()) { return; }   // nothing to release
+      tasks.push_back({v.size() * sizeof(v[0]), [&v] { v.shrink_to_fit(); }});
+    };
     auto& p = precursors_;
-    p.mz.shrink_to_fit(); p.irt.shrink_to_fit(); p.im.shrink_to_fit();
-    p.ccs.shrink_to_fit();
-    p.charge.shrink_to_fit(); p.decoy.shrink_to_fit();
-    p.modified_sequence.shrink_to_fit(); p.protein_group.shrink_to_fit();
-    p.transition_begin.shrink_to_fit(); p.transition_count.shrink_to_fit();
-
+    add(p.mz); add(p.irt); add(p.im); add(p.ccs); add(p.charge); add(p.decoy);
+    add(p.modified_sequence); add(p.protein_group); add(p.transition_begin); add(p.transition_count);
     auto& t = transitions_;
-    t.product_mz.shrink_to_fit(); t.library_intensity.shrink_to_fit();
-    t.type.shrink_to_fit(); t.ordinal.shrink_to_fit();
-    t.charge.shrink_to_fit(); t.loss.shrink_to_fit();
+    add(t.product_mz); add(t.library_intensity); add(t.type); add(t.ordinal); add(t.charge); add(t.loss);
+    if (tasks.empty()) { return; }
+    std::stable_sort(tasks.begin(), tasks.end(), [](const Task& a, const Task& b) { return a.bytes > b.bytes; });
+    const std::size_t budget = std::max<std::size_t>(1, tasks.front().bytes);
+    for (std::size_t first = 0; first < tasks.size();)
+    {
+      std::size_t last = first + 1, bytes = tasks[first].bytes;
+      while (last < tasks.size() && bytes + tasks[last].bytes <= budget) { bytes += tasks[last++].bytes; }
+      parallel::forEach(last - first, threads, [&](std::size_t k) { tasks[first + k].shrink(); });
+      first = last;
+    }
   }
 
   std::size_t Library::dropDecoys()

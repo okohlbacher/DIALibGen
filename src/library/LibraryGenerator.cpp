@@ -1542,7 +1542,7 @@ namespace ODIA
     { if (p.transition_count[i] > 0) { retained.push_back(i); } }
     if (retained.size() != n) { library = library.subsetByIndex(retained); }
     trace::Scope shrink_step("shrink", 2);
-    library.shrinkToFit();
+    library.shrinkToFit(threads);
     return unpredicted;
   }
 

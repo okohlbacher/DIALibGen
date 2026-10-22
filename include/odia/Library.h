@@ -399,7 +399,12 @@ namespace ODIA
     /// Called after loading so footprintBytes() reports what is held rather
     /// than what std::vector happened to allocate on the way -- otherwise the
     /// figure varies with the input path rather than the data.
-    void shrinkToFit();
+    ///
+    /// Each array that has slack is copied into a fitting one; @p threads
+    /// copy several smaller arrays at once (a whole proteome's arrays took
+    /// 1.2 s on one thread at the end of generation), never more bytes at a
+    /// time than the largest array, so peak memory is as with one thread.
+    void shrinkToFit(unsigned threads = 1);
 
   private:
     PrecursorArrays precursors_;

@@ -22,7 +22,7 @@ Switches for measurements and tests; none changes the library's content:
 | variable | default | effect |
 |---|---|---|
 | `ODIA_STREAM` | on | `0`: 0.11.1's order (MS2, then CCS) and the one-pass writer, instead of RT, CCS, MS2 with the writer streaming behind MS2 |
-| `ODIA_OVERLAP` | off | `1`: where RT and CCS run on the CPU while MS2 runs on a GPU (CoreML; CUDA without cuDNN), predict them on a thread of their own while the GPU predicts MS2 (the writer then waits for both) instead of before MS2. The default is in order on every route (CoreML from 0.13.1, CUDA without cuDNN after 0.13.1; 0.11.4-0.13.0 overlapped on both). The library is the same either way. On CUDA, where RT and CCS run on the GPU too, the phases are always in order (from 0.11.5) |
+| `ODIA_OVERLAP` | off | `1`: where RT and CCS run on the CPU while MS2 runs on a GPU (CoreML; CUDA without cuDNN on the `auto` route), predict them on a thread of their own while the GPU predicts MS2 (the writer then waits for both) instead of before MS2. The default is in order on every route (CoreML from 0.13.1, CUDA without cuDNN after 0.13.1; 0.11.4-0.13.0 overlapped on both). The library is the same either way. On CUDA, where RT and CCS run on the GPU too, the phases are always in order (from 0.11.5) |
 | `ODIA_OVERLAP_RESERVE` | half of `-threads` | cores the overlapped RT and CCS phases leave free for the GPU's host side (their sessions are `-threads` minus this); the library does not depend on it |
 | `ODIA_NUMA_INTERLEAVE` | off | `1`: interleave the run's memory over the NUMA nodes (the default above 32 threads until 0.11.2; the worker pool places its workers on the nodes instead) |
 | `ODIA_POOL_PIN` | on | `0`: do not bind pool worker k to NUMA node k mod n |

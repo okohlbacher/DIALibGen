@@ -45,7 +45,8 @@ jobs:
 
   build:
     name: ${{ matrix.name }}
-    timeout-minutes: 240
+    # The AppImage source step alone may take 150 minutes with a cold cache (below).
+    timeout-minutes: 300
     runs-on: ${{ matrix.runner }}
     # Release asset uploads require write permission; fork PR tokens remain read-only.
     permissions:
@@ -804,7 +805,10 @@ jobs:
       # Launchpad's librarian serves uncached files at 250-450 KB/s at times, and on 21 October 2026
       # this step hit its timeout four times. The key names the installed source packages; the
       # collector takes a member from the cache only when it hashes to the checksum in the freshly
-      # fetched descriptor, so the published sources are the bytes a download gives.
+      # fetched descriptor, so the published sources are the bytes a download gives. GitHub scopes
+      # a cache to the ref that saved it (a run also sees main's): a rerun of a tag or branch
+      # reuses what an earlier attempt downloaded, and a tag reuses main's entry, which a dry run
+      # dispatched from main saves (gui_dry_run).
       - name: Key the AppImage source cache
         id: appimage-sources
         if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
@@ -826,8 +830,8 @@ jobs:
 
       - name: Bundle and verify AppImage notices and corresponding sources
         if: steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
-        # 0.13.0 spent 43-67 minutes downloading Ubuntu sources here; the cache above makes that
-        # minutes, this bound covers a run that has to download them all.
+        # 0.13.0 spent 43-67 minutes downloading Ubuntu sources here; with the cache above a rerun
+        # spends minutes, and this bound covers a run that has to download them all.
         timeout-minutes: 150
         shell: bash
         run: |
@@ -900,11 +904,13 @@ jobs:
             "$APPDIR/usr/lib/DIALibGen/resources/dialibgen/bin/DIALibGen" \
             --bare --output smoke-appimage
 
-      # Also after a failure or timeout: what was downloaded is kept for the rerun. Only a run that
-      # downloaded something (.new) saves, under a key of its own (cache entries are immutable).
+      # Also after a failure, a timeout or a job timeout: what was downloaded is kept for the rerun
+      # (every member is verified again before use). Only a run that downloaded something (.new)
+      # saves, under a key of its own (cache entries are immutable); the job
+      # prune-appimage-source-caches keeps the newest entry per platform and ref.
       - name: Save the AppImage source cache
         if: >-
-          !cancelled() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
+          always() && steps.pkg.outputs.gui == 'true' && runner.os == 'Linux'
           && hashFiles('.appimage-source-cache/.new') != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -1013,7 +1019,7 @@ jobs:
           for i in 1 2 3 4 5; do
             xcrun stapler validate "${apps[0]}" && break
             if [ "$i" -eq 5 ]; then
-              echo "::error::the .app carries no notarization ticket -- Tauri's staple failed silently"
+              echo "::error::the .app's notarization ticket did not validate in 5 attempts: Tauri's staple failed silently, or Apple's ticket service stayed unreachable"
               echo "::error::re-run this job; the ticket is usually just not propagated yet"
               exit 1
             fi
@@ -1151,6 +1157,31 @@ jobs:
               --pattern "DIALibGen-sources-$n.json" --dir source-manifests
           done
           python3 .github/source-archive.py --verify-assets release-assets.json source-manifests/*.json
+
+  # Each run that downloaded AppImage sources saves a full cache entry of its own (about 1 GB per
+  # platform; the repository has 10 GB, evicted least recently used first). Keep the newest per
+  # platform in this ref and delete the older ones.
+  prune-appimage-source-caches:
+    needs: build
+    if: always() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded AppImage source cache entries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for platform in linux-x64 linux-arm64; do
+            gh cache list --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" --key "appimage-sources-v1-$platform-" \
+              --sort created_at --order desc --limit 100 --json id,key,sizeInBytes > caches.json
+            jq -r '.[1:][] | "\(.id) \(.key) \(.sizeInBytes)"' caches.json | while read -r id key size; do
+              echo "deleting superseded cache $key ($size bytes)"
+              gh cache delete "$id" --repo "$GITHUB_REPOSITORY"
+            done
+          done
 
   # Run desktop checks on all three OSes without OpenMS or model dependencies.
   gui:

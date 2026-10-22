@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.parse
@@ -96,14 +97,20 @@ class SourceCache:
             self.hits += 1
             return {'url': url, 'file': destination.name, 'sha256': expected}
         record = fetch(url, destination, expected)
-        partial = self.root / (expected + '.partial')
-        shutil.copyfile(destination, partial)
-        partial.replace(entry)
-        # Tells the workflow that this run added members worth saving, even if the
-        # step is stopped before it finishes.
-        (self.root / '.new').touch()
-        self.used.add(entry.name)
-        self.stored += 1
+        # Storing is best effort: a full disk must not fail the verified download.
+        try:
+            partial = self.root / (expected + '.partial')
+            partial.unlink(missing_ok=True)   # never write through a link left in the cache
+            shutil.copyfile(destination, partial)
+            partial.replace(entry)
+            digest.cache_clear()   # entry may have been hashed before it was replaced
+            # Tells the workflow that this run added members worth saving, even if the
+            # step is stopped before it finishes.
+            (self.root / '.new').touch()
+            self.used.add(entry.name)
+            self.stored += 1
+        except OSError as error:
+            print(f'WARNING: source cache: {destination.name} not stored: {error}', file=sys.stderr)
         return record
 
     def prune(self):

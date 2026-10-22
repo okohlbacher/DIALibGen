@@ -6,6 +6,10 @@ add_executable(dialibgen_atomic_file atomic_file.cpp)
 target_include_directories(dialibgen_atomic_file PRIVATE "${PROJECT_SOURCE_DIR}/include")
 add_test(NAME atomic_file_contract COMMAND dialibgen_atomic_file "${CMAKE_CURRENT_BINARY_DIR}/atomic-file")
 
+add_executable(dialibgen_string_arena string_arena.cpp)
+target_link_libraries(dialibgen_string_arena PRIVATE odia_library)
+add_test(NAME string_arena COMMAND dialibgen_string_arena)
+
 add_executable(dialibgen_library_io library_io.cpp)
 target_link_libraries(dialibgen_library_io PRIVATE odia_library)
 foreach(mode compact-chunks compact-empty)

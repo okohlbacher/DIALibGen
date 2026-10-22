@@ -5,8 +5,10 @@
 #include <odia/Library.h>
 
 #include <algorithm>
+#include <cassert>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <cstring>
 #include <numeric>
 
@@ -79,7 +81,9 @@ namespace ODIA
   void StringArena::reserve(std::size_t entries, std::size_t chars)
   {
     entries_.reserve(entries);
-    lookup_.reserve(entries);
+    std::size_t slots = 16;
+    while (slots < 2 * (entries - std::min(entries, indexed_from_))) { slots *= 2; }
+    if (slots > lookup_.size()) { grow(slots); }
     if (chars > BLOCK && blocks_.empty())
     {
       blocks_.emplace_back(chars);
@@ -99,9 +103,76 @@ namespace ODIA
     return p;
   }
 
-  std::uint32_t StringArena::intern(std::string_view s)
+  StringArena::StringArena(StringArena&& other) noexcept { swap(other); }
+
+  StringArena& StringArena::operator=(StringArena&& other) noexcept
   {
-    if (auto it = lookup_.find(s); it != lookup_.end()) { return it->second; }
+    if (this != &other)
+    {
+      StringArena empty;
+      swap(empty);
+      swap(other);
+    }
+    return *this;
+  }
+
+  void StringArena::swap(StringArena& other) noexcept
+  {
+    blocks_.swap(other.blocks_);
+    std::swap(block_used_, other.block_used_);
+    std::swap(bytes_, other.bytes_);
+    entries_.swap(other.entries_);
+    lookup_.swap(other.lookup_);
+    std::swap(indexed_, other.indexed_);
+    std::swap(indexed_from_, other.indexed_from_);
+  }
+
+  std::uint64_t StringArena::hashOf(std::string_view s) noexcept
+  {
+    return std::hash<std::string_view>{}(s);
+  }
+
+  void StringArena::grow(std::size_t slots)
+  {
+    std::vector<Slot> fresh(slots, Slot{npos, 0});
+    const std::size_t mask = slots - 1;
+    for (std::size_t h = indexed_from_; h < entries_.size(); ++h)
+    {
+      const std::uint64_t hash = hashOf(get(static_cast<std::uint32_t>(h)));
+      std::size_t i = static_cast<std::size_t>(hash) & mask;
+      while (fresh[i].handle != npos) { i = (i + 1) & mask; }
+      fresh[i] = Slot{static_cast<std::uint32_t>(h), static_cast<std::uint32_t>(hash >> 32)};
+    }
+    lookup_.swap(fresh);
+  }
+
+  std::uint32_t StringArena::insert(std::string_view s, std::uint64_t hash)
+  {
+    const auto tag = static_cast<std::uint32_t>(hash >> 32);
+    // The slot of @p s, or the empty slot where it would go.
+    const auto probe = [&]() {
+      const std::size_t mask = lookup_.size() - 1;
+      std::size_t i = static_cast<std::size_t>(hash) & mask;
+      for (; lookup_[i].handle != npos; i = (i + 1) & mask)
+      {
+        if (lookup_[i].tag != tag) { continue; }
+        const Entry& e = entries_[lookup_[i].handle];
+        if (e.length == s.size() && (s.empty() || std::memcmp(e.data, s.data(), s.size()) == 0)) { break; }
+      }
+      return i;
+    };
+    if (lookup_.empty()) { grow(16); }
+    std::size_t i = probe();
+    if (lookup_[i].handle != npos) { return lookup_[i].handle; }   // seen before: no growth, no allocation
+
+    // Handles and lengths are 32-bit; npos marks an empty slot.
+    if (entries_.size() >= npos || s.size() > std::numeric_limits<std::uint32_t>::max())
+    { throw std::length_error("StringArena: more than 2^32-1 strings, or a string of 4 GiB or more"); }
+    if (2 * (indexed_ + 1) > lookup_.size())
+    {
+      grow(2 * lookup_.size());
+      i = probe();
+    }
 
     char* p = allocate(s.size());
     // memcpy with a null source is UB even for a zero count, and an absent
@@ -111,8 +182,17 @@ namespace ODIA
 
     entries_.push_back({p, static_cast<std::uint32_t>(s.size())});
     const auto handle = static_cast<std::uint32_t>(entries_.size() - 1);
-    lookup_.emplace(std::string_view(p, s.size()), handle);
+    lookup_[i] = Slot{handle, tag};
+    ++indexed_;
     return handle;
+  }
+
+  std::uint32_t StringArena::intern(std::string_view s) { return insert(s, hashOf(s)); }
+
+  std::uint32_t StringArena::intern(std::string_view s, std::uint64_t hash)
+  {
+    assert(hash == hashOf(s) && "StringArena::intern: hash is not hashOf(s)");
+    return insert(s, hash);
   }
 
   std::string_view StringArena::get(std::uint32_t handle) const
@@ -123,27 +203,21 @@ namespace ODIA
 
   void StringArena::releaseLookup()
   {
-    // swap-with-empty, because clear() on an unordered_map keeps the bucket
-    // array -- which is the larger half at this size.
-    std::unordered_map<std::string_view, std::uint32_t>().swap(lookup_);
+    // As the map it replaces: strings interned after this are not matched
+    // against those before it.
+    std::vector<Slot>().swap(lookup_);
+    indexed_ = 0;
+    indexed_from_ = entries_.size();
   }
 
   std::size_t StringArena::footprintBytes() const
   {
     std::size_t blocks = 0;
     for (const auto& b : blocks_) { blocks += b.capacity(); }
-    // One hash node per distinct string, plus the bucket array.
-    //
-    // The model was key view + value + a next pointer, with a comment claiming
-    // it was "exact enough to stop the figure being wrong by a factor". It was
-    // wrong by a factor: releasing this map dropped peak RSS 1.28 -> 1.13 GiB
-    // (154 MB) on a 4.26 M-precursor library while the accounting predicted
-    // only 47 MiB. libstdc++ caches the hash in the node and pads to alignment,
-    // and the allocator rounds on top of that. 48 B is measured against that
-    // delta rather than derived from sizeof.
-    const std::size_t node = 48;
-    const std::size_t map = lookup_.size() * node + lookup_.bucket_count() * sizeof(void*);
-    return blocks + entries_.capacity() * sizeof(Entry) + map;
+    // The index is one flat table (8 bytes a slot, at most half full), not
+    // the 48-byte hash node per string plus a bucket array of the
+    // unordered_map it replaced.
+    return blocks + entries_.capacity() * sizeof(Entry) + lookup_.capacity() * sizeof(Slot);
   }
 
   // ------------------------------------------------------------------ Library

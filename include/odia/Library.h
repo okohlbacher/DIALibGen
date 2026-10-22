@@ -147,8 +147,10 @@ namespace ODIA
     static constexpr std::uint32_t npos = 0xFFFFFFFFu;
 
     StringArena() = default;
-    StringArena(StringArena&&) = default;
-    StringArena& operator=(StringArena&&) = default;
+    /// Moves leave the source an empty arena (the index's bookkeeping moves
+    /// with the strings it refers to).
+    StringArena(StringArena&& other) noexcept;
+    StringArena& operator=(StringArena&& other) noexcept;
 
     /// NOT copyable, and the compiler has to say so.
     ///
@@ -171,6 +173,13 @@ namespace ODIA
 
     /// Returns a handle for @p s, storing it only if it is new.
     std::uint32_t intern(std::string_view s);
+
+    /// The same, with @p hash = hashOf(s) computed beforehand -- on another
+    /// thread, say, while this one interns in order (LibraryGenerator).
+    std::uint32_t intern(std::string_view s, std::uint64_t hash);
+
+    /// The hash intern() uses.
+    static std::uint64_t hashOf(std::string_view s) noexcept;
 
     /// Drop the interning index, keeping the strings.
     ///
@@ -219,11 +228,31 @@ namespace ODIA
 
     char* allocate(std::size_t n);
 
+    /// The index from string to handle: open addressing with linear
+    /// probing, a power-of-two table at most half full, one slot per entry
+    /// holding the handle and the top 32 bits of its hash (so a probe compares
+    /// characters only on a likely match). It replaces a
+    /// std::unordered_map<std::string_view, uint32_t>: generating a whole
+    /// proteome interns 5 M strings on one thread, in order, and the map's
+    /// node allocation, its rehashing and two to three dependent cache misses
+    /// per lookup made that the longest serial step of `enumerate` (3.0 s of
+    /// 3.6 s). Handles are given out in the same order as before.
+    struct Slot
+    {
+      std::uint32_t handle;   ///< npos: empty
+      std::uint32_t tag;      ///< hash >> 32
+    };
+    std::uint32_t insert(std::string_view s, std::uint64_t hash);
+    void grow(std::size_t slots);
+    void swap(StringArena& other) noexcept;
+
     std::vector<std::vector<char>> blocks_;
     std::size_t block_used_ = 0;
     std::size_t bytes_ = 0;
     std::vector<Entry> entries_;
-    std::unordered_map<std::string_view, std::uint32_t> lookup_;
+    std::vector<Slot> lookup_;
+    std::size_t indexed_ = 0;        ///< strings in lookup_
+    std::size_t indexed_from_ = 0;   ///< first handle lookup_ covers (releaseLookup)
   };
 
   /// An assay library as parallel arrays.

@@ -1402,12 +1402,15 @@ namespace ODIA
     {
       const std::size_t chunk_count = (last - first + compactChunkRows() - 1) / compactChunkRows();
       std::vector<CompactChunk> built(chunk_count);
+      trace::Scope build_step("rows_build", 2);
       parallel::forEach(chunk_count, parallel::workers(threads), [&](std::size_t c)
       {
         const std::size_t a = first + c * compactChunkRows(), b = std::min(last, a + compactChunkRows());
         const auto rows = libraryRows(library, a, b);
         built[c] = buildCompactChunk(library, rows.data(), rows.size());
       });
+      build_step.end();
+      trace::Scope encode_step("rows_encode", 2);
       for (auto& chunk : built) { writeCompactRowGroup(writer, schema, chunk, buffered); chunk = CompactChunk{}; }
     }
   } // namespace
@@ -1908,8 +1911,12 @@ namespace ODIA
         offset += take;
         if (offset == b.precursor.size()) { ++block; offset = 0; }
       }
+      trace::Scope build_step("rows_build", 2);
       const auto chunk = buildCompactChunk(m.library, list.data(), list.size());
+      build_step.end();
+      trace::Scope encode_step("rows_encode", 2);
       writeCompactRowGroup(*m.writer, m.schema, chunk, false);
+      encode_step.end();
       for (std::size_t k = 0; k < block; ++k) { m.pending.pop_front(); }
       m.pending_offset = offset;
       m.pending_rows -= compactChunkRows();

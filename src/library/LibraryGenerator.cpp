@@ -515,7 +515,9 @@ namespace ODIA
         }
       });
     }
+    trace::Scope order_step("key_order", 1);
     const std::vector<PeptideItem> ordered = inKeyOrder(peptide_to_proteins, threads);
+    order_step.end();
     stats.peptides = ordered.size();
     digest_phase.fields().rows = static_cast<std::int64_t>(stats.peptides);
     digest_phase.end();
@@ -758,6 +760,8 @@ namespace ODIA
       const std::size_t count = std::min(wave, ordered.size() - first);
       auto& items = enumerated[first / wave % 2];
       items.resize(count);
+      trace::Scope wave_step("wave", 1);
+      wave_step.fields().rows = static_cast<std::int64_t>(count);
       parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
       {
         const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
@@ -767,6 +771,7 @@ namespace ODIA
           enumerateOne(ordered[first + k]->first, items[k]);
         }
       });
+      wave_step.end();
 
       // Where every peptide's precursors and transitions go.
       precursor_at.resize(count);
@@ -793,19 +798,26 @@ namespace ODIA
       Library::checkTransitionCapacity(transition_total, transitions - transition_total);
 
       // The previous wave's strings are interned: the arrays can grow.
+      trace::Scope wait_step("intern_wait", 1);
       if (interning.valid()) { interning.get(); }
+      wait_step.end();
+      trace::Scope resize_step("resize", 1);
+      resize_step.fields().rows = static_cast<std::int64_t>(transitions - transition_total);
       p.mz.resize(precursors); p.irt.resize(precursors); p.im.resize(precursors); p.ccs.resize(precursors);
       p.charge.resize(precursors); p.decoy.resize(precursors);
       p.modified_sequence.resize(precursors); p.protein_group.resize(precursors);
       p.transition_begin.resize(precursors); p.transition_count.resize(precursors);
       t.product_mz.resize(transitions); t.library_intensity.resize(transitions); t.type.resize(transitions);
       t.ordinal.resize(transitions); t.charge.resize(transitions); t.loss.resize(transitions);
+      resize_step.end();
 
       // The string handles, serially and in order, beside everything else;
       // they are the only columns it writes.
       const auto* wave_items = &items;
       const std::size_t wave_first = first, wave_precursor = precursor_total;
       interning = overlap([&, wave_items, wave_first, count, wave_precursor]() {
+        trace::Scope intern_step("intern", 2);
+        intern_step.fields().rows = static_cast<std::int64_t>(count);
         std::size_t i = wave_precursor;
         for (std::size_t k = 0; k < count; ++k)
         {
@@ -824,6 +836,7 @@ namespace ODIA
         }
       });
 
+      trace::Scope fill_step("fill", 1);
       parallel::forEach((count + TASK_ITEMS - 1) / TASK_ITEMS, threads, [&](std::size_t task)
       {
         const std::size_t end = std::min(count, (task + 1) * TASK_ITEMS);
@@ -859,10 +872,13 @@ namespace ODIA
           }
         }
       });
+      fill_step.end();
       precursor_total = precursors;
       transition_total = transitions;
     }
+    trace::Scope last_wait("intern_wait", 1);
     if (interning.valid()) { interning.get(); }
+    last_wait.end();
 
     stats.precursors = library.precursorCount();
     stats.transitions = library.transitionCount();
@@ -1499,6 +1515,7 @@ namespace ODIA
     for (std::size_t i = 0; i < n; ++i)
     { if (p.transition_count[i] > 0) { retained.push_back(i); } }
     if (retained.size() != n) { library = library.subsetByIndex(retained); }
+    trace::Scope shrink_step("shrink", 2);
     library.shrinkToFit();
     return unpredicted;
   }

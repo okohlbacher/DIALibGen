@@ -1153,11 +1153,19 @@ namespace ODIA
       {
         // Built concurrently from the same read-only options and shared
         // weights (ONNX Runtime's prepacked-weights container takes its own
-        // lock): 96 MS2 sessions one after another took 3.6 s, with up to 32
-        // builders 1.8 s. Each slot is written by one builder only, and the
-        // first failure is rethrown.
+        // lock). Four builders: building a session is mostly memory mapping
+        // and unmapping (ONNX Runtime packs every weight again before it
+        // finds the shared copy), which the kernel serialises across the
+        // process, so more builders only add kernel time. 96 MS2 sessions
+        // (ONNX Runtime 1.30, 2 x EPYC 9654): one builder 2.8 s, 32 builders
+        // 1.6 s with 33 s of system CPU, 4 builders 0.9 s with 2 s. Each
+        // slot is written by one builder only, and the first failure is
+        // rethrown.
         impl_->replicas.resize(static_cast<std::size_t>(sessions - 1));
-        const std::size_t builders = std::min<std::size_t>(impl_->replicas.size(), 32);
+        // Without shared weights (shareWeights_ failed) each session packs
+        // its own, CPU-bound work that does scale: up to 32 builders then.
+        const bool shared = static_cast<bool>(impl_->prepacked);
+        const std::size_t builders = std::min<std::size_t>(impl_->replicas.size(), shared ? 4 : 32);
         std::atomic<std::size_t> next{0};
         std::mutex error_mutex;
         std::exception_ptr error;

@@ -5,6 +5,26 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Performance
+
+The library is byte-identical to before; only time and memory change.
+
+- **MS2 on the CPU: smaller batches when the sessions share the L3 cache.**
+  With less than 24 MiB of last-level cache per inference session, MS2 runs
+  16-row batches instead of 64: a 64-row batch's activations no longer fit a
+  session's share of the cache. Whole human proteome on 2 x EPYC 9654 at 96
+  threads: -2.9 s (-2 %), peak memory 10.0 -> 7.4 GB; 16 threads on two core
+  complexes: -4 %; 16 threads spread over the machine keep 64 rows.
+- **Faster serial steps of `generate`** (whole proteome, 96 threads): the
+  string interning of `enumerate` (an open-addressing index in the string
+  arena, hashes computed in parallel) and the arrays grown in parallel:
+  `enumerate` 3.6 -> 1.5 s; the inference sessions built by 4 threads
+  instead of up to 32, which spent their time in the kernel: `ms2_sessions`
+  1.6 -> 0.9 s (2.8 s with ONNX Runtime 1.31); the final array copies
+  (`finalize`) in parallel without raising the peak.
+- Tracing: sub-steps of `enumerate`, `finalize` and the Parquet row groups
+  (docs/tracing.md); the trace notes the CPU batch rows per model.
+
 ### Changed defaults
 
 - **CUDA without cuDNN: RT and CCS before MS2, not during it**, as on the

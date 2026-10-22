@@ -150,13 +150,14 @@ add_test(NAME library_subset_outlives_parent COMMAND odia_library_subset)
 add_test(NAME digest_methionine_excision
          COMMAND odia_digest "${CMAKE_CURRENT_BINARY_DIR}/digest.fasta")
 
-# generate overlaps RT and CCS with MS2 only where they run on the CPU: on CUDA
-# without cuDNN, and on CoreML only with ODIA_OVERLAP=1 (from 0.13.1; it slowed
-# the GPU's host side). 0.11.4 overlapped them with CUDA too, where all three
-# models then contended for the GPU (one H100: 89.2 s against 79.5 s in order).
+# generate overlaps RT and CCS with MS2 only with ODIA_OVERLAP=1 and only where
+# they run on the CPU (CoreML; CUDA without cuDNN); by default the phases run in
+# order on every route (on CoreML the overlap slowed the GPU's host side).
+# 0.11.4 overlapped them with CUDA too, where all three models then contended
+# for the GPU (one H100: 89.2 s against 79.5 s in order).
 add_test(NAME generate_overlap_only_cpu_phases COMMAND odia_overlap_decision)
 set_tests_properties(generate_overlap_only_cpu_phases PROPERTIES PASS_REGULAR_EXPRESSION
-  "CPU -> in order\nCUDA -> in order\nCoreML -> in order\nCoreML, ODIA_OVERLAP=1 -> overlap\nCUDA, ODIA_OVERLAP=1 -> in order\nCUDA, RT and CCS on the CPU -> overlap\nCPU, RT and CCS on the CPU -> in order")
+  "^CPU -> in order\nCUDA -> in order\nCoreML -> in order\nCoreML, ODIA_OVERLAP=1 -> overlap\nCUDA, ODIA_OVERLAP=1 -> in order\nCUDA, RT and CCS on the CPU -> in order\nCUDA, RT and CCS on the CPU, ODIA_OVERLAP=1 -> overlap\nCPU, RT and CCS on the CPU -> in order\nCPU, ODIA_OVERLAP=1 -> in order\n$")
 
 # The prediction route of -machine:device: auto puts MS2 on CoreML only for a
 # library large enough to pay for the shapes, on CUDA when there is a GPU,

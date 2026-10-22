@@ -1205,10 +1205,10 @@ namespace ODIA
     return predictor;
   }
 
-  bool LibraryGenerator::overlapsCpuPhases(PeptDeepPredictor::Provider ms2, bool lstm_on_cpu, bool coreml_overlap)
+  bool LibraryGenerator::overlapsCpuPhases(PeptDeepPredictor::Provider ms2, bool lstm_on_cpu, bool requested)
   {
-    return (ms2 == PeptDeepPredictor::Provider::CoreML && coreml_overlap) ||
-           (ms2 == PeptDeepPredictor::Provider::CUDA && lstm_on_cpu);
+    return requested && (ms2 == PeptDeepPredictor::Provider::CoreML ||
+                         (ms2 == PeptDeepPredictor::Provider::CUDA && lstm_on_cpu));
   }
 
   bool LibraryGenerator::predictsIonMobility(const std::string& request, const std::string& canonical_instrument)

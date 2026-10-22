@@ -532,7 +532,7 @@ that works on the machine and says which, in one line, before predicting:
 | machine | MS2 | RT and CCS |
 |---|---|---|
 | Linux/Windows, ONNX Runtime with CUDA, NVIDIA GPU visible, cuDNN 9 found | CUDA | CUDA |
-| the same without cuDNN 9 (a `WARNING` with the fix) | CUDA | CPU, while MS2 runs |
+| the same without cuDNN 9 (a `WARNING` with the fix) | CUDA | CPU, before MS2 |
 | Mac (Apple silicon), library of at least 50,000 precursors per CPU thread | Apple GPU (CoreML) | CPU, before MS2 |
 | anything else (no GPU, a CPU-only ONNX Runtime, a small library on a Mac) | CPU | CPU |
 
@@ -570,8 +570,9 @@ search: `LD_LIBRARY_PATH`, the run path, the system cache, then ONNX
 Runtime's own directory) and checks that it is cuDNN 9. A GPU counts as
 visible with the NVIDIA driver loaded (`/proc/driver/nvidia/version`, or
 WSL 2's `/dev/dxg`) unless `CUDA_VISIBLE_DEVICES` hides it. Without it only the MS2 model (a transformer)
-runs on the GPU; RT and CCS (convolution and LSTM layers) run on the CPU, on
-a thread of their own while the GPU predicts MS2, and a `WARNING` says why
+runs on the GPU; RT and CCS (convolution and LSTM layers) run on the CPU
+before it (`ODIA_OVERLAP=1`: on a thread of their own while the GPU predicts
+MS2, as up to 0.13.1), and a `WARNING` says why
 and how to fix it, naming a directory where a cuDNN was found off the library
 path (a conda environment, a pip `nvidia-cudnn-cu12` wheel, the CUDA toolkit
 or a system directory: looked at, never loaded from). With RT and CCS on the

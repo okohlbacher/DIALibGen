@@ -3,6 +3,16 @@
 All notable changes to this project are documented here.
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed defaults
+
+- **CUDA without cuDNN: RT and CCS before MS2, not during it**, as on the
+  Apple GPU since 0.13.1: the phases now run in order on every route by
+  default, and `ODIA_OVERLAP=1` is the one switch that overlaps them (on
+  CoreML and on CUDA without cuDNN). `ODIA_OVERLAP=0` is now the default.
+  The library is the same either way.
+
 ## [0.13.1] — 2026-10-21
 
 A patch release: generation on Apple silicon is faster by default, and the

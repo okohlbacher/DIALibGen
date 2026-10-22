@@ -189,6 +189,24 @@ namespace ODIA
     /// core affordable. The result does not change (forEachChunk_).
     static constexpr std::size_t CPU_CHUNK_ROWS = 64;
 
+    /// MS2 on the CPU: rows per batch when the sessions share the last-level
+    /// cache, i.e. when it holds less than MS2_L3_PER_SESSION per session
+    /// (lastLevelCacheBytes() / sessions). A 64-row batch's activations
+    /// ([64, length, 1024] floats, about 5 MB at 20 residues) no longer fit a
+    /// session's share of the L3 and go to memory. Measured on 2 x EPYC 9654
+    /// (32 MB of L3 per 8 cores), MS2 CPU time with 16 rows against 64: 48 MB
+    /// per session (16 threads spread over the core complexes) +0.4 %, 16 MB
+    /// (48 threads) -0.7 %, 8 MB (96 threads) -2.5 %, 4 MB (16 threads on two
+    /// complexes) -5.3 %; and each session's arena is smaller (96 threads:
+    /// peak memory 10.0 -> 7.4 GB). The result does not change.
+    static constexpr std::size_t CPU_CHUNK_ROWS_SHARED_L3 = 16;
+    static constexpr std::size_t MS2_L3_PER_SESSION = std::size_t(24) << 20;
+
+    /// The MS2 rows per CPU batch for @p sessions concurrent sessions:
+    /// CPU_CHUNK_ROWS_SHARED_L3 or CPU_CHUNK_ROWS (above); CPU_CHUNK_ROWS when
+    /// the cache size is unknown.
+    static std::size_t ms2ChunkRows(std::size_t sessions);
+
     /// Peptides that could not be encoded, by index into the input, with the
     /// reason. One unencodable peptide must not discard a whole run's work.
     struct Failure

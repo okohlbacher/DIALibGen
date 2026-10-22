@@ -1200,6 +1200,12 @@ namespace ODIA
       trace::note(std::string("ort_version"), Ort::GetVersionString());
       trace::note(std::string("predictor.") + impl_->kind + ".model", model_path);
       trace::note(std::string("predictor.") + impl_->kind + ".sessions", std::to_string(sessionCount()));
+      if (impl_->provider == Provider::CPU)
+      {
+        trace::note(std::string("predictor.") + impl_->kind + ".cpu_chunk_rows",
+                    std::to_string(std::string_view(impl_->kind) == "MS2" ? ms2ChunkRows(sessionCount()) : CPU_CHUNK_ROWS) +
+                    " (L3 " + std::to_string(lastLevelCacheBytes() >> 20) + " MiB)");
+      }
       trace::note(std::string("predictor.") + impl_->kind + ".shared_weights",
                   std::to_string(impl_->shared_values.size()) + " tensors, " +
                   std::to_string(impl_->shared_bytes) + " bytes");
@@ -1398,6 +1404,13 @@ namespace ODIA
     return storage;
   }
 
+  std::size_t PeptDeepPredictor::ms2ChunkRows(std::size_t sessions)
+  {
+    const std::uint64_t l3 = lastLevelCacheBytes();
+    if (l3 == 0 || sessions == 0) { return CPU_CHUNK_ROWS; }
+    return l3 / sessions < MS2_L3_PER_SESSION ? CPU_CHUNK_ROWS_SHARED_L3 : CPU_CHUNK_ROWS;
+  }
+
   void PeptDeepPredictor::forEachChunk_(
     const std::vector<OpenMS::AASequence>& peptides,
     const std::function<void(std::size_t, const std::vector<std::size_t>&)>& body)
@@ -1408,7 +1421,7 @@ namespace ODIA
     trace::Scope chunking("chunking", 3);
     std::vector<std::vector<std::size_t>> chunks;
     // On the CPU each MAX_BATCH_ROWS chunk is cut further, into pieces of
-    // about CPU_CHUNK_ROWS. One call holds a few dozen length groups, and a
+    // about CPU_CHUNK_ROWS (MS2: ms2ChunkRows()). One call holds a few dozen length groups, and a
     // call ends only when its largest chunk does: with 2048-row chunks, 96
     // sessions ran 13 at a time on average. The cut cannot change a result:
     // on the CPU the MS2 model is bit-identical for every batch size, a single
@@ -1420,12 +1433,13 @@ namespace ODIA
     // with them.
     const bool cpu = impl_->provider == Provider::CPU;
     const bool is_ms2 = std::string_view(impl_->kind) == "MS2";
+    const std::size_t chunk_rows = is_ms2 ? ms2ChunkRows(sessionCount()) : CPU_CHUNK_ROWS;
     for (const auto& whole_group : PeptDeepEncoder::groupByLength(peptides))
     {
       for (std::size_t offset = 0; offset < whole_group.size(); offset += MAX_BATCH_ROWS)
       {
         const std::size_t end = std::min(offset + MAX_BATCH_ROWS, whole_group.size());
-        if (!cpu || end - offset <= CPU_CHUNK_ROWS)
+        if (!cpu || end - offset <= chunk_rows)
         {
           chunks.emplace_back(whole_group.begin() + static_cast<std::ptrdiff_t>(offset),
                               whole_group.begin() + static_cast<std::ptrdiff_t>(end));
@@ -1433,7 +1447,7 @@ namespace ODIA
         }
         for (std::size_t b = offset; b < end;)
         {
-          std::size_t e = std::min(b + CPU_CHUNK_ROWS, end);
+          std::size_t e = std::min(b + chunk_rows, end);
           if (!is_ms2 && end - e == 1) { e = end; }
           chunks.emplace_back(whole_group.begin() + static_cast<std::ptrdiff_t>(b),
                               whole_group.begin() + static_cast<std::ptrdiff_t>(e));

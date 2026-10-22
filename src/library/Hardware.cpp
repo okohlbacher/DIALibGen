@@ -46,7 +46,7 @@ namespace ODIA
     /// CPUs the process may run on, as a dynamically sized set: a fixed
     /// cpu_set_t holds 1,024 CPUs, and sched_getaffinity fails with EINVAL
     /// on a kernel configured for more.
-    std::vector<int> affinityCpus()
+    std::vector<int> affinityCpus(pid_t who = 0)
     {
       for (int n = 1024; n <= (1 << 16); n *= 2)
       {
@@ -54,7 +54,7 @@ namespace ODIA
         if (set == nullptr) { return {}; }
         const std::size_t size = CPU_ALLOC_SIZE(n);
         CPU_ZERO_S(size, set);
-        if (sched_getaffinity(0, size, set) == 0)
+        if (sched_getaffinity(who, size, set) == 0)
         {
           std::vector<int> cpus;
           for (int cpu = 0; cpu < n; ++cpu) { if (CPU_ISSET_S(cpu, size, set)) { cpus.push_back(cpu); } }
@@ -266,6 +266,68 @@ namespace ODIA
     }
 #endif
   } // namespace
+
+  std::uint64_t lastLevelCacheBytes()
+  {
+    static const std::uint64_t bytes = [] {
+      std::uint64_t total = 0;
+#if defined(__linux__)
+      // One L3 per distinct shared_cpu_list among the CPUs we may use: the
+      // process's (main thread's) mask, not that of a pool worker bound to
+      // one NUMA node that happens to ask first.
+      std::set<std::string> seen;
+      for (const int cpu : affinityCpus(::getpid()))
+      {
+        const std::string base = "/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cache/index";
+        for (int index = 0; index < 16; ++index)   // not necessarily contiguous
+        {
+          const std::string dir = base + std::to_string(index) + "/";
+          const std::string level = readLine(dir + "level");
+          if (level.empty()) { continue; }
+          if (level != "3" || readLine(dir + "type") == "Instruction") { continue; }
+          const std::string shared = readLine(dir + "shared_cpu_list");
+          if (!seen.insert(shared.empty() ? std::to_string(cpu) : shared).second) { continue; }
+          // "32768K"; sysfs writes K, rarely M.
+          const std::string size = readLine(dir + "size");
+          try
+          {
+            std::size_t used = 0;
+            std::uint64_t value = std::stoull(size, &used);
+            const char unit = used < size.size() ? size[used] : 'B';
+            value *= unit == 'K' ? 1024ull : unit == 'M' ? 1024ull * 1024 : unit == 'G' ? 1024ull * 1024 * 1024 : 1ull;
+            total += value;
+          }
+          catch (const std::exception&) {}
+        }
+      }
+#elif defined(__APPLE__)
+      std::int64_t l3 = 0;
+      std::size_t size = sizeof l3;
+      if (sysctlbyname("hw.l3cachesize", &l3, &size, nullptr, 0) == 0 && l3 > 0) { total = static_cast<std::uint64_t>(l3); }
+#elif defined(_WIN32)
+      DWORD length = 0;
+      GetLogicalProcessorInformationEx(RelationCache, nullptr, &length);
+      if (length > 0)
+      {
+        std::vector<char> buffer(length);
+        auto* first = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+        if (GetLogicalProcessorInformationEx(RelationCache, first, &length))
+        {
+          for (DWORD offset = 0; offset < length;)
+          {
+            const auto* entry = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+            if (entry->Relationship == RelationCache && entry->Cache.Level == 3 && entry->Cache.Type != CacheInstruction)
+            { total += entry->Cache.CacheSize; }
+            if (entry->Size == 0) { break; }
+            offset += entry->Size;
+          }
+        }
+      }
+#endif
+      return total;
+    }();
+    return bytes;
+  }
 
   unsigned numaNodes()
   {

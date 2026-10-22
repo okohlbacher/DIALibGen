@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace ODIA
@@ -40,6 +41,14 @@ namespace ODIA
   /// output.
   void preferPerformanceCores(bool only);
 
+  /// Bytes of last-level (L3) cache serving the CPUs this process may run
+  /// on: each L3 counted once, however many of those CPUs share it. Linux:
+  /// sysfs cache `index*` of level 3 for the CPUs in the affinity mask (a
+  /// process pinned to two of a socket's twelve core complexes sees their
+  /// two L3s); macOS: `hw.l3cachesize` (Intel; Apple silicon has none);
+  /// Windows: every level-3 cache (GetLogicalProcessorInformationEx). 0 when
+  /// unknown. Computed once.
+  std::uint64_t lastLevelCacheBytes();
   /// NUMA nodes with memory that this machine has online (Linux sysfs); 1
   /// elsewhere or when it cannot be read.
   unsigned numaNodes();
